@@ -143,6 +143,19 @@ type Session struct {
 	// fade (e.g. initial seed).
 	statusChangedAt time.Time
 
+	// lastSeq is the highest runner-event seq applied to this session. It is the
+	// resume cursor for the background SSE stream (passed as after=<seq>) and is
+	// persisted in the snapshot so a relaunch resumes here instead of replaying.
+	lastSeq uint64
+
+	// seenSeq is the highest seq the user has viewed; lastSeq-seenSeq is the
+	// number of unread events accumulated while the session was hidden (warm).
+	seenSeq uint64
+
+	// lastSnapSave is when the snapshot for this session was last persisted, used
+	// to throttle the high-frequency usage stream (see Model.saveSnapshot).
+	lastSnapSave time.Time
+
 	// --- Live usage metrics (Phase 3) ------------------------------------
 	// Updated from usage.updated SSE events. Drive the row/detail ctx% and the
 	// detail cost line. CtxLimit is the model's context window (cached from
@@ -175,6 +188,15 @@ func (s Session) CtxPercent() int {
 		pct = 0
 	}
 	return pct
+}
+
+// Unread is the number of events that have arrived since the user last viewed
+// this session (zero while it is foreground or fully caught up).
+func (s Session) Unread() int {
+	if s.lastSeq <= s.seenSeq {
+		return 0
+	}
+	return int(s.lastSeq - s.seenSeq)
 }
 
 // ShortID returns the first 4 hex chars of the session id — the row
@@ -260,6 +282,50 @@ func deriveTitle(st session.State) string {
 		return filepath.Base(st.ProjectPath)
 	}
 	return string(st.ID)
+}
+
+// ParseStatus maps a SessionStatus.String() label back to its SessionStatus. It
+// is the inverse of String(), used to rehydrate a persisted snapshot. An unknown
+// or empty label returns (StatusIdle, false) so callers can fall back to the
+// cluster-derived baseline.
+func ParseStatus(label string) (SessionStatus, bool) {
+	switch label {
+	case "busy":
+		return StatusBusy, true
+	case "waiting":
+		return StatusWaiting, true
+	case "needs-input":
+		return StatusNeedsInput, true
+	case "idle":
+		return StatusIdle, true
+	case "suspended":
+		return StatusSuspended, true
+	case "failed":
+		return StatusFailed, true
+	default:
+		return StatusIdle, false
+	}
+}
+
+// applySnapshot hydrates the session's live read-model fields from a persisted
+// snapshot (status, pending permission, model/ctx-limit, usage, resume cursor).
+// The cluster-derived State and titles are left untouched — they come from the
+// seed. Callers must gate this on the cluster status (see applySeed): a stale
+// running-status must not override a suspended/failed pod.
+func (s *Session) applySnapshot(snap SessionSnapshot) {
+	s.DashStatus = snap.DashStatus
+	s.PendingPermissionID = snap.PendingPermissionID
+	s.PendingPermissionTool = snap.PendingPermissionTool
+	if snap.Model != "" {
+		s.Model = snap.Model
+		s.CtxLimit = models.Limit(snap.Model).ContextLimit
+	}
+	s.InputTokens = snap.InputTokens
+	s.OutputTokens = snap.OutputTokens
+	s.CacheReadTokens = snap.CacheReadTokens
+	s.CacheWriteTokens = snap.CacheWriteTokens
+	s.TotalCostUSD = snap.TotalCostUSD
+	s.lastSeq = snap.LastSeq
 }
 
 // SessionFromState converts a session.State into a dashboard Session.

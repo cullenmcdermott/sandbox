@@ -8,6 +8,37 @@ import (
 	"github.com/cullenmcdermott/sandbox/internal/session"
 )
 
+func TestUnreadCountAndClear(t *testing.T) {
+	s := transcriptSession()
+	s.lastSeq = 10
+	s.seenSeq = 4
+	if got := s.Unread(); got != 6 {
+		t.Fatalf("Unread() = %d, want 6", got)
+	}
+	// Never negative even if seenSeq somehow exceeds lastSeq.
+	s.seenSeq = 20
+	if got := s.Unread(); got != 0 {
+		t.Fatalf("Unread() = %d, want 0 (clamped)", got)
+	}
+}
+
+func TestAttachClearsUnread(t *testing.T) {
+	app := NewApp(nil, nil, nil)
+	id := session.ID("sess-1")
+	sess := transcriptSession()
+	sess.State.ID = id
+	sess.lastSeq = 9
+	sess.seenSeq = 2
+	app.dashboard.sessions = []Session{sess}
+
+	_, _ = app.Update(attachReadyMsg{sess: sess, client: &fakeRunnerClient{}})
+
+	got := app.dashboard.sessionByID(id)
+	if got.Unread() != 0 {
+		t.Fatalf("attach should clear unread; Unread() = %d", got.Unread())
+	}
+}
+
 func TestSeedSizeSetsDimensions(t *testing.T) {
 	m := NewTranscript(&fakeRunnerClient{}, transcriptSession(), nil)
 	m.seedSize(120, 40)

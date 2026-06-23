@@ -403,6 +403,14 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.warning != "" {
 			m.appendBlock(blockInfo, "⚠ "+msg.warning)
 		}
+		// Mark everything seen for the session we're now viewing so its unread
+		// badge clears the moment it comes to the foreground.
+		for i := range a.dashboard.sessions {
+			if a.dashboard.sessions[i].ID() == msg.sess.ID() {
+				a.dashboard.sessions[i].seenSeq = a.dashboard.sessions[i].lastSeq
+				break
+			}
+		}
 		a.transcript = m
 		a.screen = ScreenTranscript
 		// Bubble Tea only emits WindowSizeMsg at startup and on resize, so a

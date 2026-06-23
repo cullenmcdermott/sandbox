@@ -896,6 +896,11 @@ func (m *Model) handleRunnerEvent(msg RunnerEventMsg) (tea.Model, tea.Cmd) {
 			if msg.Event.Seq > m.sessions[i].lastSeq {
 				m.sessions[i].lastSeq = msg.Event.Seq
 			}
+			// Keep the foreground session fully "seen" so it never accumulates an
+			// unread badge for output the user is actively watching.
+			if msg.ID == m.attachedID {
+				m.sessions[i].seenSeq = m.sessions[i].lastSeq
+			}
 			// Feed the warm model so the retained chat stays live in the
 			// background (dedup is handled by the transcript's lastSeq guard).
 			if tr, ok := m.retained[msg.ID]; ok {
@@ -1758,6 +1763,9 @@ func (m *Model) renderSessionRow(s Session, selected bool, width int) string {
 	if pct := s.CtxPercent(); pct > 0 {
 		sub += fmt.Sprintf("  %d%%", pct)
 	}
+	if u := s.Unread(); u > 0 {
+		sub += fmt.Sprintf("  ●%d", u)
+	}
 	if s.DashStatus == StatusFailed {
 		sub += "  ⚠"
 	}
@@ -1830,6 +1838,13 @@ func (m *Model) renderDetailLines(width, height int) []string {
 			continue // skip unknown fields (e.g. model before session.started)
 		}
 		lines = append(lines, kit.KV(kv.k, kv.v, detailKVWidth))
+	}
+
+	// Unread badge: events that arrived since this warm session was last viewed.
+	if u := s.Unread(); u > 0 {
+		badge := lipgloss.NewStyle().Foreground(theme.Gold).Bold(true).
+			Render(fmt.Sprintf("● %d new", u))
+		lines = append(lines, "", badge)
 	}
 
 	// ─ recent ─ : the last ≈3 main-thread tool calls, newest first (Phase 4).
