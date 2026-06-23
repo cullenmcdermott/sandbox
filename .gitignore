@@ -1,0 +1,8 @@
+# Build artifacts
+runner/node_modules/
+runner/dist/
+runner/package-lock.json
+
+# Go build output (root binary only — anchored so it does not also ignore the
+# cmd/sandbox/ source package)
+/sandbox
