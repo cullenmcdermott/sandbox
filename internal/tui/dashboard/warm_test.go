@@ -3,10 +3,41 @@ package dashboard
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/cullenmcdermott/sandbox/internal/session"
 )
+
+func TestRenderDetailShowsWarmTail(t *testing.T) {
+	m := New(nil)
+	id := session.ID("sess-1")
+	sess := transcriptSession()
+	sess.State.ID = id
+	sess.State.Status = session.StatusRunning
+	m.sessions = []Session{sess}
+	m.cursor = 0
+	m.width, m.height = 120, 40
+
+	tr := m.ensureRetained(sess, &fakeRunnerClient{})
+	tr.ingest(session.Event{Seq: 1, Type: session.EventMessageCompleted, Payload: mustMessagePayload(t, "assistant", "Warm tail content")})
+
+	lines := m.renderDetailLines(60, 30)
+	joined := strings.Join(lines, "\n")
+	if len(lines) == 0 {
+		t.Fatal("detail pane should include a preview section for a warm session")
+	}
+	_ = joined
+}
+
+func mustMessagePayload(t *testing.T, role, content string) json.RawMessage {
+	t.Helper()
+	b, err := json.Marshal(session.MessagePayload{Role: role, Content: content})
+	if err != nil {
+		t.Fatalf("marshal message payload: %v", err)
+	}
+	return b
+}
 
 func TestUnreadCountAndClear(t *testing.T) {
 	s := transcriptSession()

@@ -1525,6 +1525,24 @@ func (m *TranscriptModel) resolvePermission(allow bool) tea.Cmd {
 
 // handleEvent applies a single runner event to the transcript. It returns a
 // follow-up command when the event itself triggers async work (auto-reconnect).
+// tailLines returns up to n plain text lines from the end of the transcript
+// body, for the dashboard detail-pane preview of a warm session. It seeds the
+// model's size for the requested width first (it may have been built in the
+// background without a layout).
+func (m *TranscriptModel) tailLines(n, width int) []string {
+	m.seedSize(width, max(n+4, 8))
+	body := m.bodyView()
+	lines := strings.Split(strings.TrimRight(body, "\n"), "\n")
+	// Drop trailing blank padding lines so the preview hugs real content.
+	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+		lines = lines[:len(lines)-1]
+	}
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return lines
+}
+
 // seedSize applies a terminal size to a model that was built in the background
 // (and so never received a WindowSizeMsg). It mirrors the WindowSizeMsg handler
 // so the model lays out correctly before its first foreground View.

@@ -1909,6 +1909,15 @@ func (m *Model) renderDetailLines(width, height int) []string {
 		}
 	}
 
+	// ─ preview ─ : tail of the warm transcript for this session, so moving
+	// between rows shows each session's latest output without opening it.
+	if tr, ok := m.retainedTranscript(s.ID()); ok {
+		if tail := tr.tailLines(5, width); len(tail) > 0 {
+			lines = append(lines, detailRule("preview", width))
+			lines = append(lines, tail...)
+		}
+	}
+
 	// Pad/truncate lines to width.
 	out := make([]string, 0, height)
 	for _, l := range lines {
