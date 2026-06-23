@@ -959,6 +959,14 @@ func (a *App) connectingView() tea.View {
 	}
 	stepper := connectingStepper(a.connectStage, a.connectFrame, a.connectDetail, applicable)
 
+	// Block-pixel mascot above the title — the Claude Code guy for Claude, the
+	// pixel "OC" monogram for opencode — so the splash announces which agent is
+	// coming up, in that agent's own brand register.
+	logo := theme.ClaudeMascot()
+	if a.connectingOpencode {
+		logo = theme.OpenCodeMascot()
+	}
+
 	hint := lipgloss.NewStyle().
 		Foreground(theme.TextMuted).
 		Render("(press any key to cancel)")
@@ -967,7 +975,12 @@ func (a *App) connectingView() tea.View {
 	// so the stepper rows line up relative to each other) before centering the
 	// whole panel on screen. Centering the raw multi-line string instead would
 	// center each line independently and render the steps ragged (T2).
-	body := lipgloss.JoinVertical(lipgloss.Left, titleLine, "", stepper, "", hint)
+	// Keep the title/stepper/hint left-aligned relative to each other (JoinVertical
+	// pads to the widest line, so the stepper rows stay column-aligned — T2), then
+	// center that whole block under the logo. JoinVertical(Center, …) centers the
+	// two *blocks* against each other without disturbing the inner left alignment.
+	panel := lipgloss.JoinVertical(lipgloss.Left, titleLine, "", stepper, "", hint)
+	body := lipgloss.JoinVertical(lipgloss.Center, logo, "", panel)
 	centered := lipgloss.Place(a.width, a.height, lipgloss.Center, lipgloss.Center, body)
 
 	v := tea.NewView(centered)

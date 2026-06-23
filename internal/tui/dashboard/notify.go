@@ -72,7 +72,10 @@ func (m *Model) notifyIfBackgroundAttention(attached session.ID) tea.Cmd {
 		if m.toast != nil && m.toast.sessionID == s.ID() {
 			continue
 		}
-		note := s.State.Backend + " · " + filepathBaseLocal(s.State.ProjectPath)
+		note := ClientLabel(s.State.Backend) + " · " + filepathBaseLocal(s.State.ProjectPath)
+		if g := BackendGlyph(s.State.Backend); g != "" {
+			note = g + " " + note // uncolored so it fades with the toast
+		}
 		if s.DashStatus == StatusWaiting && s.PendingPermissionTool != "" {
 			note = "wants: " + s.PendingPermissionTool
 		}

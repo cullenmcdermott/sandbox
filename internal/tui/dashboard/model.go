@@ -3,6 +3,7 @@ package dashboard
 import (
 	"context"
 	"fmt"
+	"image/color"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -1902,13 +1903,24 @@ func (m *Model) renderSessionRow(s Session, selected bool, width int) string {
 	if s.DashStatus == StatusFailed {
 		sub += "  ⚠"
 	}
-	var subStyle lipgloss.Style
+	var subBg color.Color
+	subStyle := lipgloss.NewStyle().Foreground(theme.TextMuted)
 	if selected {
-		subStyle = lipgloss.NewStyle().Foreground(theme.TextMuted).Background(theme.Raised).Width(width)
-	} else {
-		subStyle = lipgloss.NewStyle().Foreground(theme.TextMuted).Width(width)
+		subBg = theme.Raised
+		subStyle = subStyle.Background(subBg)
 	}
-	line2 := subStyle.Render("      " + truncate(sub, max(4, width-6)))
+	// Brand mark in the gutter so every row is identifiable by agent at a glance.
+	// It is composed as its own styled cell (kept out of truncate, which is not
+	// ANSI-aware) and carries the row background so a selected row fills flush.
+	gutter := lipgloss.NewStyle().Background(subBg).Render("      ") // 6 cols under bar+dot+glyph
+	if glyph := BackendGlyph(s.State.Backend); glyph != "" {
+		gcol, _ := BackendColor(s.State.Backend)
+		markCell := lipgloss.NewStyle().Foreground(gcol).Background(subBg).Render(glyph)
+		gutter = lipgloss.NewStyle().Background(subBg).Render("  ") + markCell +
+			lipgloss.NewStyle().Background(subBg).Render("   ")
+	}
+	body := subStyle.Width(width - 6).Render(truncate(sub, max(4, width-6)))
+	line2 := gutter + body
 
 	return line1 + "\n" + line2
 }
@@ -1946,7 +1958,7 @@ func (m *Model) renderDetailLines(width, height int) []string {
 	}
 	kvPairs := []struct{ k, v string }{
 		{"status", glyphStyle(s.DashStatus).Render(s.DashStatus.Glyph() + " " + s.DashStatus.String())},
-		{"agent", ClientLabel(s.State.Backend)},
+		{"agent", MarkedClientLabel(s.State.Backend)},
 		{"model", modelVal},
 		{"project", s.State.ProjectPath},
 		{"session", string(s.ID())},

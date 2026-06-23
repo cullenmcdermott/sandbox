@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"encoding/json"
+	"image/color"
 	"path/filepath"
 	"time"
 
@@ -244,6 +245,60 @@ func ClientLabel(backend string) string {
 	default:
 		return backend
 	}
+}
+
+// BackendMark returns the one-cell brand glyph for a backend, pre-colored in its
+// brand tone (theme.MarkClaudeStyled / MarkOpenCodeStyled). Unknown backends get
+// an empty string so callers can omit the mark rather than render a tofu box.
+func BackendMark(backend string) string {
+	switch backend {
+	case session.BackendOpenCode:
+		return theme.MarkOpenCodeStyled()
+	case session.BackendClaudeSDK:
+		return theme.MarkClaudeStyled()
+	default:
+		return ""
+	}
+}
+
+// BackendGlyph returns the raw (uncolored) one-cell brand glyph for a backend, or
+// "" for unknown backends. Use it when the caller needs to apply its own styling
+// (e.g. a row background) instead of the pre-colored BackendMark.
+func BackendGlyph(backend string) string {
+	switch backend {
+	case session.BackendOpenCode:
+		return theme.MarkOpenCode
+	case session.BackendClaudeSDK:
+		return theme.MarkClaude
+	default:
+		return ""
+	}
+}
+
+// BackendColor returns the brand tone for a backend's mark, and whether the
+// backend is known. Pairs with BackendGlyph for caller-controlled styling.
+func BackendColor(backend string) (color.Color, bool) {
+	switch backend {
+	case session.BackendOpenCode:
+		return theme.BrandOpenCode(), true
+	case session.BackendClaudeSDK:
+		return theme.BrandClaude(), true
+	default:
+		return nil, false
+	}
+}
+
+// MarkedClientLabel is the brand mark followed by the friendly client name
+// ("✳ claude" / "▦ opencode"), pre-colored. It is the canonical at-a-glance agent
+// tag used across the dashboard's text surfaces (detail pane, transcript footer,
+// zone counts) so an agent looks the same everywhere. Falls back to the bare
+// ClientLabel for unknown backends.
+func MarkedClientLabel(backend string) string {
+	mark := BackendMark(backend)
+	if mark == "" {
+		return ClientLabel(backend)
+	}
+	return mark + " " + ClientLabel(backend)
 }
 
 // AgentLabel is the "<model> · <client>" descriptor for the list row, collapsing

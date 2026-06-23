@@ -145,15 +145,22 @@ func (a *App) renderBackendPicker() string {
 		sel = len(backendChoices) - 1
 	}
 	for i, c := range backendChoices {
+		// Brand mark (one cell) ahead of the label so each backend is identifiable
+		// by its glyph, not just its name. labelW already reserves room; the mark
+		// replaces one space of the chevron/indent column.
+		mark := BackendMark(c.backend)
+		if mark == "" {
+			mark = " "
+		}
 		label := padRight(truncate(c.label, labelW), labelW)
 		desc := truncate(c.desc, descW)
 		if i == sel {
-			row := lipgloss.NewStyle().Foreground(theme.Guac).Render(glyphChevron+" ") +
+			row := lipgloss.NewStyle().Foreground(theme.Guac).Render(glyphChevron) + mark + " " +
 				lipgloss.NewStyle().Foreground(theme.TextBright).Bold(true).Render(label) +
 				" " + lipgloss.NewStyle().Foreground(theme.TextBody).Render(desc)
 			lines = append(lines, lipgloss.NewStyle().Background(theme.Raised2).Width(innerW).Render(row))
 		} else {
-			row := "  " + label + " " + lipgloss.NewStyle().Foreground(theme.TextMuted).Render(desc)
+			row := " " + mark + " " + label + " " + lipgloss.NewStyle().Foreground(theme.TextMuted).Render(desc)
 			lines = append(lines, row)
 		}
 	}

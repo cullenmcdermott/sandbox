@@ -1447,7 +1447,7 @@ func (m *TranscriptModel) workingStatus() string {
 func (m *TranscriptModel) turnFooter() string {
 	parts := []string{"◇ " + shortModelName(m.model)}
 	if m.agent != "" {
-		parts = append(parts, "via "+ClientLabel(m.agent))
+		parts = append(parts, "via "+MarkedClientLabel(m.agent))
 	}
 	if !m.turnStart.IsZero() {
 		parts = append(parts, fmtElapsed(time.Since(m.turnStart)))

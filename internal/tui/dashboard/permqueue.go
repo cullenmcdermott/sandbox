@@ -71,7 +71,10 @@ func (m *Model) renderPermQueue(w int) string {
 			if s.PendingPermissionTool != "" {
 				note = "wants: " + s.PendingPermissionTool
 			} else {
-				note = s.State.Backend + " · " + filepathBaseLocal(s.State.ProjectPath)
+				note = ClientLabel(s.State.Backend) + " · " + filepathBaseLocal(s.State.ProjectPath)
+				if g := BackendGlyph(s.State.Backend); g != "" {
+					note = g + " " + note
+				}
 			}
 			detail := lipgloss.NewStyle().Foreground(theme.TextMuted).Render("  " + note)
 			if sel {

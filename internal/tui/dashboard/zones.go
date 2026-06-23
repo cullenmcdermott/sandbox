@@ -250,7 +250,7 @@ func (m *Model) clusterStrip(w int) string {
 		left += val.Render(" · ") + lipgloss.NewStyle().Foreground(theme.Coral).Render(fmt.Sprintf("✕ %d failed", c.failed))
 	}
 
-	right := val.Render(m.backendMix(c)) + " "
+	right := m.backendMix(c) + " " // self-styled (carries its own brand marks)
 	return withBackground(spread(left, right, w), theme.Surface)
 }
 
@@ -258,10 +258,21 @@ func (m *Model) clusterStrip(w int) string {
 // (P9 — no hardcoded backend). Known backends render in a stable order; any
 // unknown ids follow, sorted, so the strip is deterministic.
 func (m *Model) backendMix(c sessionPartition) string {
+	val := lipgloss.NewStyle().Foreground(theme.TextBody)
+	// part renders "<mark> <client> <n>" with the brand mark in its own color and
+	// the rest in TextBody, each part fully styled so colors don't bleed when the
+	// parts are joined (the mark's reset would otherwise clear the row tone).
+	part := func(b string, n int) string {
+		s := val.Render(fmt.Sprintf("%s %d", ClientLabel(b), n))
+		if mark := BackendMark(b); mark != "" {
+			return mark + " " + s
+		}
+		return s
+	}
 	var parts []string
 	for _, b := range []string{session.BackendClaudeSDK, session.BackendOpenCode} {
 		if n := c.byBackend[b]; n > 0 {
-			parts = append(parts, fmt.Sprintf("%s %d", ClientLabel(b), n))
+			parts = append(parts, part(b, n))
 		}
 	}
 	var extras []string
@@ -273,9 +284,9 @@ func (m *Model) backendMix(c sessionPartition) string {
 	}
 	sort.Strings(extras)
 	for _, b := range extras {
-		parts = append(parts, fmt.Sprintf("%s %d", ClientLabel(b), c.byBackend[b]))
+		parts = append(parts, part(b, c.byBackend[b]))
 	}
-	return strings.Join(parts, " · ")
+	return strings.Join(parts, val.Render(" · "))
 }
 
 // bottomBar is the persistent status/hint band.
