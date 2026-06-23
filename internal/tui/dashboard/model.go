@@ -848,7 +848,7 @@ func (m *Model) startLiveSSECmd(sess Session) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithCancel(context.Background())
 		// Connect (includes resume-if-suspended + port-forward + health).
-		res, err := connector(ctx, ref, projectPath, func(ConnectStage) {})
+		res, err := connector(ctx, ref, projectPath, func(ConnectStage, string) {})
 		if err != nil {
 			cancel()
 			// Graceful degradation: stream could not be opened; no crash.
@@ -886,7 +886,7 @@ func (m *Model) reconnectLiveSSECmd(sess Session, attempt int) tea.Cmd {
 
 	return func() tea.Msg {
 		ctx, cancel := context.WithCancel(context.Background())
-		res, err := connector(ctx, ref, projectPath, func(ConnectStage) {})
+		res, err := connector(ctx, ref, projectPath, func(ConnectStage, string) {})
 		if err != nil {
 			cancel()
 			return liveSSEReconnectFailedMsg{id: id, attempt: attempt}
@@ -1103,7 +1103,7 @@ func (m *Model) approveCmd(sess Session, allow bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		res, err := connector(ctx, ref, projectPath, func(ConnectStage) {})
+		res, err := connector(ctx, ref, projectPath, func(ConnectStage, string) {})
 		if err != nil {
 			return approveResultMsg{id: id, err: err}
 		}

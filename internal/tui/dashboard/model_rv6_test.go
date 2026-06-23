@@ -15,7 +15,7 @@ import (
 func TestBackgroundStreamUsesPassiveAttach(t *testing.T) {
 	fake := &fakeRunnerClient{}
 	m := New(nil)
-	m.connector = func(_ context.Context, _ session.Ref, _ string, _ func(ConnectStage)) (ConnectResult, error) {
+	m.connector = func(_ context.Context, _ session.Ref, _ string, _ func(ConnectStage, string)) (ConnectResult, error) {
 		return ConnectResult{Client: fake}, nil
 	}
 	sess := Session{State: session.State{ID: "s1", Status: session.StatusRunning}}

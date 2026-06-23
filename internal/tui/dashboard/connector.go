@@ -62,7 +62,11 @@ type ConnectResult struct {
 //
 // A failed connector returns a descriptive error; the dashboard renders it
 // inline and stays on the dashboard screen — it does NOT crash.
-type Connector func(ctx context.Context, ref session.Ref, projectPath string, onStage func(ConnectStage)) (ConnectResult, error)
+//
+// onStage(stage, detail) reports progress: stage is the coarse phase; detail is
+// an optional live sub-status (e.g. "uploading" during the initial file sync),
+// "" when there is none.
+type Connector func(ctx context.Context, ref session.Ref, projectPath string, onStage func(ConnectStage, string)) (ConnectResult, error)
 
 // SyncProber reports a coarse sync health for a session, decoupling the
 // dashboard from internal/sync. Returns a short token: "synced"/"syncing"/
@@ -93,4 +97,4 @@ type CreateResult struct {
 //
 // A failed Creator returns a descriptive error; the dashboard renders it inline
 // and stays on the dashboard screen — it does NOT crash.
-type Creator func(ctx context.Context, backend string, onStage func(ConnectStage)) (CreateResult, error)
+type Creator func(ctx context.Context, backend string, onStage func(ConnectStage, string)) (CreateResult, error)

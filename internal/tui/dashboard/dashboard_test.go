@@ -459,7 +459,7 @@ func TestApplySeedSkipsSSEWhenAlreadyRunning(t *testing.T) {
 	started := false
 	m.liveSSECancels["sess-b"] = func() {}
 	// Inject a connector that records calls.
-	m.connector = func(ctx context.Context, ref session.Ref, _ string, _ func(ConnectStage)) (ConnectResult, error) {
+	m.connector = func(ctx context.Context, ref session.Ref, _ string, _ func(ConnectStage, string)) (ConnectResult, error) {
 		started = true
 		return ConnectResult{}, fmt.Errorf("should not be called")
 	}

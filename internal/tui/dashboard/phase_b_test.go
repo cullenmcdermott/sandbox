@@ -221,7 +221,7 @@ func TestPermissionIDCaptureAndClear(t *testing.T) {
 // --------------------------------------------------------------------------
 
 // failingConnector is a Connector that always returns an error.
-func failingConnector(ctx context.Context, ref session.Ref, projectPath string, _ func(ConnectStage)) (ConnectResult, error) {
+func failingConnector(ctx context.Context, ref session.Ref, projectPath string, _ func(ConnectStage, string)) (ConnectResult, error) {
 	return ConnectResult{}, errors.New("runner unreachable: connection refused")
 }
 
@@ -401,7 +401,7 @@ func TestAttachReadyCancelsDashboardSSE(t *testing.T) {
 // startLiveSSECmd when the connector is non-nil).
 func TestDetachMsgRestartsSSE(t *testing.T) {
 	sseStarted := make(chan session.ID, 1)
-	fakeConnector := func(ctx context.Context, ref session.Ref, projectPath string, _ func(ConnectStage)) (ConnectResult, error) {
+	fakeConnector := func(ctx context.Context, ref session.Ref, projectPath string, _ func(ConnectStage, string)) (ConnectResult, error) {
 		sseStarted <- ref.ID
 		// Return a fake client with a working Events method so startLiveSSECmd
 		// can build the liveSSEReadyMsg.

@@ -73,12 +73,34 @@ func TestNoMatchCopy(t *testing.T) {
 func TestConnectingStepper(t *testing.T) {
 	t.Setenv("SANDBOX_REDUCE_MOTION", "1")
 	// StageRunner (3) is the current stage; earlier stages should be ✓, later dim.
-	out := connectingStepper(StageRunner, 0, nil)
+	out := connectingStepper(StageRunner, 0, "", nil)
 	if !strings.Contains(out, "Attaching") {
 		t.Fatalf("stepper missing Attaching stage: %q", out)
 	}
 	if !strings.Contains(out, "✓") {
 		t.Fatalf("stepper did not mark a completed stage: %q", out)
+	}
+}
+
+// ORACLE: a non-empty detail is appended to the CURRENT stage's label;
+// COUNTER: the same detail does not leak onto other (non-current) stage lines.
+func TestConnectingStepperDetail(t *testing.T) {
+	t.Setenv("SANDBOX_REDUCE_MOTION", "1")
+	out := connectingStepper(StageSync, 0, "uploading", nil)
+	syncLine, otherLine := "", ""
+	for _, line := range strings.Split(out, "\n") {
+		switch {
+		case strings.Contains(line, connectStageLabel(StageSync)):
+			syncLine = line
+		case strings.Contains(line, connectStageLabel(StageCheck)):
+			otherLine = line
+		}
+	}
+	if !strings.Contains(syncLine, "uploading") {
+		t.Fatalf("current stage line missing detail: %q", syncLine)
+	}
+	if strings.Contains(otherLine, "uploading") {
+		t.Fatalf("detail leaked onto a non-current stage line: %q", otherLine)
 	}
 }
 
@@ -97,7 +119,7 @@ func TestConnectingStepperOpencodeNoRegress(t *testing.T) {
 		t.Fatalf("StageSync (%d) must sort before StageOpencode (%d)", StageSync, StageOpencode)
 	}
 
-	out := connectingStepper(StageOpencode, 0, opencodeConnectStages)
+	out := connectingStepper(StageOpencode, 0, "", opencodeConnectStages)
 	if !strings.Contains(out, connectStageLabel(StageOpencode)) {
 		t.Fatalf("opencode stepper missing %q step: %q", connectStageLabel(StageOpencode), out)
 	}
@@ -116,7 +138,7 @@ func TestConnectingStepperOpencodeNoRegress(t *testing.T) {
 	}
 
 	// COUNTER: the default (claude) stepper never shows the opencode step.
-	def := connectingStepper(StageSync, 0, nil)
+	def := connectingStepper(StageSync, 0, "", nil)
 	if strings.Contains(def, connectStageLabel(StageOpencode)) {
 		t.Fatalf("default stepper should omit %q: %q", connectStageLabel(StageOpencode), def)
 	}
@@ -307,9 +329,9 @@ func TestConnectStageProgressAndAttach(t *testing.T) {
 	t.Setenv("SANDBOX_REDUCE_MOTION", "1")
 
 	// Fake connector that emits all stages then returns a result.
-	connector := func(ctx context.Context, ref session.Ref, projectPath string, onStage func(ConnectStage)) (ConnectResult, error) {
+	connector := func(ctx context.Context, ref session.Ref, projectPath string, onStage func(ConnectStage, string)) (ConnectResult, error) {
 		for _, s := range []ConnectStage{StageCheck, StageForward, StageRunner, StageSync, StageAttach} {
-			onStage(s)
+			onStage(s, "")
 		}
 		return ConnectResult{Client: &fakeRunnerClient{}}, nil
 	}

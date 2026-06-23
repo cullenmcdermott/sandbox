@@ -80,6 +80,7 @@ type externalPaneFinishedMsg struct {
 // Exactly one of stage/ready/failed is non-nil.
 type connectUpdateMsg struct {
 	stage  *ConnectStage    // progress tick — connector entered a new stage
+	detail string           // optional live sub-status for the current stage ("" = none)
 	ready  *attachReadyMsg  // success (terminal)
 	failed *attachFailedMsg // failure (terminal)
 }
@@ -124,6 +125,10 @@ type App struct {
 
 	// connectStage is the latest ConnectStage reported by the connector (U1).
 	connectStage ConnectStage
+
+	// connectDetail is the latest live sub-status for the current stage (e.g.
+	// "uploading" during the initial file sync); "" when there is none.
+	connectDetail string
 
 	// connectingOpencode records whether the in-flight connect is for an
 	// opencode-server session, so the connecting stepper shows the extra
@@ -484,6 +489,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch {
 		case msg.stage != nil:
 			a.connectStage = *msg.stage
+			a.connectDetail = msg.detail
 			return a, connectNextCmd(a.connectCh) // keep draining
 		case msg.ready != nil:
 			a.connectCancel = nil
@@ -840,11 +846,12 @@ func (a *App) connectCmd(sess Session) tea.Cmd {
 	ch := make(chan connectUpdateMsg, 8)
 	a.connectCh = ch
 	a.connectStage = StageCheck
+	a.connectDetail = ""
 	go func() {
 		defer cancel()
-		onStage := func(s ConnectStage) {
+		onStage := func(s ConnectStage, detail string) {
 			select {
-			case ch <- connectUpdateMsg{stage: &s}:
+			case ch <- connectUpdateMsg{stage: &s, detail: detail}:
 			case <-ctx.Done():
 			}
 		}
@@ -881,12 +888,13 @@ func (a *App) createCmd(backend string) tea.Cmd {
 	ch := make(chan connectUpdateMsg, 8)
 	a.connectCh = ch
 	a.connectStage = StageResume
+	a.connectDetail = ""
 	a.connectingOpencode = backend == session.BackendOpenCode
 	go func() {
 		defer cancel()
-		onStage := func(s ConnectStage) {
+		onStage := func(s ConnectStage, detail string) {
 			select {
-			case ch <- connectUpdateMsg{stage: &s}:
+			case ch <- connectUpdateMsg{stage: &s, detail: detail}:
 			case <-ctx.Done():
 			}
 		}
@@ -949,7 +957,7 @@ func (a *App) connectingView() tea.View {
 	if a.connectingOpencode {
 		applicable = opencodeConnectStages
 	}
-	stepper := connectingStepper(a.connectStage, a.connectFrame, applicable)
+	stepper := connectingStepper(a.connectStage, a.connectFrame, a.connectDetail, applicable)
 
 	hint := lipgloss.NewStyle().
 		Foreground(theme.TextMuted).

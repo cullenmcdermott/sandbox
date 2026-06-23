@@ -77,6 +77,79 @@ func parseSyncState(out []byte) SyncState {
 	return worst
 }
 
+// StagingPhase returns a short, human progress word for an in-flight sync
+// ("connecting", "scanning", "uploading", "applying") or "" when the session is
+// idle/watching/unknown. It gives the connect screen a live hint during the
+// initial blocking flush instead of a frozen "Syncing files". Robust by design:
+// it substring-matches the coarse status string, so it survives mutagen status
+// wording changes across versions.
+func (m *Manager) StagingPhase(ctx context.Context, sessionID string) string {
+	out, err := m.r.Output(ctx, nil,
+		"sync", "list",
+		"--label-selector="+sessionLabel(sessionID),
+		"--template", "{{json .}}",
+	)
+	if err != nil {
+		return ""
+	}
+	return parseStagingPhase(out)
+}
+
+func parseStagingPhase(out []byte) string {
+	trimmed := strings.TrimSpace(string(out))
+	if trimmed == "" || trimmed == "null" {
+		return ""
+	}
+	var sessions []mutagenSession
+	if err := json.Unmarshal([]byte(trimmed), &sessions); err != nil {
+		var one mutagenSession
+		if json.Unmarshal([]byte(trimmed), &one) == nil {
+			sessions = []mutagenSession{one}
+		}
+	}
+	best := ""
+	for _, s := range sessions {
+		if p := stagingPhase(s.Status); stagingRank(p) > stagingRank(best) {
+			best = p
+		}
+	}
+	return best
+}
+
+// stagingPhase maps a coarse mutagen status string to a progress word.
+func stagingPhase(status string) string {
+	st := strings.ToLower(status)
+	switch {
+	case strings.Contains(st, "stag"):
+		return "uploading"
+	case strings.Contains(st, "transition"), strings.Contains(st, "apply"), strings.Contains(st, "reconcil"):
+		return "applying"
+	case strings.Contains(st, "scan"):
+		return "scanning"
+	case strings.Contains(st, "connect"), strings.Contains(st, "wait"):
+		return "connecting"
+	default:
+		// watching / idle / unknown → no useful in-flight detail.
+		return ""
+	}
+}
+
+// stagingRank orders phases so the most-active one wins across a session's syncs.
+func stagingRank(p string) int {
+	switch p {
+	case "uploading":
+		return 4
+	case "applying":
+		return 3
+	case "scanning":
+		return 2
+	case "connecting":
+		return 1
+	default:
+		return 0
+	}
+}
+
 func classify(s mutagenSession) SyncState {
 	if len(s.Conflicts) > 0 {
 		return SyncStalled

@@ -101,9 +101,11 @@ func noMatchCopy(query string) string {
 // later ones are dim placeholders (○).
 //
 // stage is the current ConnectStage (int cast); frame is the spinner frame index
-// for the animated current-stage mark (U1.5). If applicable is non-empty, only
-// those stages are shown; pass nil to show all stages.
-func connectingStepper(stage ConnectStage, frame int, applicable []ConnectStage) string {
+// for the animated current-stage mark (U1.5). detail is an optional live
+// sub-status appended to the current stage's label (e.g. "Syncing files —
+// uploading"); "" shows none. If applicable is non-empty, only those stages are
+// shown; pass nil to show all stages.
+func connectingStepper(stage ConnectStage, frame int, detail string, applicable []ConnectStage) string {
 	stages := applicable
 	if len(stages) == 0 {
 		stages = []ConnectStage{StageCheck, StageResume, StageForward, StageRunner, StageSync, StageAttach}
@@ -119,7 +121,11 @@ func connectingStepper(stage ConnectStage, frame int, applicable []ConnectStage)
 		default:
 			mark = lipgloss.NewStyle().Foreground(theme.TextDim).Render("○")
 		}
-		lines[i] = mark + " " + lipgloss.NewStyle().Foreground(theme.TextBody).Render(connectStageLabel(s))
+		label := connectStageLabel(s)
+		if s == stage && detail != "" {
+			label += lipgloss.NewStyle().Foreground(theme.TextMuted).Render(" — " + detail)
+		}
+		lines[i] = mark + " " + lipgloss.NewStyle().Foreground(theme.TextBody).Render(label)
 	}
 	return strings.Join(lines, "\n")
 }

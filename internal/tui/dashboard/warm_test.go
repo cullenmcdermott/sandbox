@@ -99,7 +99,7 @@ func TestHideShowPreservesModelIdentity(t *testing.T) {
 	sess.State.ID = id
 	sess.State.Status = session.StatusRunning
 	app.dashboard.sessions = []Session{sess}
-	app.dashboard.WithConnector(func(_ context.Context, _ session.Ref, _ string, _ func(ConnectStage)) (ConnectResult, error) {
+	app.dashboard.WithConnector(func(_ context.Context, _ session.Ref, _ string, _ func(ConnectStage, string)) (ConnectResult, error) {
 		return ConnectResult{Client: &fakeRunnerClient{}}, nil
 	})
 
@@ -133,7 +133,7 @@ func TestDetachRestartsBackgroundStream(t *testing.T) {
 	sess.State.ID = id
 	sess.State.Status = session.StatusRunning
 	app.dashboard.sessions = []Session{sess}
-	app.dashboard.WithConnector(func(_ context.Context, _ session.Ref, _ string, _ func(ConnectStage)) (ConnectResult, error) {
+	app.dashboard.WithConnector(func(_ context.Context, _ session.Ref, _ string, _ func(ConnectStage, string)) (ConnectResult, error) {
 		return ConnectResult{Client: &fakeRunnerClient{}}, nil
 	})
 	_, _ = app.Update(attachReadyMsg{sess: sess, client: &fakeRunnerClient{}})
@@ -276,11 +276,11 @@ func TestIngestAppliesEventAndDedupes(t *testing.T) {
 func TestBackgroundStreamPrefersObserverConnector(t *testing.T) {
 	m := New(nil)
 	var observerCalled, fullCalled bool
-	m.WithConnector(func(_ context.Context, _ session.Ref, _ string, _ func(ConnectStage)) (ConnectResult, error) {
+	m.WithConnector(func(_ context.Context, _ session.Ref, _ string, _ func(ConnectStage, string)) (ConnectResult, error) {
 		fullCalled = true
 		return ConnectResult{Client: &fakeRunnerClient{}}, nil
 	})
-	m.WithObserverConnector(func(_ context.Context, _ session.Ref, _ string, _ func(ConnectStage)) (ConnectResult, error) {
+	m.WithObserverConnector(func(_ context.Context, _ session.Ref, _ string, _ func(ConnectStage, string)) (ConnectResult, error) {
 		observerCalled = true
 		return ConnectResult{Client: &fakeRunnerClient{}}, nil
 	})
@@ -306,7 +306,7 @@ func TestBackgroundStreamPrefersObserverConnector(t *testing.T) {
 func TestBackgroundStreamFallsBackToFullConnector(t *testing.T) {
 	m := New(nil)
 	var fullCalled bool
-	m.WithConnector(func(_ context.Context, _ session.Ref, _ string, _ func(ConnectStage)) (ConnectResult, error) {
+	m.WithConnector(func(_ context.Context, _ session.Ref, _ string, _ func(ConnectStage, string)) (ConnectResult, error) {
 		fullCalled = true
 		return ConnectResult{Client: &fakeRunnerClient{}}, nil
 	})

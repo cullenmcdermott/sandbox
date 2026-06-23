@@ -409,7 +409,7 @@ func TestAppExternalPaneErrorSurfaces(t *testing.T) {
 
 func TestBackendPickerSelectsBackend(t *testing.T) {
 	backendCh := make(chan string, 1)
-	creator := func(ctx context.Context, backend string, _ func(ConnectStage)) (CreateResult, error) {
+	creator := func(ctx context.Context, backend string, _ func(ConnectStage, string)) (CreateResult, error) {
 		backendCh <- backend
 		return CreateResult{
 			State:  session.State{ID: "new1", Backend: backend},
@@ -456,7 +456,7 @@ func TestBackendPickerSelectsBackend(t *testing.T) {
 
 func TestBackendPickerEscCancels(t *testing.T) {
 	called := false
-	creator := func(ctx context.Context, backend string, _ func(ConnectStage)) (CreateResult, error) {
+	creator := func(ctx context.Context, backend string, _ func(ConnectStage, string)) (CreateResult, error) {
 		called = true
 		return CreateResult{}, nil
 	}

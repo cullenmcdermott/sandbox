@@ -21,7 +21,7 @@ func newDashboardConnector(backend *k8s.Backend, reaperImage string) dashboard.C
 	if reaperImage == "" {
 		reaperImage = k8s.DefaultReaperImage
 	}
-	return func(ctx context.Context, ref session.Ref, projectPath string, onStage func(dashboard.ConnectStage)) (dashboard.ConnectResult, error) {
+	return func(ctx context.Context, ref session.Ref, projectPath string, onStage func(dashboard.ConnectStage, string)) (dashboard.ConnectResult, error) {
 		sc := &sessionConnector{
 			backend:     backend,
 			ref:         ref,
@@ -75,7 +75,7 @@ func newDashboardObserverConnector(backend *k8s.Backend, reaperImage string) das
 	if reaperImage == "" {
 		reaperImage = k8s.DefaultReaperImage
 	}
-	return func(ctx context.Context, ref session.Ref, projectPath string, onStage func(dashboard.ConnectStage)) (dashboard.ConnectResult, error) {
+	return func(ctx context.Context, ref session.Ref, projectPath string, onStage func(dashboard.ConnectStage, string)) (dashboard.ConnectResult, error) {
 		sc := &sessionConnector{
 			backend:     backend,
 			ref:         ref,
@@ -115,7 +115,7 @@ func newDashboardCreator(backend *k8s.Backend, runnerImage, reaperImage string) 
 	if reaperImage == "" {
 		reaperImage = k8s.DefaultReaperImage
 	}
-	return func(ctx context.Context, backendName string, onStage func(dashboard.ConnectStage)) (dashboard.CreateResult, error) {
+	return func(ctx context.Context, backendName string, onStage func(dashboard.ConnectStage, string)) (dashboard.CreateResult, error) {
 		if backendName == "" {
 			backendName = session.BackendClaudeSDK
 		}
@@ -131,7 +131,7 @@ func newDashboardCreator(backend *k8s.Backend, runnerImage, reaperImage string) 
 			return dashboard.CreateResult{}, fmt.Errorf("start session: %w", err)
 		}
 
-		onStage(dashboard.StageResume)
+		onStage(dashboard.StageResume, "")
 		sc := &sessionConnector{
 			backend:     backend,
 			ref:         ref,

@@ -63,7 +63,7 @@ type opencodeCreds struct {
 // onStage reports connect progress to the connecting screen. Pass nil on
 // reconnect: the original connecting screen's update channel has been closed by
 // then, so reusing its sender would send on a closed channel and panic.
-func (sc *sessionConnector) connect(ctx context.Context, onStage func(dashboard.ConnectStage)) (*connection, error) {
+func (sc *sessionConnector) connect(ctx context.Context, onStage func(dashboard.ConnectStage, string)) (*connection, error) {
 	return sc.establish(ctx, onStage, true)
 }
 
@@ -73,20 +73,23 @@ func (sc *sessionConnector) connect(ctx context.Context, onStage func(dashboard.
 // all attach-time concerns — so the dashboard's per-session background streams
 // stay cheap (RV8) instead of each running mutagen sync create + flush just to
 // observe events.
-func (sc *sessionConnector) connectObserver(ctx context.Context, onStage func(dashboard.ConnectStage)) (*connection, error) {
+func (sc *sessionConnector) connectObserver(ctx context.Context, onStage func(dashboard.ConnectStage, string)) (*connection, error) {
 	return sc.establish(ctx, onStage, false)
 }
 
 // establish is the shared connect body. full=true performs the complete attach
 // setup (file sync, idle reaper, opencode readiness); full=false stops at a
 // healthy runner client, for a background observer stream.
-func (sc *sessionConnector) establish(ctx context.Context, onStage func(dashboard.ConnectStage), full bool) (*connection, error) {
+func (sc *sessionConnector) establish(ctx context.Context, onStage func(dashboard.ConnectStage, string), full bool) (*connection, error) {
 	sc.closeHandles()
 	if onStage == nil {
-		onStage = func(dashboard.ConnectStage) {}
+		onStage = func(dashboard.ConnectStage, string) {}
 	}
+	// stage reports a coarse phase with no sub-detail; onStage carries a live
+	// detail string (used during the initial file sync).
+	stage := func(s dashboard.ConnectStage) { onStage(s, "") }
 
-	onStage(dashboard.StageCheck)
+	stage(dashboard.StageCheck)
 	st, err := sc.backend.Status(ctx, sc.ref)
 	if err != nil {
 		return nil, err
@@ -95,13 +98,13 @@ func (sc *sessionConnector) establish(ctx context.Context, onStage func(dashboar
 	case session.StatusGone:
 		return nil, fmt.Errorf("session %s no longer exists", sc.ref.ID)
 	case session.StatusSuspended:
-		onStage(dashboard.StageResume)
+		stage(dashboard.StageResume)
 		if err := sc.backend.Resume(ctx, sc.ref); err != nil {
 			return nil, fmt.Errorf("resume: %w", err)
 		}
 	}
 
-	onStage(dashboard.StageForward)
+	stage(dashboard.StageForward)
 	opencode := st.Backend == session.BackendOpenCode
 	var handles []session.ForwardHandle
 	if opencode {
@@ -121,14 +124,14 @@ func (sc *sessionConnector) establish(ctx context.Context, onStage func(dashboar
 		return nil, err
 	}
 	client := runner.New(endpoint, token)
-	onStage(dashboard.StageRunner)
+	stage(dashboard.StageRunner)
 	if err := waitHealthy(ctx, client); err != nil {
 		return nil, fmt.Errorf("runner health: %w", err)
 	}
 
 	var syncWarning string
 	if full {
-		onStage(dashboard.StageSync)
+		stage(dashboard.StageSync)
 		privPath, _, kerr := ensureSSHKey(string(sc.ref.ID))
 		if kerr != nil {
 			syncWarning = fmt.Sprintf("file sync unavailable (ssh key): %v", kerr)
@@ -143,7 +146,7 @@ func (sc *sessionConnector) establish(ctx context.Context, onStage func(dashboar
 			// sync may time out, which just means "still uploading in the background"
 			// rather than a failure (RV21).
 			flushCtx, cancelFlush := context.WithTimeout(ctx, 12*time.Second)
-			ferr := syncManager().FlushAll(flushCtx, string(sc.ref.ID))
+			ferr := sc.flushWithProgress(flushCtx, onStage)
 			timedOut := flushCtx.Err() == context.DeadlineExceeded
 			cancelFlush()
 			switch {
@@ -185,7 +188,7 @@ func (sc *sessionConnector) establish(ctx context.Context, onStage func(dashboar
 			return nil, fmt.Errorf("opencode password: %w", perr)
 		}
 		addr := fmt.Sprintf("127.0.0.1:%d", handles[2].LocalPort())
-		onStage(dashboard.StageOpencode)
+		stage(dashboard.StageOpencode)
 		// `opencode serve` is a child of the runner and comes up a beat after
 		// /healthz, so wait for it to actually answer before handing the address to
 		// the local `opencode attach` — otherwise attach hits connection-refused and
@@ -204,7 +207,7 @@ func (sc *sessionConnector) establish(ctx context.Context, onStage func(dashboar
 			url:      "http://" + addr,
 		}
 	}
-	onStage(dashboard.StageAttach)
+	stage(dashboard.StageAttach)
 	return conn, nil
 }
 
@@ -237,6 +240,30 @@ func waitOpencodeReady(ctx context.Context, url string) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(time.Second):
+		}
+	}
+}
+
+// flushWithProgress runs the bounded initial sync flush while polling mutagen
+// for a live staging phase, reporting it as a StageSync sub-detail so the
+// connect screen shows "Syncing files — uploading…" instead of a frozen label.
+// It returns the flush's own result (a timeout shows up via ctx, as before).
+func (sc *sessionConnector) flushWithProgress(ctx context.Context, onStage func(dashboard.ConnectStage, string)) error {
+	mgr := syncManager()
+	id := string(sc.ref.ID)
+	done := make(chan error, 1)
+	go func() { done <- mgr.FlushAll(ctx, id) }()
+
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case err := <-done:
+			return err
+		case <-ticker.C:
+			if phase := mgr.StagingPhase(ctx, id); phase != "" {
+				onStage(dashboard.StageSync, phase)
+			}
 		}
 	}
 }
