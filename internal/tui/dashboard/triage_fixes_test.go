@@ -3,6 +3,8 @@ package dashboard
 import (
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/cullenmcdermott/sandbox/internal/session"
 )
 
@@ -49,6 +51,67 @@ func TestCommitRenamePersists(t *testing.T) {
 	}
 	if m.renaming {
 		t.Error("renaming should be cleared after commit")
+	}
+}
+
+// Renaming via the keyboard: R opens the overlay, typed characters land in the
+// rename buffer, and enter commits. Regression test for the bug where keypresses
+// fell through to navigation because handleKey never routed to the rename buffer.
+func TestRenameKeyboardInput(t *testing.T) {
+	store := newFakeTitleStore()
+	m := New(nil).WithTitleStore(store)
+	m.sessions = []Session{
+		SessionFromState(session.State{ID: "s1", Status: session.StatusRunning, ProjectPath: "/a"}),
+	}
+	m.cursor = 0
+
+	m.handleKey(keyMsg("R"))
+	if !m.renaming {
+		t.Fatal("R should open the rename overlay")
+	}
+
+	// Clear the pre-filled title and type a new name.
+	m.renameBuf = ""
+	for _, k := range []string{"n", "e", "w"} {
+		m.handleKey(keyMsg(k))
+	}
+	if m.renameBuf != "new" {
+		t.Fatalf("renameBuf = %q, want %q", m.renameBuf, "new")
+	}
+
+	// Backspace removes the last rune.
+	m.handleKey(tea.KeyPressMsg{Code: tea.KeyBackspace})
+	if m.renameBuf != "ne" {
+		t.Fatalf("after backspace renameBuf = %q, want %q", m.renameBuf, "ne")
+	}
+
+	m.handleKey(keyMsg("enter"))
+	if m.renaming {
+		t.Error("enter should commit and close the rename overlay")
+	}
+	if got := store.LoadTitle("s1"); got != "ne" {
+		t.Fatalf("store title = %q, want %q", got, "ne")
+	}
+}
+
+// esc cancels a rename without persisting anything.
+func TestRenameEscapeCancels(t *testing.T) {
+	store := newFakeTitleStore()
+	m := New(nil).WithTitleStore(store)
+	m.sessions = []Session{
+		SessionFromState(session.State{ID: "s1", Status: session.StatusRunning, ProjectPath: "/a"}),
+	}
+	m.cursor = 0
+
+	m.handleKey(keyMsg("R"))
+	m.renameBuf = "discard"
+	m.handleKey(keyMsg("esc"))
+
+	if m.renaming {
+		t.Error("esc should close the rename overlay")
+	}
+	if got := store.LoadTitle("s1"); got != "" {
+		t.Fatalf("esc should not persist; store title = %q", got)
 	}
 }
 

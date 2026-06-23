@@ -18,16 +18,26 @@ survives detach, suspend/resume, and CLI restarts.
 
 | Where | Package / file | Role |
 |---|---|---|
-| Local | `internal/cli` | Cobra command tree; composes backend + runner client + sync |
-| Local | `internal/tui` | Bubble Tea v2 TUI: transcript, tool cards, permission modal |
-| Local | `internal/k8s` | `Backend`: Sandbox/PVC/Secret CRUD, suspend/resume, port-forward, exec |
-| Local | `internal/runner` | HTTP+SSE client implementing `RunnerClient` |
+| Local | `internal/cli` | Cobra command tree; composes backend + runner client + sync; idle-reaper Job (`reap.go`) |
+| Local | `internal/tui/dashboard` | Bubble Tea v2 command-center: session list, attention routing, transcript, tool cards, permission modal, external (opencode) PTY pane |
+| Local | `internal/k8s` | `Backend`: Sandbox/PVC/Secret CRUD, suspend/resume, port-forward, exec; reaper Job spec (`reaper.go`) |
+| Local | `internal/runner` | HTTP+SSE client implementing `RunnerClient` (active + passive streams) |
 | Local | `internal/sync` | Mutagen manager, SSH keypair + per-session ssh-config alias |
 | Local | `internal/index` | Local session index + SSH key storage under `~/.local/share/sandbox` |
 | Local | `internal/session` | Shared contract: `Spec`, `State`, `Event`, `Backend`, `RunnerClient` |
+| Local | `internal/models` | Resolves a model's context-window limit + per-million-token pricing; drives the TUI ctx% indicator |
+| Test  | `internal/e2e` | Build-tagged (`//go:build e2e`) CLI↔runner smoke test: a full turn across the `internal/runner` HTTP+SSE seam against an in-process fake runner |
 | Pod | `runner/src/server.ts` | node:http server, bearer auth, routes (see `runner-api.md`) |
 | Pod | `runner/src/claude.ts` | Claude Agent SDK `query()`, hooks, permission flow, event mapping |
+| Pod | `runner/src/opencode.ts` | OpenCode backend: supervises `opencode serve` for `sandbox opencode` sessions |
 | Pod | `runner/src/events.ts` | SQLite event log; append-before-stream; SSE replay |
+
+There are **two agent backends**: the default `claude-sdk` (the Claude Agent SDK
+driven through the runner's HTTP+SSE turns API) and `opencode` (a supervised
+`opencode serve` process the local `sandbox opencode` command attaches to via a
+PTY pane; turns are driven by the local `opencode` client, not the runner's
+turns route). The idle reaper is a per-session Kubernetes Job that polls the
+runner's `/idle` and suspends the Sandbox (replicas→0) after the idle timeout.
 
 ```mermaid
 flowchart LR
@@ -56,7 +66,7 @@ flowchart LR
     rc -. "HTTP+SSE · port-forward :8787" .-> server
     sm -. "SSH · port-forward :22" .-> sshd
     pod --- pvc[("PVC /session")]
-    claude -->|ANTHROPIC_API_KEY| anthropic(["Anthropic API"])
+    claude -->|CLAUDE_CODE_OAUTH_TOKEN| anthropic(["Anthropic API"])
 ```
 
 ## Session lifecycle (`sandbox claude`)
@@ -123,9 +133,14 @@ ssh/config                            per-session Host aliases (Include'd from ~
   `secretKeyRef`. The same value is read back from the Secret for `claude`,
   `attach`, and `cancel`. The runner rejects every non-`/healthz` request without
   it.
-- **Model auth.** `ANTHROPIC_API_KEY` is injected from the shared
-  `anthropic-credentials` Secret (optional ref, so the pod still starts before
-  it exists; turns fail to authenticate until it does).
+- **Model auth (claude-sdk backend).** A Claude Code OAuth token is read from the
+  shared `anthropic-credentials` Secret (key `api-key`) and injected as
+  `CLAUDE_CODE_OAUTH_TOKEN` (optional ref, so the pod still starts before it
+  exists; turns fail to authenticate until it does). It must be a subscription
+  OAuth token (`claude setup-token`), **not** a raw `ANTHROPIC_API_KEY` — Claude
+  Code would reject an x-api-key in this slot. `ANTHROPIC_API_KEY` is injected
+  only for the `opencode` backend, from the separate `opencode-credentials`
+  Secret (see `buildEnv` in `internal/k8s/backend.go`).
 - **Sync auth.** The CLI generates a per-session ed25519 keypair; the public key
   rides in the session Secret and is installed as the pod's `authorized_keys`,
   the private key stays local and is referenced by the ssh-config alias. Mutagen
@@ -148,14 +163,27 @@ port, and Mutagen self-heals on its next reconnect.
 
 ## Event model
 
-`internal/session/event.go` (Go) and `runner/src/types.ts` (TypeScript) define
-the **same** 23 event variants by hand. The runner maps Claude SDK messages into
-these normalized events, persists them to `events.db`, then streams them via SSE;
-the CLI consumes the stream with `after=<seq>` replay.
+`schema/events.json` is the **single source of truth** for the normalized event
+model (the event-type strings + the payload field shapes). The runner maps Claude
+SDK messages into these events, persists them to `events.db`, then streams them via
+SSE; the CLI consumes the stream with `after=<seq>` replay.
 
-> **Maintenance hazard:** the two definitions are kept in sync manually with no
-> codegen and no drift test. Changing one without the other will silently break
-> event decoding. A cross-language fixture/golden test is a worthwhile follow-up.
+Both languages are kept honest against the schema:
+
+- **TypeScript is generated.** `cmd/gen-eventschema` emits `runner/src/events.gen.ts`
+  (the `EventType` union, `ALL_EVENT_TYPES`, and every payload `interface`).
+  `runner/src/types.ts` re-exports them; never hand-edit a `*.gen.ts` file.
+- **Go is generated + validated.** The same generator emits the `EventType` consts
+  and `AllEventTypes` to `internal/session/eventtypes.gen.go`. The payload *structs*
+  stay hand-written in `event.go` (so Go keeps `*int`/`omitempty` nuances) but
+  `internal/session/schema_test.go` reflects over them and fails if any field's
+  json tag, coarse type, or `omitempty` drifts from the schema.
+
+**Workflow:** edit `schema/events.json`, run `just gen`, commit the regenerated
+files. CI's generated-file diff gate fails on a schema change that wasn't
+regenerated (or a hand-edited `*.gen.*`), and the Go drift test fails on a struct
+that diverges. Scope is event payloads only — HTTP request/response bodies and
+`IdleStatus` stay hand-written in both languages.
 
 ## Security model
 
@@ -163,7 +191,8 @@ the CLI consumes the stream with `after=<seq>` replay.
 - **Network:** default-deny ingress; egress allows DNS + public 80/443 only —
   RFC1918, CGNAT/tailnet, and link-local/metadata ranges are excluded, so a
   session cannot reach the API server, in-cluster services, or `169.254.169.254`
-  (`k8s/agent-sessions/networkpolicy.yaml` in the homelab repo).
+  (see the example `k8s/agent-sessions/networkpolicy.yaml` in this repo; the
+  maintainer's real cluster wiring is a separate private deployment).
 - **Pod hardening:** `seccompProfile: RuntimeDefault`; namespace is PodSecurity
   Admission `baseline` enforce / `restricted` warn. The runner currently runs as
   **root** (sshd + single-uid workspace ownership); moving to non-root +

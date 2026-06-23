@@ -31,6 +31,17 @@ func TestProgressStateGatedOnGhostty(t *testing.T) {
 	}
 }
 
+// The global off switch (NO_COLOR / SANDBOX_REDUCE_MOTION, folded into
+// caps.ReduceMotion) must suppress Stage 2 even on Ghostty (D2/D4).
+func TestProgressStateGatedOnReduceMotion(t *testing.T) {
+	m := New(nil)
+	m.caps = terminal.Caps{IsGhostty: true, ReduceMotion: true}
+	m.sessions = waitingSessions()
+	if got := m.progressState(); got != terminal.ProgressNone {
+		t.Fatalf("ReduceMotion must suppress progress, got %v", got)
+	}
+}
+
 func TestProgressStateMapping(t *testing.T) {
 	m := New(nil)
 	m.caps = terminal.Caps{IsGhostty: true}

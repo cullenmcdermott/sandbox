@@ -1,0 +1,59 @@
+# Egress allowlist for session pods — the SECOND half of the network boundary.
+#
+# Apply this AFTER networkpolicy-default-deny.yaml. NetworkPolicies are additive:
+# this policy ADDS the egress the agent legitimately needs (DNS + public HTTPS)
+# on top of the default-deny baseline, while the deny policy keeps everything
+# else (ingress, plain HTTP, the API server, in-cluster services) blocked.
+#
+# CUSTOMIZE THIS. The example below allows DNS and outbound 443 to public IP
+# space, with RFC1918 / CGNAT / link-local (incl. the 169.254.169.254 cloud
+# metadata endpoint) carved OUT so a session cannot reach the Kubernetes API
+# server, in-cluster services, your internal network, or instance metadata.
+# Tighten or widen to match what your agents actually need (e.g. the Anthropic
+# API, npm/PyPI/crates/Go module proxies, your git host).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: egress-allow
+  namespace: agent-sessions
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # 1. DNS resolution (UDP + TCP 53). Adjust the selector to match your cluster
+    #    DNS (CoreDNS in kube-system here); some clusters use a different ns/label.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+    # 2. HTTPS to the public internet only. The ipBlock allows all IPv4, then
+    #    `except` removes private + special-use ranges. This is what lets the
+    #    agent reach the Anthropic API (api.anthropic.com) and public package
+    #    registries while still being denied the API server / cluster services /
+    #    metadata endpoint.
+    #
+    #    For a tighter allowlist, replace the broad ipBlock with the specific
+    #    CIDRs (or FQDN policy, if your CNI supports it, e.g. Cilium
+    #    CiliumNetworkPolicy `toFQDNs`) for only the hosts you trust.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8        # RFC1918 private
+              - 172.16.0.0/12     # RFC1918 private
+              - 192.168.0.0/16    # RFC1918 private
+              - 100.64.0.0/10     # CGNAT / tailnet
+              - 169.254.0.0/16    # link-local incl. 169.254.169.254 metadata
+      ports:
+        - protocol: TCP
+          port: 443

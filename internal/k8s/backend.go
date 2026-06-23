@@ -6,20 +6,24 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/remotecommand"
+	"k8s.io/client-go/util/retry"
 
 	agentv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	agentsclient "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned"
@@ -28,8 +32,11 @@ import (
 )
 
 const (
-	defaultNamespace    = "agent-sessions"
-	defaultStorageClass = "rook-ceph-block"
+	defaultNamespace = "agent-sessions"
+	// defaultStorageClass is empty so PVCs fall back to the cluster's default
+	// StorageClass. Override per-session via Spec.StorageClass for clusters that
+	// have no default or want a specific class (e.g. "rook-ceph-block").
+	defaultStorageClass = ""
 	defaultStorageGiB   = 50
 
 	labelSessionID = "sandbox.cullen.dev/session-id"
@@ -39,10 +46,27 @@ const (
 	portRunner = 8787
 	// portSSH is the sshd port for Mutagen.
 	portSSH = 22
+	// portOpencode is the `opencode serve` HTTP/OpenAPI port inside the pod,
+	// used only by opencode-server sessions. The local `opencode attach` client
+	// reaches it over a port-forward.
+	portOpencode = 4096
+	// terminationGraceSeconds is the pod's SIGTERM→SIGKILL window, giving the
+	// runner time to emit session.terminating, abort turns, and flush on drain.
+	terminationGraceSeconds = 60
 
 	// secretKeyRunnerToken is the key in the per-session Secret holding the
 	// bearer token the runner requires for all non-/healthz requests.
 	secretKeyRunnerToken = "runner-token"
+
+	// secretKeyOpencodePassword is the key in the per-session Secret holding the
+	// HTTP basic-auth password for `opencode serve` (OPENCODE_SERVER_PASSWORD).
+	// The local `opencode attach` client reads it via OpencodePassword. Always
+	// generated; only opencode-server sessions use it.
+	secretKeyOpencodePassword = "opencode-password"
+
+	// opencodeServerUsername is the fixed HTTP basic-auth username for
+	// `opencode serve` (opencode's default; passed to the client as -u).
+	opencodeServerUsername = "opencode"
 
 	// secretKeySSHAuthorizedKey is the key in the per-session Secret holding
 	// the OpenSSH public key authorized for Mutagen's SSH transport.
@@ -54,11 +78,25 @@ const (
 	sshAuthorizedKeyMountPath = "/etc/sandbox-ssh"
 
 	// anthropicSecretName / anthropicSecretKey identify the cluster Secret
-	// that supplies the Anthropic API key to session pods. It is provisioned
-	// out-of-band (deferred) and referenced optionally so pods still start
-	// before it exists.
+	// that supplies Claude credentials to session pods. The value is a Claude
+	// Code OAuth token (subscription auth), surfaced to the runner as
+	// CLAUDE_CODE_OAUTH_TOKEN. It is provisioned out-of-band (deferred) and
+	// referenced optionally so pods still start before it exists.
 	anthropicSecretName = "anthropic-credentials"
 	anthropicSecretKey  = "api-key"
+
+	// opencodeSecretName is the cluster Secret supplying provider API keys to
+	// opencode-server session pods. Keys are optional and referenced optionally
+	// so pods start before they exist; the runner's config generator enables
+	// only the providers whose env vars are present. These are real API keys
+	// (distinct from the Claude subscription OAuth token in anthropicSecret).
+	opencodeSecretName = "opencode-credentials"
+	// opencodeSecretKeyAnthropic / OpenAI / Zen map cluster Secret keys to the
+	// provider env vars opencode reads (ANTHROPIC_API_KEY, OPENAI_API_KEY,
+	// OPENCODE_API_KEY for opencode Zen).
+	opencodeSecretKeyAnthropic = "anthropic-api-key"
+	opencodeSecretKeyOpenAI    = "openai-api-key"
+	opencodeSecretKeyZen       = "opencode-api-key"
 )
 
 // sessionSecretName returns the name of the per-session Secret for a session.
@@ -70,6 +108,15 @@ type Backend struct {
 	core      kubernetes.Interface
 	config    *rest.Config
 	namespace string
+
+	// runForwardFn is the implementation of port-forward establishment; it is
+	// overridable in tests (S4). Production code leaves it as (*Backend).runForward.
+	runForwardFn func(ctx context.Context, pod *corev1.Pod, localPort, remotePort int, h *forwardHandle, ready chan struct{})
+
+	// forwardOnceFn runs a single ForwardPorts() attempt; overridable in tests so
+	// runForward's reconnect/readiness loop can be exercised without a live SPDY
+	// endpoint. Production leaves it as (*Backend).forwardOnce.
+	forwardOnceFn func(ctx context.Context, pod *corev1.Pod, localPort, remotePort int, ready chan struct{}) error
 }
 
 // New creates a Backend. It loads kubeconfig from the standard locations
@@ -99,28 +146,15 @@ func New(namespace string) (*Backend, error) {
 	if namespace == "" {
 		namespace = defaultNamespace
 	}
-	return &Backend{
+	b := &Backend{
 		agents:    agents,
 		core:      core,
 		config:    config,
 		namespace: namespace,
-	}, nil
-}
-
-// NewForConfig creates a Backend from an explicit rest.Config (for testing).
-func NewForConfig(config *rest.Config, namespace string) (*Backend, error) {
-	agents, err := agentsclient.NewForConfig(config)
-	if err != nil {
-		return nil, err
 	}
-	core, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		return nil, err
-	}
-	if namespace == "" {
-		namespace = defaultNamespace
-	}
-	return &Backend{agents: agents, core: core, config: config, namespace: namespace}, nil
+	b.runForwardFn = b.runForward
+	b.forwardOnceFn = b.forwardOnce
+	return b, nil
 }
 
 // NewForClients creates a Backend from pre-built clientsets (for testing).
@@ -128,17 +162,31 @@ func NewForClients(agents agentsclient.Interface, core kubernetes.Interface, nam
 	if namespace == "" {
 		namespace = defaultNamespace
 	}
-	return &Backend{agents: agents, core: core, namespace: namespace}
+	b := &Backend{agents: agents, core: core, namespace: namespace}
+	b.runForwardFn = b.runForward
+	b.forwardOnceFn = b.forwardOnce
+	return b
 }
 
 // CreateSession creates a Sandbox and PVC. It does not wait for the pod to
 // be ready; call Start for that.
 func (b *Backend) CreateSession(ctx context.Context, spec session.Spec) (session.Ref, error) {
-	if spec.Namespace == "" {
-		spec.Namespace = b.namespace
-	}
+	// Every other backend method — Status, Suspend, Resume, Destroy, List and
+	// the watch — is scoped to b.namespace. Creating a session's Secret/PVC/
+	// Sandbox in any other namespace would orphan them (Destroy could never find
+	// them, leaking the runner bearer-token Secret), so pin to b.namespace.
+	// True per-namespace sessions require threading the namespace through all of
+	// those methods (future work, tracked for per-user namespace isolation).
+	spec.Namespace = b.namespace
 	if spec.StorageClass == "" {
 		spec.StorageClass = defaultStorageClass
+	}
+	// storageClassName: a nil pointer makes the PVC use the cluster's default
+	// StorageClass, whereas a pointer to "" would explicitly request NO class
+	// (which never binds). So only set it when a class is named.
+	var storageClassName *string
+	if spec.StorageClass != "" {
+		storageClassName = strPtr(spec.StorageClass)
 	}
 	if spec.StorageGiB == 0 {
 		spec.StorageGiB = defaultStorageGiB
@@ -153,6 +201,12 @@ func (b *Backend) CreateSession(ctx context.Context, spec session.Spec) (session
 	if err != nil {
 		return session.Ref{}, fmt.Errorf("k8s: generate runner token: %w", err)
 	}
+	// Per-session opencode basic-auth password (used only by opencode-server
+	// sessions; cheap to always generate so the secret shape is uniform).
+	opencodePassword, err := generateToken()
+	if err != nil {
+		return session.Ref{}, fmt.Errorf("k8s: generate opencode password: %w", err)
+	}
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      sessionSecretName(name),
@@ -165,6 +219,7 @@ func (b *Backend) CreateSession(ctx context.Context, spec session.Spec) (session
 		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
 			secretKeyRunnerToken:      []byte(token),
+			secretKeyOpencodePassword: []byte(opencodePassword),
 			secretKeySSHAuthorizedKey: []byte(spec.SSHPublicKey),
 		},
 	}
@@ -186,7 +241,7 @@ func (b *Backend) CreateSession(ctx context.Context, spec session.Spec) (session
 		},
 		Spec: corev1.PersistentVolumeClaimSpec{
 			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-			StorageClassName: strPtr(spec.StorageClass),
+			StorageClassName: storageClassName,
 			Resources: corev1.VolumeResourceRequirements{
 				Requests: corev1.ResourceList{
 					corev1.ResourceStorage: resource.MustParse(fmt.Sprintf("%dGi", spec.StorageGiB)),
@@ -271,6 +326,26 @@ func (b *Backend) RunnerToken(ctx context.Context, ref session.Ref) (string, err
 	return string(token), nil
 }
 
+// OpencodePassword returns the per-session HTTP basic-auth password for
+// `opencode serve`, read from the session Secret. Used by the local
+// `opencode attach` client for opencode-server sessions.
+func (b *Backend) OpencodePassword(ctx context.Context, ref session.Ref) (string, error) {
+	secret, err := b.core.CoreV1().Secrets(b.namespace).Get(ctx, sessionSecretName(string(ref.ID)), metav1.GetOptions{})
+	if err != nil {
+		return "", fmt.Errorf("k8s: get opencode password secret for %s: %w", ref.ID, err)
+	}
+	pw, ok := secret.Data[secretKeyOpencodePassword]
+	if !ok {
+		return "", fmt.Errorf("k8s: secret %s missing key %q", secret.Name, secretKeyOpencodePassword)
+	}
+	return string(pw), nil
+}
+
+// OpencodeUsername returns the fixed HTTP basic-auth username for `opencode
+// serve`. Exposed so the CLI can pass -u to `opencode attach` without
+// duplicating the constant.
+func OpencodeUsername() string { return opencodeServerUsername }
+
 // Suspend sets replicas to 0, terminating the pod but preserving the PVC.
 func (b *Backend) Suspend(ctx context.Context, ref session.Ref) error {
 	return b.setReplicas(ctx, ref, 0)
@@ -284,20 +359,26 @@ func (b *Backend) Resume(ctx context.Context, ref session.Ref) error {
 	return b.waitForPodReady(ctx, ref)
 }
 
-// Destroy deletes the Sandbox and PVC. Irreversible.
+// Destroy deletes the Sandbox, PVC and per-session Secret. Irreversible.
+//
+// All three deletions are attempted even if one fails: a transient error on the
+// Sandbox or PVC must not orphan the remaining resources — most importantly the
+// per-session Secret, which holds the runner bearer token. NotFound is treated
+// as success so Destroy is idempotent (C5).
 func (b *Backend) Destroy(ctx context.Context, ref session.Ref) error {
 	name := string(ref.ID)
-	err := b.agents.AgentsV1alpha1().Sandboxes(b.namespace).Delete(ctx, name, metav1.DeleteOptions{})
-	if err != nil && !k8serrors.IsNotFound(err) {
-		return fmt.Errorf("k8s: delete Sandbox %s: %w", name, err)
+	var errs []error
+	if err := b.agents.AgentsV1alpha1().Sandboxes(b.namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
+		errs = append(errs, fmt.Errorf("delete Sandbox %s: %w", name, err))
 	}
-	err = b.core.CoreV1().PersistentVolumeClaims(b.namespace).Delete(ctx, name, metav1.DeleteOptions{})
-	if err != nil && !k8serrors.IsNotFound(err) {
-		return fmt.Errorf("k8s: delete PVC %s: %w", name, err)
+	if err := b.core.CoreV1().PersistentVolumeClaims(b.namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
+		errs = append(errs, fmt.Errorf("delete PVC %s: %w", name, err))
 	}
-	err = b.core.CoreV1().Secrets(b.namespace).Delete(ctx, sessionSecretName(name), metav1.DeleteOptions{})
-	if err != nil && !k8serrors.IsNotFound(err) {
-		return fmt.Errorf("k8s: delete Secret %s: %w", sessionSecretName(name), err)
+	if err := b.core.CoreV1().Secrets(b.namespace).Delete(ctx, sessionSecretName(name), metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
+		errs = append(errs, fmt.Errorf("delete Secret %s: %w", sessionSecretName(name), err))
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("k8s: destroy %s: %w", name, errors.Join(errs...))
 	}
 	return nil
 }
@@ -315,6 +396,14 @@ func (b *Backend) Status(ctx context.Context, ref session.Ref) (session.State, e
 	st := session.State{
 		ID:          ref.ID,
 		SandboxName: sb.Name,
+		CreatedAt:   sb.CreationTimestamp.Time,
+		// Recover the identity fields the runner pod was created with. These are
+		// write-once container env (see buildEnv); reading them back here means a
+		// session attached from the list — not just one freshly created in this
+		// process — carries its real ProjectPath (needed for Mutagen sync) and
+		// Backend (needed to pick the claude vs opencode connect path).
+		ProjectPath: sandboxEnv(sb, "PROJECT_PATH"),
+		Backend:     sandboxEnv(sb, "SANDBOX_BACKEND"),
 	}
 
 	replicas := int32(1)
@@ -351,6 +440,22 @@ func (b *Backend) Status(ctx context.Context, ref session.Ref) (session.State, e
 	return st, nil
 }
 
+// sandboxEnv returns the literal value of a runner-container env var from the
+// Sandbox's pod template, or "" if absent or set via valueFrom (SecretKeyRef).
+// Used to recover the identity fields (PROJECT_PATH, SANDBOX_BACKEND) the pod
+// was created with so Status/List report them for any session, not only those
+// created in the current process.
+func sandboxEnv(sb *agentv1alpha1.Sandbox, name string) string {
+	for i := range sb.Spec.PodTemplate.Spec.Containers {
+		for _, e := range sb.Spec.PodTemplate.Spec.Containers[i].Env {
+			if e.Name == name {
+				return e.Value
+			}
+		}
+	}
+	return ""
+}
+
 // List returns all sessions in the namespace.
 func (b *Backend) List(ctx context.Context) ([]session.State, error) {
 	list, err := b.agents.AgentsV1alpha1().Sandboxes(b.namespace).List(ctx, metav1.ListOptions{})
@@ -370,14 +475,23 @@ func (b *Backend) List(ctx context.Context) ([]session.State, error) {
 	return states, nil
 }
 
-// setReplicas patches the Sandbox replicas field.
+// setReplicas updates the Sandbox replicas field. Get+Update is wrapped in
+// RetryOnConflict: the idle reaper writes the same Sandbox (it suspends by
+// setting replicas to 0), so a Suspend/Resume issued concurrently can lose the
+// resourceVersion race and get a 409 Conflict. RetryOnConflict re-Gets the
+// latest object and re-applies replicas, so the operation converges instead of
+// failing the user-visible Suspend/Resume.
 func (b *Backend) setReplicas(ctx context.Context, ref session.Ref, replicas int32) error {
-	sb, err := b.agents.AgentsV1alpha1().Sandboxes(b.namespace).Get(ctx, string(ref.ID), metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("k8s: get Sandbox %s for replicas update: %w", ref.ID, err)
-	}
-	sb.Spec.Replicas = &replicas
-	_, err = b.agents.AgentsV1alpha1().Sandboxes(b.namespace).Update(ctx, sb, metav1.UpdateOptions{})
+	sandboxes := b.agents.AgentsV1alpha1().Sandboxes(b.namespace)
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		sb, getErr := sandboxes.Get(ctx, string(ref.ID), metav1.GetOptions{})
+		if getErr != nil {
+			return getErr
+		}
+		sb.Spec.Replicas = &replicas
+		_, updateErr := sandboxes.Update(ctx, sb, metav1.UpdateOptions{})
+		return updateErr
+	})
 	if err != nil {
 		return fmt.Errorf("k8s: update Sandbox %s replicas to %d: %w", ref.ID, replicas, err)
 	}
@@ -385,7 +499,11 @@ func (b *Backend) setReplicas(ctx context.Context, ref session.Ref, replicas int
 }
 
 // waitForPodReady polls until the sandbox's pod is running and ready, or
-// the context is cancelled.
+// the context is cancelled. It fails fast with a descriptive error if the pod
+// enters a state it cannot recover from on its own (unpullable image, bad
+// config, crash loop) so a broken runner image surfaces a clear message instead
+// of polling silently until the caller's deadline / forever (RV: `sandbox
+// claude` could hang indefinitely with zero feedback on an ImagePullBackOff pod).
 func (b *Backend) waitForPodReady(ctx context.Context, ref session.Ref) error {
 	return wait.PollUntilContextCancel(ctx, 2*time.Second, true, func(ctx context.Context) (bool, error) {
 		sb, err := b.agents.AgentsV1alpha1().Sandboxes(b.namespace).Get(ctx, string(ref.ID), metav1.GetOptions{})
@@ -396,11 +514,56 @@ func (b *Backend) waitForPodReady(ctx context.Context, ref session.Ref) error {
 		if err != nil || pod == nil {
 			return false, nil
 		}
+		if startErr := podStartupError(pod); startErr != nil {
+			return false, startErr
+		}
 		return isPodReady(pod), nil
 	})
 }
 
+// fatalWaitingReasons are kubelet container "waiting" reasons that mean the pod
+// will not become ready without intervention. Each is a state kubelet reports
+// only after it has determined a real problem: the *BackOff reasons mean it has
+// already retried and is backing off, and the config/name reasons are
+// deterministic — so failing fast on them does not race a slow-but-healthy pull.
+var fatalWaitingReasons = map[string]bool{
+	"ImagePullBackOff":           true,
+	"InvalidImageName":           true,
+	"CreateContainerConfigError": true,
+	"CrashLoopBackOff":           true,
+}
+
+// podStartupError returns a descriptive error if the pod is in a state it cannot
+// recover from on its own (so the readiness wait should stop and surface it), or
+// nil while the pod is still legitimately starting up.
+func podStartupError(pod *corev1.Pod) error {
+	if pod.Status.Phase == corev1.PodFailed {
+		msg := strings.TrimSpace(pod.Status.Reason + " " + pod.Status.Message)
+		if msg == "" {
+			msg = "pod entered Failed phase"
+		}
+		return fmt.Errorf("pod %s failed to start: %s", pod.Name, msg)
+	}
+	statuses := make([]corev1.ContainerStatus, 0, len(pod.Status.InitContainerStatuses)+len(pod.Status.ContainerStatuses))
+	statuses = append(statuses, pod.Status.InitContainerStatuses...)
+	statuses = append(statuses, pod.Status.ContainerStatuses...)
+	for _, cs := range statuses {
+		w := cs.State.Waiting
+		if w == nil || !fatalWaitingReasons[w.Reason] {
+			continue
+		}
+		if detail := strings.TrimSpace(w.Message); detail != "" {
+			return fmt.Errorf("container %q is not starting: %s: %s", cs.Name, w.Reason, detail)
+		}
+		return fmt.Errorf("container %q is not starting: %s", cs.Name, w.Reason)
+	}
+	return nil
+}
+
 // getPodForSandbox finds the pod owned by the sandbox via label selector.
+// It prefers non-terminating pods: if multiple pods exist (e.g. a terminating
+// old pod + a new running one), the first non-terminating pod is returned.
+// Only if all pods are terminating does it fall back to the first entry (R7).
 func (b *Backend) getPodForSandbox(ctx context.Context, sb *agentv1alpha1.Sandbox) (*corev1.Pod, error) {
 	selector := fmt.Sprintf("%s=%s", labelSessionID, sb.Name)
 	pods, err := b.core.CoreV1().Pods(sb.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
@@ -410,7 +573,31 @@ func (b *Backend) getPodForSandbox(ctx context.Context, sb *agentv1alpha1.Sandbo
 	if len(pods.Items) == 0 {
 		return nil, nil
 	}
+	// Return the first non-terminating pod; fall back to pods.Items[0] only
+	// when every pod has a DeletionTimestamp set (R7).
+	for i := range pods.Items {
+		if pods.Items[i].DeletionTimestamp == nil {
+			return &pods.Items[i], nil
+		}
+	}
 	return &pods.Items[0], nil
+}
+
+// PodIP returns the IP of the sandbox's running pod, for direct HTTP access
+// without a port-forward (e.g. an out-of-namespace reaper polling the runner).
+func (b *Backend) PodIP(ctx context.Context, ref session.Ref) (string, error) {
+	sb, err := b.agents.AgentsV1alpha1().Sandboxes(b.namespace).Get(ctx, string(ref.ID), metav1.GetOptions{})
+	if err != nil {
+		return "", fmt.Errorf("k8s: get Sandbox %s: %w", ref.ID, err)
+	}
+	pod, err := b.getPodForSandbox(ctx, sb)
+	if err != nil || pod == nil {
+		return "", fmt.Errorf("k8s: no pod for sandbox %s", ref.ID)
+	}
+	if pod.Status.PodIP == "" {
+		return "", fmt.Errorf("k8s: pod %s has no IP yet", pod.Name)
+	}
+	return pod.Status.PodIP, nil
 }
 
 // isPodReady returns true if all containers are ready.
@@ -443,22 +630,12 @@ func buildSandbox(spec session.Spec) *agentv1alpha1.Sandbox {
 		Spec: agentv1alpha1.SandboxSpec{
 			Replicas: &one,
 			Service:  boolPtr(false),
-			VolumeClaimTemplates: []agentv1alpha1.PersistentVolumeClaimTemplate{
-				{
-					EmbeddedObjectMetadata: agentv1alpha1.EmbeddedObjectMetadata{
-						Name: "session",
-					},
-					Spec: corev1.PersistentVolumeClaimSpec{
-						AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-						StorageClassName: strPtr(spec.StorageClass),
-						Resources: corev1.VolumeResourceRequirements{
-							Requests: corev1.ResourceList{
-								corev1.ResourceStorage: resource.MustParse(fmt.Sprintf("%dGi", spec.StorageGiB)),
-							},
-						},
-					},
-				},
-			},
+			// NOTE: no VolumeClaimTemplates. The per-session PVC is created
+			// standalone (name == session id) in CreateSession and mounted via
+			// the explicit "session" Volume below (ClaimName: name); it is also
+			// what Destroy deletes. A VolumeClaimTemplate here would make the
+			// controller auto-provision a SECOND, never-mounted PVC — 2× storage
+			// per session (S1).
 			PodTemplate: agentv1alpha1.PodTemplate{
 				ObjectMeta: agentv1alpha1.PodMetadata{
 					Labels: map[string]string{
@@ -469,6 +646,10 @@ func buildSandbox(spec session.Spec) *agentv1alpha1.Sandbox {
 				Spec: corev1.PodSpec{
 					AutomountServiceAccountToken: boolPtr(false),
 					RestartPolicy:                corev1.RestartPolicyNever,
+					// Give the runner room on SIGTERM (node drain, suspend) to
+					// warn clients via session.terminating, abort in-flight
+					// turns, and flush the event log before SIGKILL.
+					TerminationGracePeriodSeconds: int64Ptr(terminationGraceSeconds),
 					// RuntimeDefault seccomp is safe alongside sshd. Moving to
 					// runAsNonRoot + dropped capabilities needs live validation
 					// because sshd privilege separation depends on it.
@@ -484,39 +665,10 @@ func buildSandbox(spec session.Spec) *agentv1alpha1.Sandbox {
 							Ports: []corev1.ContainerPort{
 								{Name: "http", ContainerPort: portRunner},
 								{Name: "ssh", ContainerPort: portSSH},
+								{Name: "opencode", ContainerPort: portOpencode},
 							},
-							Env: []corev1.EnvVar{
-								{Name: "CLAUDE_CONFIG_DIR", Value: "/session/state/claude"},
-								{Name: "CLAUDE_CODE_DISABLE_AUTO_MEMORY", Value: "1"},
-								{Name: "SANDBOX_SESSION_ID", Value: name},
-								{Name: "SANDBOX_BACKEND", Value: spec.Backend},
-								{Name: "PROJECT_PATH", Value: spec.ProjectPath},
-								{
-									Name: "RUNNER_TOKEN",
-									ValueFrom: &corev1.EnvVarSource{
-										SecretKeyRef: &corev1.SecretKeySelector{
-											LocalObjectReference: corev1.LocalObjectReference{Name: sessionSecretName(name)},
-											Key:                  secretKeyRunnerToken,
-										},
-									},
-								},
-								{
-									// Anthropic API key from a cluster-provisioned Secret.
-									// Optional so pods still start before it is created.
-									Name: "ANTHROPIC_API_KEY",
-									ValueFrom: &corev1.EnvVarSource{
-										SecretKeyRef: &corev1.SecretKeySelector{
-											LocalObjectReference: corev1.LocalObjectReference{Name: anthropicSecretName},
-											Key:                  anthropicSecretKey,
-											Optional:             boolPtr(true),
-										},
-									},
-								},
-							},
-							VolumeMounts: []corev1.VolumeMount{
-								{Name: "session", MountPath: "/session"},
-								{Name: "ssh-key", MountPath: sshAuthorizedKeyMountPath, ReadOnly: true},
-							},
+							Env:          buildEnv(spec, name),
+							VolumeMounts: runnerVolumeMounts(spec),
 							Resources: corev1.ResourceRequirements{
 								Requests: corev1.ResourceList{
 									corev1.ResourceCPU:    resource.MustParse("1"),
@@ -525,6 +677,59 @@ func buildSandbox(spec session.Spec) *agentv1alpha1.Sandbox {
 								Limits: corev1.ResourceList{
 									corev1.ResourceCPU:    resource.MustParse("4"),
 									corev1.ResourceMemory: resource.MustParse("8Gi"),
+								},
+							},
+							// C9: detect a crashed/hung runner. Without probes the
+							// pod is Ready the instant the container starts — before
+							// the runner's HTTP server is listening — and a wedged
+							// runner is never restarted. Both probes hit the
+							// unauthenticated GET /healthz (server.ts) on the runner
+							// port. Readiness gates traffic (and is what the reaper
+							// can key suspension on); liveness restarts a hung runner.
+							ReadinessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									HTTPGet: &corev1.HTTPGetAction{
+										Path: "/healthz",
+										Port: intstr.FromString("http"),
+									},
+								},
+								InitialDelaySeconds: 5,
+								PeriodSeconds:       10,
+								TimeoutSeconds:      5,
+								FailureThreshold:    3,
+							},
+							LivenessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									HTTPGet: &corev1.HTTPGetAction{
+										Path: "/healthz",
+										Port: intstr.FromString("http"),
+									},
+								},
+								InitialDelaySeconds: 10,
+								PeriodSeconds:       30,
+								TimeoutSeconds:      5,
+								FailureThreshold:    3,
+							},
+							// BR1: shrink the container's root blast radius without
+							// breaking sshd. allowPrivilegeEscalation=false sets
+							// no_new_privs (the agent's tools can't gain privileges
+							// via setuid binaries). Capabilities drop ALL and add
+							// back only the default set sshd's privilege separation
+							// and the agent need — this removes NET_RAW (raw-socket
+							// sniffing/spoofing on the pod network) and MKNOD (device
+							// nodes), which neither uses. The larger win
+							// (runAsNonRoot + fsGroup) is deferred: it needs live
+							// cluster validation because sshd privsep depends on it
+							// (see architecture.md / runner/Dockerfile).
+							SecurityContext: &corev1.SecurityContext{
+								AllowPrivilegeEscalation: boolPtr(false),
+								Capabilities: &corev1.Capabilities{
+									Drop: []corev1.Capability{"ALL"},
+									Add: []corev1.Capability{
+										"CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID",
+										"SETGID", "SETUID", "SETPCAP", "SETFCAP",
+										"NET_BIND_SERVICE", "SYS_CHROOT", "KILL", "AUDIT_WRITE",
+									},
 								},
 							},
 						},
@@ -558,8 +763,130 @@ func buildSandbox(spec session.Spec) *agentv1alpha1.Sandbox {
 	}
 }
 
+// runnerVolumeMounts returns the runner container's volume mounts. The session
+// PVC is always mounted at /session (holding workspace/ + state/). When the
+// session has an absolute project path, the workspace subtree is ALSO bind-
+// mounted (via subPath) at that real host path — e.g. /Users/cullen/git/homelab
+// — so the Claude SDK runs with cwd equal to the host project path rather than
+// /session/workspace/<path>.
+//
+// This is what makes a k8s-started session resumable on the laptop: the SDK keys
+// its on-disk transcript directory by cwd (~/.claude/projects/<cwd with '/'→'-'>),
+// so a matching cwd means the synced transcript lands in the same project folder
+// `claude --resume` reads locally. Both mounts reference the same PVC, so the two
+// views (/session/workspace/<path> and <path>) are the same underlying files.
+// See TODO.md "Resumable transcripts (Option B)".
+func runnerVolumeMounts(spec session.Spec) []corev1.VolumeMount {
+	mounts := []corev1.VolumeMount{
+		{Name: "session", MountPath: "/session"},
+		{Name: "ssh-key", MountPath: sshAuthorizedKeyMountPath, ReadOnly: true},
+	}
+	if strings.HasPrefix(spec.ProjectPath, "/") && spec.ProjectPath != "/" {
+		// subPath must be relative to the PVC root; ProjectPath starts with "/",
+		// so "workspace"+ProjectPath yields e.g. "workspace/Users/cullen/git/x".
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      "session",
+			MountPath: spec.ProjectPath,
+			SubPath:   "workspace" + spec.ProjectPath,
+		})
+	}
+	return mounts
+}
+
+// buildEnv builds the runner container's env, branching on the backend. Common
+// vars are set for all sessions; backend-specific credentials/config are added
+// only for the matching backend. In particular ANTHROPIC_API_KEY is set ONLY
+// for opencode (Claude Code would reject the subscription OAuth token if a real
+// x-api-key were also present — see CLAUDE_CODE_OAUTH_TOKEN below).
+func buildEnv(spec session.Spec, name string) []corev1.EnvVar {
+	env := []corev1.EnvVar{
+		{Name: "CLAUDE_CONFIG_DIR", Value: "/session/state/claude"},
+		{Name: "CLAUDE_CODE_DISABLE_AUTO_MEMORY", Value: "1"},
+		{Name: "SANDBOX_SESSION_ID", Value: name},
+		{Name: "SANDBOX_BACKEND", Value: spec.Backend},
+		{Name: "PROJECT_PATH", Value: spec.ProjectPath},
+		// Lets the runner report an accurate countdown in session.terminating;
+		// mirrors the pod grace period.
+		{Name: "TERMINATION_GRACE_SECONDS", Value: fmt.Sprintf("%d", terminationGraceSeconds)},
+		{
+			Name: "RUNNER_TOKEN",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: sessionSecretName(name)},
+					Key:                  secretKeyRunnerToken,
+				},
+			},
+		},
+	}
+
+	// SANDBOX_MODEL is the optional session-default model (from `claude --model`);
+	// the runner passes it to the SDK as Options.model. Empty => account default.
+	if spec.Model != "" {
+		env = append(env, corev1.EnvVar{Name: "SANDBOX_MODEL", Value: spec.Model})
+	}
+
+	if spec.Backend == session.BackendOpenCode {
+		return append(env, opencodeEnv(name)...)
+	}
+
+	// Default (claude-sdk): Claude Code OAuth token (subscription auth) from a
+	// cluster-provisioned Secret. Optional so pods still start before it is
+	// created. Note: do NOT also set ANTHROPIC_API_KEY — Claude Code prefers it
+	// and would reject the OAuth token as an invalid x-api-key.
+	return append(env, corev1.EnvVar{
+		Name: "CLAUDE_CODE_OAUTH_TOKEN",
+		ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: anthropicSecretName},
+				Key:                  anthropicSecretKey,
+				Optional:             boolPtr(true),
+			},
+		},
+	})
+}
+
+// opencodeEnv returns the env vars specific to opencode-server sessions: the
+// serve basic-auth credentials, the data dir + config path on the PVC, and the
+// provider API keys (all optional so a pod starts before the cluster Secret
+// exists; the runner enables only providers whose keys are present).
+func opencodeEnv(name string) []corev1.EnvVar {
+	providerKey := func(envName, secretKey string) corev1.EnvVar {
+		return corev1.EnvVar{
+			Name: envName,
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: opencodeSecretName},
+					Key:                  secretKey,
+					Optional:             boolPtr(true),
+				},
+			},
+		}
+	}
+	return []corev1.EnvVar{
+		{Name: "OPENCODE_PORT", Value: fmt.Sprintf("%d", portOpencode)},
+		{Name: "OPENCODE_SERVER_USERNAME", Value: opencodeServerUsername},
+		{
+			Name: "OPENCODE_SERVER_PASSWORD",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: sessionSecretName(name)},
+					Key:                  secretKeyOpencodePassword,
+				},
+			},
+		},
+		// opencode session history + generated config live on the PVC so they
+		// survive suspend/resume (mirrors claude state at /session/state/claude).
+		{Name: "XDG_DATA_HOME", Value: "/session/state/opencode/data"},
+		{Name: "OPENCODE_CONFIG", Value: "/session/state/opencode/opencode.json"},
+		providerKey("ANTHROPIC_API_KEY", opencodeSecretKeyAnthropic),
+		providerKey("OPENAI_API_KEY", opencodeSecretKeyOpenAI),
+		providerKey("OPENCODE_API_KEY", opencodeSecretKeyZen),
+	}
+}
+
 func strPtr(s string) *string { return &s }
-func boolPtr(b bool) *bool     { return &b }
+func boolPtr(b bool) *bool    { return &b }
+func int64Ptr(i int64) *int64 { return &i }
 
 // generateToken returns a random 256-bit hex token for runner bearer auth.
 func generateToken() (string, error) {

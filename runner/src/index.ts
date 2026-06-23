@@ -5,9 +5,61 @@
 // resume the runner reloads session.json + events.db from the PVC and the
 // next turn continues the same Claude session via resume.
 
-import { openEventLog, appendEvent } from './events.js';
-import { loadConfig, loadSessionState, initRegistry } from './session.js';
+import { openEventLog, appendEvent, closeEventLog } from './events.js';
+import { loadConfig, loadSessionState, initRegistry, getRegistry } from './session.js';
 import { startServer } from './server.js';
+import { resolveWorkspaceDir } from './exec.js';
+import { startOpencodeSupervisor, type OpencodeSupervisor } from './opencode.js';
+
+// Seconds before SIGKILL, reported in session.terminating so the TUI can show
+// an accurate countdown. Mirrors the pod's terminationGracePeriodSeconds.
+const GRACE_SECONDS = parseInt(process.env.TERMINATION_GRACE_SECONDS ?? '60', 10);
+
+let shuttingDown = false;
+
+// Set for opencode-server sessions: the supervised `opencode serve` child.
+let opencode: OpencodeSupervisor | null = null;
+
+/**
+ * Graceful shutdown on SIGTERM (node drain/reboot, suspend, eviction). Warn
+ * attached clients via session.terminating, abort in-flight turns, flush the
+ * event log, then exit so the pod can be rescheduled. The client reconnects
+ * once the pod is back (see docs/session-lifecycle.md).
+ */
+function shutdown(signal: string): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+
+  // Send SIGTERM to the supervised opencode child immediately so it gets the
+  // full grace window; we await its exit below (bounded by STOP_GRACE_MS) before
+  // process.exit so we never orphan it (O5).
+  const opencodeStopped = opencode ? opencode.stop() : Promise.resolve();
+
+  let turnsAborted = 0;
+  try {
+    const reg = getRegistry();
+    for (const turn of reg.activeTurns.values()) {
+      turn.abort.abort();
+      turnsAborted++;
+    }
+    appendEvent(reg.state.sandbox_session_id, undefined, 'session.terminating', {
+      reason: `pod terminating (${signal})`,
+      graceSeconds: GRACE_SECONDS,
+      turnsAborted,
+    });
+  } catch {
+    /* registry may not be initialized yet */
+  }
+
+  // Give SSE writes a moment to flush to attached clients, then wait for the
+  // opencode child to exit (so it never outlives us) and close cleanly.
+  setTimeout(() => {
+    void opencodeStopped.finally(() => {
+      closeEventLog();
+      process.exit(0);
+    });
+  }, 500);
+}
 
 function main(): void {
   const cfg = loadConfig();
@@ -17,14 +69,40 @@ function main(): void {
   const reg = initRegistry(state);
 
   // Emit session.started on (re)boot so live SSE clients see the session come
-  // up. On resume this is a fresh event after the persisted history; replay
-  // via after=0 still yields the full original sequence.
+  // up. On resume this is a fresh event after the persisted history; replay via
+  // after=0 still yields the full original sequence.
+  //
+  // This must conform to SessionStartedPayload (model, cwd, [claudeSessionId]) —
+  // the same shape the SDK init path emits — so the Go TUI's status line reads a
+  // consistent payload (transcript.go reads Model + Cwd). The off-schema
+  // backend/projectPath/status fields the reboot emit used to carry are dropped:
+  // backend/projectPath are not part of session.started, and the (reconciled)
+  // status is already surfaced via /status and session.status_changed. cwd is
+  // derived from the project path the same way the SDK turn resolves it; model
+  // comes from session.json when a prior turn captured it (empty on first boot,
+  // which the consumer guards with `if p.Model != ""`).
+  let bootCwd = '';
+  try {
+    bootCwd = resolveWorkspaceDir(reg.state.project_path);
+  } catch {
+    // projectPath escapes the workspace root (should not happen on a valid pod):
+    // omit cwd rather than crash the boot emit.
+  }
   appendEvent(reg.state.sandbox_session_id, undefined, 'session.started', {
-    backend: reg.state.backend,
-    projectPath: reg.state.project_path,
-    status: reg.state.status,
-    claudeSessionId: reg.state.claude_session_id,
+    model: reg.state.model ?? '',
+    cwd: bootCwd,
+    ...(reg.state.claude_session_id ? { claudeSessionId: reg.state.claude_session_id } : {}),
   });
+
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
+
+  // opencode-server sessions: the runner stays the control plane and supervises
+  // a child `opencode serve`; the local `opencode attach` client drives it. The
+  // claude SDK turn path (server.ts /turns) is simply unused for these sessions.
+  if (reg.state.backend === 'opencode-server') {
+    opencode = startOpencodeSupervisor();
+  }
 
   startServer();
 }

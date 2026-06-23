@@ -9,29 +9,39 @@ permissions:
   contents: read
 
 jobs:
-  go:
-    name: Go build, vet, test
+  # Single gate that mirrors `just check` exactly, so local and CI cannot drift.
+  # `just check` runs: gen (+generated-file diff gate) → fmt-check → lint
+  # (golangci-lint + eslint) → build → vet → test (Go + runner) → typecheck →
+  # verify (anti-cheat scan + race tests twice).
+  check:
+    name: just check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+
       - uses: actions/setup-go@v6
         with:
           go-version: '1.26'
-      - run: go build ./...
-      - run: go vet ./...
-      - run: go test ./...
 
-  runner:
-    name: Runner typecheck
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
       - uses: actions/setup-node@v5
         with:
           node-version: '24'
-      - name: Install deps
+
+      - name: Install just
+        uses: extractions/setup-just@v3
+
+      - name: Install golangci-lint
+        # Pinned to match .golangci.yml's v2 schema. Installed onto PATH so that
+        # `just lint` runs it for real (the hard enforcement point) rather than
+        # skipping it as a local dev shell does.
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
+            | sh -s -- -b "$(go env GOPATH)/bin" v2.12.2
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Install runner deps
         working-directory: runner
         run: npm install --ignore-scripts
-      - name: Typecheck
-        working-directory: runner
-        run: ./node_modules/.bin/tsc --noEmit
+
+      - name: just check
+        run: just check

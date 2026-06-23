@@ -18,10 +18,56 @@ type AnyPayload = Record<string, unknown>;
 interface SseClient {
   res: ServerResponse;
   afterSeq: number;
+  /** A passive client is a status observer (e.g. the command-center dashboard's
+   * background list streams) — it receives events but does NOT count as
+   * "attached" for idle detection, so it cannot keep the idle reaper from
+   * suspending a session the user is only glancing at in the list (RV6). */
+  passive: boolean;
 }
 
 let db: Database.Database | null = null;
 const clients = new Set<SseClient>();
+
+/** Current event-log schema version (bump + migrate on shape changes). */
+const SCHEMA_VERSION = 1;
+
+/** Max concurrent SSE clients per session; 0 disables the cap. A single bad or
+ * buggy client can otherwise open unbounded streams and fan-out every event to
+ * each (M33). The dashboard uses at most a few per session. */
+export const MAX_SSE_CLIENTS = 16;
+
+/** Keep at most this many most-recent events (one session per pod). 0 disables
+ * retention — the default, because pruning truncates after=0 replay history.
+ * Opt in via RETENTION_MAX_EVENTS to bound long-lived logs (M34). */
+const RETENTION_MAX_EVENTS = ((): number => {
+  const v = parseInt(process.env.RETENTION_MAX_EVENTS ?? '', 10);
+  return Number.isFinite(v) && v > 0 ? v : 0;
+})();
+
+/** Number of ACTIVE (non-passive) SSE clients currently attached. This is the
+ * count used for idle detection: a session is "detached" only when no real
+ * client is watching, so passive status observers (dashboard list streams) are
+ * excluded and do not block the idle reaper (RV6). */
+export function sseClientCount(): number {
+  let n = 0;
+  for (const c of clients) {
+    if (!c.passive) n++;
+  }
+  return n;
+}
+
+/** Total SSE clients (active + passive). Used only to bound concurrent streams
+ * against fan-out abuse (M33) — passive observers still consume a connection. */
+export function sseTotalClientCount(): number {
+  return clients.size;
+}
+
+// Optional hook invoked whenever the attached-client count changes, so the
+// session registry can recompute idleSince (turn-done AND detached).
+let onClientsChanged: (() => void) | null = null;
+export function setClientsChangedHandler(fn: () => void): void {
+  onClientsChanged = fn;
+}
 
 /** Open (or reopen) the SQLite event log and ensure the schema exists. */
 export function openEventLog(): void {
@@ -42,11 +88,34 @@ export function openEventLog(): void {
     CREATE INDEX IF NOT EXISTS idx_events_session_seq
       ON events(session_id, seq);
   `);
+  db.pragma(`user_version = ${SCHEMA_VERSION}`);
+  pruneOldEvents();
+}
+
+// pruneOldEvents bounds the event log when RETENTION_MAX_EVENTS is set, keeping
+// the most-recent N events (one session per pod). Default disabled (M34).
+function pruneOldEvents(): void {
+  if (RETENTION_MAX_EVENTS <= 0 || !db) return;
+  db.prepare(
+    'DELETE FROM events WHERE seq <= (SELECT COALESCE(MAX(seq), 0) FROM events) - ?',
+  ).run(RETENTION_MAX_EVENTS);
 }
 
 function getDb(): Database.Database {
   if (!db) openEventLog();
   return db!;
+}
+
+/** Checkpoint the WAL and close the DB on shutdown so no events are lost. */
+export function closeEventLog(): void {
+  if (!db) return;
+  try {
+    db.pragma('wal_checkpoint(TRUNCATE)');
+    db.close();
+  } catch {
+    /* best effort during shutdown */
+  }
+  db = null;
 }
 
 /**
@@ -62,12 +131,20 @@ export function appendEvent(
   const d = getDb();
   const time = new Date().toISOString();
   const payloadJson = JSON.stringify(payload);
-  const info = d
-    .prepare(
-      'INSERT INTO events (time, session_id, turn_id, type, payload) VALUES (?, ?, ?, ?, ?)',
-    )
-    .run(time, sessionId, turnId ?? null, type, payloadJson);
-  const seq = Number(info.lastInsertRowid);
+  let seq = 0;
+  try {
+    const info = d
+      .prepare(
+        'INSERT INTO events (time, session_id, turn_id, type, payload) VALUES (?, ?, ?, ?, ?)',
+      )
+      .run(time, sessionId, turnId ?? null, type, payloadJson);
+    seq = Number(info.lastInsertRowid);
+  } catch (err) {
+    // R11: SQLite write failure must not crash the turn loop. Log and continue
+    // with seq=0. Callers (mapMessage, appendBlock) are fire-and-forget; a
+    // missed event in the log is preferable to a killed turn.
+    console.error(`appendEvent: failed to persist ${type}:`, err);
+  }
   const evt: Event = {
     seq,
     time,
@@ -148,6 +225,7 @@ export function attachSseClient(
   res: ServerResponse,
   sessionId: string,
   afterSeq: number,
+  passive = false,
 ): () => void {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -155,15 +233,35 @@ export function attachSseClient(
     Connection: 'keep-alive',
     'X-Accel-Buffering': 'no',
   });
-  // Heartbeat comment keeps proxies from timing out the idle stream.
+  // Heartbeat comment keeps proxies and LBs from timing out the idle stream.
+  // The one-shot open comment is sent immediately; a periodic timer sends
+  // further keepalives every 30 s so half-open sockets are detected promptly
+  // and the stream survives idle periods behind proxy/LB timeouts (R5).
   res.write(': stream-open\n\n');
+  const heartbeatInterval = setInterval(() => {
+    if (res.writableEnded || res.destroyed) {
+      clearInterval(heartbeatInterval);
+      return;
+    }
+    try {
+      res.write(': heartbeat\n\n');
+    } catch {
+      clearInterval(heartbeatInterval);
+    }
+  }, 30_000);
 
-  const client: SseClient = { res, afterSeq };
+  const client: SseClient = { res, afterSeq, passive };
   clients.add(client);
+  onClientsChanged?.();
   replayTo(client, sessionId);
 
+  let cleanedUp = false;
   const cleanup = (): void => {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    clearInterval(heartbeatInterval);
     clients.delete(client);
+    onClientsChanged?.();
     if (!res.writableEnded && !res.destroyed) {
       try {
         res.end();

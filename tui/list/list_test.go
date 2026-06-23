@@ -1,4 +1,4 @@
-// CANONICAL TEST — do not weaken. internal/tui/dashboard/list/list_test.go
+// CANONICAL TEST — do not weaken. tui/list/list_test.go
 package list
 
 import (

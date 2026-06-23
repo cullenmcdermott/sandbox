@@ -23,6 +23,9 @@ type RunnerClient interface {
 	EventsPassive(ctx context.Context, ref session.Ref, afterSeq uint64) (<-chan session.Event, error)
 	SessionState(ctx context.Context, ref session.Ref) (session.State, error)
 	Exec(ctx context.Context, ref session.Ref, command string) (session.ExecResult, error)
+	// Idle reports whether the session is idle (and since when), used to render
+	// the warm-session "suspends in ~X" hint.
+	Idle(ctx context.Context, ref session.Ref) (session.IdleStatus, error)
 }
 
 // OpencodeCreds holds the local endpoint and HTTP basic-auth credentials for
@@ -60,6 +63,11 @@ type ConnectResult struct {
 // A failed connector returns a descriptive error; the dashboard renders it
 // inline and stays on the dashboard screen — it does NOT crash.
 type Connector func(ctx context.Context, ref session.Ref, projectPath string, onStage func(ConnectStage)) (ConnectResult, error)
+
+// SyncProber reports a coarse sync health for a session, decoupling the
+// dashboard from internal/sync. Returns a short token: "synced"/"syncing"/
+// "stalled"/"unknown".
+type SyncProber func(ctx context.Context, id session.ID) string
 
 // CreateResult is the successful outcome of a Creator call: the newly created
 // session's observed State plus a live client and reconnect callback ready for

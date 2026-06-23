@@ -1,0 +1,4 @@
+# Reaper image (Dockerfile.reaper) only needs the prebuilt binary in dist/.
+# Exclude everything else so the build context stays small.
+*
+!dist/sandbox-linux-amd64

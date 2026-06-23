@@ -38,11 +38,12 @@ func (m *TranscriptModel) enterNormal() {
 
 // escapeConsumes reports whether esc should be handled inside the transcript
 // rather than detaching to the dashboard. True when an overlay is open (help,
-// search, slash palette) or we're in INSERT mode — in all of which esc has a
-// local meaning (close / return to NORMAL). The App checks this before deciding
-// whether esc detaches. ctrl+] / ctrl+4 always detach regardless.
+// search, slash palette), we're in INSERT mode, or a turn is active — in all of
+// which esc has a local meaning (close / return to NORMAL / interrupt the turn).
+// The App checks this before deciding whether esc detaches. ctrl+] / ctrl+4 (and
+// NORMAL-mode q) always detach regardless.
 func (m *TranscriptModel) escapeConsumes() bool {
-	return m.imode == modeInsert || m.showHelp || m.search.open || m.paletteOpen()
+	return m.imode == modeInsert || m.showHelp || m.search.open || m.paletteOpen() || m.turnActive
 }
 
 // normalKey handles a key press while in NORMAL mode. It returns (cmd, true)

@@ -1,0 +1,161 @@
+{
+  "$comment": "SOURCE OF TRUTH for the normalized session event model. Go event-type consts (internal/session/eventtypes.gen.go) and the entire TS event model (runner/src/events.gen.ts) are generated from this file by cmd/gen-eventschema. Go payload structs (internal/session/event.go) are hand-written but validated against this schema by internal/session/schema_test.go. Edit this file, then run `just gen`; never hand-edit a *.gen.* file. Scope is event payloads only: HTTP request/response bodies and IdleStatus stay hand-written in both languages (see docs/architecture.md).",
+  "typeVocabulary": {
+    "string": {"go": "string", "ts": "string"},
+    "int": {"go": "int", "ts": "number"},
+    "float": {"go": "float64", "ts": "number"},
+    "bool": {"go": "bool", "ts": "boolean"},
+    "stringArray": {"go": "[]string", "ts": "string[]"},
+    "intPtr": {"go": "*int", "ts": "number"},
+    "floatPtr": {"go": "*float64", "ts": "number"},
+    "raw": {"go": "json.RawMessage", "ts": "unknown"}
+  },
+  "$objectArrayComment": "A field with type \"objectArray\" carries an \"items\" key naming an entry in \"objects\". The generator emits the named object as its own TS interface and types the field as <Item>[]. The Go side hand-writes a []<Item> slice; schema_test.go maps a slice-of-struct to the \"objectArray\" category and asserts the element type name matches \"items\".",
+  "objects": {
+    "TodoItem": {
+      "doc": "a single entry in a todo.updated list, mirroring the SDK TodoWrite tool's items.",
+      "fields": [
+        {"json": "content", "type": "string", "optional": false, "doc": "imperative description of the task"},
+        {"json": "status", "type": "string", "optional": false, "doc": "pending | in_progress | completed"},
+        {"json": "activeForm", "type": "string", "optional": true, "doc": "present-tense form shown while in_progress"}
+      ]
+    }
+  },
+  "eventTypes": [
+    "session.started",
+    "session.status_changed",
+    "session.terminating",
+    "turn.started",
+    "turn.completed",
+    "turn.failed",
+    "turn.interrupted",
+    "message.started",
+    "message.delta",
+    "message.completed",
+    "reasoning.started",
+    "reasoning.delta",
+    "reasoning.completed",
+    "tool.started",
+    "tool.delta",
+    "tool.completed",
+    "tool.failed",
+    "permission.requested",
+    "permission.resolved",
+    "todo.updated",
+    "usage.updated",
+    "rate_limit.updated",
+    "workspace.status",
+    "session.title",
+    "error"
+  ],
+  "payloads": {
+    "SessionStartedPayload": {
+      "doc": "payload for session.started events: the model, pod cwd, tools, and applied permission mode reported by the SDK init message. The CLI uses model+cwd for the status line and the model id to look up the context-window limit (ctx%).",
+      "fields": [
+        {"json": "model", "type": "string", "optional": false},
+        {"json": "cwd", "type": "string", "optional": false},
+        {"json": "tools", "type": "stringArray", "optional": true},
+        {"json": "permissionMode", "type": "string", "optional": true},
+        {"json": "claudeSessionId", "type": "string", "optional": true}
+      ]
+    },
+    "SessionStatusPayload": {
+      "doc": "payload for session.status_changed events.",
+      "fields": [
+        {"json": "status", "type": "string", "optional": false, "doc": "idle | busy | error"},
+        {"json": "reason", "type": "string", "optional": true, "doc": "why the status changed (e.g. SessionEnd reason)"}
+      ]
+    },
+    "TerminatingPayload": {
+      "doc": "payload for session.terminating events (SIGTERM: drain/suspend/eviction).",
+      "fields": [
+        {"json": "reason", "type": "string", "optional": false, "doc": "human-readable cause, e.g. \"pod terminating (SIGTERM)\""},
+        {"json": "graceSeconds", "type": "int", "optional": false, "doc": "best-effort seconds before SIGKILL"},
+        {"json": "turnsAborted", "type": "int", "optional": false, "doc": "in-flight turns aborted during shutdown"}
+      ]
+    },
+    "MessagePayload": {
+      "doc": "payload for message.* events.",
+      "fields": [
+        {"json": "role", "type": "string", "optional": false, "doc": "user | assistant"},
+        {"json": "content", "type": "string", "optional": false, "doc": "text content or delta"},
+        {"json": "delta", "type": "bool", "optional": true, "doc": "true for message.delta events"}
+      ]
+    },
+    "ToolPayload": {
+      "doc": "payload for tool.* events.",
+      "fields": [
+        {"json": "tool", "type": "string", "optional": false, "doc": "\"Bash\", \"Edit\", etc."},
+        {"json": "input", "type": "raw", "optional": true, "doc": "tool input"},
+        {"json": "output", "type": "string", "optional": true, "doc": "tool output (completed)"},
+        {"json": "partialJson", "type": "string", "optional": true, "doc": "tool.delta: a chunk of the tool's input JSON as it streams (input_json_delta)"},
+        {"json": "exitCode", "type": "intPtr", "optional": true, "doc": "Bash exit code"},
+        {"json": "error", "type": "string", "optional": true},
+        {"json": "toolUseId", "type": "string", "optional": true, "doc": "this tool_use block's id"},
+        {"json": "parentToolUseId", "type": "string", "optional": true, "doc": "Task tool_use id that spawned a subagent's child tool (empty on main thread)"},
+        {"json": "agentName", "type": "string", "optional": true, "doc": "subagent_type for a Task tool (the dispatched agent name)"}
+      ]
+    },
+    "PermissionPayload": {
+      "doc": "payload for permission.* events.",
+      "fields": [
+        {"json": "permissionId", "type": "string", "optional": false},
+        {"json": "tool", "type": "string", "optional": false},
+        {"json": "input", "type": "raw", "optional": false},
+        {"json": "decision", "type": "string", "optional": true, "doc": "\"allow-once\" | \"allow-session\" | \"deny\" | \"\" (pending)"}
+      ]
+    },
+    "UsagePayload": {
+      "doc": "payload for usage.updated events.",
+      "fields": [
+        {"json": "inputTokens", "type": "int", "optional": false},
+        {"json": "outputTokens", "type": "int", "optional": false},
+        {"json": "cacheReadTokens", "type": "int", "optional": false},
+        {"json": "cacheWriteTokens", "type": "int", "optional": false},
+        {"json": "totalCostUsd", "type": "float", "optional": false}
+      ]
+    },
+    "RateLimitPayload": {
+      "doc": "payload for rate_limit.updated events: the claude.ai plan usage windows (5-hour + weekly, plus the optional per-model weekly Opus/Sonnet caps) and their reset instants, fetched from the SDK's structured /usage data (Query.usage_EXPERIMENTAL...). `available` is false for API-key/Bedrock/Vertex sessions where plan limits do not apply; the TUI hides the windows then rather than fabricating values. Utilizations are 0-100; resets are ISO 8601 (RFC3339) and may be empty when the SDK reports null. The per-model windows are absent (nil pointer / undefined) unless the plan has a separate cap for that model; the status line surfaces the one matching the attached model. The runner emits this during a turn (the control channel is only open until the result closes stdin), so the status line shows real reset times instead of projecting 5h/7d from the wall clock.",
+      "fields": [
+        {"json": "available", "type": "bool", "optional": false, "doc": "rate_limits_available: true only for claude.ai subscription sessions"},
+        {"json": "fiveHourUtil", "type": "float", "optional": false, "doc": "5-hour window utilization, 0-100"},
+        {"json": "fiveHourResetsAt", "type": "string", "optional": true, "doc": "ISO 8601 instant the 5-hour window resets; empty if unknown"},
+        {"json": "sevenDayUtil", "type": "float", "optional": false, "doc": "weekly (7-day) window utilization, 0-100"},
+        {"json": "sevenDayResetsAt", "type": "string", "optional": true, "doc": "ISO 8601 instant the weekly window resets; empty if unknown"},
+        {"json": "sevenDayOpusUtil", "type": "floatPtr", "optional": true, "doc": "per-model weekly (7-day) Opus window utilization, 0-100; nil/absent when the plan has no separate Opus weekly cap (a non-nil pointer to 0 means present at 0%)"},
+        {"json": "sevenDayOpusResetsAt", "type": "string", "optional": true, "doc": "ISO 8601 instant the weekly Opus window resets; empty if unknown"},
+        {"json": "sevenDaySonnetUtil", "type": "floatPtr", "optional": true, "doc": "per-model weekly (7-day) Sonnet window utilization, 0-100; nil/absent when the plan has no separate Sonnet weekly cap (a non-nil pointer to 0 means present at 0%)"},
+        {"json": "sevenDaySonnetResetsAt", "type": "string", "optional": true, "doc": "ISO 8601 instant the weekly Sonnet window resets; empty if unknown"}
+      ]
+    },
+    "WorkspaceStatusPayload": {
+      "doc": "payload for workspace.status events: git branch + dirty/ahead/behind for the status line. Emitted at session start and after each turn; skipped for non-git cwd.",
+      "fields": [
+        {"json": "branch", "type": "string", "optional": false},
+        {"json": "dirty", "type": "bool", "optional": false},
+        {"json": "ahead", "type": "int", "optional": false},
+        {"json": "behind", "type": "int", "optional": false}
+      ]
+    },
+    "SessionTitlePayload": {
+      "doc": "payload for session.title events: a short conversation-derived summary emitted once per session after the first assistant turn.",
+      "fields": [
+        {"json": "title", "type": "string", "optional": false}
+      ]
+    },
+    "TodoUpdatedPayload": {
+      "doc": "payload for todo.updated events: the agent's current task list, emitted by the runner whenever the SDK TodoWrite tool runs. The TUI renders it as a checklist.",
+      "fields": [
+        {"json": "todos", "type": "objectArray", "items": "TodoItem", "optional": false, "doc": "the full todo list (replaces any prior list)"}
+      ]
+    },
+    "ErrorPayload": {
+      "doc": "payload for error events.",
+      "fields": [
+        {"json": "message", "type": "string", "optional": false},
+        {"json": "code", "type": "string", "optional": true}
+      ]
+    }
+  }
+}

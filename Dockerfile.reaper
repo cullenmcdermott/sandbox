@@ -1,0 +1,19 @@
+# sandbox-reaper — the Go `sandbox` binary running its hidden `reap` subcommand.
+#
+# This is a per-session idle reaper (see docs/session-lifecycle.md): one Job per
+# session that polls the runner's /idle endpoint and suspends the Sandbox after
+# the idle timeout. It is a different image from runner/Dockerfile (that one is
+# the TypeScript Claude runner); this one is just the static Go CLI.
+#
+# The binary is cross-compiled on the host (Go cross-compiles natively, avoiding
+# slow/flaky QEMU emulation) and copied in here. Build with:
+#   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' \
+#     -o dist/sandbox-linux-amd64 ./cmd/sandbox
+#   docker buildx build --platform linux/amd64 -f Dockerfile.reaper \
+#     -t registry.cullen.rocks/sandbox-reaper:latest --push .
+#
+# distroless/static ships ca-certificates (for in-cluster k8s API TLS) and runs
+# as nonroot by default.
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY dist/sandbox-linux-amd64 /usr/local/bin/sandbox
+ENTRYPOINT ["/usr/local/bin/sandbox"]

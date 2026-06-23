@@ -199,6 +199,13 @@ type RunOptions struct {
 	// hydrates instantly on launch and resumes the SSE stream from the cached seq
 	// instead of replaying the full event history.
 	SnapshotStore SnapshotStore
+
+	// SyncProber reports per-session sync health for the dashboard indicator.
+	SyncProber SyncProber
+
+	// IdleTimeout is the reaper idle-timeout, used to render the "suspends in"
+	// hint for warm sessions. Zero hides the hint.
+	IdleTimeout time.Duration
 }
 
 // applyOpts threads RunOptions into the dashboard model.
@@ -217,6 +224,12 @@ func (a *App) applyOpts(opts []RunOptions) {
 	}
 	if opts[0].SnapshotStore != nil {
 		a.dashboard = a.dashboard.WithSnapshotStore(opts[0].SnapshotStore)
+	}
+	if opts[0].SyncProber != nil {
+		a.dashboard = a.dashboard.WithSyncProber(opts[0].SyncProber)
+	}
+	if opts[0].IdleTimeout > 0 {
+		a.dashboard = a.dashboard.WithIdleTimeout(opts[0].IdleTimeout)
 	}
 }
 

@@ -62,4 +62,8 @@ type RunnerClient interface {
 
 	// SessionState fetches the runner's session.json state.
 	SessionState(ctx context.Context, ref Ref) (State, error)
+
+	// Exec runs a one-shot shell command in the session cwd and returns its
+	// captured (bounded) output. No persisted cd/env between calls.
+	Exec(ctx context.Context, ref Ref, command string) (ExecResult, error)
 }

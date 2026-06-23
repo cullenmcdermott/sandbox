@@ -19,6 +19,14 @@ func TestSlashFilter(t *testing.T) {
 	if c := flatCmds("/sonnet"); len(c) != 1 || c[0].name != "/sonnet" {
 		t.Errorf("filter '/sonnet' = %v, want [/sonnet]", c)
 	}
+	// Typing "model" matches the "Model" group name, so all four model commands
+	// (/opus, /sonnet, /haiku, /model-default) should appear — not just
+	// /model-default (the only one with "model" in its own name/desc). This is
+	// the bug that made /model appear broken: the palette collapsed to one entry
+	// and pressing Enter accidentally ran /model-default.
+	if c := flatCmds("model"); len(c) != 4 {
+		t.Errorf("filter 'model' (group-name match) = %d cmds, want 4 (/opus /sonnet /haiku /model-default)", len(c))
+	}
 	// Filtering matches descriptions too ("/clear" desc has "transcript").
 	if len(flatCmds("transcript")) == 0 {
 		t.Errorf("description filter found nothing for 'transcript'")

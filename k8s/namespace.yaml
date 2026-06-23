@@ -1,0 +1,21 @@
+# Example namespace for sandbox session pods.
+#
+# This is a STARTING POINT — review and adapt before applying. The CLI defaults
+# to this namespace name (`agent-sessions`, see internal/k8s/backend.go); change
+# it only if you also override it on the CLI side.
+#
+# The PodSecurity Admission labels enforce the `baseline` profile and warn on
+# `restricted`. The runner currently runs as root + sshd, which is compatible
+# with `baseline` enforce but will warn under `restricted` (tracked hardening;
+# see SECURITY.md).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agent-sessions
+  labels:
+    app.kubernetes.io/part-of: sandbox
+    # PodSecurity Admission (https://kubernetes.io/docs/concepts/security/pod-security-admission/)
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest

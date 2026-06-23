@@ -1,0 +1,22 @@
+# Default-deny ingress AND egress for the session namespace.
+#
+# This is the FIRST half of the required network boundary. With only this policy
+# applied, session pods have NO network at all (not even DNS). The companion
+# policy `networkpolicy-egress-allow.yaml` adds back the minimum egress.
+#
+# An empty podSelector ({}) selects every pod in the namespace; listing both
+# policyTypes with no rules denies all traffic in both directions.
+#
+# REQUIRED: without a NetworkPolicy-enforcing CNI (Cilium, Calico, ...) this
+# policy is silently ignored and there is no boundary. See SECURITY.md.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: agent-sessions
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  # No ingress/egress rules => deny everything.

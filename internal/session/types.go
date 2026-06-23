@@ -8,6 +8,14 @@ package session
 
 import "time"
 
+// Backend identifiers selecting which agent backend the runner uses. These are
+// the canonical values for Spec.Backend / State.Backend, shared across the CLI,
+// the k8s backend, and the dashboard to avoid stringly-typed drift.
+const (
+	BackendClaudeSDK = "claude-sdk"
+	BackendOpenCode  = "opencode-server"
+)
+
 // ID is a sandbox session identifier, e.g. "claude-sdk-7f3a".
 type ID string
 
@@ -36,6 +44,12 @@ type Spec struct {
 
 	// RunnerImage is the container image for the runner pod.
 	RunnerImage string `json:"runnerImage"`
+
+	// Model is an optional model id/alias (e.g. "opus", "sonnet",
+	// "claude-opus-4-8") the runner passes to the Claude Agent SDK as the
+	// session default. Empty means the account default. Per-turn overrides
+	// (TurnInput.Model, the in-session /model command) take precedence.
+	Model string `json:"model,omitempty"`
 
 	// Namespace is the Kubernetes namespace for the Sandbox/PVC. Defaults to
 	// "agent-sessions".
@@ -68,31 +82,43 @@ const (
 // State is the observed state of a remote session, mirroring the runner's
 // session.json plus Kubernetes pod/Sandbox state.
 type State struct {
-	ID             ID        `json:"id"`
-	Backend        string    `json:"backend"`
-	ProjectPath    string    `json:"projectPath"`
-	Status         Status    `json:"status"`
-	ClaudeSession  string    `json:"claudeSession,omitempty"`
-	LastTurnID     TurnID    `json:"lastTurnId,omitempty"`
-	LastActivity   time.Time `json:"lastActivity,omitempty"`
-	PodName        string    `json:"podName,omitempty"`
-	PodReady       bool      `json:"podReady,omitempty"`
-	SandboxName    string    `json:"sandboxName,omitempty"`
-	RunnerToken    string    `json:"-"`
-	ForwardPort    int       `json:"-"`
-	SSHForwardPort int       `json:"-"`
+	ID          ID     `json:"id"`
+	Backend     string `json:"backend"`
+	ProjectPath string `json:"projectPath"`
+	Model       string `json:"model,omitempty"`
+	Status      Status `json:"status"`
+	// ClaudeSession is populated from the runner's session.json (the upstream
+	// Claude SDK session id) but is not yet read anywhere in the Go CLI; it is
+	// carried for future resume/inspection features.
+	ClaudeSession string    `json:"claudeSession,omitempty"`
+	LastTurnID    TurnID    `json:"lastTurnId,omitempty"`
+	LastActivity  time.Time `json:"lastActivity,omitempty"`
+	CreatedAt     time.Time `json:"createdAt,omitempty"`
+	PodName       string    `json:"podName,omitempty"`
+	PodReady      bool      `json:"podReady,omitempty"`
+	SandboxName   string    `json:"sandboxName,omitempty"`
+	RunnerToken   string    `json:"-"`
 }
 
 // TurnInput is the user input that starts a turn.
 type TurnInput struct {
-	Prompt    string   `json:"prompt"`
-	Resume    TurnID   `json:"resume,omitempty"`
+	Prompt       string   `json:"prompt"`
+	Resume       TurnID   `json:"resume,omitempty"`
 	AllowedTools []string `json:"allowedTools,omitempty"`
+	// Mode is the SDK permission mode the turn runs in: one of
+	// "default", "acceptEdits", "plan", "bypassPermissions". Empty means the
+	// runner uses "acceptEdits" (preserves the pre-mode-switching behavior).
+	Mode string `json:"mode,omitempty"`
+	// Model overrides the model for this turn (the in-session /model switch):
+	// an id/alias like "opus", "sonnet", "haiku", or a full id. Empty means the
+	// runner falls back to its session default (Spec.Model / SANDBOX_MODEL) and
+	// then the account default.
+	Model string `json:"model,omitempty"`
 }
 
 // TurnRef addresses a specific turn.
 type TurnRef struct {
-	Session ID    `json:"session"`
+	Session ID     `json:"session"`
 	Turn    TurnID `json:"turn"`
 }
 
@@ -103,6 +129,15 @@ type PermissionDecision struct {
 	Allow       bool   `json:"allow"`
 	Scope       string `json:"scope"` // "once" | "session"
 	EditedInput string `json:"editedInput,omitempty"`
+}
+
+// ExecResult is the outcome of a one-shot shell command run in the session
+// cwd via the runner's /exec endpoint (slice 2 `!` passthrough). Output is
+// bounded by the runner; ExitCode is the process exit code (124 on timeout).
+type ExecResult struct {
+	Stdout   string `json:"stdout"`
+	Stderr   string `json:"stderr"`
+	ExitCode int    `json:"exitCode"`
 }
 
 // PortSpec describes a port-forward request.

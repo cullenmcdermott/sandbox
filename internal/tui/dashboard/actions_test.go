@@ -50,6 +50,7 @@ type fakeRunnerClient struct {
 	startedModes   []string
 	startedModels  []string
 	resolved       []session.PermissionDecision
+	interrupts     int // count of InterruptTurn calls
 	execCommands   []string
 	execResult     *session.ExecResult
 	startErr       error // if set, StartTurn fails with it (still records the prompt)
@@ -68,6 +69,7 @@ func (f *fakeRunnerClient) StartTurn(_ context.Context, ref session.Ref, in sess
 	return session.TurnRef{Session: ref.ID}, nil
 }
 func (f *fakeRunnerClient) InterruptTurn(context.Context, session.Ref, session.TurnRef) error {
+	f.interrupts++
 	return nil
 }
 func (f *fakeRunnerClient) ResolvePermission(_ context.Context, _ session.Ref, d session.PermissionDecision) error {
@@ -96,6 +98,10 @@ func (f *fakeRunnerClient) Exec(_ context.Context, _ session.Ref, command string
 		return *f.execResult, nil
 	}
 	return session.ExecResult{Stdout: "ok\n", ExitCode: 0}, nil
+}
+
+func (f *fakeRunnerClient) Idle(context.Context, session.Ref) (session.IdleStatus, error) {
+	return session.IdleStatus{}, nil
 }
 
 // keyMsg builds a KeyPressMsg whose String() matches the dashboard keymap.

@@ -8,9 +8,9 @@
 
 import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { SessionState, StatusResponse } from './types.js';
+import type { IdleStatus, SessionState, StatusResponse } from './types.js';
 import { SESSION_JSON_PATH } from './types.js';
-import { appendEvent } from './events.js';
+import { appendEvent, sseClientCount, setClientsChangedHandler } from './events.js';
 
 /** Runner env configuration (set by the pod spec). */
 export interface RunnerConfig {
@@ -18,6 +18,9 @@ export interface RunnerConfig {
   backend: string;
   projectPath: string;
   runnerToken: string;
+  /** Optional session-default model id/alias (SANDBOX_MODEL). Empty/undefined
+   * => the account default. Per-turn TurnRequestBody.model overrides it. */
+  model?: string;
 }
 
 export function loadConfig(): RunnerConfig {
@@ -25,11 +28,12 @@ export function loadConfig(): RunnerConfig {
   const backend = process.env.SANDBOX_BACKEND ?? 'claude-sdk';
   const projectPath = process.env.PROJECT_PATH ?? process.cwd();
   const runnerToken = process.env.RUNNER_TOKEN ?? '';
+  const model = process.env.SANDBOX_MODEL ?? '';
   if (!runnerToken) {
     // Auth is still enforced (token === '' rejects all non-healthz), but warn.
     console.warn('RUNNER_TOKEN not set: all non-healthz requests will be rejected');
   }
-  return { sessionId, backend, projectPath, runnerToken };
+  return { sessionId, backend, projectPath, runnerToken, ...(model ? { model } : {}) };
 }
 
 // --- session.json ---------------------------------------------------------
@@ -46,20 +50,40 @@ function emptyState(cfg: RunnerConfig): SessionState {
   };
 }
 
+/** External backends (opencode) are considered "in use" if activity was seen
+ * within this window; keeps the reaper from suspending an active opencode
+ * session that has neither a runner turn nor an SSE client. */
+const EXTERNAL_ACTIVE_WINDOW_MS = 90_000;
+
+/** A freshly-started runner has no in-flight turns (activeTurns is rebuilt
+ * empty), so a persisted 'busy' status — saved just before a crash/restart
+ * mid-turn — is stale and would make /status report a turn that no longer
+ * exists. Coerce it to 'idle' on load; 'idle' and 'error' are preserved (C3). */
+export function reconcileLoadedStatus(status: SessionState['status'] | undefined): SessionState['status'] {
+  return status === 'busy' ? 'idle' : (status ?? 'idle');
+}
+
 /** Load session.json, or seed it from env if absent. */
 export function loadSessionState(cfg: RunnerConfig): SessionState {
   if (existsSync(SESSION_JSON_PATH)) {
     const raw = readFileSync(SESSION_JSON_PATH, 'utf8');
     const parsed = JSON.parse(raw) as Partial<SessionState>;
-    return {
+    const loaded: SessionState = {
       sandbox_session_id: parsed.sandbox_session_id ?? cfg.sessionId,
       backend: parsed.backend ?? cfg.backend,
       project_path: parsed.project_path ?? cfg.projectPath,
-      status: parsed.status ?? 'idle',
+      status: reconcileLoadedStatus(parsed.status),
       claude_session_id: parsed.claude_session_id ?? '',
       last_turn_id: parsed.last_turn_id ?? '',
       last_activity: parsed.last_activity ?? new Date().toISOString(),
+      ...(parsed.model ? { model: parsed.model } : {}),
+      ...(parsed.title_generated ? { title_generated: true } : {}),
     };
+    // Persist the correction so disk matches the live (idle) reality.
+    if (parsed.status !== loaded.status) {
+      saveSessionState(loaded);
+    }
+    return loaded;
   }
   const state = emptyState(cfg);
   saveSessionState(state);
@@ -84,6 +108,7 @@ export function toStatusResponse(state: SessionState): StatusResponse {
     claudeSession: state.claude_session_id,
     lastTurnId: state.last_turn_id,
     lastActivity: state.last_activity,
+    ...(state.model ? { model: state.model } : {}),
   };
 }
 
@@ -109,18 +134,91 @@ class SessionRegistry {
   readonly activeTurns = new Map<string, ActiveTurn>();
   readonly pendingPermissions = new Map<string, PendingPermission>();
 
+  // RFC3339 instant the session last became idle (turn-done AND no attached
+  // clients), or null when active. The reaper reads this via /idle; keeping the
+  // clock here (not in the reaper) makes the reaper stateless across restarts.
+  private idleSince: string | null = null;
+
+  // Epoch ms of the last externally-observed activity (opencode client traffic),
+  // or 0 if never. An opencode session has no runner turn and no SSE client, so
+  // without this signal the reaper would read it as permanently idle. The
+  // opencode supervisor calls setExternalActivity() while the client is live.
+  private externalActivityAt = 0;
+
   constructor(state: SessionState) {
     this.state = state;
   }
 
   setStatus(status: SessionState['status']): void {
-    if (this.state.status === status) return;
+    if (this.state.status === status) {
+      this.recomputeIdle();
+      return;
+    }
     this.state.status = status;
     this.state.last_activity = new Date().toISOString();
     saveSessionState(this.state);
     appendEvent(this.state.sandbox_session_id, undefined, 'session.status_changed', {
       status,
     });
+    this.recomputeIdle();
+  }
+
+  /**
+   * Recompute idleSince from the current turn + attached-client state. Idle =
+   * no active turn AND no attached SSE clients. Sets idleSince on the
+   * transition into idle, clears it on any activity. Safe to call often.
+   */
+  recomputeIdle(): void {
+    const idle = this.activeTurns.size === 0 && this.isDetached();
+    if (idle && this.idleSince === null) {
+      this.idleSince = new Date().toISOString();
+    } else if (!idle) {
+      this.idleSince = null;
+    }
+  }
+
+  /**
+   * True when no SSE client is attached and there is no recent external
+   * (opencode) activity — i.e. the session is detached. Mirrors the "attached"
+   * notion used by recomputeIdle so an abandoned pending permission can be
+   * auto-denied and the pod reaped (NEW-7): otherwise a turn blocked on an
+   * unanswered permission keeps activeTurns > 0 forever and idleSince is never
+   * set, so the reaper can never suspend.
+   */
+  isDetached(): boolean {
+    const externalActive =
+      this.externalActivityAt > 0 && Date.now() - this.externalActivityAt < EXTERNAL_ACTIVE_WINDOW_MS;
+    return sseClientCount() === 0 && !externalActive;
+  }
+
+  /** Record externally-observed activity (opencode client traffic) so the idle
+   * clock treats the session as in use. Called by the opencode supervisor. */
+  setExternalActivity(): void {
+    this.externalActivityAt = Date.now();
+    this.recomputeIdle();
+  }
+
+  /** Persist the active model id reported by the backend (Seam C). */
+  setModel(model: string): void {
+    if (!model || this.state.model === model) return;
+    this.state.model = model;
+    saveSessionState(this.state);
+  }
+
+  /** Persist the one-shot auto-title guard (title_generated = true) (T6). */
+  setTitleGenerated(): void {
+    if (this.state.title_generated === true) return;
+    this.state.title_generated = true;
+    saveSessionState(this.state);
+  }
+
+  idleStatus(): IdleStatus {
+    this.recomputeIdle();
+    return {
+      turnActive: this.activeTurns.size > 0,
+      attachedClients: sseClientCount(),
+      ...(this.idleSince ? { idleSince: this.idleSince } : {}),
+    };
   }
 
   setClaudeSession(claudeSessionId: string): void {
@@ -168,12 +266,20 @@ class SessionRegistry {
   ): PendingPermission | undefined {
     return this.pendingPermissions.get(permissionId);
   }
+
+  /** Delete a pending permission entry. Called after resolving (R2). */
+  deletePermission(permissionId: string): void {
+    this.pendingPermissions.delete(permissionId);
+  }
 }
 
 let registry: SessionRegistry | null = null;
 
 export function initRegistry(state: SessionState): SessionRegistry {
   registry = new SessionRegistry(state);
+  // Recompute idleSince whenever a client attaches/detaches so "detached"
+  // transitions are reflected immediately for the reaper.
+  setClientsChangedHandler(() => registry?.recomputeIdle());
   return registry;
 }
 

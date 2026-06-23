@@ -170,6 +170,14 @@ type Session struct {
 	// RecentTools is the main-thread tool ring (Phase 4), oldest→newest. Capped
 	// at recentToolsCap; the detail pane renders the last few newest-first.
 	RecentTools []ToolRef
+
+	// SyncStatus is the coarse Mutagen sync health for this session, polled while
+	// warm: "synced"/"syncing"/"stalled"/"unknown". "" = no data yet.
+	SyncStatus string
+
+	// IdleSince is when the runner started counting this session idle (zero = not
+	// idle-counting, e.g. a turn is active). Drives the "suspends in ~X" hint.
+	IdleSince time.Time
 }
 
 // CtxPercent returns the rounded context-window utilization (0–100) for the

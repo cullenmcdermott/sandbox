@@ -259,6 +259,22 @@ func TestIngestAppliesEventAndDedupes(t *testing.T) {
 	}
 }
 
+func TestSyncPollUpdatesSession(t *testing.T) {
+	m := New(nil)
+	id := session.ID("sess-1")
+	sess := transcriptSession()
+	sess.State.ID = id
+	sess.State.Status = session.StatusRunning
+	m.sessions = []Session{sess}
+	m.WithSyncProber(func(_ context.Context, _ session.ID) string { return "stalled" })
+
+	_, _ = m.Update(syncStatusMsg{id: id, status: "stalled"})
+
+	if got := m.sessionByID(id).SyncStatus; got != "stalled" {
+		t.Fatalf("SyncStatus = %q, want stalled", got)
+	}
+}
+
 func TestRetainedStoreLifecycle(t *testing.T) {
 	m := New(nil)
 	id := session.ID("sess-1")

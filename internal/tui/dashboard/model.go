@@ -51,6 +51,62 @@ type RunnerEventMsg struct {
 	StreamEnded bool
 }
 
+// syncStatusMsg carries one warm session's freshly-probed sync health.
+type syncStatusMsg struct {
+	id     session.ID
+	status string
+}
+
+// idleStatusMsg carries one warm session's freshly-probed idle-since time.
+type idleStatusMsg struct {
+	id        session.ID
+	idleSince time.Time
+}
+
+// syncPollTickMsg schedules the next round of warm-session sync/idle probes.
+type syncPollTickMsg struct{}
+
+// syncPollInterval is the cadence for probing warm sessions' sync + idle state.
+const syncPollInterval = 4 * time.Second
+
+func syncPollCmd() tea.Cmd {
+	return tea.Tick(syncPollInterval, func(time.Time) tea.Msg { return syncPollTickMsg{} })
+}
+
+// probeSyncCmd probes one warm session's sync health off the Update goroutine.
+func (m *Model) probeSyncCmd(id session.ID) tea.Cmd {
+	prober := m.syncProber
+	if prober == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		return syncStatusMsg{id: id, status: prober(context.Background(), id)}
+	}
+}
+
+// probeIdleCmd probes one warm session's idle-since time off the Update
+// goroutine, reusing the session's already-open background runner client.
+func (m *Model) probeIdleCmd(id session.ID) tea.Cmd {
+	client, ok := m.liveSSEClients[id]
+	if !ok {
+		return nil
+	}
+	ref := session.Ref{ID: id}
+	return func() tea.Msg {
+		st, err := client.Idle(context.Background(), ref)
+		if err != nil {
+			return idleStatusMsg{id: id} // zero idleSince = not counting
+		}
+		var since time.Time
+		if st.IdleSince != "" {
+			if parsed, perr := time.Parse(time.RFC3339, st.IdleSince); perr == nil {
+				since = parsed
+			}
+		}
+		return idleStatusMsg{id: id, idleSince: since}
+	}
+}
+
 // liveSSEReadyMsg is returned by the SSE-start Cmd when the channel is open.
 type liveSSEReadyMsg struct {
 	id     session.ID
@@ -226,6 +282,14 @@ type Model struct {
 	// destroyed while its pod runs, so showing it is an O(1) swap (see warm.go).
 	retained map[session.ID]*TranscriptModel
 
+	// syncProber reports per-session sync health for the detail-pane indicator.
+	// nil disables the indicator (unit-test default).
+	syncProber SyncProber
+
+	// idleTimeout is the reaper idle-timeout, used to render the warm session
+	// "suspends in ~X" hint. Zero hides the hint.
+	idleTimeout time.Duration
+
 	// Spinner frame index (global; applied per busy row).
 	spinnerFrame int
 
@@ -336,6 +400,14 @@ func (m *Model) WithConnector(c Connector) *Model {
 	return m
 }
 
+// WithSyncProber injects the sync-health probe used to render per-session sync
+// status. nil disables the indicator (unit-test default).
+func (m *Model) WithSyncProber(p SyncProber) *Model { m.syncProber = p; return m }
+
+// WithIdleTimeout sets the reaper idle-timeout used to render the "suspends in"
+// hint. Zero disables the hint.
+func (m *Model) WithIdleTimeout(d time.Duration) *Model { m.idleTimeout = d; return m }
+
 // WithDestroyHook registers a callback that is called after a successful
 // backend.Destroy so the caller can perform local cleanup (sync teardown,
 // SSH alias removal, key deletion). The CLI uses this to match what the
@@ -425,6 +497,12 @@ func (m *Model) Init() tea.Cmd {
 		cmds = append(cmds, m.startWatchCmd())
 	}
 
+	// Start the warm-session sync/idle poll loop when an indicator source is
+	// wired (the CLI injects a prober; unit tests leave it nil and skip ticking).
+	if m.syncProber != nil || m.idleTimeout > 0 {
+		cmds = append(cmds, syncPollCmd())
+	}
+
 	return tea.Batch(cmds...)
 }
 
@@ -475,6 +553,37 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.toastTickActive = true
 		return m, toastTickCmd()
+
+	case syncStatusMsg:
+		for i := range m.sessions {
+			if m.sessions[i].ID() == msg.id {
+				m.sessions[i].SyncStatus = msg.status
+				break
+			}
+		}
+		return m, nil
+
+	case idleStatusMsg:
+		for i := range m.sessions {
+			if m.sessions[i].ID() == msg.id {
+				m.sessions[i].IdleSince = msg.idleSince
+				break
+			}
+		}
+		return m, nil
+
+	case syncPollTickMsg:
+		var cmds []tea.Cmd
+		for id := range m.retained { // warm sessions only
+			if c := m.probeSyncCmd(id); c != nil {
+				cmds = append(cmds, c)
+			}
+			if c := m.probeIdleCmd(id); c != nil {
+				cmds = append(cmds, c)
+			}
+		}
+		cmds = append(cmds, syncPollCmd())
+		return m, tea.Batch(cmds...)
 
 	case liveSSEReadyMsg:
 		// Guard: if the session was deleted or suspended while the connector
@@ -1828,6 +1937,15 @@ func (m *Model) renderDetailLines(width, height int) []string {
 	// When a suspend/resume/destroy is in flight, append a pending line (U3).
 	if s.PendingAction != "" {
 		kvPairs = append(kvPairs, struct{ k, v string }{"pending", s.PendingAction + "…"})
+	}
+	// Sync health (warm sessions, polled).
+	if s.SyncStatus != "" {
+		glyph := map[string]string{
+			"synced":  "✓",
+			"syncing": "⟳",
+			"stalled": "⚠",
+		}[s.SyncStatus]
+		kvPairs = append(kvPairs, struct{ k, v string }{"sync", strings.TrimSpace(glyph + " " + s.SyncStatus)})
 	}
 
 	// detailKVWidth is the fixed key column width for aligned key/value rows

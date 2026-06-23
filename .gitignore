@@ -1,8 +1,12 @@
 # Build artifacts
 runner/node_modules/
 runner/dist/
-runner/package-lock.json
 
 # Go build output (root binary only — anchored so it does not also ignore the
-# cmd/sandbox/ source package)
+# cmd/sandbox/ source package). runner/package-lock.json is intentionally NOT
+# ignored: it is committed so the runner image builds reproducibly via `npm ci`.
 /sandbox
+
+# Cross-compiled / scratch binaries that must never be committed via `git add -A`
+/dist/
+/mockup

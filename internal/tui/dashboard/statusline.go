@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"charm.land/lipgloss/v2"
+
+	"github.com/cullenmcdermott/sandbox/internal/terminal"
 	"github.com/cullenmcdermott/sandbox/tui/theme"
 )
 
@@ -151,6 +153,58 @@ func shimmerBlockBar(frac float64, n, phase int, pulse bool) string {
 	}
 	b.WriteString(lipgloss.NewStyle().Foreground(theme.TextDim).Render(strings.Repeat("░", n-fill)))
 	return b.String()
+}
+
+// kittyGaugeCols/Rows are the placeholder rectangle dimensions; cols matches the
+// block bar width exactly so the kitty gauge causes no layout shift. The source
+// bitmap is rendered larger and scaled to the cell grid by the terminal.
+const (
+	kittyGaugeCols = 10
+	kittyGaugeRows = 1
+	kittyGaugePixW = 80
+	kittyGaugePixH = 16
+)
+
+// ctxGaugeKitty returns the Stage 3 Kitty Unicode-placeholder ctx gauge: a run
+// of kittyGaugeCols placeholder cells the terminal swaps for a rasterized fill
+// gauge. The gauge image is (re)transmitted only when the fill bucket (whole
+// percent) changes — the transmission is queued one-shot into pendingKitty for
+// App.View to prepend to the frame, never emitted every frame. A new image id
+// per change forces the terminal to re-fetch. The returned placeholder run is
+// exactly kittyGaugeCols cells wide, matching the block bar it replaces.
+func (m *TranscriptModel) ctxGaugeKitty(frac float64) string {
+	bucket := int(frac * 100)
+	if bucket != m.kittyGaugeBucket || m.kittyGaugeID == 0 {
+		m.kittyGaugeBucket = bucket
+		// Ids stay within 24 bits because KittyPlaceholders encodes the id in the
+		// cell's 24-bit foreground color while the transmission carries the full
+		// id — they must agree. Wrap back to 1 (0 is reserved) past the 24-bit
+		// ceiling so a marathon session can't desync them.
+		m.kittyGaugeID++
+		if m.kittyGaugeID >= (1 << 24) {
+			m.kittyGaugeID = 1
+		}
+		rgba := terminal.GaugeRGBA(frac, kittyGaugePixW, kittyGaugePixH,
+			rgbOf(rampColor(frac)), rgbOf(theme.TextDim))
+		m.pendingKitty = terminal.KittyTransmitRGBA(m.kittyGaugeID,
+			kittyGaugeCols, kittyGaugeRows, kittyGaugePixW, kittyGaugePixH, rgba)
+	}
+	return terminal.KittyPlaceholders(m.kittyGaugeID, kittyGaugeCols, kittyGaugeRows)
+}
+
+// takePendingKitty returns and clears any queued one-shot Kitty image
+// transmission so it rides exactly one frame.
+func (m *TranscriptModel) takePendingKitty() string {
+	s := m.pendingKitty
+	m.pendingKitty = ""
+	return s
+}
+
+// rgbOf converts a lipgloss/theme color.Color to the terminal package's 8-bit
+// RGB (dropping any alpha) for gauge bitmap generation.
+func rgbOf(c color.Color) terminal.RGB {
+	r, g, b, _ := c.RGBA()
+	return terminal.RGB{R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8)}
 }
 
 // shortModelName turns a model id (e.g. "claude-opus-4-8" or
@@ -336,7 +390,14 @@ func (m *TranscriptModel) renderStatusLine() string {
 	// pulses coral past 80%. Everywhere else (idle, NO_COLOR, non-truecolor, tests)
 	// it falls back to the static single-color bar — byte-identical to today.
 	bar := blockBar(frac, 10, rampColor(frac))
-	if m.caps.TrueColor && !m.caps.ReduceMotion && m.status == StatusBusy {
+	switch {
+	case m.caps.KittyGraphics && !m.caps.ReduceMotion:
+		// Stage 3: the showpiece — a rasterized 10×1-cell gauge via Kitty Unicode
+		// placeholders. Overrides the shimmer on Ghostty (the richer rendering).
+		// Suppressed under the global off switch (NO_COLOR / SANDBOX_REDUCE_MOTION)
+		// so output degrades to the block bar (D2/D4).
+		bar = m.ctxGaugeKitty(frac)
+	case m.caps.TrueColor && !m.caps.ReduceMotion && m.status == StatusBusy:
 		bar = shimmerBlockBar(frac, 10, m.workFrame, pct >= 80)
 	}
 	ctx := lipgloss.NewStyle().Foreground(theme.TextBody).Render(fmt.Sprintf("%s/%s ", fmtTokenLimit(used), fmtTokenLimit(limit))) +

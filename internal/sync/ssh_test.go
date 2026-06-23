@@ -96,3 +96,46 @@ func TestSSHConfigUpsertAndRemove(t *testing.T) {
 		t.Errorf("sandbox-xyz should remain:\n%s", body)
 	}
 }
+
+// Upsert and Remove must reject a session ID that does not match [a-z0-9-]+,
+// before any file is touched. This is defense-in-depth against ssh config
+// directive injection: an ID containing a newline could otherwise smuggle
+// arbitrary directives (e.g. ProxyCommand) into the per-session Host block.
+func TestSSHConfigRejectsBadSessionID(t *testing.T) {
+	dir := t.TempDir()
+	include := filepath.Join(dir, "sandbox", "config")
+	userCfg := filepath.Join(dir, "ssh", "config")
+	c := NewSSHConfig(include, userCfg)
+
+	bad := []string{
+		"abc\n    ProxyCommand /bin/sh", // newline injection
+		"abc def",                       // whitespace
+		"Abc",                           // uppercase
+		"a/b",                           // slash
+		"a:b",                           // colon
+		"",                              // empty
+		"sandbox-../../etc",             // path traversal chars
+	}
+	for _, id := range bad {
+		if err := c.Upsert(id, 12345, "/keys/id"); err == nil {
+			t.Errorf("Upsert(%q) should be rejected", id)
+		}
+		if err := c.Remove(id); err == nil {
+			t.Errorf("Remove(%q) should be rejected", id)
+		}
+	}
+
+	// A rejected Upsert must not have written anything (it returns before
+	// ensureInclude touches the user config).
+	if _, err := os.Stat(userCfg); !os.IsNotExist(err) {
+		t.Errorf("rejected Upsert should not create the user config (stat err=%v)", err)
+	}
+	if _, err := os.Stat(include); !os.IsNotExist(err) {
+		t.Errorf("rejected Upsert should not create the include file (stat err=%v)", err)
+	}
+
+	// A valid ID still works.
+	if err := c.Upsert("valid-id-123", 12345, "/keys/id"); err != nil {
+		t.Errorf("Upsert with a valid id should succeed, got %v", err)
+	}
+}

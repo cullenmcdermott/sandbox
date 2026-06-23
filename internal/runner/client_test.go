@@ -78,6 +78,34 @@ func TestStartTurn(t *testing.T) {
 	}
 }
 
+func TestExec(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/sessions/test/exec" || r.Method != "POST" {
+			http.NotFound(w, r)
+			return
+		}
+		var body struct {
+			Command string `json:"command"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		if body.Command != "git status" {
+			t.Errorf("command: got %q, want git status", body.Command)
+		}
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"stdout":"clean\n","stderr":"","exitCode":0}`)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "token")
+	res, err := c.Exec(context.Background(), session.Ref{ID: "test"}, "git status")
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	if res.Stdout != "clean\n" || res.ExitCode != 0 {
+		t.Errorf("exec result: %+v", res)
+	}
+}
+
 func TestInterruptTurn(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/sessions/test/turns/turn-1/interrupt" {
@@ -190,5 +218,210 @@ func TestEventsSSE(t *testing.T) {
 	}
 	if collected[1].Seq != 2 {
 		t.Errorf("event 1 seq: got %d, want 2", collected[1].Seq)
+	}
+}
+
+// RV6: EventsPassive must request the stream with ?passive=1 (so the runner does
+// not count it as an attached client for idle detection), while the active
+// Events must NOT set the flag.
+func TestEventsPassiveQueryParam(t *testing.T) {
+	gotQuery := make(chan string, 2)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.Path, "/events") {
+			http.NotFound(w, r)
+			return
+		}
+		gotQuery <- r.URL.RawQuery
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "token")
+	ref := session.Ref{ID: "test"}
+
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	if _, err := c.Events(ctx1, ref, 0); err != nil {
+		t.Fatalf("Events: %v", err)
+	}
+	activeQ := <-gotQuery
+	cancel1()
+	if strings.Contains(activeQ, "passive") {
+		t.Errorf("active Events query = %q, must not contain passive", activeQ)
+	}
+
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	if _, err := c.EventsPassive(ctx2, ref, 0); err != nil {
+		t.Fatalf("EventsPassive: %v", err)
+	}
+	passiveQ := <-gotQuery
+	cancel2()
+	if !strings.Contains(passiveQ, "passive=1") {
+		t.Errorf("EventsPassive query = %q, must contain passive=1", passiveQ)
+	}
+}
+
+// errResponse configures how the test server replies for an error-path case.
+type errResponse struct {
+	status int
+	body   string
+	ctype  string // Content-Type; defaults to application/json when body is set
+}
+
+// serverFor returns a server that always responds with the given errResponse,
+// regardless of path. Each error-path test owns its single call.
+func serverFor(r errResponse) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if r.ctype != "" {
+			w.Header().Set("Content-Type", r.ctype)
+		}
+		w.WriteHeader(r.status)
+		if r.body != "" {
+			fmt.Fprint(w, r.body)
+		}
+	}))
+}
+
+// invoke exercises one client method by name against the given client, returning
+// the error (if any). It lets the table drive every method uniformly.
+func invoke(c *Client, method string) error {
+	ctx := context.Background()
+	ref := session.Ref{ID: "test"}
+	switch method {
+	case "Health":
+		return c.Health(ctx)
+	case "StartTurn":
+		_, err := c.StartTurn(ctx, ref, session.TurnInput{Prompt: "hi"})
+		return err
+	case "InterruptTurn":
+		return c.InterruptTurn(ctx, ref, session.TurnRef{Session: "test", Turn: "turn-1"})
+	case "ResolvePermission":
+		return c.ResolvePermission(ctx, ref, session.PermissionDecision{Session: "test", Permission: "perm-1", Allow: true, Scope: "once"})
+	case "SessionState":
+		_, err := c.SessionState(ctx, ref)
+		return err
+	case "Exec":
+		_, err := c.Exec(ctx, ref, "git status")
+		return err
+	case "Idle":
+		_, err := c.Idle(ctx, ref)
+		return err
+	default:
+		panic("unknown method " + method)
+	}
+}
+
+// opPrefix is the error-message prefix each method uses (see statusError calls
+// in client.go). Used to assert the right operation is named in the error.
+var opPrefix = map[string]string{
+	"Health":            "runner health",
+	"StartTurn":         "runner start turn",
+	"InterruptTurn":     "runner interrupt turn",
+	"ResolvePermission": "runner resolve permission",
+	"SessionState":      "runner session state",
+	"Exec":              "runner exec",
+	"Idle":              "runner idle",
+}
+
+// TestErrorPathStatusSurfaced asserts that every method turns a non-2xx response
+// into an error that names the operation, the status code, and — when the runner
+// sends a {"error":...} body — the server's message. This is the regression
+// guard for the opaque "status 409"/"status 404" bug reports.
+func TestErrorPathStatusSurfaced(t *testing.T) {
+	methods := []string{"Health", "StartTurn", "InterruptTurn", "ResolvePermission", "SessionState", "Exec", "Idle"}
+
+	cases := []struct {
+		name        string
+		resp        errResponse
+		wantStatus  string // substring that must appear (status code)
+		wantMessage string // substring that must appear (server message), "" if none
+	}{
+		{
+			name:        "json error body",
+			resp:        errResponse{status: http.StatusConflict, body: `{"error":"turn already running"}`},
+			wantStatus:  "409",
+			wantMessage: "turn already running",
+		},
+		{
+			name:       "no body",
+			resp:       errResponse{status: http.StatusNotFound},
+			wantStatus: "404",
+		},
+		{
+			name:        "plain text body",
+			resp:        errResponse{status: http.StatusBadGateway, body: "upstream is down", ctype: "text/plain"},
+			wantStatus:  "502",
+			wantMessage: "upstream is down",
+		},
+	}
+
+	for _, m := range methods {
+		for _, tc := range cases {
+			t.Run(m+"/"+tc.name, func(t *testing.T) {
+				srv := serverFor(tc.resp)
+				defer srv.Close()
+				c := New(srv.URL, "token")
+
+				err := invoke(c, m)
+				if err == nil {
+					t.Fatalf("%s: expected error for status %d, got nil", m, tc.resp.status)
+				}
+				msg := err.Error()
+				if !strings.Contains(msg, opPrefix[m]) {
+					t.Errorf("%s: error %q missing op prefix %q", m, msg, opPrefix[m])
+				}
+				if !strings.Contains(msg, tc.wantStatus) {
+					t.Errorf("%s: error %q missing status %q", m, msg, tc.wantStatus)
+				}
+				if tc.wantMessage != "" && !strings.Contains(msg, tc.wantMessage) {
+					t.Errorf("%s: error %q does not surface server message %q", m, msg, tc.wantMessage)
+				}
+			})
+		}
+	}
+}
+
+// TestErrorPathMalformedSuccessBody asserts that a 2xx response with a body the
+// client cannot decode (truncated/garbage JSON) is reported as a decode error
+// rather than being silently swallowed. Only methods that decode a response
+// body are covered (Health/InterruptTurn/ResolvePermission have no body to
+// decode).
+func TestErrorPathMalformedSuccessBody(t *testing.T) {
+	methods := []string{"StartTurn", "SessionState", "Exec", "Idle"}
+	for _, m := range methods {
+		t.Run(m, func(t *testing.T) {
+			srv := serverFor(errResponse{status: http.StatusOK, body: `{not json`})
+			defer srv.Close()
+			c := New(srv.URL, "token")
+
+			err := invoke(c, m)
+			if err == nil {
+				t.Fatalf("%s: expected decode error for malformed body, got nil", m)
+			}
+			if !strings.Contains(err.Error(), opPrefix[m]) {
+				t.Errorf("%s: decode error %q missing op prefix %q", m, err.Error(), opPrefix[m])
+			}
+		})
+	}
+}
+
+// TestEventsErrorStatusSurfaced asserts the SSE open path also folds the
+// server's error body into the returned error (the connect path can't decode a
+// body into events, so a clear error is the only signal the caller gets).
+func TestEventsErrorStatusSurfaced(t *testing.T) {
+	srv := serverFor(errResponse{status: http.StatusServiceUnavailable, body: `{"error":"session suspended"}`})
+	defer srv.Close()
+	c := New(srv.URL, "token")
+
+	_, err := c.Events(context.Background(), session.Ref{ID: "test"}, 0)
+	if err == nil {
+		t.Fatal("expected error from Events on 503, got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "runner events") || !strings.Contains(msg, "503") || !strings.Contains(msg, "session suspended") {
+		t.Errorf("Events error %q missing op/status/message", msg)
 	}
 }

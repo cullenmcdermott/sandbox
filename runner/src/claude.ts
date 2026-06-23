@@ -15,15 +15,27 @@
 // Events are persisted (appendEvent) BEFORE being streamed, so SSE replay is
 // consistent with the live tail.
 
-import { query, type Options, type Query, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
-import type { BetaContentBlock, BetaRawContentBlockDeltaEvent, BetaRawContentBlockStartEvent, BetaTextBlock, BetaThinkingBlock, BetaToolUseBlock } from '@anthropic-ai/sdk/resources/beta/messages/messages';
+import { query, type Options, type PermissionMode, type Query, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { BetaContentBlock, BetaTextBlock } from '@anthropic-ai/sdk/resources/beta/messages/messages';
 import type { PermissionResult, HookCallback, HookInput, SyncHookJSONOutput } from '@anthropic-ai/claude-agent-sdk';
-import { join } from 'node:path';
+import { mkdirSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { appendEvent, shortId } from './events.js';
 import { appendAudit } from './audit.js';
-import { getRegistry } from './session.js';
+import { bashCommandBlocked } from './guards.js';
+import { resolveWorkspaceDir } from './exec.js';
+import { getRegistry, loadConfig } from './session.js';
 import type { RunnerConfig } from './session.js';
-import { CLAUDE_CONFIG_DIR, WORKSPACE_ROOT } from './types.js';
+import type { Agent } from './agent.js';
+import { CLAUDE_CONFIG_DIR } from './types.js';
+import { TITLE_PROMPT, sanitizeTitle, shouldGenerateTitle } from './title.js';
+import { SessionGrants, resolutionOutcome } from './grants.js';
+import { mapMessage as mapMessagePure } from './mapping.js';
+
+// Tool-name-level "allow for this session" grants (permission scope:'session').
+// One session per pod, so a single module-level store is the whole session's
+// grant set; it is not persisted across pod restarts (a restart re-prompts).
+const sessionGrants = new SessionGrants();
 
 // --- Tool policy (spec 8.4) ----------------------------------------------
 
@@ -48,48 +60,40 @@ const DEFAULT_DISALLOWED_TOOLS = [
   'Bash(sudo *)',
 ];
 
-/**
- * Bash commands blocked by the PreToolUse(Bash) hook (spec 8.5). Blocks
- * obvious host/cluster/credential operations. Pattern-matched as a prefix on
- * the raw command string.
- */
-const BLOCKED_BASH_PATTERNS: RegExp[] = [
-  /\bkubectl\b/,
-  /\btalosctl\b/,
-  /\bhelm\b/,
-  /\bargocd\b/,
-  /\bop\s+(auth|login|whoami|token|kubeconfig)\b/,
-  /\bsudo\b/,
-  /\bssh\b/,
-  /\bscp\b/,
-  /\brsync\b/,
-  /\bdocker\b/,
-  /\bpodman\b/,
-  /\bcrictl\b/,
-  /\bctr\b/,
-  /\bnsenter\b/,
-  /\bchroot\b/,
-  /\bmount\b/,
-  /\bumount\b/,
-  /\bip\s+(addr|link|route)\b/,
-  /\biptables\b/,
-  /\bchmod\s+[0-7]{4}?\s+\/etc\b/,
-  /\bcat\s+\/etc\/shadow\b/,
-  /\bcat\s+\/etc\/passwd\b/,
-  /~\/\.ssh\//,
-  /\/etc\/kubernetes\//,
-  /\/var\/run\/docker\.sock/,
-  /\/run\/containerd\//,
-  /\bANTHROPIC_API_KEY\b/,
-  /\bAWS_SECRET_ACCESS_KEY\b/,
-  /\bKUBECONFIG\b/,
-];
-
-function bashCommandBlocked(command: string): boolean {
-  return BLOCKED_BASH_PATTERNS.some((re) => re.test(command));
-}
+// BLOCKED_BASH_PATTERNS / bashCommandBlocked moved to ./guards.js so the same
+// blocklist gates both the SDK Bash tool (below) and the /exec passthrough (O2).
 
 // --- SDK options ----------------------------------------------------------
+
+/**
+ * Resolve a client-supplied permission-mode string to a valid SDK
+ * PermissionMode. An empty/unknown value defaults to 'acceptEdits' so the
+ * pre-mode-switching behavior is preserved.
+ */
+export function resolvePermissionMode(mode: string | undefined): PermissionMode {
+  switch (mode) {
+    case 'default':
+    case 'acceptEdits':
+    case 'plan':
+    case 'bypassPermissions':
+      return mode;
+    default:
+      return 'acceptEdits';
+  }
+}
+
+/**
+ * Resolve the model for a turn: a per-turn override (the in-session /model
+ * switch, TurnRequestBody.model) wins over the session default (SANDBOX_MODEL /
+ * cfg.model). An empty result means "unset" so the SDK uses the account
+ * default. Returns undefined (not '') so callers can leave Options.model unset.
+ */
+export function resolveModel(
+  turnModel: string | undefined,
+  sessionModel: string | undefined,
+): string | undefined {
+  return turnModel || sessionModel || undefined;
+}
 
 /** Build the SDK Options for a turn (spec 8.4). */
 export function buildOptions(
@@ -97,15 +101,28 @@ export function buildOptions(
   turnId: string,
   resume: string | undefined,
   allowedToolsOverride: string[] | undefined,
+  mode: string | undefined,
+  model: string | undefined,
   abort: AbortController,
 ): Options {
   const reg = getRegistry();
   const sessionId = reg.state.sandbox_session_id;
-  const cwd = join(WORKSPACE_ROOT, cfg.projectPath);
+  const cwd = resolveWorkspaceDir(cfg.projectPath);
 
+  // The PVC mounts over /session and shadows the workspace dir baked into the
+  // image, and Mutagen may not have synced (or created) the project path yet.
+  // The SDK spawns the `claude` binary with this cwd; a missing dir makes the
+  // spawn fail with a misleading "binary failed to launch / libc" error. Ensure
+  // it exists, mirroring how events/session/audit create their state dirs.
+  mkdirSync(cwd, { recursive: true });
+
+  const permissionMode = resolvePermissionMode(mode);
   const options: Options = {
     cwd,
-    permissionMode: 'acceptEdits',
+    permissionMode,
+    // bypassPermissions is a hard SDK safety gate: it is ignored unless this
+    // flag is also set. Only enable it for that mode.
+    allowDangerouslySkipPermissions: permissionMode === 'bypassPermissions',
     allowedTools: allowedToolsOverride ?? DEFAULT_ALLOWED_TOOLS,
     disallowedTools: DEFAULT_DISALLOWED_TOOLS,
     env: {
@@ -135,8 +152,16 @@ export function buildOptions(
         },
       ],
     },
-    canUseTool: makeCanUseTool(sessionId, turnId),
+    canUseTool: makeCanUseTool(sessionId, turnId, abort.signal),
   };
+
+  // Model selection: a per-turn override (the in-session /model switch) wins
+  // over the session default (SANDBOX_MODEL / cfg.model); an empty value leaves
+  // options.model unset so the SDK uses the account default. The SDK maps this
+  // to `--model <id>` on the spawned claude binary, which resolves aliases like
+  // "opus"/"sonnet"/"haiku" to the latest model the account can use.
+  const resolvedModel = resolveModel(model, cfg.model);
+  if (resolvedModel) options.model = resolvedModel;
 
   if (resume) {
     // resume is the Claude SDK session id (not a turn id). The CLI maps turn
@@ -212,9 +237,38 @@ function makeSessionEndHook(
 
 // --- Permission callback --------------------------------------------------
 
+// PERMISSION_ABANDON_MS bounds how long a pending permission may keep the turn
+// (and thus the pod) alive once the client has detached (NEW-7). While a client
+// is attached the abandon check reschedules; the absolute deadline below is what
+// bounds an attached-but-unanswered prompt.
+const PERMISSION_ABANDON_MS = 120_000;
+
+// PERMISSION_MAX_WAIT_MS is the absolute deadline after which a still-pending
+// permission auto-denies even while a client is attached (C8: "auto-deny after a
+// timeout"). This guarantees an unanswered prompt can never hold the turn — and
+// the pod — open indefinitely. Configurable via the env var of the same name.
+const PERMISSION_MAX_WAIT_MS = ((): number => {
+  const v = parseInt(process.env.PERMISSION_MAX_WAIT_MS ?? '', 10);
+  return Number.isFinite(v) && v > 0 ? v : 600_000;
+})();
+
+// parseEditedInput safely parses a permission's edited tool input. A malformed
+// edit returns undefined so the caller falls back to the original input — it
+// must NEVER throw, because a throw inside the resolve callback would leave
+// canUseTool unresolved and hang the turn (and the pod) forever (C8).
+export function parseEditedInput(editedInput: string | undefined): Record<string, unknown> | undefined {
+  if (!editedInput) return undefined;
+  try {
+    return JSON.parse(editedInput) as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+}
+
 function makeCanUseTool(
   sessionId: string,
   turnId: string,
+  abortSignal: AbortSignal,
 ): (toolName: string, input: Record<string, unknown>) => Promise<PermissionResult> {
   return (toolName, input) => {
     const reg = getRegistry();
@@ -225,23 +279,108 @@ function makeCanUseTool(
       input,
       decision: '',
     });
+    // Session-scope grant: a prior permission resolved with scope:'session' for
+    // this tool name, so auto-allow WITHOUT prompting. Still emit a resolved
+    // event (decision 'allow-session') so the transcript/audit shows the
+    // auto-allow rather than a silent gap.
+    if (sessionGrants.isGranted(toolName)) {
+      appendEvent(sessionId, turnId, 'permission.resolved', {
+        permissionId,
+        tool: toolName,
+        input,
+        decision: 'allow-session',
+      });
+      return Promise.resolve<PermissionResult>({ behavior: 'allow' });
+    }
     return new Promise<PermissionResult>((resolve) => {
+      let settled = false;
+      let abandonTimer: ReturnType<typeof setTimeout> | undefined;
+      let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+
+      const cleanup = (): void => {
+        if (abandonTimer !== undefined) clearTimeout(abandonTimer);
+        if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+        abandonTimer = undefined;
+        deadlineTimer = undefined;
+        abortSignal.removeEventListener('abort', onAbort);
+      };
+
+      // Auto-deny a pending permission and unblock the turn. Idempotent: the
+      // abort, abandon (detached), absolute-deadline and user-resolve paths can
+      // race, but the turn must settle exactly once (one permission.resolved).
+      const denyAndResolve = (message: string): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reg.deletePermission(permissionId);
+        appendEvent(sessionId, turnId, 'permission.resolved', {
+          permissionId,
+          tool: toolName,
+          input,
+          decision: 'deny',
+        });
+        resolve({ behavior: 'deny', message });
+      };
+
+      // R1: if the turn is interrupted while a permission is pending, auto-deny
+      // so query() can unblock and propagate the abort.
+      const onAbort = (): void => denyAndResolve('Turn interrupted — pending permission auto-denied');
+      if (abortSignal.aborted) {
+        onAbort();
+        return;
+      }
+      abortSignal.addEventListener('abort', onAbort, { once: true });
+
+      // NEW-7: a permission pending with the client detached is abandoned after
+      // the grace window so the turn finishes (activeTurns → 0, idleSince set)
+      // and the reaper can suspend the pod. While a client is attached this
+      // reschedules; the absolute deadline below bounds the attached case.
+      const checkAbandoned = (): void => {
+        if (settled) return;
+        if (reg.isDetached()) {
+          denyAndResolve('Pending permission auto-denied — client detached');
+          return;
+        }
+        abandonTimer = setTimeout(checkAbandoned, PERMISSION_ABANDON_MS);
+      };
+      abandonTimer = setTimeout(checkAbandoned, PERMISSION_ABANDON_MS);
+
+      // C8: absolute deadline — auto-deny even while a client is attached so an
+      // unanswered prompt can never hold the turn (and the pod) open forever.
+      deadlineTimer = setTimeout(
+        () => denyAndResolve('Permission timed out — auto-denied after no response'),
+        PERMISSION_MAX_WAIT_MS,
+      );
+
       reg.registerPermission({
         permissionId,
         tool: toolName,
         input,
-        resolve: (allow, _scope, editedInput) => {
-          const decision = allow ? 'allow-once' : 'deny';
+        resolve: (allow, scope, editedInput) => {
+          if (settled) return; // already auto-denied (abort / abandon / deadline)
+          settled = true;
+          cleanup();
+          // Honor the resolution scope: scope:'session' records a tool-name
+          // grant so future uses of this tool auto-allow (above); 'once'/default
+          // is a single allow. resolutionOutcome maps allow+scope → decision.
+          const { decision, grantSession } = resolutionOutcome(allow, scope);
+          if (grantSession) sessionGrants.grant(toolName);
           appendEvent(sessionId, turnId, 'permission.resolved', {
             permissionId,
             tool: toolName,
             input,
             decision,
           });
+          reg.deletePermission(permissionId); // R2: clean up after resolve
           if (allow) {
+            // editedInput is validated as JSON at the server boundary, but guard
+            // here too: a malformed edit must never throw and leave canUseTool
+            // unresolved — that would hang the turn forever (C8). Fall back to
+            // the original input instead.
+            const updatedInput = parseEditedInput(editedInput);
             resolve({
               behavior: 'allow',
-              ...(editedInput ? { updatedInput: JSON.parse(editedInput) as Record<string, unknown> } : {}),
+              ...(updatedInput ? { updatedInput } : {}),
             });
           } else {
             resolve({
@@ -264,31 +403,39 @@ export async function runTurn(
   prompt: string,
   resume: string | undefined,
   allowedToolsOverride: string[] | undefined,
+  mode: string | undefined,
+  model: string | undefined,
   abort: AbortController,
 ): Promise<void> {
   const reg = getRegistry();
   const sessionId = reg.state.sandbox_session_id;
-  const options = buildOptions(cfg, turnId, resume, allowedToolsOverride, abort);
+  const options = buildOptions(cfg, turnId, resume, allowedToolsOverride, mode, model, abort);
 
   appendEvent(sessionId, turnId, 'turn.started', { prompt });
 
   const q: Query = query({ prompt, options });
   let resultSeen = false;
+  let rateLimitsFetched = false;
 
   try {
     for await (const msg of q) {
       mapMessage(msg, sessionId, turnId);
-      // Capture the Claude session id from the init system message.
-      if (!reg.state.claude_session_id && msg.type === 'system' && msg.subtype === 'init') {
-        reg.setClaudeSession(msg.session_id);
+      // Fetch the claude.ai plan rate-limit windows once per turn, triggered by
+      // the SDK init message. The control channel (stdin) is open from init
+      // until the result message closes it (single-user-turn mode), so this
+      // MUST fire mid-turn — a post-loop call would race the closed stdin.
+      // Fire-and-forget: it never blocks or fails the turn.
+      if (!rateLimitsFetched && msg.type === 'system' && msg.subtype === 'init') {
+        rateLimitsFetched = true;
+        void fetchAndEmitRateLimits(q, sessionId, turnId);
       }
     }
     resultSeen = true;
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    if (abort.signal.aborted) {
-      appendEvent(sessionId, turnId, 'turn.interrupted', { reason: 'client interrupt' });
-    } else {
+    // When aborted, server.ts already emitted 'turn.interrupted' at the
+    // /interrupt route; do not re-emit it here (R3: would produce a duplicate).
+    if (!abort.signal.aborted) {
+      const message = err instanceof Error ? err.message : String(err);
       appendEvent(sessionId, turnId, 'turn.failed', { message });
       appendEvent(sessionId, turnId, 'error', { message });
     }
@@ -300,262 +447,237 @@ export async function runTurn(
       // turn.completed is emitted by mapMessage when the result message
       // arrives; only emit a fallback if it somehow didn't.
     }
+    // Finalize the turn FIRST so the session goes idle promptly: finishTurn
+    // clears the active-turn count and starts the idle reaper's clock. The
+    // one-time title summary below runs an extra summarizer round-trip, and we
+    // must not keep the session "busy" (or delay suspension) while it does.
     reg.finishTurn(turnId);
-  }
-}
-
-function mapMessage(msg: SDKMessage, sessionId: string, turnId: string): void {
-  const reg = getRegistry();
-  switch (msg.type) {
-    case 'system': {
-      if (msg.subtype === 'init') {
-        appendEvent(sessionId, turnId, 'session.started', {
-          model: msg.model,
-          cwd: msg.cwd,
-          tools: msg.tools,
-          permissionMode: msg.permissionMode,
-          claudeSessionId: msg.session_id,
-        });
-      }
-      break;
-    }
-    case 'assistant': {
-      // Full assistant message: one or more content blocks (text, thinking,
-      // tool_use). Emit message.completed + tool.started for each block.
-      handleAssistantMessage(msg, sessionId, turnId);
-      // Usage is carried on the BetaMessage.
-      emitUsage(msg.message.usage, sessionId, turnId);
-      break;
-    }
-    case 'user': {
-      // User messages in the SDK stream carry tool_result blocks. Map each to
-      // tool.completed or tool.failed.
-      handleUserMessage(msg, sessionId, turnId);
-      break;
-    }
-    case 'stream_event': {
-      // Partial assistant message: incremental deltas for text/thinking/tool
-      // input as they arrive.
-      handleStreamEvent(msg.event, sessionId, turnId);
-      break;
-    }
-    case 'result': {
-      handleResultMessage(msg, sessionId, turnId);
-      break;
-    }
-    default:
-      // Other SDK message types (tool_progress, status, api_retry, etc.) are
-      // not part of the normalized event model; ignore them.
-      break;
-  }
-}
-
-// --- Assistant / user / stream / result handlers -------------------------
-
-function handleAssistantMessage(
-  msg: Extract<SDKMessage, { type: 'assistant' }>,
-  sessionId: string,
-  turnId: string,
-): void {
-  for (const block of msg.message.content as BetaContentBlock[]) {
-    switch (block.type) {
-      case 'text': {
-        appendEvent(sessionId, turnId, 'message.started', {
-          role: 'assistant',
-          content: '',
-        });
-        appendEvent(sessionId, turnId, 'message.completed', {
-          role: 'assistant',
-          content: (block as BetaTextBlock).text,
-        });
-        break;
-      }
-      case 'thinking': {
-        const tb = block as BetaThinkingBlock;
-        appendEvent(sessionId, turnId, 'reasoning.started', {});
-        appendEvent(sessionId, turnId, 'reasoning.completed', {
-          content: tb.thinking,
-        });
-        break;
-      }
-      case 'tool_use': {
-        const tu = block as BetaToolUseBlock;
-        appendEvent(sessionId, turnId, 'tool.started', {
-          tool: tu.name,
-          input: tu.input,
-        });
-        break;
-      }
-      default:
-        // Other block kinds (redacted_thinking, server_tool_use, mcp_*,
-        // compaction, etc.) are not normalized.
-        break;
+    // T6: one-time auto title after the first assistant turn. Only on a normal
+    // completion (not aborted/errored). Non-fatal: maybeGenerateTitle swallows
+    // any failure so it can never break the turn loop. Ordered after finishTurn
+    // per the above; the turn is already done/idle by the time this runs.
+    if (resultSeen && !abort.signal.aborted) {
+      await maybeGenerateTitle(liveTitleDeps(cfg, sessionId, turnId));
     }
   }
 }
 
-function handleUserMessage(
-  msg: Extract<SDKMessage, { type: 'user' }>,
-  sessionId: string,
-  turnId: string,
-): void {
-  const content = msg.message.content;
-  // MessageParam.content is string | array of block params. Tool results are
-  // { type: 'tool_result', tool_use_id, content, is_error } blocks.
-  if (!Array.isArray(content)) {
-    appendEvent(sessionId, turnId, 'message.started', {
-      role: 'user',
-      content: typeof content === 'string' ? content : '',
+// --- Plan rate-limit windows (status line) -------------------------------
+
+/**
+ * Fetch the claude.ai plan rate-limit windows (5-hour + weekly) from the SDK's
+ * structured /usage data and emit a rate_limit.updated event, so the status
+ * line shows REAL reset instants instead of projecting 5h/7d from the wall
+ * clock (TODO.md). The TUI counts down locally from the reset instant, so one
+ * fetch per turn keeps the display fresh.
+ *
+ * Best-effort and fully fail-soft:
+ *   - The underlying method is experimental (the verbose name is a deliberate
+ *     warning) and may throw or be absent in some SDK versions.
+ *   - rate_limits is null for API-key / Bedrock / Vertex / missing-scope
+ *     sessions (rate_limits_available=false); we emit available:false then so
+ *     the TUI hides the windows rather than fabricating values.
+ *   - The control channel may already be closing — any error is swallowed.
+ *
+ * Must be called while the control channel is open (during a turn, after the
+ * init message), never after the turn's result message closes stdin.
+ */
+async function fetchAndEmitRateLimits(q: Query, sessionId: string, turnId: string): Promise<void> {
+  try {
+    const usage = await q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET();
+    const rl = usage?.rate_limits;
+    if (!usage?.rate_limits_available || !rl) {
+      appendEvent(sessionId, turnId, 'rate_limit.updated', {
+        available: false,
+        fiveHourUtil: 0,
+        sevenDayUtil: 0,
+      });
+      return;
+    }
+    const five = rl.five_hour;
+    const week = rl.seven_day;
+    // Per-model weekly caps (Max plans). The window object is present only when
+    // the plan has a separate cap for that model; include the field then (even
+    // at 0% util) so the Go side sees a non-nil pointer = "present".
+    const opus = rl.seven_day_opus;
+    const sonnet = rl.seven_day_sonnet;
+    appendEvent(sessionId, turnId, 'rate_limit.updated', {
+      available: true,
+      fiveHourUtil: five?.utilization ?? 0,
+      sevenDayUtil: week?.utilization ?? 0,
+      ...(five?.resets_at ? { fiveHourResetsAt: five.resets_at } : {}),
+      ...(week?.resets_at ? { sevenDayResetsAt: week.resets_at } : {}),
+      ...(opus ? { sevenDayOpusUtil: opus.utilization ?? 0 } : {}),
+      ...(opus?.resets_at ? { sevenDayOpusResetsAt: opus.resets_at } : {}),
+      ...(sonnet ? { sevenDaySonnetUtil: sonnet.utilization ?? 0 } : {}),
+      ...(sonnet?.resets_at ? { sevenDaySonnetResetsAt: sonnet.resets_at } : {}),
     });
-    appendEvent(sessionId, turnId, 'message.completed', {
-      role: 'user',
-      content: typeof content === 'string' ? content : '',
-    });
+  } catch (err) {
+    // Experimental API absent, non-streaming session, or the control channel
+    // raced shut: never fatal — emit nothing and keep the turn healthy.
+    console.error(
+      'fetchAndEmitRateLimits (non-fatal):',
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
+// --- One-time auto session title (T6) ------------------------------------
+
+/**
+ * Dependencies for the one-shot title generation, injected so the logic is
+ * unit-testable without an SDK call or a live registry. In production these are
+ * bound to the session registry, the event log, and a real SDK summarizer.
+ */
+export interface TitleDeps {
+  sessionId: string;
+  turnId: string;
+  /** True if the one-shot title was already generated for this session. */
+  isTitleGenerated: () => boolean;
+  /** Persist the one-shot guard (title_generated = true) in session.json. */
+  markTitleGenerated: () => void;
+  /** Append a normalized event to the log (append-before-stream). */
+  emit: (type: 'session.title', payload: { title: string }) => void;
+  /** Produce a short task summary; may throw or return '' (both swallowed). */
+  summarize: () => Promise<string>;
+}
+
+/**
+ * Generate the session's auto title exactly once, after the first assistant
+ * turn. Idempotent (guarded by isTitleGenerated) and non-fatal: any failure or
+ * empty summary is logged and swallowed so the title stays the derived basename.
+ * The guard is persisted before emitting so a crash mid-emit can't double-fire —
+ * i.e. we choose at-most-once over at-least-once delivery. That is acceptable
+ * because the auto title is a non-essential nicety: if the event is lost, the
+ * derived basename remains as the durable fallback.
+ */
+export async function maybeGenerateTitle(deps: TitleDeps): Promise<void> {
+  if (deps.isTitleGenerated()) return;
+  let title = '';
+  try {
+    title = sanitizeTitle(await deps.summarize());
+  } catch (err) {
+    console.error('maybeGenerateTitle: summarization failed (non-fatal):', err);
+    deps.markTitleGenerated(); // do not retry a failing summary every turn
     return;
   }
-  for (const block of content as Array<{ type: string; tool_use_id?: string; content?: unknown; is_error?: boolean }>) {
-    if (block.type === 'tool_result') {
-      const outputStr =
-        typeof block.content === 'string'
-          ? block.content
-          : Array.isArray(block.content)
-            ? (block.content as Array<{ text?: string }>)
-                .map((c) => c?.text ?? '')
-                .join('')
-            : '';
-      if (block.is_error) {
-        appendEvent(sessionId, turnId, 'tool.failed', {
-          output: outputStr,
-        });
-      } else {
-        appendEvent(sessionId, turnId, 'tool.completed', {
-          output: outputStr,
-        });
-      }
-    }
-  }
+  // Set the guard regardless of whether we emit, so an empty summary doesn't
+  // trigger a fresh summarizer call on every subsequent turn.
+  deps.markTitleGenerated();
+  if (title === '') return;
+  deps.emit('session.title', { title });
 }
 
-function handleStreamEvent(
-  event: BetaRawContentBlockStartEvent | BetaRawContentBlockDeltaEvent | { type: string },
-  sessionId: string,
-  turnId: string,
-): void {
-  switch (event.type) {
-    case 'content_block_start': {
-      const e = event as BetaRawContentBlockStartEvent;
-      const block = e.content_block;
-      switch (block.type) {
-        case 'text':
-          appendEvent(sessionId, turnId, 'message.started', { role: 'assistant', content: '' });
-          break;
-        case 'thinking':
-          appendEvent(sessionId, turnId, 'reasoning.started', {});
-          break;
-        case 'tool_use':
-          appendEvent(sessionId, turnId, 'tool.started', {
-            tool: (block as BetaToolUseBlock).name,
-            input: (block as BetaToolUseBlock).input,
-          });
-          break;
-        default:
-          break;
-      }
-      break;
-    }
-    case 'content_block_delta': {
-      const e = event as BetaRawContentBlockDeltaEvent;
-      const delta = e.delta;
-      switch (delta.type) {
-        case 'text_delta':
-          appendEvent(sessionId, turnId, 'message.delta', {
-            role: 'assistant',
-            content: delta.text,
-            delta: true,
-          });
-          break;
-        case 'thinking_delta':
-          appendEvent(sessionId, turnId, 'reasoning.delta', {
-            content: delta.thinking,
-            delta: true,
-          });
-          break;
-        case 'input_json_delta':
-          appendEvent(sessionId, turnId, 'tool.delta', {
-            partialJson: delta.partial_json,
-            delta: true,
-          });
-          break;
-        default:
-          break;
-      }
-      break;
-    }
-    case 'content_block_stop':
-      // Block completion is reflected in the full assistant/user message that
-      // follows; no separate event needed for the normalized model.
-      break;
-    case 'message_start':
-      // Carried by the full assistant message's usage; nothing to emit here.
-      break;
-    case 'message_delta': {
-      // message_delta carries cumulative usage in some SDK configs; the
-      // authoritative usage comes on the result message. Skip to avoid
-      // duplicate usage.updated events.
-      break;
-    }
-    case 'message_stop':
-      break;
-    default:
-      break;
-  }
-}
-
-function handleResultMessage(
-  msg: Extract<SDKMessage, { type: 'result' }>,
-  sessionId: string,
-  turnId: string,
-): void {
+/**
+ * Build a TitleDeps bound to the live registry + event log for a turn. The
+ * summarizer runs a single cheap query() over the just-completed conversation
+ * (resumed via the captured claude session id) with the hardcoded prompt.
+ */
+function liveTitleDeps(cfg: RunnerConfig, sessionId: string, turnId: string): TitleDeps {
   const reg = getRegistry();
-  if (msg.subtype === 'success') {
-    appendEvent(sessionId, turnId, 'turn.completed', {
-      result: msg.result,
-      stopReason: msg.stop_reason,
-      numTurns: msg.num_turns,
-      durationMs: msg.duration_ms,
-    });
-    emitUsage(msg.usage, sessionId, turnId);
-    appendEvent(sessionId, turnId, 'usage.updated', {
-      inputTokens: msg.usage.input_tokens,
-      outputTokens: msg.usage.output_tokens,
-      cacheReadTokens: msg.usage.cache_read_input_tokens ?? 0,
-      cacheWriteTokens: msg.usage.cache_creation_input_tokens ?? 0,
-      totalCostUsd: msg.total_cost_usd,
-    });
-  } else {
-    appendEvent(sessionId, turnId, 'turn.failed', {
-      subtype: msg.subtype,
-      errors: msg.errors,
-    });
-    appendEvent(sessionId, turnId, 'error', {
-      message: msg.errors.join('; ') || `turn failed: ${msg.subtype}`,
-      code: msg.subtype,
-    });
-    emitUsage(msg.usage, sessionId, turnId);
-  }
+  return {
+    sessionId,
+    turnId,
+    isTitleGenerated: () => !shouldGenerateTitle(reg.state),
+    markTitleGenerated: () => reg.setTitleGenerated(),
+    emit: (type, payload) => {
+      appendEvent(sessionId, turnId, type, payload);
+    },
+    summarize: async () => {
+      const opts: Options = {
+        cwd: resolveWorkspaceDir(cfg.projectPath),
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+        allowedTools: [],
+        disallowedTools: DEFAULT_DISALLOWED_TOOLS,
+        env: { ...process.env, CLAUDE_CONFIG_DIR, CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' },
+        settingSources: [],
+        ...(reg.state.claude_session_id ? { resume: reg.state.claude_session_id } : {}),
+      };
+      let text = '';
+      for await (const msg of query({ prompt: TITLE_PROMPT, options: opts })) {
+        if (msg.type === 'assistant') {
+          for (const block of msg.message.content as BetaContentBlock[]) {
+            if (block.type === 'text') text += (block as BetaTextBlock).text;
+          }
+        }
+      }
+      return text;
+    },
+  };
 }
 
-function emitUsage(
-  usage: { input_tokens: number; output_tokens: number; cache_read_input_tokens?: number | null; cache_creation_input_tokens?: number | null } | undefined,
-  sessionId: string,
-  turnId: string,
-): void {
-  if (!usage) return;
-  appendEvent(sessionId, turnId, 'usage.updated', {
-    inputTokens: usage.input_tokens,
-    outputTokens: usage.output_tokens,
-    cacheReadTokens: usage.cache_read_input_tokens ?? 0,
-    cacheWriteTokens: usage.cache_creation_input_tokens ?? 0,
-    totalCostUsd: 0,
-  });
+// claudeAgent is the Claude Agent SDK backend (the default). It is a thin
+// binding of the module's runTurn to the Agent interface; see ./agent.ts.
+export const claudeAgent: Agent = { runTurn };
+
+// --- Workspace status (git branch + dirty) -------------------------------
+
+/**
+ * Emit a workspace.status event (git branch + dirty/ahead/behind) for the chat
+ * status line. Runs git in the session cwd; emits nothing (and never throws)
+ * when cwd is not a git repo or git is unavailable. Called at session start and
+ * after each turn completes.
+ */
+function emitWorkspaceStatus(sessionId: string, turnId: string): void {
+  const cwd = resolveWorkspaceDir(loadConfig().projectPath);
+  const git = (args: string[]): string =>
+    execFileSync('git', args, {
+      cwd,
+      encoding: 'utf8',
+      timeout: 3000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+
+  let branch: string;
+  try {
+    branch = git(['rev-parse', '--abbrev-ref', 'HEAD']);
+  } catch {
+    return; // not a git repo (or git missing): emit nothing, no error.
+  }
+
+  let dirty = false;
+  try {
+    dirty = git(['status', '--porcelain']).length > 0;
+  } catch {
+    // leave dirty=false
+  }
+
+  let ahead = 0;
+  let behind = 0;
+  try {
+    // "<behind>\t<ahead>" relative to the upstream; errors when no upstream.
+    const m = /^(\d+)\s+(\d+)$/.exec(git(['rev-list', '--left-right', '--count', '@{upstream}...HEAD']));
+    if (m) {
+      behind = parseInt(m[1], 10);
+      ahead = parseInt(m[2], 10);
+    }
+  } catch {
+    // no upstream configured: ahead/behind stay 0
+  }
+
+  appendEvent(sessionId, turnId, 'workspace.status', { branch, dirty, ahead, behind });
+}
+
+// mapMessage is the live binding of the pure SDK-message→event mapping
+// (./mapping.ts) to this pod's event log and session registry. The mapping
+// logic itself is pure and sqlite-free (so it is unit-testable without the
+// native addon); here we bind its `emit` to appendEvent (append-before-stream)
+// and apply the registry-affecting observations it returns: persist the model
+// into session.json, capture the Claude session id, and emit workspace.status
+// (which shells out to git) at session start and after a completed turn.
+function mapMessage(msg: SDKMessage, sessionId: string, turnId: string): void {
+  const reg = getRegistry();
+  const result = mapMessagePure(msg, (type, payload) => appendEvent(sessionId, turnId, type, payload));
+  if (result.isInit) {
+    // Persist the model into session.json so /status (and the dashboard list,
+    // even when suspended) reports it (Seam C).
+    if (result.model) reg.setModel(result.model);
+    // Capture the Claude session id from the init system message (only if unset).
+    if (result.claudeSessionId && !reg.state.claude_session_id) {
+      reg.setClaudeSession(result.claudeSessionId);
+    }
+    emitWorkspaceStatus(sessionId, turnId);
+  }
+  if (result.completed) emitWorkspaceStatus(sessionId, turnId);
 }

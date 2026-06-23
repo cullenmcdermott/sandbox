@@ -1,0 +1,47 @@
+# golangci-lint v2 configuration. Conservative starting point that is GREEN on
+# the current tree, per the "start non-strict, ratchet later" plan. Generated
+# files (// Code generated …) are auto-excluded by the `generated: lax` default.
+#
+# Enabled now (clean today): errcheck, govet, ineffassign, unused + gofmt formatting.
+#
+# Deferred to a future ratchet (each needs a dedicated cleanup pass). Turning
+# these on today would fail CI on pre-existing issues outside current scope:
+#   - staticcheck (~11: deprecated test APIs, style QF/S, one real SA4000 test bug)
+#   - goimports   (import-grouping churn across many files)
+#
+# Not installed on the Nix host — run via CI (the hard gate) or locally with
+# `nix run nixpkgs#golangci-lint -- run`.
+version: "2"
+
+run:
+  # Lint build-tagged files too (e.g. the `e2e` CLI↔runner smoke test).
+  build-tags:
+    - e2e
+
+linters:
+  # Start from an empty set and opt in, so the remaining deferred linter
+  # (staticcheck, on by default in v2's "standard" set) stays off until its
+  # cleanup pass. Re-enabling it is a one-line change once the debt is paid.
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - unused
+  exclusions:
+    generated: lax
+    paths:
+      # npm packages occasionally vendor Go (e.g. flatted); never our concern.
+      - runner/node_modules
+    presets:
+      # Don't gate on unchecked errors from fmt.Print*/Write-to-buffer/etc.
+      - std-error-handling
+    rules:
+      # Tests routinely ignore errors on teardown/fixtures; don't gate on that.
+      - path: _test\.go
+        linters:
+          - errcheck
+
+formatters:
+  enable:
+    - gofmt

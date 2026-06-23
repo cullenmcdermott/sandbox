@@ -1,0 +1,282 @@
+// Package models resolves a model's context-window limit and per-million-token
+// USD prices. It consults a cached copy of the models.dev table (fetched and
+// cached on first use with a TTL) and falls back to a static offline table.
+package models
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"sync"
+	"time"
+)
+
+// Info is the resolved context limit and per-million-token USD prices for a model.
+type Info struct {
+	ContextLimit int     // tokens; e.g. 200000 or 1000000
+	InputPrice   float64 // USD per million input tokens
+	OutputPrice  float64 // USD per million output tokens
+}
+
+// Limit returns the Info for a model id (as emitted by session.started.model).
+// It consults a cached copy of the models.dev table (fetched + cached on first
+// use with a TTL), falling back to a static table (200k context + known Claude
+// prices) when offline or when the id is unknown.
+func Limit(modelID string) Info { return defaultProvider.limit(modelID) }
+
+const staticContextLimit = 200000
+
+// apiURL is the models.dev endpoint. Overridable for tests.
+var apiURL = "https://models.dev/api.json"
+
+// cachePath returns the on-disk path of the cached models table. Overridable for
+// tests. Errors (e.g. no home dir) yield an empty path, which disables caching.
+var cachePath = func() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".local", "share", "sandbox", "models.json")
+}
+
+// cacheTTL bounds how long a cache file is considered fresh. Reachable from tests.
+var cacheTTL = 24 * time.Hour
+
+// httpTimeout bounds a single fetch so Limit never blocks forever.
+var httpTimeout = 5 * time.Second
+
+// provider resolves model info from models.dev with an on-disk cache and a
+// static fallback. It reads the package vars lazily (when its own fields are
+// unset) so tests can override apiURL/cachePath/cacheTTL before first use.
+type provider struct {
+	apiURL    string        // when "", read apiURL var
+	cachePath func() string // when nil, read cachePath var
+	ttl       time.Duration // when 0, read cacheTTL var
+	client    *http.Client  // when nil, build from httpTimeout
+
+	mu     sync.Mutex
+	table  table // parsed models.dev table, nil until first load
+	loaded bool  // whether an in-memory load was attempted this process
+}
+
+// defaultProvider is the package-level instance backing Limit.
+var defaultProvider = &provider{}
+
+// table is provider id -> model id (lowercase) -> model entry.
+type table map[string]map[string]modelEntry
+
+type modelEntry struct {
+	ContextLimit int
+	InputPrice   float64
+	OutputPrice  float64
+}
+
+// --- models.dev JSON shapes (only the fields we need) ---
+
+type apiProvider struct {
+	Models map[string]apiModel `json:"models"`
+}
+
+type apiModel struct {
+	Limit apiLimit `json:"limit"`
+	Cost  apiCost  `json:"cost"`
+}
+
+type apiLimit struct {
+	Context int `json:"context"`
+}
+
+type apiCost struct {
+	Input  float64 `json:"input"`
+	Output float64 `json:"output"`
+}
+
+func (p *provider) effAPIURL() string {
+	if p.apiURL != "" {
+		return p.apiURL
+	}
+	return apiURL
+}
+
+func (p *provider) effCachePath() string {
+	if p.cachePath != nil {
+		return p.cachePath()
+	}
+	return cachePath()
+}
+
+func (p *provider) effTTL() time.Duration {
+	if p.ttl != 0 {
+		return p.ttl
+	}
+	return cacheTTL
+}
+
+func (p *provider) effClient() *http.Client {
+	if p.client != nil {
+		return p.client
+	}
+	return &http.Client{Timeout: httpTimeout}
+}
+
+func (p *provider) limit(modelID string) Info {
+	tbl := p.load()
+	key := normalize(modelID)
+	if tbl != nil {
+		// models.dev groups by provider; the normalized key is unique enough
+		// that we search across providers.
+		for _, models := range tbl {
+			if e, ok := models[key]; ok {
+				return Info{ContextLimit: e.ContextLimit, InputPrice: e.InputPrice, OutputPrice: e.OutputPrice}
+			}
+		}
+	}
+	return staticFallback(key)
+}
+
+// load returns the parsed table, fetching+caching as needed. It never returns
+// an error: on total failure it returns nil and callers use the static fallback.
+func (p *provider) load() table {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.loaded {
+		return p.table
+	}
+	p.loaded = true
+
+	cp := p.effCachePath()
+
+	// Fresh cache within TTL: use it without fetching.
+	if cp != "" {
+		if info, err := os.Stat(cp); err == nil && time.Since(info.ModTime()) < p.effTTL() {
+			if tbl, err := readCache(cp); err == nil {
+				p.table = tbl
+				return p.table
+			}
+		}
+	}
+
+	// Fetch. On success, rewrite the cache.
+	if raw, tbl, err := p.fetch(); err == nil {
+		if cp != "" {
+			writeCache(cp, raw)
+		}
+		p.table = tbl
+		return p.table
+	}
+
+	// Fetch failed: fall back to a stale cache if present.
+	if cp != "" {
+		if tbl, err := readCache(cp); err == nil {
+			p.table = tbl
+			return p.table
+		}
+	}
+
+	// Nothing available; static fallback will be used.
+	p.table = nil
+	return nil
+}
+
+func (p *provider) fetch() ([]byte, table, error) {
+	resp, err := p.effClient().Get(p.effAPIURL())
+	if err != nil {
+		return nil, nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil, fmt.Errorf("models.dev: unexpected status %d", resp.StatusCode)
+	}
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, nil, err
+	}
+	tbl, err := parseTable(raw)
+	if err != nil {
+		return nil, nil, err
+	}
+	return raw, tbl, nil
+}
+
+func parseTable(raw []byte) (table, error) {
+	var providers map[string]apiProvider
+	if err := json.Unmarshal(raw, &providers); err != nil {
+		return nil, err
+	}
+	tbl := make(table, len(providers))
+	for pid, ap := range providers {
+		if len(ap.Models) == 0 {
+			continue
+		}
+		models := make(map[string]modelEntry, len(ap.Models))
+		for mid, m := range ap.Models {
+			models[strings.ToLower(mid)] = modelEntry{
+				ContextLimit: m.Limit.Context,
+				InputPrice:   m.Cost.Input,
+				OutputPrice:  m.Cost.Output,
+			}
+		}
+		tbl[pid] = models
+	}
+	return tbl, nil
+}
+
+func readCache(path string) (table, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return parseTable(raw)
+}
+
+func writeCache(path string, raw []byte) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return
+	}
+	_ = os.WriteFile(path, raw, 0o644)
+}
+
+// datedSuffix matches a trailing "-YYYYMMDD" snapshot suffix.
+var datedSuffix = regexp.MustCompile(`-\d{8}$`)
+
+// normalize maps a session.started model id to a models.dev key (lowercase).
+//   - exact ids pass through: claude-opus-4-8
+//   - dated suffixes are stripped: claude-opus-4-8-20260101 -> claude-opus-4-8
+//   - short aliases gain the claude- prefix and dots become dashes:
+//     opus-4.8 -> claude-opus-4-8, sonnet-4.6 -> claude-sonnet-4-6
+func normalize(modelID string) string {
+	id := strings.ToLower(strings.TrimSpace(modelID))
+	if id == "" {
+		return id
+	}
+	id = datedSuffix.ReplaceAllString(id, "")
+	id = strings.ReplaceAll(id, ".", "-")
+	if !strings.HasPrefix(id, "claude-") {
+		id = "claude-" + id
+	}
+	return id
+}
+
+// staticFallback returns deterministic, network-free info for a normalized key.
+// Known Claude families get their published prices and context limits; anything
+// else gets 200k context and zero prices.
+func staticFallback(key string) Info {
+	in, out := 0.0, 0.0
+	ctx := staticContextLimit
+	switch {
+	case strings.Contains(key, "opus"):
+		in, out = 5, 25
+		ctx = 1000000 // claude-opus-4-8 is 1M; future opuses likely stay 1M+
+	case strings.Contains(key, "sonnet"):
+		in, out = 3, 15
+	case strings.Contains(key, "haiku"):
+		in, out = 1, 5
+	}
+	return Info{ContextLimit: ctx, InputPrice: in, OutputPrice: out}
+}

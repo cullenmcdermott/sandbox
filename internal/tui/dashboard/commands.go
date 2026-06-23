@@ -119,15 +119,19 @@ func (m *TranscriptModel) openHelp() {
 
 // --- palette filtering ----------------------------------------------------
 
-// filteredGroups returns the groups whose commands match the query (by name or
-// description, case-insensitive), preserving group/command order.
+// filteredGroups returns the groups whose commands match the query (by name,
+// description, or group name, case-insensitive), preserving group/command
+// order. A group-name match (e.g. "model" → "Model" group) includes the whole
+// group so typing /model shows all model-switching commands, not just
+// /model-default.
 func filteredGroups(query string) []cmdGroup {
 	q := strings.ToLower(strings.TrimSpace(query))
 	var out []cmdGroup
 	for _, g := range commandGroups() {
+		groupMatch := q != "" && strings.Contains(strings.ToLower(g.name), q)
 		var cmds []slashCmd
 		for _, c := range g.cmds {
-			if q == "" || strings.Contains(c.name, q) || strings.Contains(strings.ToLower(c.desc), q) {
+			if q == "" || groupMatch || strings.Contains(c.name, q) || strings.Contains(strings.ToLower(c.desc), q) {
 				cmds = append(cmds, c)
 			}
 		}

@@ -60,8 +60,129 @@ func TestCreateSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get pvc: %v", err)
 	}
-	if *pvc.Spec.StorageClassName != "rook-ceph-block" {
-		t.Errorf("storageClass: got %q, want rook-ceph-block", *pvc.Spec.StorageClassName)
+	// With no StorageClass in the Spec, the PVC must leave StorageClassName nil
+	// so it falls back to the cluster's default StorageClass (an explicit "" would
+	// request NO class and never bind). An environment-specific class is opt-in
+	// via Spec.StorageClass (see TestCreateSessionExplicitStorageClass).
+	if pvc.Spec.StorageClassName != nil {
+		t.Errorf("storageClass: got %q, want nil (cluster default)", *pvc.Spec.StorageClassName)
+	}
+}
+
+// TestCreateSessionProbes guards C9: the runner container must carry both a
+// readiness and a liveness probe hitting GET /healthz on the runner HTTP port,
+// so a crashed/hung runner is detected (readiness gates traffic; liveness lets
+// the controller recreate a wedged pod) rather than being marked Ready forever.
+func TestCreateSessionProbes(t *testing.T) {
+	ctx := context.Background()
+	b := newTestBackend(t)
+	spec := session.Spec{ID: "claude-sdk-probe", Backend: "claude-sdk", RunnerImage: "test:latest"}
+	if _, err := b.CreateSession(ctx, spec); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	sb, err := b.agents.AgentsV1alpha1().Sandboxes("agent-sessions").Get(ctx, "claude-sdk-probe", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get sandbox: %v", err)
+	}
+	c := sb.Spec.PodTemplate.Spec.Containers[0]
+
+	for _, tc := range []struct {
+		name  string
+		probe *corev1.Probe
+	}{
+		{"readiness", c.ReadinessProbe},
+		{"liveness", c.LivenessProbe},
+	} {
+		if tc.probe == nil {
+			t.Fatalf("%s probe is nil, want GET /healthz probe", tc.name)
+		}
+		h := tc.probe.HTTPGet
+		if h == nil {
+			t.Fatalf("%s probe is not an HTTPGet probe", tc.name)
+		}
+		if h.Path != "/healthz" {
+			t.Errorf("%s probe path = %q, want /healthz", tc.name, h.Path)
+		}
+		// Target the named "http" port so it tracks the runner ContainerPort.
+		if h.Port.StrVal != "http" {
+			t.Errorf("%s probe port = %q, want \"http\"", tc.name, h.Port.StrVal)
+		}
+	}
+}
+
+// TestCreateSessionExplicitStorageClass verifies an explicit Spec.StorageClass
+// is passed through to the PVC unchanged (the override path now that the default
+// is the cluster default rather than a hardcoded rook class).
+func TestCreateSessionExplicitStorageClass(t *testing.T) {
+	ctx := context.Background()
+	b := newTestBackend(t)
+	spec := session.Spec{
+		ID:           "claude-sdk-sc",
+		Backend:      "claude-sdk",
+		RunnerImage:  "test:latest",
+		StorageClass: "rook-ceph-block",
+	}
+	if _, err := b.CreateSession(ctx, spec); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	pvc, err := b.core.CoreV1().PersistentVolumeClaims("agent-sessions").Get(ctx, "claude-sdk-sc", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get pvc: %v", err)
+	}
+	if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName != "rook-ceph-block" {
+		t.Errorf("storageClass: got %v, want rook-ceph-block", pvc.Spec.StorageClassName)
+	}
+}
+
+// TestCreateSessionSinglePVC guards S1: the Sandbox spec must NOT carry a
+// VolumeClaimTemplates entry (which would make the controller auto-provision a
+// second, never-mounted PVC — 2× storage). The single per-session PVC is the
+// standalone one, mounted via the explicit "session" Volume.
+func TestCreateSessionSinglePVC(t *testing.T) {
+	ctx := context.Background()
+	b := newTestBackend(t)
+	spec := session.Spec{ID: "claude-sdk-pvc", Backend: "claude-sdk", RunnerImage: "test:latest"}
+	if _, err := b.CreateSession(ctx, spec); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	sb, err := b.agents.AgentsV1alpha1().Sandboxes("agent-sessions").Get(ctx, "claude-sdk-pvc", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get sandbox: %v", err)
+	}
+	if n := len(sb.Spec.VolumeClaimTemplates); n != 0 {
+		t.Fatalf("VolumeClaimTemplates = %d, want 0 (a template auto-provisions a 2nd, never-mounted PVC — S1)", n)
+	}
+
+	// Storage must still be wired: the pod mounts the standalone PVC by name.
+	pod := sb.Spec.PodTemplate.Spec
+	var claim string
+	for _, v := range pod.Volumes {
+		if v.Name == "session" && v.PersistentVolumeClaim != nil {
+			claim = v.PersistentVolumeClaim.ClaimName
+		}
+	}
+	if claim != "claude-sdk-pvc" {
+		t.Fatalf("session volume ClaimName = %q, want claude-sdk-pvc (standalone PVC)", claim)
+	}
+	var mounted bool
+	for _, m := range pod.Containers[0].VolumeMounts {
+		if m.Name == "session" && m.MountPath == "/session" {
+			mounted = true
+		}
+	}
+	if !mounted {
+		t.Fatal("session volume not mounted at /session")
+	}
+
+	// Exactly one PVC object is created by the backend.
+	pvcs, err := b.core.CoreV1().PersistentVolumeClaims("agent-sessions").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("list pvc: %v", err)
+	}
+	if len(pvcs.Items) != 1 {
+		t.Fatalf("backend created %d PVCs, want 1", len(pvcs.Items))
 	}
 }
 
@@ -122,11 +243,11 @@ func TestCreateSessionSecretAndEnv(t *testing.T) {
 		rt.ValueFrom.SecretKeyRef.Name != sessionSecretName("claude-sdk-env") {
 		t.Error("RUNNER_TOKEN should reference the per-session secret")
 	}
-	ak := envVar(env, "ANTHROPIC_API_KEY")
+	ak := envVar(env, "CLAUDE_CODE_OAUTH_TOKEN")
 	if ak == nil || ak.ValueFrom == nil || ak.ValueFrom.SecretKeyRef == nil ||
 		ak.ValueFrom.SecretKeyRef.Name != anthropicSecretName ||
 		ak.ValueFrom.SecretKeyRef.Optional == nil || !*ak.ValueFrom.SecretKeyRef.Optional {
-		t.Error("ANTHROPIC_API_KEY should optionally reference the anthropic secret")
+		t.Error("CLAUDE_CODE_OAUTH_TOKEN should optionally reference the anthropic secret")
 	}
 
 	// The SSH public key is mounted from the per-session secret.
