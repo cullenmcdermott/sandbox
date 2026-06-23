@@ -376,8 +376,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var m *TranscriptModel
 		if existing, ok := a.dashboard.retainedTranscript(msg.sess.ID()); ok {
 			m = existing
-			m.client = msg.client       // install the live (active) client
-			m.reconnect = msg.reconnect // and its reconnect callback
+			m.client = msg.client         // install the live (active) client
+			m.reconnect = msg.reconnect   // and its reconnect callback
+			m.seedSize(a.width, a.height) // background model never got a WindowSizeMsg
 		} else {
 			m = NewTranscript(msg.client, msg.sess, msg.reconnect)
 			a.dashboard.putRetained(msg.sess.ID(), m)

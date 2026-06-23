@@ -8,6 +8,14 @@ import (
 	"github.com/cullenmcdermott/sandbox/internal/session"
 )
 
+func TestSeedSizeSetsDimensions(t *testing.T) {
+	m := NewTranscript(&fakeRunnerClient{}, transcriptSession(), nil)
+	m.seedSize(120, 40)
+	if m.width != 120 || m.height != 40 {
+		t.Fatalf("seedSize gave (%d,%d), want (120,40)", m.width, m.height)
+	}
+}
+
 func TestHideShowPreservesModelIdentity(t *testing.T) {
 	app := NewApp(nil, nil, nil)
 	id := session.ID("sess-1")

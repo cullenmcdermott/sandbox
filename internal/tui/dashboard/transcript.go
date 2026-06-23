@@ -1525,6 +1525,14 @@ func (m *TranscriptModel) resolvePermission(allow bool) tea.Cmd {
 
 // handleEvent applies a single runner event to the transcript. It returns a
 // follow-up command when the event itself triggers async work (auto-reconnect).
+// seedSize applies a terminal size to a model that was built in the background
+// (and so never received a WindowSizeMsg). It mirrors the WindowSizeMsg handler
+// so the model lays out correctly before its first foreground View.
+func (m *TranscriptModel) seedSize(w, h int) {
+	m.width, m.height = w, h
+	m.layout()
+}
+
 // ingest applies a single event to this model from an external (background)
 // source — the dashboard's passive stream feeding a warm, non-foreground model.
 // It reuses handleEvent (which dedupes on lastSeq) and discards the returned
