@@ -490,6 +490,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.liveSSECancels[msg.id] = msg.cancel
 		m.liveSSEChannels[msg.id] = msg.ch
 		m.liveSSEClients[msg.id] = msg.client
+		// Build (or reuse) the warm transcript for this session so the background
+		// stream keeps a full, live chat in memory — making a later show an O(1)
+		// swap instead of a rebuild+replay. Skip opencode sessions (no Go
+		// transcript) and skip if this session is currently the foreground one
+		// (its own active stream already owns the model).
+		if sess.State.Backend != session.BackendOpenCode && msg.id != m.attachedID {
+			m.ensureRetained(sess, msg.client)
+			m.maybeWarnWarm()
+		}
 		return m, liveSSENextCmd(msg.id, msg.ch)
 
 	case liveSSEReconnectMsg:

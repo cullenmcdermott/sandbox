@@ -16,6 +16,27 @@ func mustTitlePayload(t *testing.T, title string) json.RawMessage {
 	return b
 }
 
+func TestLiveSSEReadyBuildsRetained(t *testing.T) {
+	m := New(nil)
+	id := session.ID("sess-1")
+	sess := transcriptSession()
+	sess.State.ID = id
+	sess.State.Status = session.StatusRunning
+	m.sessions = []Session{sess}
+
+	ch := make(chan session.Event)
+	_, _ = m.Update(liveSSEReadyMsg{
+		id:     id,
+		ch:     ch,
+		cancel: func() {},
+		client: &fakeRunnerClient{},
+	})
+
+	if _, ok := m.retainedTranscript(id); !ok {
+		t.Fatal("liveSSEReadyMsg must build a retained model for the session")
+	}
+}
+
 func TestIngestAppliesEventAndDedupes(t *testing.T) {
 	m := NewTranscript(&fakeRunnerClient{}, transcriptSession(), nil)
 
