@@ -196,6 +196,12 @@ type Model struct {
 	// May be nil (no live status, graceful degradation).
 	connector Connector
 
+	// observerConnector is a lightweight connect path for background (passive)
+	// status streams: it does port-forward + runner health only, skipping the
+	// attach-time file-sync setup so the per-session background streams stay cheap
+	// (RV8). When nil, background streams fall back to the full connector.
+	observerConnector Connector
+
 	// sessions is the canonical read-model: all live sessions, kept in the
 	// current sort order. The watch Cmd patches individual entries here.
 	sessions []Session
@@ -398,6 +404,24 @@ func newHelp() help.Model {
 func (m *Model) WithConnector(c Connector) *Model {
 	m.connector = c
 	return m
+}
+
+// WithObserverConnector injects the lightweight connect path used for background
+// (passive) status streams — port-forward + runner health, no file-sync setup.
+// nil leaves background streams on the full connector (the prior behavior).
+func (m *Model) WithObserverConnector(c Connector) *Model {
+	m.observerConnector = c
+	return m
+}
+
+// backgroundConnector returns the connector used for background status streams
+// and other non-attach connects: the lightweight observer connector when set,
+// else the full connector.
+func (m *Model) backgroundConnector() Connector {
+	if m.observerConnector != nil {
+		return m.observerConnector
+	}
+	return m.connector
 }
 
 // WithSyncProber injects the sync-health probe used to render per-session sync
@@ -806,7 +830,7 @@ func (m *Model) maybeStartAnim() tea.Cmd {
 // Each session is bounded to one concurrent SSE forward: we store the cancel
 // function in liveSSECancels and cancel any prior stream before opening a new one.
 func (m *Model) startLiveSSECmd(sess Session) tea.Cmd {
-	connector := m.connector
+	connector := m.backgroundConnector()
 	if connector == nil || sess.ID() == "" {
 		return nil
 	}
@@ -847,7 +871,7 @@ func (m *Model) startLiveSSECmd(sess Session) tea.Cmd {
 // so the Update loop can back off and retry — or eventually degrade — instead of
 // silently giving up (which would leave a healthy-but-blipped session stuck busy).
 func (m *Model) reconnectLiveSSECmd(sess Session, attempt int) tea.Cmd {
-	connector := m.connector
+	connector := m.backgroundConnector()
 	if connector == nil || sess.ID() == "" {
 		return nil
 	}
@@ -1071,7 +1095,7 @@ func (m *Model) approveCmd(sess Session, allow bool) tea.Cmd {
 		}
 	}
 
-	connector := m.connector
+	connector := m.backgroundConnector()
 	if connector == nil {
 		return nil
 	}

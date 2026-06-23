@@ -273,6 +273,60 @@ func TestIngestAppliesEventAndDedupes(t *testing.T) {
 	}
 }
 
+func TestBackgroundStreamPrefersObserverConnector(t *testing.T) {
+	m := New(nil)
+	var observerCalled, fullCalled bool
+	m.WithConnector(func(_ context.Context, _ session.Ref, _ string, _ func(ConnectStage)) (ConnectResult, error) {
+		fullCalled = true
+		return ConnectResult{Client: &fakeRunnerClient{}}, nil
+	})
+	m.WithObserverConnector(func(_ context.Context, _ session.Ref, _ string, _ func(ConnectStage)) (ConnectResult, error) {
+		observerCalled = true
+		return ConnectResult{Client: &fakeRunnerClient{}}, nil
+	})
+
+	sess := transcriptSession()
+	sess.State.ID = "s1"
+	sess.State.Status = session.StatusRunning
+
+	cmd := m.startLiveSSECmd(sess)
+	if cmd == nil {
+		t.Fatal("expected a background-stream Cmd")
+	}
+	_ = cmd() // run it: invokes the connector, then EventsPassive on the result
+
+	if !observerCalled {
+		t.Fatal("background stream should use the lightweight observer connector")
+	}
+	if fullCalled {
+		t.Fatal("background stream must NOT use the full (sync-setup) connector when an observer is set")
+	}
+}
+
+func TestBackgroundStreamFallsBackToFullConnector(t *testing.T) {
+	m := New(nil)
+	var fullCalled bool
+	m.WithConnector(func(_ context.Context, _ session.Ref, _ string, _ func(ConnectStage)) (ConnectResult, error) {
+		fullCalled = true
+		return ConnectResult{Client: &fakeRunnerClient{}}, nil
+	})
+	// No observer connector set.
+
+	sess := transcriptSession()
+	sess.State.ID = "s1"
+	sess.State.Status = session.StatusRunning
+
+	cmd := m.startLiveSSECmd(sess)
+	if cmd == nil {
+		t.Fatal("expected a background-stream Cmd")
+	}
+	_ = cmd()
+
+	if !fullCalled {
+		t.Fatal("background stream should fall back to the full connector when no observer is set")
+	}
+}
+
 func TestFooterShowsWarmCount(t *testing.T) {
 	m := New(nil)
 	m.width = 120

@@ -200,6 +200,11 @@ type RunOptions struct {
 	// instead of replaying the full event history.
 	SnapshotStore SnapshotStore
 
+	// ObserverConnector is the lightweight connect path for background passive
+	// status streams (port-forward + runner health, no file-sync setup). When
+	// nil, background streams use Connector.
+	ObserverConnector Connector
+
 	// SyncProber reports per-session sync health for the dashboard indicator.
 	SyncProber SyncProber
 
@@ -224,6 +229,9 @@ func (a *App) applyOpts(opts []RunOptions) {
 	}
 	if opts[0].SnapshotStore != nil {
 		a.dashboard = a.dashboard.WithSnapshotStore(opts[0].SnapshotStore)
+	}
+	if opts[0].ObserverConnector != nil {
+		a.dashboard = a.dashboard.WithObserverConnector(opts[0].ObserverConnector)
 	}
 	if opts[0].SyncProber != nil {
 		a.dashboard = a.dashboard.WithSyncProber(opts[0].SyncProber)

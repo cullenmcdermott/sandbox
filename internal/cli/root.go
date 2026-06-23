@@ -69,12 +69,13 @@ func NewRoot() *cobra.Command {
 			creator := newDashboardCreator(backend, "", "")
 			return afterTUI(func() error {
 				return dashboard.Run(backend, connector, creator, dashboard.RunOptions{
-					DestroyHook:    newLocalDestroyHook(),
-					PreDestroyHook: newPreDestroySyncStop(),
-					TitleStore:     indexTitleStore{},
-					SnapshotStore:  indexSnapshotStore{},
-					SyncProber:     dashboardSyncProber(),
-					IdleTimeout:    defaultReaperIdleTimeout,
+					DestroyHook:       newLocalDestroyHook(),
+					PreDestroyHook:    newPreDestroySyncStop(),
+					TitleStore:        indexTitleStore{},
+					SnapshotStore:     indexSnapshotStore{},
+					ObserverConnector: newDashboardObserverConnector(backend, ""),
+					SyncProber:        dashboardSyncProber(),
+					IdleTimeout:       defaultReaperIdleTimeout,
 				})
 			})
 		},

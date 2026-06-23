@@ -64,6 +64,23 @@ type opencodeCreds struct {
 // reconnect: the original connecting screen's update channel has been closed by
 // then, so reusing its sender would send on a closed channel and panic.
 func (sc *sessionConnector) connect(ctx context.Context, onStage func(dashboard.ConnectStage)) (*connection, error) {
+	return sc.establish(ctx, onStage, true)
+}
+
+// connectObserver establishes a lightweight, read-only connection for a
+// background status stream: port-forward + runner health only. It skips file
+// sync setup, the idle-reaper ensure, and the opencode-serve readiness wait —
+// all attach-time concerns — so the dashboard's per-session background streams
+// stay cheap (RV8) instead of each running mutagen sync create + flush just to
+// observe events.
+func (sc *sessionConnector) connectObserver(ctx context.Context, onStage func(dashboard.ConnectStage)) (*connection, error) {
+	return sc.establish(ctx, onStage, false)
+}
+
+// establish is the shared connect body. full=true performs the complete attach
+// setup (file sync, idle reaper, opencode readiness); full=false stops at a
+// healthy runner client, for a background observer stream.
+func (sc *sessionConnector) establish(ctx context.Context, onStage func(dashboard.ConnectStage), full bool) (*connection, error) {
 	sc.closeHandles()
 	if onStage == nil {
 		onStage = func(dashboard.ConnectStage) {}
@@ -109,49 +126,51 @@ func (sc *sessionConnector) connect(ctx context.Context, onStage func(dashboard.
 		return nil, fmt.Errorf("runner health: %w", err)
 	}
 
-	onStage(dashboard.StageSync)
 	var syncWarning string
-	privPath, _, kerr := ensureSSHKey(string(sc.ref.ID))
-	if kerr != nil {
-		syncWarning = fmt.Sprintf("file sync unavailable (ssh key): %v", kerr)
-	} else if created, serr := startMutagen(ctx, string(sc.ref.ID), sc.projectPath, privPath, handles[1].LocalPort()); serr != nil {
-		syncWarning = fmt.Sprintf("file sync unavailable: %v", serr)
-	} else if created {
-		// First-ever sync for this session: `mutagen sync create` returns before
-		// the SSH transport is proven or any files have staged, so a broken
-		// transport (auth/agent-install) or a not-yet-uploaded workspace would
-		// otherwise be invisible. Block on a bounded flush: a broken transport
-		// errors fast (surfaced as a warning, RV20); a healthy-but-large first
-		// sync may time out, which just means "still uploading in the background"
-		// rather than a failure (RV21).
-		flushCtx, cancelFlush := context.WithTimeout(ctx, 12*time.Second)
-		ferr := syncManager().FlushAll(flushCtx, string(sc.ref.ID))
-		timedOut := flushCtx.Err() == context.DeadlineExceeded
-		cancelFlush()
-		switch {
-		case ferr != nil && timedOut:
-			syncWarning = "initial file sync still in progress (continuing in the background)"
-		case ferr != nil:
-			syncWarning = fmt.Sprintf("file sync error: %v", ferr)
+	if full {
+		onStage(dashboard.StageSync)
+		privPath, _, kerr := ensureSSHKey(string(sc.ref.ID))
+		if kerr != nil {
+			syncWarning = fmt.Sprintf("file sync unavailable (ssh key): %v", kerr)
+		} else if created, serr := startMutagen(ctx, string(sc.ref.ID), sc.projectPath, privPath, handles[1].LocalPort()); serr != nil {
+			syncWarning = fmt.Sprintf("file sync unavailable: %v", serr)
+		} else if created {
+			// First-ever sync for this session: `mutagen sync create` returns before
+			// the SSH transport is proven or any files have staged, so a broken
+			// transport (auth/agent-install) or a not-yet-uploaded workspace would
+			// otherwise be invisible. Block on a bounded flush: a broken transport
+			// errors fast (surfaced as a warning, RV20); a healthy-but-large first
+			// sync may time out, which just means "still uploading in the background"
+			// rather than a failure (RV21).
+			flushCtx, cancelFlush := context.WithTimeout(ctx, 12*time.Second)
+			ferr := syncManager().FlushAll(flushCtx, string(sc.ref.ID))
+			timedOut := flushCtx.Err() == context.DeadlineExceeded
+			cancelFlush()
+			switch {
+			case ferr != nil && timedOut:
+				syncWarning = "initial file sync still in progress (continuing in the background)"
+			case ferr != nil:
+				syncWarning = fmt.Sprintf("file sync error: %v", ferr)
+			}
+		} else {
+			// Reconnect to an already-synced session: the mutagen session persists in
+			// the daemon and reconciles on its own, so DON'T block the user behind a
+			// full flush — that blocking flush is what made reattaching feel like a
+			// fresh "Syncing Files…" every time. Kick a detached flush so mutagen
+			// re-establishes the transport on the new port-forward promptly instead of
+			// waiting out its reconnect backoff; the dashboard's per-session sync
+			// indicator shows progress. This is what makes reattaching feel instant.
+			go func() {
+				bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				_ = syncManager().FlushAll(bgCtx, string(sc.ref.ID))
+			}()
 		}
-	} else {
-		// Reconnect to an already-synced session: the mutagen session persists in
-		// the daemon and reconciles on its own, so DON'T block the user behind a
-		// full flush — that blocking flush is what made reattaching feel like a
-		// fresh "Syncing Files…" every time. Kick a detached flush so mutagen
-		// re-establishes the transport on the new port-forward promptly instead of
-		// waiting out its reconnect backoff; the dashboard's per-session sync
-		// indicator shows progress. This is what makes reattaching feel instant.
-		go func() {
-			bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			_ = syncManager().FlushAll(bgCtx, string(sc.ref.ID))
-		}()
-	}
 
-	// Make sure the idle reaper is watching (a prior one may have completed when
-	// the session was suspended).
-	ensureReaperForSession(ctx, sc.backend, sc.ref, sc.reaperImage)
+		// Make sure the idle reaper is watching (a prior one may have completed when
+		// the session was suspended).
+		ensureReaperForSession(ctx, sc.backend, sc.ref, sc.reaperImage)
+	}
 
 	conn := &connection{
 		client:   client,
@@ -159,7 +178,7 @@ func (sc *sessionConnector) connect(ctx context.Context, onStage func(dashboard.
 		backend:  st.Backend,
 		warning:  syncWarning,
 	}
-	if opencode {
+	if full && opencode {
 		pass, perr := sc.backend.OpencodePassword(ctx, sc.ref)
 		if perr != nil {
 			sc.closeHandles()

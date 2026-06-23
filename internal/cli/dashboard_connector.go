@@ -65,6 +65,45 @@ func newDashboardConnector(backend *k8s.Backend, reaperImage string) dashboard.C
 	}
 }
 
+// newDashboardObserverConnector returns a dashboard.Connector wired to the
+// lightweight observer connect (port-forward + runner health only, no file-sync
+// setup). The dashboard uses it for background passive status streams so each
+// per-session stream stops paying for mutagen sync create + flush just to
+// observe events (RV8). The returned reconnect callback reuses the same
+// lightweight path.
+func newDashboardObserverConnector(backend *k8s.Backend, reaperImage string) dashboard.Connector {
+	if reaperImage == "" {
+		reaperImage = k8s.DefaultReaperImage
+	}
+	return func(ctx context.Context, ref session.Ref, projectPath string, onStage func(dashboard.ConnectStage)) (dashboard.ConnectResult, error) {
+		sc := &sessionConnector{
+			backend:     backend,
+			ref:         ref,
+			projectPath: projectPath,
+			reaperImage: reaperImage,
+		}
+
+		conn, err := sc.connectObserver(ctx, onStage)
+		if err != nil {
+			return dashboard.ConnectResult{}, fmt.Errorf("observe %s: %w", ref.ID, err)
+		}
+
+		reconnect := func(ctx context.Context) (dashboard.RunnerClient, error) {
+			c, rerr := sc.connectObserver(ctx, nil)
+			if rerr != nil {
+				return nil, rerr
+			}
+			return c.client, nil
+		}
+
+		return dashboard.ConnectResult{
+			Client:    conn.client,
+			Reconnect: reconnect,
+			Endpoint:  conn.endpoint,
+		}, nil
+	}
+}
+
 // newDashboardCreator returns a dashboard.Creator that provisions a brand-new
 // session for the current working directory and connects to it — the `n` (new
 // session) action. It mirrors `sandbox claude` without a prompt: ID generation,
