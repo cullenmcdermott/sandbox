@@ -1,11 +1,64 @@
 package dashboard
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
 	"github.com/cullenmcdermott/sandbox/internal/session"
 )
+
+func TestHideShowPreservesModelIdentity(t *testing.T) {
+	app := NewApp(nil, nil, nil)
+	id := session.ID("sess-1")
+	sess := transcriptSession()
+	sess.State.ID = id
+	sess.State.Status = session.StatusRunning
+	app.dashboard.sessions = []Session{sess}
+	app.dashboard.WithConnector(func(_ context.Context, _ session.Ref, _ string, _ func(ConnectStage)) (ConnectResult, error) {
+		return ConnectResult{Client: &fakeRunnerClient{}}, nil
+	})
+
+	// Show.
+	_, _ = app.Update(attachReadyMsg{sess: sess, client: &fakeRunnerClient{}})
+	first := app.transcript
+	if first == nil {
+		t.Fatal("no foreground transcript after show")
+	}
+
+	// Hide (detachMsg path).
+	_, _ = app.Update(detachMsg{})
+	if app.transcript != nil {
+		t.Fatal("detach must clear the foreground transcript pointer")
+	}
+	if _, ok := app.dashboard.retainedTranscript(id); !ok {
+		t.Fatal("detach must KEEP the model warm in the retained map")
+	}
+
+	// Show again.
+	_, _ = app.Update(attachReadyMsg{sess: sess, client: &fakeRunnerClient{}})
+	if app.transcript != first {
+		t.Fatal("re-show must reuse the SAME model instance (warm), not rebuild")
+	}
+}
+
+func TestDetachRestartsBackgroundStream(t *testing.T) {
+	app := NewApp(nil, nil, nil)
+	id := session.ID("sess-1")
+	sess := transcriptSession()
+	sess.State.ID = id
+	sess.State.Status = session.StatusRunning
+	app.dashboard.sessions = []Session{sess}
+	app.dashboard.WithConnector(func(_ context.Context, _ session.Ref, _ string, _ func(ConnectStage)) (ConnectResult, error) {
+		return ConnectResult{Client: &fakeRunnerClient{}}, nil
+	})
+	_, _ = app.Update(attachReadyMsg{sess: sess, client: &fakeRunnerClient{}})
+
+	_, cmd := app.Update(detachMsg{})
+	if cmd == nil {
+		t.Fatal("detach should return a Cmd that restarts the background stream")
+	}
+}
 
 func mustTitlePayload(t *testing.T, title string) json.RawMessage {
 	t.Helper()
