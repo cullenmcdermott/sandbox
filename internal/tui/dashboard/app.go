@@ -10,9 +10,12 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/charmbracelet/x/ansi"
+
 	"github.com/cullenmcdermott/sandbox/internal/k8s"
 	"github.com/cullenmcdermott/sandbox/internal/session"
 	"github.com/cullenmcdermott/sandbox/internal/terminal"
+	"github.com/cullenmcdermott/sandbox/tui/kit"
 	"github.com/cullenmcdermott/sandbox/tui/theme"
 )
 
@@ -191,6 +194,11 @@ type RunOptions struct {
 
 	// TitleStore persists user-chosen session titles across restarts (T5).
 	TitleStore TitleStore
+
+	// SnapshotStore persists the per-session live read-model so the dashboard
+	// hydrates instantly on launch and resumes the SSE stream from the cached seq
+	// instead of replaying the full event history.
+	SnapshotStore SnapshotStore
 }
 
 // applyOpts threads RunOptions into the dashboard model.
@@ -206,6 +214,9 @@ func (a *App) applyOpts(opts []RunOptions) {
 	}
 	if opts[0].TitleStore != nil {
 		a.dashboard = a.dashboard.WithTitleStore(opts[0].TitleStore)
+	}
+	if opts[0].SnapshotStore != nil {
+		a.dashboard = a.dashboard.WithSnapshotStore(opts[0].SnapshotStore)
 	}
 }
 
@@ -359,7 +370,18 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.screen = ScreenExternal
 			return a, pane.Init()
 		}
-		m := NewTranscript(msg.client, msg.sess, msg.reconnect)
+		// Reuse the warm model if this session was already retained (instant, with
+		// the progress made while hidden); otherwise build a fresh one (cold open)
+		// and register it as warm so future hide/show are O(1).
+		var m *TranscriptModel
+		if existing, ok := a.dashboard.retainedTranscript(msg.sess.ID()); ok {
+			m = existing
+			m.client = msg.client       // install the live (active) client
+			m.reconnect = msg.reconnect // and its reconnect callback
+		} else {
+			m = NewTranscript(msg.client, msg.sess, msg.reconnect)
+			a.dashboard.putRetained(msg.sess.ID(), m)
+		}
 		// Thread detected terminal capabilities into the transcript so its
 		// status-line effects (ctx-gauge sweep, etc.) light up only on a capable
 		// terminal; the dashboard Model detected them once at startup.
@@ -666,6 +688,13 @@ func (a *App) withTerminalSignals(v tea.View) tea.View {
 	}
 	// One-shot desktop notification queued by the toast transition.
 	pre.WriteString(a.dashboard.takePendingOSC())
+	// Stage 3: one-shot Kitty image transmission queued by the transcript's ctx
+	// gauge when its value changed this frame (the only sanctioned out-of-band
+	// write — it rides the frame on the changing frame, not every frame).
+	// Prepended so the image exists before the placeholder cells reference it.
+	if a.transcript != nil {
+		pre.WriteString(a.transcript.takePendingKitty())
+	}
 
 	if pre.Len() == 0 {
 		return v
@@ -696,11 +725,22 @@ func (a *App) modalView() tea.View {
 	mx := (w - mw) / 2
 	my := (h - mh) / 2
 
-	modal := a.transcript.modalContent(mw, mh)
+	// Frame the transcript as a bordered popup. The content is sized two cells
+	// smaller in each axis to leave room for the rounded border, so the framed
+	// card is exactly mw×mh and lines up with the drop shadow.
+	inner := a.transcript.modalContent(mw-2, mh-2)
+	modal := kit.Card(kit.CardOpts{
+		Content:     inner,
+		Width:       mw,
+		BorderColor: theme.Charple,
+		Background:  theme.Surface,
+	})
 	shadow := solidBlock(mw, mh, theme.Shadow)
 
 	layers := []*lipgloss.Layer{
-		lipgloss.NewLayer(bg).X(0).Y(0).Z(0),
+		// Ghost the dashboard behind the popup so it reads as "out of focus"
+		// context instead of bleeding live (colored) rows past the modal edges.
+		lipgloss.NewLayer(dimBackdrop(bg, w, h)).X(0).Y(0).Z(0),
 		lipgloss.NewLayer(shadow).X(mx + 2).Y(my + 1).Z(1),
 		lipgloss.NewLayer(modal).X(mx).Y(my).Z(2),
 	}
@@ -710,6 +750,31 @@ func (a *App) modalView() tea.View {
 	v := tea.NewView(canvas.Render())
 	v.AltScreen = true
 	return v
+}
+
+// dimBackdrop ghosts the dashboard behind a modal: it strips each line's colors
+// and re-renders them as dim text on the flat page background, normalized to a
+// solid w×h block. The result is recognizably the dashboard, but recessed — so
+// a floating popup reads as the focus and live rows (e.g. the status line) don't
+// bleed through at full brightness past the modal's edges.
+func dimBackdrop(bg string, w, h int) string {
+	dim := lipgloss.NewStyle().Foreground(theme.TextDim).Background(theme.Page)
+	lines := strings.Split(bg, "\n")
+	out := make([]string, h)
+	for i := range out {
+		var raw string
+		if i < len(lines) {
+			raw = ansi.Strip(lines[i])
+		}
+		if lipgloss.Width(raw) > w {
+			raw = ansi.Truncate(raw, w, "")
+		}
+		if pad := w - lipgloss.Width(raw); pad > 0 {
+			raw += strings.Repeat(" ", pad)
+		}
+		out[i] = dim.Render(raw)
+	}
+	return strings.Join(out, "\n")
 }
 
 // solidBlock returns a w×h block of spaces with the given background color.

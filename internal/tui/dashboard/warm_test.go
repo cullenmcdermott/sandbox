@@ -16,6 +16,49 @@ func mustTitlePayload(t *testing.T, title string) json.RawMessage {
 	return b
 }
 
+func TestAttachReusesRetainedModel(t *testing.T) {
+	app := NewApp(nil, nil, nil)
+	id := session.ID("sess-1")
+	sess := transcriptSession()
+	sess.State.ID = id
+	sess.State.Status = session.StatusRunning
+	app.dashboard.sessions = []Session{sess}
+
+	// Pre-warm: a retained model exists (as if a background stream had built it).
+	pre := app.dashboard.ensureRetained(sess, &fakeRunnerClient{})
+
+	_, _ = app.Update(attachReadyMsg{sess: sess, client: &fakeRunnerClient{}})
+
+	if app.transcript == nil {
+		t.Fatal("attach did not set a foreground transcript")
+	}
+	if app.transcript != pre {
+		t.Fatal("attach must REUSE the retained model instance, not rebuild it")
+	}
+	if app.screen != ScreenTranscript {
+		t.Fatalf("screen = %v, want ScreenTranscript", app.screen)
+	}
+}
+
+func TestAttachColdRegistersRetained(t *testing.T) {
+	app := NewApp(nil, nil, nil)
+	id := session.ID("sess-2")
+	sess := transcriptSession()
+	sess.State.ID = id
+	app.dashboard.sessions = []Session{sess}
+
+	// No pre-warm: cold open must still build a model AND register it as warm.
+	_, _ = app.Update(attachReadyMsg{sess: sess, client: &fakeRunnerClient{}})
+
+	got, ok := app.dashboard.retainedTranscript(id)
+	if !ok {
+		t.Fatal("cold attach must register the new model as warm")
+	}
+	if got != app.transcript {
+		t.Fatal("registered warm model must be the same instance as the foreground transcript")
+	}
+}
+
 func TestHandleRunnerEventFeedsRetained(t *testing.T) {
 	m := New(nil)
 	id := session.ID("sess-1")
