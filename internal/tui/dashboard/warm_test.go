@@ -273,6 +273,22 @@ func TestIngestAppliesEventAndDedupes(t *testing.T) {
 	}
 }
 
+func TestFooterShowsWarmCount(t *testing.T) {
+	m := New(nil)
+	m.width = 120
+	s1 := transcriptSession()
+	s1.State.ID = "a"
+	s2 := transcriptSession()
+	s2.State.ID = "b"
+	m.ensureRetained(s1, &fakeRunnerClient{})
+	m.ensureRetained(s2, &fakeRunnerClient{})
+
+	bar := m.bottomBar(120)
+	if !strings.Contains(bar, "2") || !strings.Contains(bar, "warm") {
+		t.Fatalf("footer should show warm count; got %q", bar)
+	}
+}
+
 func TestSyncPollUpdatesSession(t *testing.T) {
 	m := New(nil)
 	id := session.ID("sess-1")

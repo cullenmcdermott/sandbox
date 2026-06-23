@@ -282,9 +282,15 @@ func (m *Model) backendMix(c sessionPartition) string {
 func (m *Model) bottomBar(w int) string {
 	m.help.SetWidth(w - 2)
 	left := " " + m.help.ShortHelpView(m.keys.ShortHelp())
+	// Right-aligned warm-session count: how many running sessions are kept warm
+	// (live model + passive stream) and so resume instantly.
+	warm := ""
+	if n := m.warmCount(); n > 0 {
+		warm = lipgloss.NewStyle().Foreground(theme.Gold).Render(fmt.Sprintf("⚡%d warm", n)) + " "
+	}
 	// theme.TextMuted (not the recessed theme.TextDim) so the footer keeps contrast
 	// against the surface fill (P11).
-	styled := lipgloss.NewStyle().Foreground(theme.TextMuted).Render(spread(left, "", w))
+	styled := lipgloss.NewStyle().Foreground(theme.TextMuted).Render(spread(left, warm, w))
 	return withBackground(styled, theme.Surface)
 }
 
