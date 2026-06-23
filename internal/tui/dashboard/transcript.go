@@ -212,6 +212,16 @@ type TranscriptModel struct {
 	// line is byte-identical to today. See docs/ghostty-terminal-effects.md.
 	caps terminal.Caps
 
+	// Stage 3 (Kitty graphics ctx gauge). kittyGaugeBucket is the last fill
+	// fraction (quantized to whole percent) we transmitted an image for;
+	// kittyGaugeID is that image's id (a new id each change forces a re-fetch);
+	// pendingKitty holds the one-shot APC transmission queued when the bucket
+	// changes, drained into the next frame by App.View. All zero/empty unless
+	// caps.KittyGraphics. See docs/ghostty-terminal-effects.md §4.
+	kittyGaugeBucket int
+	kittyGaugeID     uint32
+	pendingKitty     string
+
 	// modelOverride is the in-session /model selection, sent as TurnInput.Model
 	// on the next turn (empty => session/account default). Kept separate from
 	// `model` (the SDK-reported active id used for display) so the status line
@@ -1129,10 +1139,10 @@ func (m *TranscriptModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.openHelp()
 		return m, nil
 	}
-	// esc: close an open overlay, or leave INSERT for NORMAL. When none of those
-	// apply the App intercepts esc as a detach before delegation (see
-	// escapeConsumes); ctrl+] / ctrl+4 always detach there. A queued prompt
-	// still steers the running turn.
+	// esc, in priority order: close an open overlay; steer the running turn with
+	// a queued prompt (interrupt + inject); interrupt a running turn outright;
+	// leave INSERT for NORMAL. When none apply the App intercepts esc as a detach
+	// before delegation (see escapeConsumes); ctrl+] / ctrl+4 always detach there.
 	if key == "esc" {
 		if m.search.open {
 			cmd, _ := m.searchKey(msg)
@@ -1142,12 +1152,15 @@ func (m *TranscriptModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			cmd, _ := m.paletteKey(msg)
 			return m, cmd
 		}
+		if m.queuedPrompt != "" {
+			return m, m.queueSteer()
+		}
+		if m.turnActive {
+			return m, m.interruptTurn()
+		}
 		if m.imode == modeInsert {
 			m.enterNormal()
 			return m, nil
-		}
-		if m.queuedPrompt != "" {
-			return m, m.queueSteer()
 		}
 		return m, nil
 	}
@@ -1348,6 +1361,20 @@ func (m *TranscriptModel) queueSteer() tea.Cmd {
 	)
 }
 
+// interruptTurn cancels the active turn without injecting a new prompt. A bare
+// esc maps here while a turn runs and there is no queued prompt to steer with;
+// the runner answers with EventTurnInterrupted, which clears turnActive and
+// appends the "[interrupted]" marker.
+func (m *TranscriptModel) interruptTurn() tea.Cmd {
+	if !m.turnActive {
+		return nil
+	}
+	return func() tea.Msg {
+		_ = m.client.InterruptTurn(context.Background(), m.ref, session.TurnRef{})
+		return nil
+	}
+}
+
 // submitText starts a turn for the given prompt text, recording the user block
 // and entering the busy state. Shared by interactive submit and the auto-
 // submitted initial prompt.
@@ -1498,6 +1525,15 @@ func (m *TranscriptModel) resolvePermission(allow bool) tea.Cmd {
 
 // handleEvent applies a single runner event to the transcript. It returns a
 // follow-up command when the event itself triggers async work (auto-reconnect).
+// ingest applies a single event to this model from an external (background)
+// source — the dashboard's passive stream feeding a warm, non-foreground model.
+// It reuses handleEvent (which dedupes on lastSeq) and discards the returned
+// Cmd, since a background model is never the active tea screen. Safe to call on
+// a model whose own SSE stream has not been started.
+func (m *TranscriptModel) ingest(ev session.Event) {
+	_ = m.handleEvent(ev)
+}
+
 func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 	if ev.Seq > m.lastSeq {
 		m.lastSeq = ev.Seq

@@ -1,10 +1,37 @@
 package dashboard
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/cullenmcdermott/sandbox/internal/session"
 )
+
+func mustTitlePayload(t *testing.T, title string) json.RawMessage {
+	t.Helper()
+	b, err := json.Marshal(session.SessionTitlePayload{Title: title})
+	if err != nil {
+		t.Fatalf("marshal title payload: %v", err)
+	}
+	return b
+}
+
+func TestIngestAppliesEventAndDedupes(t *testing.T) {
+	m := NewTranscript(&fakeRunnerClient{}, transcriptSession(), nil)
+
+	ev := session.Event{Seq: 5, Type: session.EventSessionTitle, Payload: mustTitlePayload(t, "Hello")}
+	m.ingest(ev)
+	if m.lastSeq != 5 {
+		t.Fatalf("lastSeq = %d after ingest, want 5", m.lastSeq)
+	}
+
+	// Re-ingesting a seq <= lastSeq is a no-op (dedup): lastSeq must not regress
+	// and must not advance.
+	m.ingest(session.Event{Seq: 3, Type: session.EventSessionTitle, Payload: mustTitlePayload(t, "Old")})
+	if m.lastSeq != 5 {
+		t.Fatalf("lastSeq = %d after stale ingest, want 5 (dedup)", m.lastSeq)
+	}
+}
 
 func TestRetainedStoreLifecycle(t *testing.T) {
 	m := New(nil)
