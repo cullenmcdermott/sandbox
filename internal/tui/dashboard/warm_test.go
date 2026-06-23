@@ -5,9 +5,23 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cullenmcdermott/sandbox/internal/session"
 )
+
+func TestIdleSoonRemaining(t *testing.T) {
+	timeout := 15 * time.Minute
+	// idle for 3m → ~12m left
+	got := idleRemaining(timeout, 3*time.Minute)
+	if got < 11*time.Minute || got > 12*time.Minute {
+		t.Fatalf("idleRemaining = %v, want ~12m", got)
+	}
+	// idle longer than timeout → zero, not negative
+	if got := idleRemaining(timeout, 20*time.Minute); got != 0 {
+		t.Fatalf("idleRemaining = %v, want 0", got)
+	}
+}
 
 func TestRenderDetailShowsWarmTail(t *testing.T) {
 	m := New(nil)

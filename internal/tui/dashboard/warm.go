@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -79,4 +80,13 @@ func idleRemaining(timeout, idleFor time.Duration) time.Duration {
 		return 0
 	}
 	return rem
+}
+
+// roundDur is a compact, whole-unit duration string for the idle-soon hint
+// ("45s", "12m") — precision the user doesn't need in a passive indicator.
+func roundDur(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	return fmt.Sprintf("%dm", int(d.Minutes()))
 }

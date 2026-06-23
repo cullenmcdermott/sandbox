@@ -1965,6 +1965,15 @@ func (m *Model) renderDetailLines(width, height int) []string {
 		lines = append(lines, "", badge)
 	}
 
+	// Idle-soon hint: how long until the reaper suspends this idle warm session.
+	if !s.IdleSince.IsZero() && m.idleTimeout > 0 {
+		idleFor := time.Since(s.IdleSince)
+		if rem := idleRemaining(m.idleTimeout, idleFor); rem > 0 {
+			hint := fmt.Sprintf("idle %s · suspends in ~%s", roundDur(idleFor), roundDur(rem))
+			lines = append(lines, lipgloss.NewStyle().Foreground(theme.TextMuted).Render(hint))
+		}
+	}
+
 	// ─ recent ─ : the last ≈3 main-thread tool calls, newest first (Phase 4).
 	if n := len(s.RecentTools); n > 0 {
 		lines = append(lines, detailRule("recent", width))
