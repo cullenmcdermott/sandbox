@@ -16,6 +16,45 @@ func mustTitlePayload(t *testing.T, title string) json.RawMessage {
 	return b
 }
 
+func TestHandleRunnerEventFeedsRetained(t *testing.T) {
+	m := New(nil)
+	id := session.ID("sess-1")
+	sess := transcriptSession()
+	sess.State.ID = id
+	sess.State.Status = session.StatusRunning
+	m.sessions = []Session{sess}
+
+	// Warm it, plus register a channel so handleRunnerEvent's re-read doesn't panic.
+	ch := make(chan session.Event, 1)
+	m.liveSSEChannels[id] = ch
+	tr := m.ensureRetained(sess, &fakeRunnerClient{})
+
+	_, _ = m.Update(RunnerEventMsg{
+		ID:    id,
+		Event: session.Event{Seq: 7, Type: session.EventSessionTitle, Payload: mustTitlePayload(t, "Fed")},
+	})
+
+	if tr.lastSeq != 7 {
+		t.Fatalf("retained model lastSeq = %d, want 7 (not fed)", tr.lastSeq)
+	}
+}
+
+func TestStreamEndedDropsRetained(t *testing.T) {
+	m := New(nil)
+	id := session.ID("sess-1")
+	sess := transcriptSession()
+	sess.State.ID = id
+	sess.State.Status = session.StatusSuspended // cluster says not-running
+	m.sessions = []Session{sess}
+	m.ensureRetained(sess, &fakeRunnerClient{})
+
+	_, _ = m.Update(RunnerEventMsg{ID: id, StreamEnded: true})
+
+	if _, ok := m.retainedTranscript(id); ok {
+		t.Fatal("StreamEnded for a non-running pod must drop the retained model (warm→cold)")
+	}
+}
+
 func TestLiveSSEReadyBuildsRetained(t *testing.T) {
 	m := New(nil)
 	id := session.ID("sess-1")

@@ -843,6 +843,12 @@ func (m *Model) saveSnapshot(s *Session, force bool) {
 // status (idle/suspended/failed) without crashing.
 func (m *Model) handleRunnerEvent(msg RunnerEventMsg) (tea.Model, tea.Cmd) {
 	if msg.StreamEnded {
+		// warm→cold: a closed stream means the pod is no longer feeding us. Drop
+		// the warm model unless the cluster still believes the pod is running (a
+		// transient port-forward blip that the reconnect path below will retry).
+		if s := m.sessionByID(msg.ID); s.State.Status != session.StatusRunning {
+			m.dropRetained(msg.ID)
+		}
 		// Stream closed; clean up.
 		m.cancelLiveSSE(msg.ID)
 		delete(m.liveSSEChannels, msg.ID)
@@ -889,6 +895,11 @@ func (m *Model) handleRunnerEvent(msg RunnerEventMsg) (tea.Model, tea.Cmd) {
 			// resumes from here instead of replaying history.
 			if msg.Event.Seq > m.sessions[i].lastSeq {
 				m.sessions[i].lastSeq = msg.Event.Seq
+			}
+			// Feed the warm model so the retained chat stays live in the
+			// background (dedup is handled by the transcript's lastSeq guard).
+			if tr, ok := m.retained[msg.ID]; ok {
+				tr.ingest(msg.Event)
 			}
 			m.saveSnapshot(&m.sessions[i], changed)
 			// Persist a runner-generated auto title so it survives a re-seed (the
@@ -1091,6 +1102,7 @@ func (m *Model) applyPodEvent(ev k8s.StateEvent) tea.Cmd {
 			}
 		}
 		m.cancelLiveSSE(id)
+		m.dropRetained(id)
 		m.clampCursor()
 		return nil
 	}
@@ -1114,6 +1126,7 @@ func (m *Model) applyPodEvent(ev k8s.StateEvent) tea.Cmd {
 				m.sessions[i].PendingPermissionID = ""
 				m.sessions[i].PendingPermissionTool = ""
 				m.cancelLiveSSE(id)
+				m.dropRetained(id)
 			} else if ev.State.Status == session.StatusRunning && m.sessions[i].DashStatus == StatusSuspended {
 				// Pod just resumed: reset to idle and start SSE.
 				m.sessions[i].DashStatus = StatusIdle
