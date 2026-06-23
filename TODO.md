@@ -1,19 +1,28 @@
 # TODO
 
-## Warm "hide" sessions — rework attach/detach (design approved)
+## ~~Warm "hide" sessions — rework attach/detach (design approved)~~ **DONE (2026-06-23)**
 
-Rework detach so leaving a chat *hides* it (kept warm + instantly resumable)
-instead of fully detaching, while still allowing idle/sever and keeping the
-agent working + files syncing in the background. Every running-pod session stays
-warm (passive SSE + retained `TranscriptModel` + Mutagen sync); hide/show toggles
-the stream passive↔active while the model stays alive. Adds dashboard liveness
-signals (agent activity, unread output, sync status, idle-soon) and a tracked
-(uncapped) `warmCount`.
-Spec: [`docs/superpowers/specs/2026-06-22-warm-hide-sessions-design.md`](docs/superpowers/specs/2026-06-22-warm-hide-sessions-design.md).
-Plan: [`docs/superpowers/plans/2026-06-22-warm-hide-sessions.md`](docs/superpowers/plans/2026-06-22-warm-hide-sessions.md) (14 tasks, TDD, 4 phases).
-Key code: `internal/tui/dashboard/{app.go,model.go,zones.go}` (detach/park,
-`startLiveSSECmd`, detail pane), `internal/cli/connect.go` (connector + sync),
-`runner/src/session.ts` (idle accounting).
+Implemented the full 14-task TDD plan
+([`docs/superpowers/plans/2026-06-22-warm-hide-sessions.md`](docs/superpowers/plans/2026-06-22-warm-hide-sessions.md)).
+Leaving a chat now *hides* it: every running-pod session stays warm (passive SSE
++ a retained `TranscriptModel` fed in the background + Mutagen sync), so show is
+an O(1) instance swap that surfaces progress made while away. New code:
+`internal/tui/dashboard/warm.go` (retained store, `ensureRetained`/`dropRetained`/
+`warmCount`, `idleRemaining`/`roundDur`), `TranscriptModel.ingest`+`seedSize`+
+`tailLines` (`transcript.go`), warm build/feed/drop in `model.go`
+(`liveSSEReadyMsg`/`handleRunnerEvent`/`applyPodEvent`), reuse-on-attach +
+keep-warm-on-detach in `app.go`. Liveness signals: unread badge (`Session.seenSeq`/
+`Unread()`), detail-pane tail preview, polled sync status
+(`internal/sync/status.go` `StatusSummary`→`SyncState`, `SyncProber` injected via
+`RunOptions`), idle-soon "suspends in ~X" hint (`Idle` added to the dashboard
+`RunnerClient`; reaper `defaultReaperIdleTimeout` threaded), and a `⚡N warm`
+footer count. All gated green by `just check` (tests, vet, race-twice, e2e).
+Verified by `internal/tui/dashboard/warm_test.go` + `internal/sync/status_test.go`.
+
+Follow-up (optional): a live-TUI smoke against ≥2 running sessions (hide/show
+instant resume, unread badge appears, hidden idle session still reaped → footer
+drops). Plan Task 14 Step 3 — not runnable in the dev sandbox (no live cluster
+auth).
 
 ## Manual Additions (needs triage)
 * Improve the agent picker modal, shuld feel like picking a fighter in tekken or something with cool animations and a good "avatar"/"portrait" for each one. If you waant I can have chatgpt generate images that we can turn into ascii/ansi art?
