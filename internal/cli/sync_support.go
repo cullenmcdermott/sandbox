@@ -126,18 +126,21 @@ func dashboardSyncProber() dashboard.SyncProber {
 }
 
 // startMutagen writes the SSH alias for the current port-forward and (re)creates
-// the session's Mutagen sync sessions. It is idempotent across reconnects.
-func startMutagen(ctx context.Context, id, projectPath, privPath string, sshLocalPort int) error {
+// the session's Mutagen sync sessions. It is idempotent across reconnects, and
+// reports whether the load-bearing project sync was freshly created (created=true,
+// i.e. this session's first-ever sync) so the caller can skip a blocking initial
+// flush on reconnect.
+func startMutagen(ctx context.Context, id, projectPath, privPath string, sshLocalPort int) (created bool, err error) {
 	cfg, err := sshConfigManager()
 	if err != nil {
-		return err
+		return false, err
 	}
 	if err := cfg.Upsert(id, sshLocalPort, privPath); err != nil {
-		return err
+		return false, err
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return err
+		return false, err
 	}
 	return syncManager().CreateAll(ctx, syncpkg.Spec{
 		SessionID: id,

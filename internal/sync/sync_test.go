@@ -89,8 +89,12 @@ func TestCreateAll(t *testing.T) {
 		RemoteClaude: "/session/state/claude",
 	}
 
-	if err := m.CreateAll(context.Background(), spec); err != nil {
+	created, err := m.CreateAll(context.Background(), spec)
+	if err != nil {
 		t.Fatalf("createAll: %v", err)
+	}
+	if !created {
+		t.Fatal("CreateAll should report created=true when the project session is freshly made")
 	}
 
 	// Should have created: 1 project + 4 config + 3 transcripts = 8 sessions
@@ -170,8 +174,14 @@ func TestCreateAllIdempotent(t *testing.T) {
 	}
 
 	// "already exists" errors should be swallowed
-	if err := m.CreateAll(context.Background(), spec); err != nil {
+	created, err := m.CreateAll(context.Background(), spec)
+	if err != nil {
 		t.Fatalf("createAll should swallow already-exists: %v", err)
+	}
+	// An already-existing project session is the reconnect signal: created=false
+	// so the caller skips the blocking initial flush.
+	if created {
+		t.Fatal("CreateAll should report created=false when the project session already exists")
 	}
 }
 
@@ -188,7 +198,7 @@ func TestCreateAllRealError(t *testing.T) {
 		RemoteClaude: "/session/state/claude",
 	}
 
-	if err := m.CreateAll(context.Background(), spec); err == nil {
+	if _, err := m.CreateAll(context.Background(), spec); err == nil {
 		t.Fatal("expected error for connection refused")
 	}
 }

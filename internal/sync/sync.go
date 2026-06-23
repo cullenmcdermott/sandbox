@@ -62,8 +62,12 @@ var ConfigInputsSubs = []struct {
 var TranscriptSubs = []string{"projects", "todos", "tasks"}
 
 // CreateAll creates all three sync session groups for a remote session.
-// It is idempotent: existing sessions are not recreated.
-func (m *Manager) CreateAll(ctx context.Context, spec Spec) error {
+// It is idempotent: existing sessions are not recreated. It reports whether the
+// load-bearing project sync session was newly created (created=true) versus
+// already existing (created=false). Callers use this to decide whether to block
+// on an initial flush — needed only for a session's first-ever sync — or let an
+// existing session reconcile in the background on reconnect.
+func (m *Manager) CreateAll(ctx context.Context, spec Spec) (created bool, err error) {
 	label := sessionLabel(spec.SessionID)
 
 	// 1. Project sync (two-way-safe). Skip rather than hand Mutagen an empty
@@ -71,7 +75,7 @@ func (m *Manager) CreateAll(ctx context.Context, spec Spec) error {
 	// local repo path (e.g. attaching to a session whose State lacks it), and a
 	// blank path would otherwise produce "unable to parse alpha URL: empty URL".
 	if spec.ProjectPath == "" {
-		return fmt.Errorf("sync: project path is empty for session %s; skipping project sync", spec.SessionID)
+		return false, fmt.Errorf("sync: project path is empty for session %s; skipping project sync", spec.SessionID)
 	}
 	projectName := "sandbox-" + spec.SessionID + "-project"
 	// Ignore patterns prevent secrets, credentials, and large build trees from
@@ -115,8 +119,12 @@ func (m *Manager) CreateAll(ctx context.Context, spec Spec) error {
 		// C8: use a more specific substring to avoid swallowing unrelated failures.
 		// Mutagen emits "session already exists" for idempotent re-creates.
 		if !isMutagenAlreadyExists(err) {
-			return fmt.Errorf("sync: create project session: %w", err)
+			return false, fmt.Errorf("sync: create project session: %w", err)
 		}
+		// Already exists → this is a reconnect; the session will reconcile on its
+		// own. Leave created=false.
+	} else {
+		created = true
 	}
 
 	// 2. Config inputs (one-way host -> remote)
@@ -133,7 +141,7 @@ func (m *Manager) CreateAll(ctx context.Context, spec Spec) error {
 		}
 		if _, err := m.r.Output(ctx, nil, args...); err != nil {
 			if !isMutagenAlreadyExists(err) {
-				return fmt.Errorf("sync: create config-%s session: %w", sub.Local, err)
+				return false, fmt.Errorf("sync: create config-%s session: %w", sub.Local, err)
 			}
 		}
 	}
@@ -152,12 +160,12 @@ func (m *Manager) CreateAll(ctx context.Context, spec Spec) error {
 		}
 		if _, err := m.r.Output(ctx, nil, args...); err != nil {
 			if !isMutagenAlreadyExists(err) {
-				return fmt.Errorf("sync: create transcripts-%s session: %w", sub, err)
+				return false, fmt.Errorf("sync: create transcripts-%s session: %w", sub, err)
 			}
 		}
 	}
 
-	return nil
+	return created, nil
 }
 
 // Status returns mutagen's listing output for a session's sync sessions.
