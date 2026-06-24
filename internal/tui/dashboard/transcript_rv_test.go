@@ -13,7 +13,9 @@ import (
 // port-forward to the still-dying pod and flap [reconnected]/[connection lost]).
 // The reconnect is deferred to stream-end, when the old pod is actually gone.
 func TestTerminatingDefersReconnectToStreamEnd(t *testing.T) {
-	reconnect := func(context.Context) (RunnerClient, error) { return &fakeRunnerClient{}, nil }
+	reconnect := func(context.Context, func(ConnectStage, string)) (RunnerClient, error) {
+		return &fakeRunnerClient{}, nil
+	}
 	m := NewTranscript(&fakeRunnerClient{}, transcriptSession(), reconnect)
 	m.width, m.height = 80, 24
 	m.layout()
@@ -103,7 +105,7 @@ func TestReconnectBackoffGrowsAndCaps(t *testing.T) {
 // RV29: a successful reconnect resets the attempt counter so the next drop
 // starts the backoff over from the bottom.
 func TestReconnectedResetsAttempts(t *testing.T) {
-	m := NewTranscript(&fakeRunnerClient{}, transcriptSession(), func(context.Context) (RunnerClient, error) {
+	m := NewTranscript(&fakeRunnerClient{}, transcriptSession(), func(context.Context, func(ConnectStage, string)) (RunnerClient, error) {
 		return &fakeRunnerClient{}, nil
 	})
 	m.width, m.height = 80, 24

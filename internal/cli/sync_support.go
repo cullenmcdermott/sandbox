@@ -299,6 +299,29 @@ func (indexSnapshotStore) SaveSnapshot(id session.ID, snap dashboard.SessionSnap
 	_ = idx.Save(string(id), entry)
 }
 
+// indexEventCache implements dashboard.EventCache on top of the local index's
+// per-session events.ndjson (Workstream C): the foreground transcript loads it on
+// a cold open to rebuild history instantly and appends each non-delta event it
+// streams. Best effort — a cache miss/failure just falls back to a full runner
+// replay, which is still correct (the cache is a discardable local mirror).
+type indexEventCache struct{}
+
+func (indexEventCache) LoadEvents(id session.ID) ([]session.Event, error) {
+	idx, err := newIndex()
+	if err != nil {
+		return nil, err
+	}
+	return idx.LoadCachedEvents(string(id))
+}
+
+func (indexEventCache) AppendEvent(id session.ID, ev session.Event) error {
+	idx, err := newIndex()
+	if err != nil {
+		return err
+	}
+	return idx.AppendCachedEvent(string(id), ev)
+}
+
 // newPreDestroySyncStop returns a callback that stops file sync for a session.
 // The TUI runs it BEFORE the cluster-side destroy so the mutagen-over-SSH stream
 // is torn down cleanly rather than racing the pod's disappearance into

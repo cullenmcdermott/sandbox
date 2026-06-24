@@ -1,4 +1,4 @@
-package main
+package chat
 
 import (
 	"fmt"
@@ -13,9 +13,10 @@ import (
 // themedStyleConfig derives a glamour StyleConfig from the active theme tokens,
 // starting from the stock dark style and overriding only the color-bearing
 // fields. This is the fix for "the markdown coloring doesn't fit my theme":
-// today's renderer hardcodes glamour.WithStandardStyle("dark"), whose headings
+// the prior renderer hardcoded glamour.WithStandardStyle("dark"), whose headings
 // (ANSI 39), inline code (203 on 236), and H1 purple block have nothing to do
-// with the Midnight palette. Read tokens at call time so a /theme swap reskins.
+// with the Midnight palette. Read tokens at call time so a /theme swap reskins
+// (the renderer pool is dropped on theme change via InvalidateRenderers).
 func themedStyleConfig() ansi.StyleConfig {
 	c := gstyles.DarkStyleConfig // value copy; we only reassign pointer fields
 

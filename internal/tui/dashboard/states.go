@@ -85,7 +85,7 @@ func (m *Model) firstRunView(width, height int) string {
 	steps := lipgloss.NewStyle().Foreground(theme.TextMuted).Render("then: type to chat · ") +
 		kit.KbdRow([2]string{"⌃K", "switch sessions"}, [2]string{"q", "detach"})
 	body := strings.Join([]string{title, "", tagline, "", cta, steps}, "\n")
-	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, body, lipgloss.WithWhitespaceChars(" "))
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, body, pageWhitespace())
 }
 
 // noMatchCopy is the distinct empty copy shown when a filter matches nothing,

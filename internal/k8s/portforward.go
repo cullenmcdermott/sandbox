@@ -287,6 +287,16 @@ func ForwardSpecs(httpLocal, sshLocal int) []session.PortSpec {
 	}
 }
 
+// ForwardSpecsRunnerOnly forwards just the runner HTTP port. Used by the
+// dashboard's background status observers (and any read-only attach that never
+// runs mutagen sync), so the SSH forward — needed only for sync — is not opened.
+// Halves the SPDY stream count per backgrounded session at launch.
+func ForwardSpecsRunnerOnly(httpLocal int) []session.PortSpec {
+	return []session.PortSpec{
+		{Local: httpLocal, Remote: portRunner},
+	}
+}
+
 // ForwardSpecsWithOpencode is ForwardSpecs plus the opencode serve port. Used
 // for opencode-server sessions where the local `opencode attach` client needs a
 // forward to port 4096. The returned handles are ordered HTTP, SSH, opencode.

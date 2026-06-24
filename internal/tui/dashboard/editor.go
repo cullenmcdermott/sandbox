@@ -63,5 +63,5 @@ func (m *TranscriptModel) applyEditorResult(msg editorResultMsg) {
 		return
 	}
 	m.input.SetValue(msg.text)
-	m.input.SetCursor(len(msg.text))
+	m.input.CursorEnd()
 }

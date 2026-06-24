@@ -14,8 +14,8 @@ import (
 
 	"github.com/cullenmcdermott/sandbox/internal/k8s"
 	"github.com/cullenmcdermott/sandbox/internal/session"
-	"github.com/cullenmcdermott/sandbox/internal/terminal"
 	"github.com/cullenmcdermott/sandbox/tui/kit"
+	"github.com/cullenmcdermott/sandbox/tui/terminal"
 	"github.com/cullenmcdermott/sandbox/tui/theme"
 )
 
@@ -51,7 +51,7 @@ type attachMsg struct {
 type attachReadyMsg struct {
 	sess          Session
 	client        RunnerClient
-	reconnect     func(ctx context.Context) (RunnerClient, error)
+	reconnect     ReconnectFunc
 	endpoint      string
 	opencodeCreds *OpencodeCreds
 	// warning is a non-fatal advisory (e.g. sync failure) to surface in the
@@ -122,6 +122,28 @@ type App struct {
 	// connectingFor is the session being connected to (shown in the
 	// ScreenConnecting placeholder).
 	connectingFor *Session
+
+	// connectingPreview is a read-only transcript built from warm history or the
+	// host-side cache at attach time, rendered behind the connect banner so the
+	// user sees their conversation immediately during a (possibly slow cold-pod)
+	// resume instead of a blank splash (Fix A). nil when there's nothing cached to
+	// show, or for opencode sessions (no Go transcript). On a successful attach it
+	// is promoted to the live foreground transcript.
+	connectingPreview *TranscriptModel
+
+	// modalBackdrop caches the dimmed dashboard backdrop composited behind the
+	// transcript modal. A transcript keystroke is never delegated to the dashboard
+	// (see the delegation guard in Update), so the dashboard's render is unchanged
+	// between keystrokes — caching the dimmed backdrop skips a full dashboard
+	// re-render + per-line dim pass on every keystroke (Fix E). Invalidated
+	// whenever the dashboard is actually delegated a message, or the size changes.
+	modalBackdrop      string
+	modalBackdropW     int
+	modalBackdropH     int
+	modalBackdropValid bool
+	// bdBuilds counts backdrop (re)builds — a behavioral counter the Fix E test
+	// asserts on to prove the backdrop is reused across keystrokes.
+	bdBuilds int
 
 	// connectStage is the latest ConnectStage reported by the connector (U1).
 	connectStage ConnectStage
@@ -205,6 +227,11 @@ type RunOptions struct {
 	// instead of replaying the full event history.
 	SnapshotStore SnapshotStore
 
+	// EventCache persists each foreground session's transcript events host-side so
+	// a cold re-attach rebuilds the conversation instantly and streams only the
+	// delta (Workstream C).
+	EventCache EventCache
+
 	// ObserverConnector is the lightweight connect path for background passive
 	// status streams (port-forward + runner health, no file-sync setup). When
 	// nil, background streams use Connector.
@@ -234,6 +261,9 @@ func (a *App) applyOpts(opts []RunOptions) {
 	}
 	if opts[0].SnapshotStore != nil {
 		a.dashboard = a.dashboard.WithSnapshotStore(opts[0].SnapshotStore)
+	}
+	if opts[0].EventCache != nil {
+		a.dashboard = a.dashboard.WithEventCache(opts[0].EventCache)
 	}
 	if opts[0].ObserverConnector != nil {
 		a.dashboard = a.dashboard.WithObserverConnector(opts[0].ObserverConnector)
@@ -337,6 +367,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.connectCh = nil
 			}
 			a.connectingFor = nil
+			a.connectingPreview = nil
 			a.screen = ScreenDashboard
 			return a, nil
 		}
@@ -362,6 +393,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.connectingOpencode = msg.sess.State.Backend == session.BackendOpenCode
 		a.connectErr = nil
 		a.screen = ScreenConnecting
+		// Fix A: build a read-only preview of the conversation from warm history or
+		// the host-side cache so it paints immediately during the resume wait,
+		// instead of a blank splash. opencode sessions have no Go transcript.
+		a.connectingPreview = nil
+		if !a.connectingOpencode {
+			a.connectingPreview = a.buildConnectingPreview(msg.sess)
+		}
 		return a, a.connectCmd(msg.sess)
 
 	case createSessionMsg:
@@ -396,23 +434,33 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.screen = ScreenExternal
 			return a, pane.Init()
 		}
-		// Reuse the warm model if this session was already retained (instant, with
-		// the progress made while hidden); otherwise build a fresh one (cold open)
-		// and register it as warm so future hide/show are O(1).
+		// Reuse, in priority order: the preview already built (and cache-loaded)
+		// for this connect (Fix A); the warm model retained from a background
+		// stream; otherwise a fresh cold model. In every case we install the live
+		// client + reconnect and register it as warm so future hide/show are O(1).
 		var m *TranscriptModel
+		preview := a.connectingPreview
+		a.connectingPreview = nil
 		if existing, ok := a.dashboard.retainedTranscript(msg.sess.ID()); ok {
 			m = existing
+		} else if preview != nil && preview.ref.ID == msg.sess.ID() {
+			m = preview
+		}
+		if m != nil {
 			m.client = msg.client         // install the live (active) client
 			m.reconnect = msg.reconnect   // and its reconnect callback
-			m.seedSize(a.width, a.height) // background model never got a WindowSizeMsg
+			m.seedSize(a.width, a.height) // a background/preview model never got a WindowSizeMsg
 		} else {
 			m = NewTranscript(msg.client, msg.sess, msg.reconnect)
-			a.dashboard.putRetained(msg.sess.ID(), m)
 		}
+		a.dashboard.putRetained(msg.sess.ID(), m)
 		// Thread detected terminal capabilities into the transcript so its
 		// status-line effects (ctx-gauge sweep, etc.) light up only on a capable
 		// terminal; the dashboard Model detected them once at startup.
 		m.caps = a.dashboard.caps
+		// Workstream C: give the transcript the host-side event cache so it loads
+		// history instantly on a cold open and mirrors streamed events for next time.
+		m.cache = a.dashboard.eventCache
 		// Hand off a one-shot initial prompt (from `sandbox claude "…"`) so the
 		// transcript submits it as the first turn once its stream is live.
 		m.initialPrompt = a.initialPrompt
@@ -450,6 +498,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case attachFailedMsg:
 		// Connector failed: stay on the dashboard and show the error inline.
 		a.connectingFor = nil
+		a.connectingPreview = nil
 		a.connectErr = msg.err
 		a.dashboard.connectErr = msg.err
 		a.screen = ScreenDashboard
@@ -529,6 +578,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.dashboard = dm
 		}
 		dashCmd = cmd
+		// The dashboard may have changed, so the cached modal backdrop (Fix E) is
+		// stale. A pure transcript keystroke never reaches here, so it keeps the
+		// cache warm.
+		a.modalBackdropValid = false
 	}
 
 	switch a.screen {
@@ -586,6 +639,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return a, dashCmd
 			}
 		}
+		// Left-button press/drag on the modal's scrollbar column drives the scroll
+		// position; wheel and everything else fall through to the transcript's own
+		// Update (which handles the wheel).
+		if a.handleScrollbarMouse(msg) {
+			return a, dashCmd
+		}
 		next, cmd := a.transcript.Update(msg)
 		if tm, ok := next.(*TranscriptModel); ok {
 			a.transcript = tm
@@ -624,6 +683,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// cancels the connection attempt and returns to the dashboard.
 		if _, ok := msg.(tea.KeyPressMsg); ok {
 			a.connectingFor = nil
+			a.connectingPreview = nil
 			a.screen = ScreenDashboard
 			return a, dashCmd
 		}
@@ -672,7 +732,47 @@ func (a *App) parkTranscript(m *TranscriptModel) {
 // as a near-fullscreen modal over the live dashboard (slice 5b) so the frame
 // badge/toasts stay visible around the edges.
 func (a *App) View() tea.View {
-	return a.withTerminalSignals(a.screenView())
+	v := a.withTerminalSignals(a.withToast(a.screenView()))
+	// Force an opaque page background on every screen except the external PTY,
+	// which owns the terminal. Without this, unpainted cells (splash whitespace,
+	// overlay margins, preview gaps) show the terminal's own — possibly
+	// transparent — background and bleed through (T9). Unconditional by decision.
+	// Cell-motion mouse is enabled here too so the transcript scrollbar can be
+	// wheel-scrolled and click-dragged (T1); the external screen keeps its own
+	// terminal/mouse handling untouched. Trade-off: native click-drag text
+	// selection is replaced by app mouse capture (shift+drag still selects).
+	if a.screen != ScreenExternal {
+		v.BackgroundColor = theme.Page
+		v.MouseMode = tea.MouseModeCellMotion
+	}
+	return v
+}
+
+// withToast composites the active cross-session "needs you" notification over the
+// composed frame so it floats at the top-right of *every* screen (T3) — the chat
+// modal and connecting splash included, which is exactly when a background
+// session needing attention matters most. Previously only renderZoned composited
+// it, so it was invisible behind the modal. ScreenExternal owns the terminal and
+// is left untouched. A nil toast is a no-op, so non-toast frames are unchanged.
+func (a *App) withToast(v tea.View) tea.View {
+	if a.dashboard == nil || a.screen == ScreenExternal || a.dashboard.toast == nil {
+		return v
+	}
+	w, h := a.width, a.height
+	if w == 0 || h == 0 {
+		return v
+	}
+	toast := a.dashboard.renderToast(w)
+	if toast == "" {
+		return v
+	}
+	canvas := lipgloss.NewCanvas(w, h)
+	canvas.Compose(lipgloss.NewCompositor(
+		lipgloss.NewLayer(v.Content).X(0).Y(0).Z(0),
+		lipgloss.NewLayer(toast).X(0).Y(2).Z(10),
+	))
+	v.Content = canvas.Render()
+	return v
 }
 
 // screenView renders the active screen's view without terminal-signal
@@ -739,27 +839,62 @@ func (a *App) withTerminalSignals(v tea.View) tea.View {
 	return v
 }
 
-// modalView composites the dashboard background with the transcript as a
-// floating modal. z-order: dashboard < shadow < modal.
-func (a *App) modalView() tea.View {
-	bg := a.dashboard.View().Content
+// modalRect returns the chat modal's outer rectangle (top-left mx,my and size
+// mw,mh) on the current screen. It is the single source of truth shared by
+// modalView (compositing) and the scrollbar mouse hit-test, so the two can never
+// drift apart.
+func (a *App) modalRect() (mx, my, mw, mh int) {
 	w, h := a.width, a.height
-	if w == 0 || h == 0 {
-		v := tea.NewView(bg)
-		v.AltScreen = true
-		return v
-	}
-
-	mw := w - 6
-	mh := h - 4
+	mw = w - 6
+	mh = h - 4
 	if mw < 20 {
 		mw = 20
 	}
 	if mh < 6 {
 		mh = 6
 	}
-	mx := (w - mw) / 2
-	my := (h - mh) / 2
+	mx = (w - mw) / 2
+	my = (h - mh) / 2
+	return mx, my, mw, mh
+}
+
+// handleScrollbarMouse routes a left-button press/drag onto the chat modal's
+// scrollbar column, translating absolute screen coordinates into the
+// transcript's content space via modalRect (inner origin = modal top-left + the
+// rounded border). It returns true only when the event is a left press/drag on
+// the scrollbar; wheel events and clicks elsewhere return false and fall through
+// to the transcript's own handler.
+func (a *App) handleScrollbarMouse(msg tea.Msg) bool {
+	if a.transcript == nil {
+		return false
+	}
+	var mouse tea.Mouse
+	switch m := msg.(type) {
+	case tea.MouseClickMsg:
+		mouse = m.Mouse()
+	case tea.MouseMotionMsg:
+		mouse = m.Mouse()
+	default:
+		return false
+	}
+	if mouse.Button != tea.MouseLeft {
+		return false
+	}
+	mx, my, _, _ := a.modalRect()
+	return a.transcript.scrollbarDragTo(mouse.X-(mx+1), mouse.Y-(my+1))
+}
+
+// modalView composites the dashboard background with the transcript as a
+// floating modal. z-order: dashboard < shadow < modal.
+func (a *App) modalView() tea.View {
+	w, h := a.width, a.height
+	if w == 0 || h == 0 {
+		v := tea.NewView(a.dashboard.View().Content)
+		v.AltScreen = true
+		return v
+	}
+
+	mx, my, mw, mh := a.modalRect()
 
 	// Frame the transcript as a bordered popup. The content is sized two cells
 	// smaller in each axis to leave room for the rounded border, so the framed
@@ -776,7 +911,8 @@ func (a *App) modalView() tea.View {
 	layers := []*lipgloss.Layer{
 		// Ghost the dashboard behind the popup so it reads as "out of focus"
 		// context instead of bleeding live (colored) rows past the modal edges.
-		lipgloss.NewLayer(dimBackdrop(bg, w, h)).X(0).Y(0).Z(0),
+		// Reused across keystrokes via the backdrop cache (Fix E).
+		lipgloss.NewLayer(a.dimmedBackdrop(w, h)).X(0).Y(0).Z(0),
 		lipgloss.NewLayer(shadow).X(mx + 2).Y(my + 1).Z(1),
 		lipgloss.NewLayer(modal).X(mx).Y(my).Z(2),
 	}
@@ -786,6 +922,23 @@ func (a *App) modalView() tea.View {
 	v := tea.NewView(canvas.Render())
 	v.AltScreen = true
 	return v
+}
+
+// dimmedBackdrop returns the dimmed dashboard backdrop for the modal, served from
+// cache when the dashboard render is unchanged (Fix E). The cache is invalidated
+// whenever a message is delegated to the dashboard (it may have changed) or the
+// size differs, so a transcript-only keystroke — which never touches the
+// dashboard — reuses the prior frame instead of re-rendering the whole dashboard
+// and re-running the per-line dim pass.
+func (a *App) dimmedBackdrop(w, h int) string {
+	if a.modalBackdropValid && a.modalBackdropW == w && a.modalBackdropH == h {
+		return a.modalBackdrop
+	}
+	a.bdBuilds++
+	d := dimBackdrop(a.dashboard.View().Content, w, h)
+	a.modalBackdrop, a.modalBackdropW, a.modalBackdropH = d, w, h
+	a.modalBackdropValid = true
+	return d
 }
 
 // dimBackdrop ghosts the dashboard behind a modal: it strips each line's colors
@@ -937,13 +1090,51 @@ func connectTickCmd() tea.Cmd {
 // Rendering helpers
 // --------------------------------------------------------------------------
 
-// connectingView renders the animated "connecting…" screen (U1.5):
-// title in theme.TextBright (text ramp, not bold Charple brand color), animated
-// stepper, and hint in theme.TextMuted.
+// buildConnectingPreview returns a read-only transcript for the session being
+// connected to, populated from warm history or the host-side cache, so the
+// conversation can paint during the connect/resume wait (Fix A). It returns nil
+// when there is nothing to show (no warm model and an empty/absent cache), so a
+// brand-new or uncached session keeps the centered "connecting…" splash.
+func (a *App) buildConnectingPreview(sess Session) *TranscriptModel {
+	// A warm background model already holds history — reuse it directly.
+	if m, ok := a.dashboard.retainedTranscript(sess.ID()); ok {
+		m.seedSize(a.width, a.height)
+		if len(m.blocks) == 0 {
+			return nil
+		}
+		return m
+	}
+	if a.dashboard.eventCache == nil {
+		return nil
+	}
+	m := NewTranscript(nil, sess, nil)
+	m.caps = a.dashboard.caps
+	m.cache = a.dashboard.eventCache
+	m.loadCachedTranscript() // O(N) bulk replay; needs no live client
+	if len(m.blocks) == 0 {
+		return nil // nothing cached → keep the centered splash
+	}
+	m.seedSize(a.width, a.height)
+	return m
+}
+
+// connectingView renders the animated connect/reconnect screen: a block-pixel
+// mascot, the title (text ramp, not bold brand color), an animated stepper, and
+// a cancel hint, centered on screen. When a warm/cached preview exists (Fix A)
+// the conversation is dimmed as a backdrop and the stepper floats over it as a
+// "Reconnecting…" modal from frame one — so a resume reads as progress over your
+// real chat instead of a blank splash, and the stepper is visible immediately
+// (T4) rather than buried in a thin one-line banner.
 func (a *App) connectingView() tea.View {
-	title := "Connecting…"
+	reconnecting := a.connectingPreview != nil && len(a.connectingPreview.blocks) > 0
+
+	verb := "Connecting"
+	if reconnecting {
+		verb = "Reconnecting"
+	}
+	title := verb + "…"
 	if a.connectingFor != nil {
-		title = fmt.Sprintf("Connecting to %s…", a.connectingFor.Title)
+		title = fmt.Sprintf("%s to %s…", verb, a.connectingFor.Title)
 	}
 
 	titleLine := lipgloss.NewStyle().
@@ -971,18 +1162,53 @@ func (a *App) connectingView() tea.View {
 		Foreground(theme.TextMuted).
 		Render("(press any key to cancel)")
 
-	// Build the block left-aligned (JoinVertical pads every line to the widest,
-	// so the stepper rows line up relative to each other) before centering the
-	// whole panel on screen. Centering the raw multi-line string instead would
-	// center each line independently and render the steps ragged (T2).
-	// Keep the title/stepper/hint left-aligned relative to each other (JoinVertical
-	// pads to the widest line, so the stepper rows stay column-aligned — T2), then
-	// center that whole block under the logo. JoinVertical(Center, …) centers the
-	// two *blocks* against each other without disturbing the inner left alignment.
+	// Keep the title/stepper/hint left-aligned relative to each other: the inner
+	// JoinVertical(Left, …) pads every line to the panel's widest, so the stepper
+	// rows stay column-aligned (T2) and re-centering the finished block can't
+	// disturb that inner alignment. The same uniform-width invariant is why the
+	// logo no longer shears — gradientBlock pads its lines to a common width
+	// (T7); JoinVertical(Center, …) then centers the two equal-width blocks
+	// against each other cleanly. (A ragged block would be centered line-by-line
+	// and come out sheared.)
 	panel := lipgloss.JoinVertical(lipgloss.Left, titleLine, "", stepper, "", hint)
 	body := lipgloss.JoinVertical(lipgloss.Center, logo, "", panel)
-	centered := lipgloss.Place(a.width, a.height, lipgloss.Center, lipgloss.Center, body)
 
+	if reconnecting {
+		// Dim the cached conversation as a backdrop and float the stepper over it
+		// as a modal from frame one. The card is fully opaqued (withBackground) so
+		// the dimmed chat behind it can't bleed through the stepper's transparent
+		// gaps; it mirrors the chat modal's framing (border + shadow) so the two
+		// read as siblings.
+		backdrop := dimBackdrop(a.connectingPreview.previewView(a.width, a.height, ""), a.width, a.height)
+		cardW := lipgloss.Width(body) + 2 // + rounded border
+		card := withBackground(kit.Card(kit.CardOpts{
+			Content:     body,
+			Width:       cardW,
+			BorderColor: theme.Charple,
+			Background:  theme.Surface,
+		}), theme.Surface)
+		cardH := lipgloss.Height(card)
+		mx := (a.width - cardW) / 2
+		my := (a.height - cardH) / 2
+		if mx < 0 {
+			mx = 0
+		}
+		if my < 0 {
+			my = 0
+		}
+		shadow := solidBlock(cardW, cardH, theme.Shadow)
+		canvas := lipgloss.NewCanvas(a.width, a.height)
+		canvas.Compose(lipgloss.NewCompositor(
+			lipgloss.NewLayer(backdrop).X(0).Y(0).Z(0),
+			lipgloss.NewLayer(shadow).X(mx+2).Y(my+1).Z(1),
+			lipgloss.NewLayer(card).X(mx).Y(my).Z(2),
+		))
+		v := tea.NewView(canvas.Render())
+		v.AltScreen = true
+		return v
+	}
+
+	centered := lipgloss.Place(a.width, a.height, lipgloss.Center, lipgloss.Center, body, pageWhitespace())
 	v := tea.NewView(centered)
 	v.AltScreen = true
 	return v

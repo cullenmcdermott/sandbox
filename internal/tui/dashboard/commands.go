@@ -16,6 +16,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/cullenmcdermott/sandbox/internal/models"
 	"github.com/cullenmcdermott/sandbox/internal/session"
 	"github.com/cullenmcdermott/sandbox/tui/kit"
 	"github.com/cullenmcdermott/sandbox/tui/theme"
@@ -57,6 +58,7 @@ func commandGroups() []cmdGroup {
 			{"/auto", "accept-edits mode (auto-accept)", setModeCmd(modeAcceptEdits)},
 			{"/normal", "ask before each tool", setModeCmd(modeDefault)},
 			{"/yolo", "bypass all permissions", setModeCmd(modeBypass)},
+			{"/vim", "toggle vim-style modal editing (off by default)", toggleVimCmd},
 		}},
 		{name: "Model", glyph: "✸", cmds: []slashCmd{
 			{"/opus", "switch to Opus for new turns", setModelCmd("opus", "Opus")},
@@ -100,15 +102,38 @@ func setModeCmd(mode permMode) func(*TranscriptModel) tea.Cmd {
 
 // setModelCmd returns a handler that selects the model for subsequent turns
 // (sent as TurnInput.Model on the next prompt) and confirms it in the
-// transcript. An empty id reverts to the session/account default. The
-// status-line model name reflects the SDK-reported id once the next turn
-// starts, so it follows what the model actually resolved to.
+// transcript. An empty id reverts to the session/account default. It also
+// optimistically updates the status-line model name + ctx window so the switch
+// is reflected immediately instead of only after the next turn's session.started
+// (T8); the display self-heals to the exact SDK-resolved id on that event.
 func setModelCmd(id, label string) func(*TranscriptModel) tea.Cmd {
 	return func(m *TranscriptModel) tea.Cmd {
 		m.modelOverride = id
+		// /model-default (empty id) restores the captured account default; a named
+		// alias ("opus") shows as-is until session.started reports the full id.
+		if id == "" {
+			m.model = m.defaultModel
+		} else {
+			m.model = id
+		}
+		m.ctxLimit = models.Limit(m.model).ContextLimit
 		m.appendBlock(blockInfo, "model → "+label)
 		return nil
 	}
+}
+
+// toggleVimCmd flips vim-style modal editing. Off (the default) keeps the prompt
+// focused so keys always type; on enables the NORMAL/INSERT chords (i/a/j/k/g/G/q)
+// and the mode badge. The follow-up Cmd re-focuses the prompt (off) or drops to
+// NORMAL (on); a transcript note confirms the new state.
+func toggleVimCmd(m *TranscriptModel) tea.Cmd {
+	cmd := m.setVim(!m.vimEnabled)
+	state := "off"
+	if m.vimEnabled {
+		state = "on"
+	}
+	m.appendBlock(blockInfo, "vim → "+state)
+	return cmd
 }
 
 // openHelp opens the shared grouped help overlay (slash commands + chat keys).

@@ -96,7 +96,7 @@ func (sc *sessionConnector) establish(ctx context.Context, onStage func(dashboar
 	}
 	switch st.Status {
 	case session.StatusGone:
-		return nil, fmt.Errorf("session %s no longer exists", sc.ref.ID)
+		return nil, fmt.Errorf("session %s: %w", sc.ref.ID, session.ErrSessionGone)
 	case session.StatusSuspended:
 		stage(dashboard.StageResume)
 		if err := sc.backend.Resume(ctx, sc.ref); err != nil {
@@ -107,9 +107,18 @@ func (sc *sessionConnector) establish(ctx context.Context, onStage func(dashboar
 	stage(dashboard.StageForward)
 	opencode := st.Backend == session.BackendOpenCode
 	var handles []session.ForwardHandle
-	if opencode {
+	switch {
+	case opencode:
 		handles, err = sc.backend.PortForward(ctx, sc.ref, k8s.ForwardSpecsWithOpencode(0, 0, 0))
-	} else {
+	case !full:
+		// Observer mode (background status streams) only reads the runner event
+		// stream and never runs mutagen sync, so the SSH forward is pure waste.
+		// Forward the runner HTTP port only to keep the launch-time fan-out across
+		// every known session cheap (one SPDY stream per session, not two). The
+		// SSH-dependent code below is all gated on `full`, so handles[1] is never
+		// touched here.
+		handles, err = sc.backend.PortForward(ctx, sc.ref, k8s.ForwardSpecsRunnerOnly(0))
+	default:
 		handles, err = sc.backend.PortForward(ctx, sc.ref, k8s.ForwardSpecs(0, 0))
 	}
 	if err != nil {

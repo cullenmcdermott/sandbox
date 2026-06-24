@@ -68,8 +68,10 @@ func styledMark(glyph string, c color.Color) string {
 //
 // Drawn in Unicode quadrant block elements (▀▄▌▐▖▗▘▝▙▛▜▟█) — the same
 // 2×2-subpixel technique the Claude Code CLI uses for its startup robot. They
-// read as chunky pixel sprites rather than line art. Every line is the same
-// display width so the sprite stays rectangular when centered.
+// read as chunky pixel sprites rather than line art. The raw constants have
+// unequal line widths; gradientBlock right-pads each line to the block's widest
+// so the sprite stays rectangular when centered (otherwise the narrow lines
+// shear — see gradientBlock).
 
 // MascotClaude is the "Claude Code guy": a rounded block head with two little
 // feet/eyes below. Render through ClaudeMascot for the warm Peach→Coral glow.
@@ -96,10 +98,25 @@ func OpenCodeMascot() string {
 
 // gradientBlock applies GradientText line-by-line so a multi-line block keeps its
 // shape (GradientText spans one logical line; mapping per line preserves the
-// newlines and column alignment).
+// newlines and column alignment). Each raw line is first right-padded to the
+// block's widest display width so every line is the same width: the mascot
+// sprites are hand-drawn with unequal line widths (e.g. the "OC" monogram is
+// 7/5/7 cells), and centering a ragged block — JoinVertical(Center) /
+// lipgloss.Place(Center) pad each line independently — would shear the narrow
+// lines sideways. Padding to a common width keeps the sprite rectangular so it
+// centers as one block (T7).
 func gradientBlock(block string, bold bool, stops ...color.Color) string {
 	lines := strings.Split(block, "\n")
+	maxW := 0
+	for _, ln := range lines {
+		if w := lipgloss.Width(ln); w > maxW {
+			maxW = w
+		}
+	}
 	for i, ln := range lines {
+		if pad := maxW - lipgloss.Width(ln); pad > 0 {
+			ln += strings.Repeat(" ", pad)
+		}
 		lines[i] = GradientText(ln, bold, stops...)
 	}
 	return strings.Join(lines, "\n")

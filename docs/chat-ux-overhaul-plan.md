@@ -149,7 +149,7 @@ preview the combination first).
 
 ### A3 — Real inline images (Kitty), #4
 Feasible by **reuse** — the repo already ships the encoder
-(`internal/terminal/kitty.go`: `KittyTransmitRGBA` + `KittyPlaceholders`) and the
+(`tui/terminal/kitty.go`: `KittyTransmitRGBA` + `KittyPlaceholders`) and the
 frame-splice pattern (`app.go:738`, `statusline.go:197`). A production version
 decodes a PNG → RGBA and feeds the same path.
 

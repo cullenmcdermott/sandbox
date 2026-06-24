@@ -17,13 +17,17 @@ import (
 
 	"charm.land/lipgloss/v2"
 
-	"github.com/cullenmcdermott/sandbox/internal/terminal"
+	"github.com/cullenmcdermott/sandbox/tui/terminal"
 	"github.com/cullenmcdermott/sandbox/tui/theme"
 )
 
-// statusLineRows is the fixed height of the status-line block (the locked
-// CC-clone layout). layout() reserves this many rows below the prompt.
-const statusLineRows = 4
+// statusLineRows is the fixed height of the status-line block. A2.5 (Calm)
+// collapsed the old 4-row CC-clone block to two: a single status row (model ·
+// cwd · branch · ctx · cost · mode) plus one conditional rate-limit row, shown
+// only when real claude.ai /usage data is present and otherwise blank. Kept
+// FIXED at 2 (not variable) so the body height never reflows when usage data
+// arrives mid-session. layout() reserves this many rows below the prompt.
+const statusLineRows = 2
 
 // podWorkspacePrefix is the legacy pod path the project was mounted under. The
 // SDK cwd is now the real host project path (Option B, resumable transcripts),
@@ -75,6 +79,25 @@ func (p permMode) modeLine() string {
 		glyph, label, col = "⏵⏵", "bypass permissions on", theme.Coral
 	}
 	return lipgloss.NewStyle().Foreground(col).Bold(true).Render(glyph + " " + label)
+}
+
+// modeTag is the compact permission-mode tag for the collapsed status row (A2.5):
+// a glyph + short label in the mode's hue, vs modeLine's verbose "auto mode on"
+// footer form. Not bold — it sits as a quiet trailing tag on row 1.
+func (p permMode) modeTag() string {
+	var glyph, label string
+	var col color.Color
+	switch p {
+	case modeAcceptEdits:
+		glyph, label, col = "⏵⏵", "auto", theme.Guac
+	case modeDefault:
+		glyph, label, col = "⏵", "ask", theme.Malibu
+	case modePlan:
+		glyph, label, col = "⏸", "plan", theme.Gold
+	case modeBypass:
+		glyph, label, col = "⏵⏵", "bypass", theme.Coral
+	}
+	return lipgloss.NewStyle().Foreground(col).Render(glyph + " " + label)
 }
 
 // label is the short human name of the mode (for /command confirmations).
@@ -410,39 +433,33 @@ func (m *TranscriptModel) renderStatusLine() string {
 	if m.costUSD > 0 {
 		row1 += muted.Render(" · ") + lipgloss.NewStyle().Foreground(theme.Guac).Render(fmt.Sprintf("$%.4f", m.costUSD))
 	}
+	// Mode moves onto row 1 as a compact trailing tag (was the separate row 4).
+	row1 += muted.Render(" · ") + m.mode.modeTag()
 
-	// Rows 2–3: claude.ai plan usage windows (5-hour + weekly) and their reset
-	// countdowns, from real SDK /usage data (rate_limit.updated). When the data
-	// is unavailable — API-key/Bedrock/Vertex sessions, or before the first
-	// event arrives — we show a neutral placeholder rather than fabricating
-	// values (the old behavior projected 5h/7d off the wall clock, TODO.md).
-	var row2, row3 string
+	// Row 2: a single compact claude.ai plan-usage row (5-hour + weekly util bars,
+	// reset countdowns, and the attached model's weekly cap when present), from
+	// real SDK /usage data (rate_limit.updated). Shown ONLY when that data is
+	// available; otherwise BLANK — we never fabricate values and never show a
+	// placeholder (A2.5: rate-limit detail only-when-present). The block stays a
+	// fixed two rows regardless, so the body height never reflows.
+	body := lipgloss.NewStyle().Foreground(theme.TextBody)
+	row2 := ""
 	if m.rlSeen && m.rlAvailable {
 		f5 := m.rl5hUtil / 100
 		f7 := m.rl7dUtil / 100
-		row2 = label.Render("5h: ") + blockBar(f5, 10, rampColor(f5)) +
-			lipgloss.NewStyle().Foreground(theme.TextBody).Render(fmt.Sprintf(" %d%%", int(m.rl5hUtil+0.5))) +
-			muted.Render(" · ") + label.Render("weekly: ") + blockBar(f7, 10, rampColor(f7)) +
-			lipgloss.NewStyle().Foreground(theme.TextBody).Render(fmt.Sprintf(" %d%%", int(m.rl7dUtil+0.5)))
-		row3 = muted.Render("resets in " + fmtReset(m.rl5hReset) + " · weekly in " + fmtReset(m.rl7dReset))
-		// Per-model weekly cap for the attached model (Max plans). Percent-only
-		// (no bar) to keep the fixed-height block within the modal width.
+		row2 = label.Render("5h: ") + blockBar(f5, 8, rampColor(f5)) +
+			body.Render(fmt.Sprintf(" %d%%", int(m.rl5hUtil+0.5))) +
+			muted.Render(" "+fmtReset(m.rl5hReset)) +
+			muted.Render(" · ") + label.Render("weekly: ") + blockBar(f7, 8, rampColor(f7)) +
+			body.Render(fmt.Sprintf(" %d%%", int(m.rl7dUtil+0.5))) +
+			muted.Render(" "+fmtReset(m.rl7dReset))
+		// Per-model weekly cap for the attached model (Max plans): percent + reset.
 		if mUtil, mReset, lbl, ok := m.activeModelWindow(); ok {
 			row2 += muted.Render(" · ") + label.Render(lbl+": ") +
-				lipgloss.NewStyle().Foreground(rampColor(mUtil/100)).Render(fmt.Sprintf("%d%%", int(mUtil+0.5)))
-			row3 += muted.Render(" · " + lbl + " in " + fmtReset(mReset))
+				lipgloss.NewStyle().Foreground(rampColor(mUtil/100)).Render(fmt.Sprintf("%d%%", int(mUtil+0.5))) +
+				muted.Render(" · "+lbl+" in "+fmtReset(mReset))
 		}
-	} else {
-		note := "usage limits unavailable"
-		if !m.rlSeen {
-			note = "usage limits …"
-		}
-		row2 = label.Render("5h: ") + muted.Render("—") +
-			muted.Render(" · ") + label.Render("weekly: ") + muted.Render("—")
-		row3 = muted.Render(note)
 	}
 
-	row4 := m.mode.modeLine()
-
-	return " " + row1 + "\n " + row2 + "\n " + row3 + "\n " + row4
+	return " " + row1 + "\n " + row2
 }

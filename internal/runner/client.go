@@ -288,6 +288,19 @@ func (c *Client) events(ctx context.Context, ref session.Ref, afterSeq uint64, p
 			default:
 			}
 			line := scanner.Text()
+			// Replay/live boundary (Workstream C): the runner writes this comment
+			// once it has replayed all history to us. Surface it as a client-internal
+			// stream.live marker so the TUI flips out of "loading transcript…" into
+			// the live tail. It is not a persisted event (no seq), so it bypasses the
+			// data: decode path below.
+			if strings.HasPrefix(line, ": replay-complete") {
+				select {
+				case events <- session.Event{Type: session.EventStreamLive, SessionID: ref.ID}:
+				case <-ctx.Done():
+					return
+				}
+				continue
+			}
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}

@@ -95,6 +95,77 @@ export function resolveModel(
   return turnModel || sessionModel || undefined;
 }
 
+/**
+ * Resolve the Claude SDK session id to resume for a turn (Workstream B). A
+ * client-supplied resume id wins; otherwise default to the persisted session
+ * head (reg.state.claude_session_id) so every turn after the first continues
+ * the same conversation. Returns undefined when neither is set — the first turn
+ * (persisted id still '') leaves Options.resume unset so the SDK starts a fresh
+ * session, whose id mapMessage then captures. This is the core of the
+ * continuity fix: without it every turn was a brand-new, history-less query().
+ */
+export function effectiveResume(
+  clientResume: string | undefined,
+  persistedId: string | undefined,
+): string | undefined {
+  return clientResume || persistedId || undefined;
+}
+
+/**
+ * True when a query() failure means the resume id is stale/unknown — the SDK
+ * throws e.g. "No conversation found with session ID: <id>" (matched
+ * empirically against SDK 0.3.181 in the B spike). Drives the fail-soft retry
+ * in runTurn: a stale id must NOT hard-fail the turn (a host-path migration or
+ * transcript GC can orphan an id); we retry once without resume so the user's
+ * prompt still runs. Conservative — only this resume-specific phrasing triggers
+ * a retry, so an unrelated failure still surfaces as today.
+ */
+export function isStaleResumeError(message: string): boolean {
+  return /no conversation found/i.test(message);
+}
+
+/**
+ * True for the terminal SDK `result` message that reports a stale/unknown resume
+ * id. The SDK yields this is_error result and THEN throws (confirmed against
+ * sdk 0.3.181), so runTurn must skip mapping it when a fail-soft retry is still
+ * available — otherwise mapMessage emits a spurious turn.failed+error into the
+ * stream ahead of the successful retry.
+ */
+export function isStaleResultMessage(msg: SDKMessage): boolean {
+  if (msg.type !== 'result' || msg.subtype === 'success') return false;
+  const errors = (msg as { errors?: string[] }).errors ?? [];
+  return isStaleResumeError(errors.join('; '));
+}
+
+/**
+ * Whether a query() failure should trigger the fail-soft retry: a resume id was
+ * in play, we have not retried yet, and the message is the stale-resume
+ * signature. Pure so the at-most-once + used-resume guards are unit-testable
+ * (runTurn itself binds the sqlite event log and isn't).
+ */
+export function shouldRetryStaleResume(
+  usedResume: string | undefined,
+  alreadyRetried: boolean,
+  message: string,
+): boolean {
+  return !!usedResume && !alreadyRetried && isStaleResumeError(message);
+}
+
+/**
+ * Whether to (re)persist the Claude session id observed on an init message.
+ * Capture-LATEST: follow the live resumable head rather than pinning to turn-1's
+ * id, so a chain of resumes always threads the current session. The spike shows
+ * the id is stable across a plain resume (forkSession off), so this normally
+ * no-ops after turn 1; the `!== current` guard avoids a redundant session.json
+ * write each turn, and it self-heals if a future SDK forks the id on resume.
+ */
+export function shouldCaptureClaudeSession(
+  current: string | undefined,
+  observed: string | undefined,
+): boolean {
+  return !!observed && observed !== current;
+}
+
 /** Build the SDK Options for a turn (spec 8.4). */
 export function buildOptions(
   cfg: RunnerConfig,
@@ -163,12 +234,14 @@ export function buildOptions(
   const resolvedModel = resolveModel(model, cfg.model);
   if (resolvedModel) options.model = resolvedModel;
 
-  if (resume) {
-    // resume is the Claude SDK session id (not a turn id). The CLI maps turn
-    // resume→claude session id before calling the runner in practice; here we
-    // pass through whatever the client supplied.
-    options.resume = resume;
-  }
+  // Resume defaulting (Workstream B): a client-supplied resume id wins;
+  // otherwise default to the persisted Claude session head so every turn after
+  // the first continues the same conversation (fixes #2 model-switch and #3
+  // mid-convo drop — same root cause). First turn: persisted id is '' → omit →
+  // fresh session, then captured by mapMessage. runTurn clears the persisted id
+  // and retries without resume if it turns out stale (isStaleResumeError).
+  const resumeId = effectiveResume(resume, reg.state.claude_session_id);
+  if (resumeId) options.resume = resumeId;
 
   return options;
 }
@@ -409,44 +482,77 @@ export async function runTurn(
 ): Promise<void> {
   const reg = getRegistry();
   const sessionId = reg.state.sandbox_session_id;
-  const options = buildOptions(cfg, turnId, resume, allowedToolsOverride, mode, model, abort);
 
   appendEvent(sessionId, turnId, 'turn.started', { prompt });
 
-  const q: Query = query({ prompt, options });
+  // A turn normally resumes the persisted Claude session head (buildOptions's
+  // effectiveResume). Fail-soft (Workstream B): if that id is stale — the SDK
+  // throws "No conversation found" (confirmed by the B spike; a host-path
+  // migration or transcript GC can orphan an id) — drop it and retry ONCE as a
+  // fresh session so the user's prompt still runs instead of erroring the whole
+  // turn. Any other failure surfaces as before.
+  let clientResume = resume;
   let resultSeen = false;
-  let rateLimitsFetched = false;
+  let retriedStaleResume = false;
 
   try {
-    for await (const msg of q) {
-      mapMessage(msg, sessionId, turnId);
-      // Fetch the claude.ai plan rate-limit windows once per turn, triggered by
-      // the SDK init message. The control channel (stdin) is open from init
-      // until the result message closes it (single-user-turn mode), so this
-      // MUST fire mid-turn — a post-loop call would race the closed stdin.
-      // Fire-and-forget: it never blocks or fails the turn.
-      if (!rateLimitsFetched && msg.type === 'system' && msg.subtype === 'init') {
-        rateLimitsFetched = true;
-        void fetchAndEmitRateLimits(q, sessionId, turnId);
+    for (;;) {
+      const options = buildOptions(cfg, turnId, clientResume, allowedToolsOverride, mode, model, abort);
+      const usedResume = options.resume;
+      const q: Query = query({ prompt, options });
+      let rateLimitsFetched = false;
+      let staleResume = false;
+      try {
+        for await (const msg of q) {
+          // Fail-soft (1/2): the SDK yields an is_error `result` for a stale
+          // resume id and THEN throws. While a retry is still available, do NOT
+          // map that terminal result — mapMessage would emit a spurious
+          // turn.failed+error ahead of the successful retry. Flag it and let the
+          // throw (or, defensively, the stream simply ending) drive the retry.
+          if (usedResume && !retriedStaleResume && isStaleResultMessage(msg)) {
+            staleResume = true;
+            continue;
+          }
+          mapMessage(msg, sessionId, turnId);
+          // Fetch the claude.ai plan rate-limit windows once per turn, triggered
+          // by the SDK init message. The control channel (stdin) is open from
+          // init until the result message closes it (single-user-turn mode), so
+          // this MUST fire mid-turn — a post-loop call would race the closed
+          // stdin. Fire-and-forget: it never blocks or fails the turn.
+          if (!rateLimitsFetched && msg.type === 'system' && msg.subtype === 'init') {
+            rateLimitsFetched = true;
+            void fetchAndEmitRateLimits(q, sessionId, turnId);
+          }
+        }
+        // Stream ended without throwing. Unless we skipped a stale result (and
+        // must retry), the turn completed normally.
+        if (!staleResume) {
+          resultSeen = true;
+          break;
+        }
+      } catch (err) {
+        // When aborted, server.ts already emitted 'turn.interrupted' at the
+        // /interrupt route; do not re-emit it here (R3: would produce a duplicate).
+        if (abort.signal.aborted) break;
+        const message = err instanceof Error ? err.message : String(err);
+        // Fail-soft (2/2): retry once on a stale resume id (detected as the
+        // skipped result above, or via the throw message defensively); any other
+        // failure surfaces as before.
+        if (!(staleResume || shouldRetryStaleResume(usedResume, retriedStaleResume, message))) {
+          appendEvent(sessionId, turnId, 'turn.failed', { message });
+          appendEvent(sessionId, turnId, 'error', { message });
+          break;
+        }
       }
-    }
-    resultSeen = true;
-  } catch (err) {
-    // When aborted, server.ts already emitted 'turn.interrupted' at the
-    // /interrupt route; do not re-emit it here (R3: would produce a duplicate).
-    if (!abort.signal.aborted) {
-      const message = err instanceof Error ? err.message : String(err);
-      appendEvent(sessionId, turnId, 'turn.failed', { message });
-      appendEvent(sessionId, turnId, 'error', { message });
+      // Fail-soft retry: clear the orphaned head (so later turns don't re-fail on
+      // it) and run once more without resume — degraded (history not loaded) but
+      // the turn still runs instead of erroring.
+      retriedStaleResume = true;
+      clientResume = undefined;
+      reg.clearClaudeSession();
+      console.error(`runTurn: resume id ${usedResume} is stale; retrying once without resume`);
     }
   } finally {
-    // The SDK emits a 'result' message as the final non-error outcome; if we
-    // never saw one and weren't aborted/errored above, treat the turn as
-    // completed (some SDK versions close the generator without a result).
-    if (resultSeen) {
-      // turn.completed is emitted by mapMessage when the result message
-      // arrives; only emit a fallback if it somehow didn't.
-    }
     // Finalize the turn FIRST so the session goes idle promptly: finishTurn
     // clears the active-turn count and starts the idle reaper's clock. The
     // one-time title summary below runs an extra summarizer round-trip, and we
@@ -592,7 +698,15 @@ function liveTitleDeps(cfg: RunnerConfig, sessionId: string, turnId: string): Ti
         disallowedTools: DEFAULT_DISALLOWED_TOOLS,
         env: { ...process.env, CLAUDE_CONFIG_DIR, CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' },
         settingSources: [],
-        ...(reg.state.claude_session_id ? { resume: reg.state.claude_session_id } : {}),
+        // Resume the just-completed conversation for context, but FORK it: the
+        // TITLE_PROMPT Q&A is written to a throwaway forked session, never to the
+        // live resumable head. Without forkSession the summary would pollute the
+        // head's transcript — invisible before, but now that every user turn
+        // resumes that head (Workstream B) the next turn would load this stray
+        // "Summarize this task…" exchange into its history. Forking also keeps the
+        // summarizer off the head entirely, so it can't collide with a user turn
+        // that resumes the head while this one-shot summary is still in flight.
+        ...(reg.state.claude_session_id ? { resume: reg.state.claude_session_id, forkSession: true } : {}),
       };
       let text = '';
       for await (const msg of query({ prompt: TITLE_PROMPT, options: opts })) {
@@ -673,9 +787,14 @@ function mapMessage(msg: SDKMessage, sessionId: string, turnId: string): void {
     // Persist the model into session.json so /status (and the dashboard list,
     // even when suspended) reports it (Seam C).
     if (result.model) reg.setModel(result.model);
-    // Capture the Claude session id from the init system message (only if unset).
-    if (result.claudeSessionId && !reg.state.claude_session_id) {
-      reg.setClaudeSession(result.claudeSessionId);
+    // Capture the Claude session id from the init system message. Capture-LATEST
+    // (follow the live resumable head) so a chain of resumes keeps threading the
+    // current session; the spike shows the id is stable across a plain resume so
+    // this normally no-ops after turn 1 (shouldCaptureClaudeSession's `!==` guard
+    // avoids a redundant session.json write each turn).
+    const observedId = result.claudeSessionId ?? '';
+    if (shouldCaptureClaudeSession(reg.state.claude_session_id, observedId)) {
+      reg.setClaudeSession(observedId);
     }
     emitWorkspaceStatus(sessionId, turnId);
   }

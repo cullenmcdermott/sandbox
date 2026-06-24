@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/cullenmcdermott/sandbox/internal/tui/dashboard/chat"
+	"github.com/cullenmcdermott/sandbox/tui/theme"
 )
 
 // TestAssistantBlockRoutesThroughChat is the A1 regression: the live
@@ -21,8 +22,10 @@ func TestAssistantBlockRoutesThroughChat(t *testing.T) {
 	const body = "Here is **bold** text and a list:\n\n- one\n- two\n"
 	got := m.renderBlock(tblock{kind: blockAssistant, text: body})
 
-	// Oracle: the same pool renderer chat.MarkdownRenderer, rendered directly.
-	wrap := m.width - 2
+	// Oracle: the same pool renderer chat.MarkdownRenderer at the gutter-reduced
+	// width, then wrapped in the A2.1 Charple role gutter — exactly what
+	// renderBlock does for a finalized assistant block.
+	wrap := m.width - 2 - gutterInset
 	if wrap < 20 {
 		wrap = 20
 	}
@@ -34,7 +37,7 @@ func TestAssistantBlockRoutesThroughChat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pool render: %v", err)
 	}
-	want := strings.TrimRight(out, "\n")
+	want := gutterPrefix(strings.TrimRight(out, "\n"), theme.Charple)
 
 	if got != want {
 		t.Fatalf("blockAssistant does not route through chat pool.\n--- got ---\n%q\n--- want ---\n%q", got, want)

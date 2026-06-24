@@ -80,6 +80,14 @@ func withBackground(s string, c color.Color) string {
 	return seq + s + "\x1b[0m"
 }
 
+// pageWhitespace fills lipgloss.Place padding with opaque page-colored cells so
+// overlay/splash margins don't show the terminal's (possibly transparent)
+// background (T9). lipgloss v2 removed WithWhitespaceBackground, so the bg is set
+// via a Style.
+func pageWhitespace() lipgloss.WhitespaceOption {
+	return lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(theme.Page))
+}
+
 // boxWithTitle renders a rounded box of exactly w×h with the title embedded in
 // the top border. Body lines are clipped/padded to the inner width so columns
 // line up; the box is padded to h-2 body rows. Every cell is painted bg so the
@@ -152,24 +160,12 @@ func (m *Model) renderZoned(w, h int) string {
 	}
 
 	bg := lipgloss.JoinVertical(lipgloss.Left, top, strip, mid, bottom)
-	bg = clampLines(bg, w, h)
-
-	if m.toast == nil {
-		return bg
-	}
-
-	// Composite the toast over the background so it floats at the top-right.
-	toast := m.renderToast(w)
-	if toast == "" {
-		return bg
-	}
-
-	canvas := lipgloss.NewCanvas(w, h)
-	canvas.Compose(lipgloss.NewCompositor(
-		lipgloss.NewLayer(bg).X(0).Y(0).Z(0),
-		lipgloss.NewLayer(toast).X(0).Y(2).Z(10),
-	))
-	return canvas.Render()
+	// The toast is intentionally NOT composited here: App.View overlays it over
+	// the final frame of *every* screen (App.withToast, T3), so it floats above
+	// the chat modal / connecting splash too — and so it never gets baked into the
+	// modal's dimmed backdrop. Keeping it out of the dashboard's own view is what
+	// makes that single-overlay path correct.
+	return clampLines(bg, w, h)
 }
 
 // joinGap is the opaque (page-colored) inter-column gutter between the list and
@@ -407,7 +403,7 @@ func (m *Model) sessionListBody(boxW, boxH int) []string {
 
 // renderLegend renders the pinned glyph legend footer (P5).
 func (m *Model) renderLegend(innerW int) string {
-	legend := "─ legend ─  ○idle ◐busy ◆wait ❯input ◌susp ✕fail"
+	legend := "─ legend ─  ○idle ◐busy ◆wait ❯input ⏾susp ✕fail"
 	return lipgloss.NewStyle().Foreground(theme.TextMuted).Render(truncate(legend, innerW))
 }
 

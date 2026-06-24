@@ -86,8 +86,10 @@ func TestStatusLineHidesUnavailableRateLimits(t *testing.T) {
 	m := &TranscriptModel{}
 	m.rlSeen, m.rlAvailable = true, false
 	out := stripANSI(m.renderStatusLine())
-	if !strings.Contains(out, "unavailable") {
-		t.Errorf("unavailable rate limits should say so: %q", out)
+	// A2.5: when plan limits don't apply, the rate-limit row is BLANK — no window
+	// labels, no placeholder text, and (as before) never fabricated percentages.
+	if strings.Contains(out, "5h:") || strings.Contains(out, "weekly:") {
+		t.Errorf("unavailable rate limits must not render a window row: %q", out)
 	}
 	if strings.Contains(out, "30%") || strings.Contains(out, "17%") {
 		t.Errorf("unavailable rate limits must not fabricate percentages: %q", out)

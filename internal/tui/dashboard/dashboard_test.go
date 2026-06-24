@@ -80,7 +80,7 @@ func TestSessionStatusGlyphAndString(t *testing.T) {
 		{StatusWaiting, "◆", "waiting"},
 		{StatusNeedsInput, "❯", "needs-input"},
 		{StatusIdle, "○", "idle"},
-		{StatusSuspended, "◌", "suspended"},
+		{StatusSuspended, "⏾", "suspended"},
 		{StatusFailed, "✕", "failed"},
 	}
 	for _, tc := range tests {

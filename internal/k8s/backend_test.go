@@ -2,11 +2,15 @@ package k8s
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	agentv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	agentsfake "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned/fake"
@@ -417,6 +421,40 @@ func TestList(t *testing.T) {
 	}
 	if len(states) != 2 {
 		t.Errorf("got %d states, want 2", len(states))
+	}
+}
+
+// TestListSurvivesPerItemGetFailure guards the reconcile-safety fix: a per-item
+// Sandbox Get failure (API pressure, or the caller's list deadline truncating a
+// sequence of Gets) must NOT drop a live Sandbox from the List snapshot. The
+// dashboard reconcile treats absence-from-the-snapshot as deletion, so dropping
+// a live session here would make it wrongly pruned. List builds states straight
+// from the bulk-list objects, so a failing "get sandboxes" reactor can't shrink
+// the result.
+func TestListSurvivesPerItemGetFailure(t *testing.T) {
+	ctx := context.Background()
+	agents := agentsfake.NewSimpleClientset()
+	core := fake.NewSimpleClientset()
+	b := NewForClients(agents, core, "agent-sessions")
+
+	for _, id := range []string{"list-a", "list-b"} {
+		spec := session.Spec{ID: session.ID(id), ProjectPath: "/tmp", Backend: "claude-sdk", RunnerImage: "test:latest"}
+		if _, err := b.CreateSession(ctx, spec); err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+	}
+
+	// Every per-item Sandbox GET now fails, while the bulk LIST still succeeds.
+	agents.PrependReactor("get", "sandboxes", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewInternalError(fmt.Errorf("simulated API pressure"))
+	})
+
+	states, err := b.List(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(states) != 2 {
+		t.Fatalf("got %d states, want 2 — a per-item Get failure must not drop live sessions from the snapshot", len(states))
 	}
 }
 

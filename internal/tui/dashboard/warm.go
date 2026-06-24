@@ -31,6 +31,7 @@ func (m *Model) ensureRetained(sess Session, client RunnerClient) *TranscriptMod
 	// real client + reconnect before starting the active stream.
 	t := NewTranscript(client, sess, nil)
 	t.caps = m.caps
+	t.cache = m.eventCache
 	m.retained[id] = t
 	return t
 }

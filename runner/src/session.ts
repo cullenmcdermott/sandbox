@@ -227,6 +227,19 @@ class SessionRegistry {
     saveSessionState(this.state);
   }
 
+  /**
+   * Drop the persisted Claude session id (the resumable head). Called by the
+   * fail-soft path in runTurn when a resume id turns out stale ("No conversation
+   * found") so the retry — and every later turn — starts fresh instead of
+   * repeatedly hard-failing on the orphaned id. No-op when already empty.
+   */
+  clearClaudeSession(): void {
+    if (!this.state.claude_session_id) return;
+    this.state.claude_session_id = '';
+    this.state.last_activity = new Date().toISOString();
+    saveSessionState(this.state);
+  }
+
   setLastTurn(turnId: string): void {
     this.state.last_turn_id = turnId;
     this.state.last_activity = new Date().toISOString();

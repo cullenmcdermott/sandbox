@@ -51,12 +51,13 @@ Tick cadence: ~30fps motion tick; `workTickInterval = 150ms`
 
 ## 1. Architecture
 
-A new package `internal/terminal` owns capability detection and escape-sequence
-emission. Detect once at startup, thread a `Caps` value into the dashboard model,
-and gate every feature behind `if caps.X`.
+The public package `tui/terminal` owns capability detection and escape-sequence
+emission (originally `internal/terminal`; promoted so other systems can reuse it
+— see `cmd/tuikit-demo`). Detect once at startup, thread a `Caps` value into the
+dashboard model, and gate every feature behind `if caps.X`.
 
 ```
-internal/terminal/
+tui/terminal/
   caps.go     // Detect() -> Caps; Ghostty + version, kitty graphics, truecolor
   osc.go      // OSC 9;4 progress, OSC 9 / OSC 777 notifications (zero-width strings)
   kitty.go    // Kitty graphics: image transmit (APC) + Unicode placeholder cells

@@ -24,7 +24,7 @@ const (
 func (m *TranscriptModel) enterInsert(toEnd bool) tea.Cmd {
 	m.imode = modeInsert
 	if toEnd {
-		m.input.SetCursor(len(m.input.Value()))
+		m.input.CursorEnd()
 	}
 	return m.input.Focus()
 }
@@ -38,12 +38,31 @@ func (m *TranscriptModel) enterNormal() {
 
 // escapeConsumes reports whether esc should be handled inside the transcript
 // rather than detaching to the dashboard. True when an overlay is open (help,
-// search, slash palette), we're in INSERT mode, or a turn is active — in all of
-// which esc has a local meaning (close / return to NORMAL / interrupt the turn).
-// The App checks this before deciding whether esc detaches. ctrl+] / ctrl+4 (and
-// NORMAL-mode q) always detach regardless.
+// search, slash palette) or a turn is active — esc has a local meaning there
+// (close / interrupt the turn). With vim modal editing on, esc in INSERT is also
+// consumed (it returns to NORMAL). With vim off the prompt is always focused, so
+// a bare idle esc has no local meaning and falls through to the App's detach
+// (preserving the old NORMAL-mode esc-detach). ctrl+] / ctrl+4 (and NORMAL-mode
+// q) always detach regardless.
 func (m *TranscriptModel) escapeConsumes() bool {
-	return m.imode == modeInsert || m.showHelp || m.search.open || m.paletteOpen() || m.turnActive
+	if m.showHelp || m.search.open || m.paletteOpen() || m.turnActive {
+		return true
+	}
+	return m.vimEnabled && m.imode == modeInsert
+}
+
+// setVim turns vim-style modal editing on or off and returns the follow-up Cmd
+// that applies the resulting input mode. Off (the default): pin to INSERT and
+// focus the prompt so every key types and esc keeps its interrupt/steer/detach
+// meaning; NORMAL is never entered. On: drop to NORMAL so the single-key chords
+// (i/a/j/k/g/G/q) work and the mode badge shows.
+func (m *TranscriptModel) setVim(enabled bool) tea.Cmd {
+	m.vimEnabled = enabled
+	if !enabled {
+		return m.enterInsert(false)
+	}
+	m.enterNormal()
+	return nil
 }
 
 // normalKey handles a key press while in NORMAL mode. It returns (cmd, true)

@@ -254,6 +254,11 @@ export function attachSseClient(
   clients.add(client);
   onClientsChanged?.();
   replayTo(client, sessionId);
+  // Replay/live boundary (Workstream C): replayTo is synchronous, so this comment
+  // lands immediately after the last historical frame and before any live event
+  // can be broadcast. The CLI surfaces it as a stream.live marker so the TUI knows
+  // the catch-up is done and stops showing "loading transcript…".
+  writeSse(res, ': replay-complete\n\n');
 
   let cleanedUp = false;
   const cleanup = (): void => {

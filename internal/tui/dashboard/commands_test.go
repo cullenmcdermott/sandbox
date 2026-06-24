@@ -1,11 +1,50 @@
 package dashboard
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/cullenmcdermott/sandbox/internal/session"
 )
+
+// TestModelSwitchUpdatesStatuslineImmediately guards T8: a /model switch must
+// reflect in the status-line model name + ctx window right away, not only after
+// the next turn's session.started.
+func TestModelSwitchUpdatesStatuslineImmediately(t *testing.T) {
+	m := NewTranscript(&fakeRunnerClient{}, transcriptSession(), nil)
+	m.width, m.height = 80, 24
+
+	// First session.started establishes the account default (Haiku, 200k window).
+	startPayload, _ := json.Marshal(session.SessionStartedPayload{Model: "claude-haiku-4-5"})
+	m.handleEvent(session.Event{Type: session.EventSessionStarted, Payload: startPayload})
+	if m.defaultModel != "claude-haiku-4-5" {
+		t.Fatalf("defaultModel = %q, want claude-haiku-4-5", m.defaultModel)
+	}
+	if m.ctxLimit != 200_000 {
+		t.Fatalf("default ctxLimit = %d, want 200000", m.ctxLimit)
+	}
+
+	// /opus updates the displayed model + ctx window immediately (200k → 1M).
+	m.input.SetValue("/opus")
+	m.handleKey(keyMsg("enter"))
+	if m.model != "opus" {
+		t.Errorf("after /opus, model = %q, want opus", m.model)
+	}
+	if m.ctxLimit != 1_000_000 {
+		t.Errorf("after /opus, ctxLimit = %d, want 1000000 (window must track the switch)", m.ctxLimit)
+	}
+
+	// /model-default restores the captured default and its window (1M → 200k).
+	m.input.SetValue("/model-default")
+	m.handleKey(keyMsg("enter"))
+	if m.model != "claude-haiku-4-5" {
+		t.Errorf("after /model-default, model = %q, want claude-haiku-4-5", m.model)
+	}
+	if m.ctxLimit != 200_000 {
+		t.Errorf("after /model-default, ctxLimit = %d, want 200000", m.ctxLimit)
+	}
+}
 
 func TestSlashFilter(t *testing.T) {
 	if got := len(filteredGroups("")); got != 5 {

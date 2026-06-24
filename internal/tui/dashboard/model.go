@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"image/color"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -15,9 +16,9 @@ import (
 
 	"github.com/cullenmcdermott/sandbox/internal/k8s"
 	"github.com/cullenmcdermott/sandbox/internal/session"
-	"github.com/cullenmcdermott/sandbox/internal/terminal"
 	"github.com/cullenmcdermott/sandbox/tui/anim"
 	"github.com/cullenmcdermott/sandbox/tui/kit"
+	"github.com/cullenmcdermott/sandbox/tui/terminal"
 	"github.com/cullenmcdermott/sandbox/tui/theme"
 )
 
@@ -72,6 +73,38 @@ const syncPollInterval = 4 * time.Second
 
 func syncPollCmd() tea.Cmd {
 	return tea.Tick(syncPollInterval, func(time.Time) tea.Msg { return syncPollTickMsg{} })
+}
+
+// reconcileTickMsg schedules the next periodic full cluster re-list.
+type reconcileTickMsg struct{}
+
+// reconcileMsg carries a fresh full cluster snapshot (Backend.List) used to drop
+// sessions the watch never told us were deleted. Distinct from seedMsg, which
+// adds/patches; the reconcile only removes (the watch owns adds).
+type reconcileMsg []session.State
+
+// reconcileInterval is the cadence of the periodic full re-list that prunes
+// phantom sessions the watch informer missed.
+const reconcileInterval = 30 * time.Second
+
+func reconcileTickCmd() tea.Cmd {
+	return tea.Tick(reconcileInterval, func(time.Time) tea.Msg { return reconcileTickMsg{} })
+}
+
+// reconcileListCmd re-lists the cluster off the Update goroutine and delivers the
+// result as a reconcileMsg. It must NOT touch m.sessions (that would race with
+// Update); the snapshot is applied in the reconcileMsg handler.
+func (m *Model) reconcileListCmd() tea.Cmd {
+	backend := m.backend
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		states, err := backend.List(ctx)
+		if err != nil {
+			return nil // transient: skip this cycle, the next tick retries
+		}
+		return reconcileMsg(states)
+	}
 }
 
 // probeSyncCmd probes one warm session's sync health off the Update goroutine.
@@ -284,10 +317,27 @@ type Model struct {
 	// fresh connection. Keyed by session.ID.
 	liveSSEClients map[session.ID]RunnerClient
 
+	// connectSem bounds how many background observer connects run their expensive
+	// setup (cluster Status + port-forward + runner health) concurrently. On
+	// launch the dashboard fans out one connect per running session; without a cap
+	// a large session set hits the cluster with N simultaneous resume/forward/health
+	// round-trips (FU2). Each background connect Cmd acquires a slot for the setup
+	// phase only and releases it before the long-lived stream continues, so the cap
+	// throttles the burst without limiting the number of open streams.
+	connectSem chan struct{}
+
 	// retained holds a live TranscriptModel for each warm (running-pod) session,
 	// fed in the background by handleRunnerEvent. A warm session's model is never
 	// destroyed while its pod runs, so showing it is an O(1) swap (see warm.go).
 	retained map[session.ID]*TranscriptModel
+
+	// reconcileMisses counts how many consecutive periodic cluster re-lists a
+	// session has been absent from. The watch informer can miss a delete that
+	// happened before its cache synced, leaving a phantom session in the list
+	// forever; the reconcile loop drops a session only after it's missed twice
+	// (~2 cycles) so a just-created session the snapshot predates — added by the
+	// watch — isn't dropped out from under us. See reconcile.
+	reconcileMisses map[session.ID]int
 
 	// syncProber reports per-session sync health for the detail-pane indicator.
 	// nil disables the indicator (unit-test default).
@@ -346,6 +396,11 @@ type Model struct {
 	// instead of replaying full history. nil in unit tests (no caching).
 	snapStore SnapshotStore
 
+	// eventCache, when non-nil, persists each foreground session's transcript
+	// events host-side so a cold re-attach rebuilds the conversation instantly and
+	// streams only the delta (Workstream C). nil in unit tests (no caching).
+	eventCache EventCache
+
 	// actionErr is the last suspend/resume/destroy/create error, surfaced in
 	// the detail pane. Cleared when an action succeeds.
 	actionErr error
@@ -378,6 +433,7 @@ func New(backend Backend) *Model {
 		liveSSEChannels: make(map[session.ID]<-chan session.Event),
 		liveSSEClients:  make(map[session.ID]RunnerClient),
 		retained:        make(map[session.ID]*TranscriptModel),
+		connectSem:      make(chan struct{}, maxConcurrentBackgroundConnects),
 		engine:          anim.NewEngine(),
 		caps:            terminal.Detect(),
 	}
@@ -507,6 +563,26 @@ func (m *Model) WithSnapshotStore(s SnapshotStore) *Model {
 	return m
 }
 
+// EventCache persists a session's transcript events host-side (Workstream C) so a
+// cold re-attach rebuilds the conversation instantly and resumes the runner SSE
+// stream from the last cached seq, replaying only the delta instead of the whole
+// history from 0. Implemented by the CLI on top of the local index; nil in unit
+// tests (the transcript replays from the runner as before). Delta events
+// (message/reasoning/tool .delta) are intentionally not cached — replay rebuilds
+// final state from the completed events.
+type EventCache interface {
+	// LoadEvents returns a session's cached transcript events, in append order.
+	LoadEvents(id session.ID) ([]session.Event, error)
+	// AppendEvent persists one event to a session's cache (best effort).
+	AppendEvent(id session.ID, ev session.Event) error
+}
+
+// WithEventCache registers the persistent host-side transcript cache.
+func (m *Model) WithEventCache(c EventCache) *Model {
+	m.eventCache = c
+	return m
+}
+
 // --------------------------------------------------------------------------
 // tea.Model interface
 // --------------------------------------------------------------------------
@@ -520,6 +596,9 @@ func (m *Model) Init() tea.Cmd {
 		cmds = append(cmds, m.seedCmd())
 		// Start the cluster watch.
 		cmds = append(cmds, m.startWatchCmd())
+		// Periodically re-list the cluster to prune phantom sessions the watch
+		// informer missed (a delete that happened before its cache synced).
+		cmds = append(cmds, reconcileTickCmd())
 	}
 
 	// Start the warm-session sync/idle poll loop when an indicator source is
@@ -609,6 +688,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		cmds = append(cmds, syncPollCmd())
 		return m, tea.Batch(cmds...)
+
+	case reconcileTickMsg:
+		// Kick a fresh full re-list and schedule the next tick. The list runs off
+		// the Update goroutine and comes back as reconcileMsg.
+		return m, tea.Batch(m.reconcileListCmd(), reconcileTickCmd())
+
+	case reconcileMsg:
+		m.reconcile([]session.State(msg))
+		return m, nil
 
 	case liveSSEReadyMsg:
 		// Guard: if the session was deleted or suspended while the connector
@@ -845,17 +933,24 @@ func (m *Model) startLiveSSECmd(sess Session) tea.Cmd {
 	// the runner replays only genuinely-new events rather than the full history
 	// (the source of the launch-time notification flashing and usage count-up).
 	afterSeq := sess.lastSeq
+	sem := m.connectSem
 
 	return func() tea.Msg {
+		// Throttle the connect burst (FU2): hold a slot only for the expensive
+		// setup, then release it so the long-lived stream below doesn't occupy the
+		// cap.
+		release := acquireConnectSlot(sem)
 		ctx, cancel := context.WithCancel(context.Background())
 		// Connect (includes resume-if-suspended + port-forward + health).
 		res, err := connector(ctx, ref, projectPath, func(ConnectStage, string) {})
 		if err != nil {
+			release()
 			cancel()
 			// Graceful degradation: stream could not be opened; no crash.
 			return nil
 		}
 		ch, err := res.Client.EventsPassive(ctx, ref, afterSeq)
+		release()
 		if err != nil {
 			cancel()
 			return nil
@@ -864,6 +959,23 @@ func (m *Model) startLiveSSECmd(sess Session) tea.Cmd {
 		// starts reading events.
 		return liveSSEReadyMsg{id: id, ch: ch, cancel: cancel, client: res.Client}
 	}
+}
+
+// maxConcurrentBackgroundConnects caps how many background observer connects run
+// their setup phase at once (FU2). Small enough to keep the launch burst off the
+// cluster, large enough that a handful of sessions still warm up promptly.
+const maxConcurrentBackgroundConnects = 4
+
+// acquireConnectSlot blocks until a background-connect slot is free and returns
+// a one-shot release. A nil semaphore (tests that build a Model directly) is a
+// no-op, so the throttle never deadlocks an unconfigured model.
+func acquireConnectSlot(sem chan struct{}) func() {
+	if sem == nil {
+		return func() {}
+	}
+	sem <- struct{}{}
+	var once sync.Once
+	return func() { once.Do(func() { <-sem }) }
 }
 
 // reconnectLiveSSECmd is startLiveSSECmd's retry sibling: on success it delivers
@@ -884,15 +996,19 @@ func (m *Model) reconnectLiveSSECmd(sess Session, attempt int) tea.Cmd {
 	// Resume from the last persisted event (see startLiveSSECmd): a reconnect
 	// after a port-forward blip must not replay the whole stream either.
 	afterSeq := sess.lastSeq
+	sem := m.connectSem
 
 	return func() tea.Msg {
+		release := acquireConnectSlot(sem)
 		ctx, cancel := context.WithCancel(context.Background())
 		res, err := connector(ctx, ref, projectPath, func(ConnectStage, string) {})
 		if err != nil {
+			release()
 			cancel()
 			return liveSSEReconnectFailedMsg{id: id, attempt: attempt}
 		}
 		ch, err := res.Client.EventsPassive(ctx, ref, afterSeq)
+		release()
 		if err != nil {
 			cancel()
 			return liveSSEReconnectFailedMsg{id: id, attempt: attempt}
@@ -1295,6 +1411,66 @@ func (m *Model) applyPodEvent(ev k8s.StateEvent) tea.Cmd {
 	return nil
 }
 
+// reconcile prunes sessions that have disappeared from the cluster but whose
+// delete the watch informer never delivered (it can miss a delete that landed
+// before its cache synced, leaving a phantom row forever — T5). It only REMOVES;
+// the watch owns adds, so a session present in the cluster but missing locally is
+// left for the watch to insert.
+//
+// To avoid racing with a just-created session the List snapshot predates (the
+// watch adds it; this snapshot, taken earlier, wouldn't include it), a session is
+// dropped only after it's been absent from two consecutive re-lists.
+func (m *Model) reconcile(states []session.State) {
+	present := make(map[session.ID]bool, len(states))
+	for _, st := range states {
+		present[st.ID] = true
+	}
+	if m.reconcileMisses == nil {
+		m.reconcileMisses = make(map[session.ID]int)
+	}
+
+	dropped := false
+	kept := m.sessions[:0]
+	for _, s := range m.sessions {
+		id := s.ID()
+		if present[id] {
+			delete(m.reconcileMisses, id)
+			kept = append(kept, s)
+			continue
+		}
+		// Absent from the cluster: one grace cycle before dropping.
+		m.reconcileMisses[id]++
+		if m.reconcileMisses[id] < 2 {
+			kept = append(kept, s)
+			continue
+		}
+		delete(m.reconcileMisses, id)
+		m.cancelLiveSSE(id)
+		m.dropRetained(id)
+		dropped = true
+	}
+	m.sessions = kept
+
+	// Prune miss counters for sessions no longer tracked (e.g. removed by the
+	// watch between cycles) so the map can't grow unbounded.
+	if len(m.reconcileMisses) > 0 {
+		live := make(map[session.ID]bool, len(m.sessions))
+		for _, s := range m.sessions {
+			live[s.ID()] = true
+		}
+		for id := range m.reconcileMisses {
+			if !live[id] {
+				delete(m.reconcileMisses, id)
+			}
+		}
+	}
+
+	if dropped {
+		m.sortSessions()
+		m.clampCursor()
+	}
+}
+
 func (m *Model) sortSessions() {
 	SortSessions(m.sessions, m.sortKey, m.sortDir)
 }
@@ -1666,7 +1842,7 @@ func (m *Model) render() string {
 		return lipgloss.Place(m.width, m.height,
 			lipgloss.Center, lipgloss.Center,
 			overlay,
-			lipgloss.WithWhitespaceChars(" "),
+			pageWhitespace(),
 		)
 	}
 
@@ -1675,7 +1851,7 @@ func (m *Model) render() string {
 		return lipgloss.Place(m.width, m.height,
 			lipgloss.Center, lipgloss.Center,
 			overlay,
-			lipgloss.WithWhitespaceChars(" "),
+			pageWhitespace(),
 		)
 	}
 

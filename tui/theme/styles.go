@@ -101,7 +101,7 @@ const (
 	GlyphWaiting    = "◆" // gold approval pending
 	GlyphNeedsInput = "❯" // guac green, turn done
 	GlyphIdle       = "○" // muted, pod up nothing pending
-	GlyphSuspended  = "◌" // dim, pod scaled to zero
+	GlyphSuspended  = "⏾" // dim sleep crescent, pod scaled to zero (distinct from idle's ○)
 	GlyphFailed     = "✕" // coral red
 	GlyphSelBar     = "▌" // selection bar
 )

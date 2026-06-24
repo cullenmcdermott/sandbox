@@ -392,9 +392,20 @@ func (b *Backend) Status(ctx context.Context, ref session.Ref) (session.State, e
 		}
 		return session.State{}, fmt.Errorf("k8s: get Sandbox %s: %w", ref.ID, err)
 	}
+	return b.statusFromSandbox(ctx, sb), nil
+}
 
+// statusFromSandbox derives the observed State from a Sandbox object already in
+// hand. The only extra I/O is the pod-readiness probe, which degrades to
+// Creating on error rather than failing. Splitting this out of Status lets List
+// build every session's state straight from the bulk-list objects — with no
+// per-item Get that could fail (API pressure, or the caller's list deadline
+// truncating the sequence) and silently drop a live Sandbox from the snapshot.
+// The dashboard reconcile treats absence-from-the-snapshot as deletion, so a
+// dropped live session would be wrongly pruned.
+func (b *Backend) statusFromSandbox(ctx context.Context, sb *agentv1alpha1.Sandbox) session.State {
 	st := session.State{
-		ID:          ref.ID,
+		ID:          session.ID(sb.Name),
 		SandboxName: sb.Name,
 		CreatedAt:   sb.CreationTimestamp.Time,
 		// Recover the identity fields the runner pod was created with. These are
@@ -437,7 +448,7 @@ func (b *Backend) Status(ctx context.Context, ref session.Ref) (session.State, e
 		}
 	}
 
-	return st, nil
+	return st
 }
 
 // sandboxEnv returns the literal value of a runner-container env var from the
@@ -465,12 +476,10 @@ func (b *Backend) List(ctx context.Context) ([]session.State, error) {
 
 	states := make([]session.State, 0, len(list.Items))
 	for i := range list.Items {
-		sb := &list.Items[i]
-		st, err := b.Status(ctx, session.Ref{ID: session.ID(sb.Name)})
-		if err != nil {
-			continue
-		}
-		states = append(states, st)
+		// Build each state straight from the bulk-list object — never a per-item
+		// Get that could fail and silently drop a live Sandbox from the snapshot
+		// (the dashboard reconcile treats absence as deletion and would prune it).
+		states = append(states, b.statusFromSandbox(ctx, &list.Items[i]))
 	}
 	return states, nil
 }

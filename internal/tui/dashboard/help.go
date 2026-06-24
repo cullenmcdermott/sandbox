@@ -167,7 +167,8 @@ func chatHelpCategories() []helpCategory {
 		{"shift+tab", "cycle permission mode"},
 		{"?", "toggle this help"},
 		{"↑/↓ pgup/pgdn", "scroll the transcript"},
-		{"esc", "detach to the command center"},
+		{"esc", "interrupt the turn / close an overlay (detaches when idle)"},
+		{"ctrl+]", "detach to the command center"},
 	}})
 	return cats
 }

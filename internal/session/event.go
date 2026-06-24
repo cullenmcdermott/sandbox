@@ -11,6 +11,15 @@ import "encoding/json"
 // are validated field-for-field against the schema by schema_test.go.
 type EventType string
 
+// EventStreamLive is a CLIENT-INTERNAL stream marker, NOT a persisted event: it
+// is never written to events.db and is deliberately absent from AllEventTypes /
+// schema/events.json (so the schema drift gate ignores it). The runner writes a
+// `: replay-complete` SSE comment once it finishes replaying history to a freshly
+// connected client; the RunnerClient surfaces that comment as an Event of this
+// type so the TUI can flip out of its "loading transcript…" replay state into the
+// live tail (Workstream C: replay/live boundary). It carries no payload.
+const EventStreamLive EventType = "stream.live"
+
 // Event is a single normalized event in the session event log. Payload is
 // type-specific JSON; consumers decode it based on Type.
 type Event struct {

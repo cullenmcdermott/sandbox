@@ -35,11 +35,12 @@ func newDashboardConnector(backend *k8s.Backend, reaperImage string) dashboard.C
 		}
 
 		// The reconnect callback closes over the same sessionConnector so it
-		// re-uses the port-forward state when the stream drops. It passes a nil
-		// onStage: the connecting screen (and its update channel) is long gone by
-		// reconnect time, so emitting stage updates there would panic.
-		reconnect := func(ctx context.Context) (dashboard.RunnerClient, error) {
-			c, rerr := sc.connect(ctx, nil)
+		// re-uses the port-forward state when the stream drops. onStage is the
+		// transcript's own per-reconnect stage sink (FU1) — a fresh callback each
+		// attempt, NOT the connecting screen's closed channel — so threading it
+		// through lets the header show live "Resuming pod…" progress.
+		reconnect := func(ctx context.Context, onStage func(dashboard.ConnectStage, string)) (dashboard.RunnerClient, error) {
+			c, rerr := sc.connect(ctx, onStage)
 			if rerr != nil {
 				return nil, rerr
 			}
@@ -88,8 +89,8 @@ func newDashboardObserverConnector(backend *k8s.Backend, reaperImage string) das
 			return dashboard.ConnectResult{}, fmt.Errorf("observe %s: %w", ref.ID, err)
 		}
 
-		reconnect := func(ctx context.Context) (dashboard.RunnerClient, error) {
-			c, rerr := sc.connectObserver(ctx, nil)
+		reconnect := func(ctx context.Context, onStage func(dashboard.ConnectStage, string)) (dashboard.RunnerClient, error) {
+			c, rerr := sc.connectObserver(ctx, onStage)
 			if rerr != nil {
 				return nil, rerr
 			}
@@ -154,8 +155,8 @@ func newDashboardCreator(backend *k8s.Backend, runnerImage, reaperImage string) 
 			}
 		}
 
-		reconnect := func(ctx context.Context) (dashboard.RunnerClient, error) {
-			c, rerr := sc.connect(ctx, nil)
+		reconnect := func(ctx context.Context, onStage func(dashboard.ConnectStage, string)) (dashboard.RunnerClient, error) {
+			c, rerr := sc.connect(ctx, onStage)
 			if rerr != nil {
 				return nil, rerr
 			}

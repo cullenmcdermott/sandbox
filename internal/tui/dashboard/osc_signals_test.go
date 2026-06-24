@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/cullenmcdermott/sandbox/internal/session"
-	"github.com/cullenmcdermott/sandbox/internal/terminal"
+	"github.com/cullenmcdermott/sandbox/tui/terminal"
 )
 
 func busySessions() []Session {

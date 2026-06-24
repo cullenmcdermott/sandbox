@@ -1,5 +1,48 @@
 # TODO
 
+## ~~Transcript load / typing / reconnect performance~~ **DONE (2026-06-23)**
+
+Deep-dive fixes for: slow transcript load despite cache, sluggish typing, and a
+stuck "reconnecting…" — all rooted in an idle-reaped/suspended pod on a fresh
+launch. Implemented:
+
+- **B — O(N) cache replay:** `loadCachedTranscript` now bulk-replays under a
+  `bulkReplay` flag so `syncBody`/`reconcileItems` runs once, not per event
+  (`transcript.go:loadCachedTranscript`, `transcript_list.go:syncBody`). Was
+  O(N²) in `blockFP` re-hashing.
+- **F-blockFP — fingerprint memoization:** immutable text blocks are hashed once;
+  reconcile recomputes only `fresh`/`dirty`/unread-toggled/mutable-card items
+  (`transcript_list.go:reconcileItems`,`blockKindMutable`,`markBlockDirty`).
+- **C — stop the repaint spin:** the 150ms work-tick loop no longer re-fires while
+  `m.reconnecting` (`transcript.go` `workTickMsg` handler), so an ungraceful drop
+  that leaves `turnActive` set can't burn a full-screen repaint forever.
+- **A — paint cache during resume:** a read-only `connectingPreview` transcript is
+  built from warm/cache history at attach and rendered behind the connect-stage
+  banner (`app.go:buildConnectingPreview`/`connectingBanner`/`connectingView`,
+  `transcript.go:previewView`), instead of a blank splash while the pod resumes.
+- **D — suspend-aware reconnect:** header shows elapsed time and a terminal
+  "session gone" state on `session.ErrSessionGone` instead of retrying forever
+  (`transcript.go` reconnect handlers + `renderHeader`, `connect.go` StatusGone).
+- **E — backdrop memoization:** the dimmed dashboard backdrop behind the modal is
+  cached and reused across keystrokes (`app.go:dimmedBackdrop`), invalidated only
+  when the dashboard is actually delegated a message.
+- **F-rest — observer forward:** background observer connects forward the runner
+  HTTP port only (`k8s.ForwardSpecsRunnerOnly`, `connect.go` `!full` branch); the
+  SSH forward existed solely for mutagen, which observer mode never runs.
+
+### Follow-ups — **DONE (2026-06-23)**
+- **FU1 live per-stage reconnect readout:** the `Reconnect` callback now carries an
+  `onStage` (`connector.go:ReconnectFunc`); `doReconnect` streams stages into a
+  per-attempt channel drained by `waitForReconnectStage`, and the header shows
+  "reconnecting — Starting pod / Waiting for runner (elapsed)" instead of a flat
+  label (`transcript.go`, `dashboard_connector.go` closures pass the real onStage).
+  Per-attempt timeout raised to 180s (`reconnectAttemptTimeout`) for cold pulls.
+- **FU2 observer fan-out cap:** background observer connects acquire a slot from a
+  cap-4 semaphore (`model.go:connectSem`/`acquireConnectSlot`/
+  `maxConcurrentBackgroundConnects`) for the setup phase only, throttling the
+  launch burst without limiting open streams. Applied to both
+  `startLiveSSECmd` and `reconnectLiveSSECmd`.
+
 ## ~~Warm "hide" sessions — rework attach/detach (design approved)~~ **DONE (2026-06-23)**
 
 Implemented the full 14-task TDD plan

@@ -37,12 +37,21 @@ type OpencodeCreds struct {
 	URL      string // e.g. http://127.0.0.1:4096
 }
 
+// ReconnectFunc re-establishes a live runner connection after the SSE stream
+// drops (node drain, suspend/resume, transient port-forward loss). onStage
+// reports coarse stage progress (Resume → port-forward → runner health) so the
+// transcript header can show a live "Resuming pod…" readout instead of a flat
+// "reconnecting…" during a slow cold-pod resume; pass a no-op to ignore it. It
+// is a distinct callback per reconnect, NOT the connecting screen's onStage
+// (whose channel is closed by reconnect time — reusing it would panic).
+type ReconnectFunc func(ctx context.Context, onStage func(ConnectStage, string)) (RunnerClient, error)
+
 // ConnectResult is the successful outcome of a Connector call: a live client
-// and the reconnect callback (same signature as the connector) that the
-// transcript TUI uses when the SSE stream drops.
+// and the reconnect callback that the transcript TUI uses when the SSE stream
+// drops.
 type ConnectResult struct {
 	Client        RunnerClient
-	Reconnect     func(ctx context.Context) (RunnerClient, error)
+	Reconnect     ReconnectFunc
 	Endpoint      string         // runner HTTP base URL (claude transcript / SSE)
 	OpencodeCreds *OpencodeCreds // nil for claude-sdk sessions
 	// Warning is a non-fatal advisory surfaced to the user (e.g. sync failed).
@@ -79,7 +88,7 @@ type SyncProber func(ctx context.Context, id session.ID) string
 type CreateResult struct {
 	State         session.State
 	Client        RunnerClient
-	Reconnect     func(ctx context.Context) (RunnerClient, error)
+	Reconnect     ReconnectFunc
 	Endpoint      string         // runner HTTP base URL
 	OpencodeCreds *OpencodeCreds // nil for claude-sdk sessions
 	// Warning is a non-fatal advisory surfaced to the user (e.g. sync failed on

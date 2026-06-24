@@ -11,7 +11,9 @@ import (
 // already past permissionGraceCap, so a key held during the drop would instantly
 // answer the box as it becomes live again. Reconnect must re-anchor the grace.
 func TestPermissionGraceReanchorsOnReconnect(t *testing.T) {
-	reconnect := func(context.Context) (RunnerClient, error) { return &fakeRunnerClient{}, nil }
+	reconnect := func(context.Context, func(ConnectStage, string)) (RunnerClient, error) {
+		return &fakeRunnerClient{}, nil
+	}
 	m := NewTranscript(&fakeRunnerClient{}, transcriptSession(), reconnect)
 	m.width, m.height = 80, 24
 	m.layout()

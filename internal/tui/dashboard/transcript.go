@@ -3,23 +3,26 @@ package dashboard
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"image/color"
+	"math"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"charm.land/bubbles/v2/textinput"
+	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/cullenmcdermott/sandbox/internal/models"
 	"github.com/cullenmcdermott/sandbox/internal/session"
-	"github.com/cullenmcdermott/sandbox/internal/terminal"
 	"github.com/cullenmcdermott/sandbox/internal/tui/dashboard/chat"
 	"github.com/cullenmcdermott/sandbox/tui/anim"
 	"github.com/cullenmcdermott/sandbox/tui/kit"
 	"github.com/cullenmcdermott/sandbox/tui/list"
+	"github.com/cullenmcdermott/sandbox/tui/terminal"
 	"github.com/cullenmcdermott/sandbox/tui/theme"
 )
 
@@ -94,6 +97,12 @@ type transcriptPermission struct {
 // transcript message types (prefixed to avoid colliding with the dashboard's
 // own message set).
 type tEventMsg session.Event
+
+// tEventBatchMsg carries one or more SSE events coalesced by waitForEvent. A
+// burst of stream deltas is applied in a single Update+View instead of one per
+// event, so a fast turn doesn't re-render per delta or starve keystrokes (T1).
+type tEventBatchMsg []session.Event
+
 type tStreamEndedMsg struct{}
 type tReconnectedMsg struct{ client RunnerClient }
 type tReconnectFailedMsg struct{ err error }
@@ -114,10 +123,10 @@ type TranscriptModel struct {
 	items      []*blockItem        // one per m.blocks entry, parallel and index-stable
 	streamItem *blockItem          // ephemeral trailing item for the live streaming turn
 	streamAI   *chat.AssistantItem // persistent AI for live tail (A2 incremental render)
-	input      textinput.Model
-	permBox    string // cached rendered permission box (recomputed in layout)
-	palette    string // cached rendered slash palette (recomputed in layout)
-	cmdSel     int    // selected index in the slash palette
+	input      textarea.Model      // multi-line composer (boxed; shift+enter inserts a newline)
+	permBox    string              // cached rendered permission box (recomputed in layout)
+	palette    string              // cached rendered slash palette (recomputed in layout)
+	cmdSel     int                 // selected index in the slash palette
 
 	// Grouped help overlay (`?` / /help), shared with the command center.
 	showHelp bool
@@ -227,6 +236,11 @@ type TranscriptModel struct {
 	// `model` (the SDK-reported active id used for display) so the status line
 	// doesn't flicker between the requested alias and the resolved id.
 	modelOverride string
+	// defaultModel is the account/session default model id, captured from the
+	// first session.started (before any /model override). /model-default restores
+	// the status line to it optimistically; it self-heals to the SDK-resolved id
+	// on the next session.started.
+	defaultModel string
 
 	// lastKeyAt is the time of the previous key event, used to gate the inline
 	// permission box against type-ahead: an answer key (a/d/enter) only resolves
@@ -235,12 +249,19 @@ type TranscriptModel struct {
 	// can't auto-approve/deny it (chat-rendering §2.6).
 	lastKeyAt time.Time
 
-	// imode is the vim-style input mode. The transcript opens in NORMAL (single
-	// key commands: i/a insert, j/k scroll, / search, q detach), and i/a enter
-	// INSERT where keystrokes type into the prompt and esc returns to NORMAL.
+	// imode is the input mode. With vim modal editing off (the default) the
+	// transcript stays in INSERT — the prompt is always focused so every key
+	// types. /vim turns modal editing on (vimEnabled), opening in NORMAL where
+	// single-key chords work (i/a insert, j/k scroll, / search, q detach) and
+	// i/a enter INSERT (keystrokes type; esc returns to NORMAL).
 	imode inputMode
+	// vimEnabled gates vim-style modal editing. Off by default: the prompt is
+	// always focused (imode pinned to INSERT) so there's no "press i to type"
+	// surprise and esc keeps its interrupt/steer/detach meaning; /vim toggles it
+	// on for the NORMAL/INSERT chords and the mode badge.
+	vimEnabled bool
 
-	reconnect    func(context.Context) (RunnerClient, error)
+	reconnect    ReconnectFunc
 	reconnecting bool
 	terminating  bool
 	// reconnectAttempts counts consecutive failed reconnect tries; it drives the
@@ -248,6 +269,22 @@ type TranscriptModel struct {
 	// (RV29: previously the loop retried every flat 3s forever, hammering the
 	// connector and spamming the transcript with identical lines).
 	reconnectAttempts int
+	// reconnectStartedAt is when the current reconnect sequence began; the header
+	// shows elapsed time so a slow cold-pod resume reads as progress, not a freeze.
+	reconnectStartedAt time.Time
+	// reconnectGaveUp is set when reconnect hits a permanent condition (the session
+	// no longer exists). The retry loop stops and the header shows a terminal
+	// "session gone" state instead of an endless "reconnecting…" (Fix D).
+	reconnectGaveUp bool
+	// reconnectStages carries live connect-stage updates from the in-flight
+	// doReconnect goroutine into the Update loop (drained by waitForReconnectStage),
+	// so the header shows "reconnecting — Starting pod / Waiting for runner" during
+	// a slow cold-pod resume instead of a static label. reconnectStage/Detail hold
+	// the latest; reconnectStageKnown gates the richer label until the first update.
+	reconnectStages     chan reconnectStageMsg
+	reconnectStage      ConnectStage
+	reconnectDetail     string
+	reconnectStageKnown bool
 
 	// initialPrompt is submitted as the first turn once the stream is live
 	// (from `sandbox claude "…"`). Consumed once on Init.
@@ -269,15 +306,102 @@ type TranscriptModel struct {
 
 	events       <-chan session.Event
 	streamCancel context.CancelFunc // cancels the live Events() stream (NEW-5)
+
+	// Workstream C — replay/live boundary. While true, the stream (or the local
+	// cache) is still feeding HISTORICAL events being caught up after an attach or
+	// reconnect; the prompt line shows "loading transcript…" and the working
+	// spinner is suppressed so replay can't masquerade as a live turn (#1). The
+	// runner's `: replay-complete` comment (surfaced as session.EventStreamLive)
+	// flips it false; a genuinely in-flight turn then resumes "working" because
+	// turnActive is carried across the boundary. replayedCount drives the loading
+	// progress readout.
+	replaying     bool
+	replayedCount int
+	// attachSeq is the session's last-known event seq at attach (the dashboard's
+	// resume cursor). It is the replay WATERMARK: catch-up is "done" once
+	// m.lastSeq reaches it, so the loading state self-clears even if the runner
+	// never sends the `: replay-complete` marker (an older runner, or a proxy that
+	// strips SSE comments). attachSeq==0 means a fresh session with no history —
+	// we never enter the loading state then, so a brand-new chat shows no "loading
+	// transcript…" flash.
+	attachSeq uint64
+
+	// cache, when non-nil, is the host-side transcript cache (Workstream C): the
+	// transcript loads it on a cold open to rebuild history instantly and appends
+	// each non-delta event it observes (whether via its own foreground stream or
+	// the warm background feed), so the next cold attach resumes from the cached
+	// head instead of replaying from seq 0. nil in tests.
+	cache EventCache
+	// lastCachedSeq is the highest seq written to the cache. It makes maybeCache
+	// idempotent per seq so a brief double-feed at the warm→foreground handoff
+	// (a buffered background event racing the foreground stream) can't write a
+	// duplicate line that would double-render on the next cold replay.
+	lastCachedSeq uint64
+
+	// bulkReplay is set while loadCachedTranscript applies a batch of cached
+	// events. It makes syncBody a no-op so the per-event reconcile (which
+	// re-fingerprints every prior item and rebuilds the list) is skipped during
+	// the replay; the caller reconciles exactly once at the end, turning an
+	// O(N^2) cold load into O(N).
+	bulkReplay bool
+	// reconciles counts reconcileItems() calls — a behavioral counter the bulk
+	// replay test asserts on to prove the replay collapses to a single reconcile.
+	reconciles int
+	// fpComputes counts blockFP() calls — a behavioral counter proving that
+	// immutable text blocks are fingerprinted once, not re-hashed every reconcile.
+	fpComputes int
+}
+
+// cacheableEvent reports whether an event belongs in the host-side transcript
+// cache. Synthetic stream markers (EventStreamLive, seq 0) are excluded, and the
+// high-volume incremental deltas are skipped — replay rebuilds final state from
+// the started/completed events, so caching deltas would only bloat the file.
+func cacheableEvent(ev session.Event) bool {
+	if ev.Seq == 0 {
+		return false
+	}
+	switch ev.Type {
+	case session.EventMessageDelta, session.EventReasoningDelta, session.EventToolDelta:
+		return false
+	}
+	return true
+}
+
+// maybeCache appends an event to the host-side cache exactly once, in seq order.
+// Used by BOTH the foreground stream (tEventMsg) and the warm background feed
+// (ingest): a session is fed by exactly one of those at a time (attach cancels
+// the background stream, detach cancels the foreground stream), and the
+// lastCachedSeq guard covers the brief handoff race. Best effort — a write
+// failure never breaks the turn (the runner's events.db is authoritative).
+func (m *TranscriptModel) maybeCache(ev session.Event) {
+	if m.cache == nil || !cacheableEvent(ev) || ev.Seq <= m.lastCachedSeq {
+		return
+	}
+	if err := m.cache.AppendEvent(m.ref.ID, ev); err == nil {
+		m.lastCachedSeq = ev.Seq
+	}
 }
 
 // NewTranscript builds a transcript model for an attached session. reconnect
 // re-establishes the connection (resume + port-forward + fresh client) when the
 // SSE stream drops; it may be nil (no auto-reconnect).
-func NewTranscript(client RunnerClient, sess Session, reconnect func(context.Context) (RunnerClient, error)) *TranscriptModel {
-	in := textinput.New()
-	in.Prompt = "❯ "
+func NewTranscript(client RunnerClient, sess Session, reconnect ReconnectFunc) *TranscriptModel {
+	in := textarea.New()
+	// The "❯" marks only the first row; wrapped/continuation rows align under it
+	// with blank gutters, so a multi-line message reads as one prompt, not many.
+	in.SetPromptFunc(2, func(info textarea.PromptInfo) string {
+		if info.LineNumber == 0 {
+			return "❯ "
+		}
+		return "  "
+	})
 	in.Placeholder = "type a message…"
+	in.ShowLineNumbers = false
+	in.CharLimit = 0
+	in.SetHeight(1) // grows with content up to maxInputRows (see layout/renderInput)
+	// Vim modal editing is off by default, so the composer opens in INSERT and is
+	// focused by Init (enterInsert focuses, enterNormal blurs). /vim switches to
+	// the modal NORMAL/INSERT register.
 
 	return &TranscriptModel{
 		client:      client,
@@ -288,8 +412,14 @@ func NewTranscript(client RunnerClient, sess Session, reconnect func(context.Con
 		status:      sess.DashStatus,
 		body:        list.New(),
 		input:       in,
+		imode:       modeInsert, // vim off by default → always-focused INSERT
 		mode:        modeAcceptEdits,
 		reconnect:   reconnect,
+		// Replay watermark (Workstream C): the dashboard's last-known seq for this
+		// session. 0 => a fresh session, so we never show a "loading transcript…"
+		// flash; >0 => catch-up is done once the stream reaches it (works without
+		// the runner's replay-complete marker).
+		attachSeq: sess.lastSeq,
 
 		droppedPartialIdx: -1,
 	}
@@ -337,9 +467,17 @@ func (m *TranscriptModel) RestoreParkedState(ps ParkedTranscriptState) {
 // Init focuses the prompt and opens the event stream. If an initial prompt was
 // supplied (from `sandbox claude "…"`), it is submitted as the first turn.
 func (m *TranscriptModel) Init() tea.Cmd {
-	// Open in NORMAL mode: the prompt starts blurred and `i`/`a` enter INSERT.
 	var cmds []tea.Cmd
+	// Vim modal editing is off by default: focus the prompt so the user can type
+	// immediately (no "press i" surprise). /vim drops to NORMAL when enabled.
+	if !m.vimEnabled {
+		cmds = append(cmds, m.input.Focus())
+	}
 	if m.client != nil {
+		// Workstream C: seed history from the host-side cache (cold open) before
+		// opening the stream, so attach is instant and the stream resumes from the
+		// cached head (after=lastSeq) rather than replaying from seq 0.
+		m.loadCachedTranscript()
 		cmds = append(cmds, m.startEventStream())
 	}
 	if m.initialPrompt != "" {
@@ -370,8 +508,29 @@ func (m *TranscriptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.submitText(msg.text)
 
 	case tEventMsg:
-		cmd := m.handleEvent(session.Event(msg))
+		ev := session.Event(msg)
+		cmd := m.handleEvent(ev)
+		// Workstream C: mirror each streamed (non-delta) event into the host-side
+		// cache so the next cold attach replays from here.
+		m.maybeCache(ev)
 		cmds := []tea.Cmd{m.maybeStartWorking(), cmd}
+		if m.events != nil {
+			cmds = append(cmds, m.waitForEvent)
+		}
+		return m, tea.Batch(cmds...)
+	case tEventBatchMsg:
+		// A coalesced burst (waitForEvent): apply every event in order, then render
+		// ONCE (Update→View runs a single frame per message). handleEvent still
+		// streamDelta()s per event, but that only re-fingerprints the live tail —
+		// the expensive glamour render happens once, at View, for the whole batch.
+		cmds := make([]tea.Cmd, 0, len(msg)+2)
+		for _, e := range msg {
+			if c := m.handleEvent(e); c != nil {
+				cmds = append(cmds, c)
+			}
+			m.maybeCache(e)
+		}
+		cmds = append(cmds, m.maybeStartWorking())
 		if m.events != nil {
 			cmds = append(cmds, m.waitForEvent)
 		}
@@ -387,7 +546,15 @@ func (m *TranscriptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.hasRunningSubagent() {
 			m.syncBody()
 		}
-		if m.turnActive {
+		// Keep the 150ms work-tick loop running only while a turn is genuinely
+		// live. An UNGRACEFUL stream drop (half-open socket from a suspended or
+		// lost pod, with no SessionTerminating event) leaves turnActive set with
+		// nothing to clear it; without the !reconnecting guard the loop would
+		// re-fire forever, burning a full-screen repaint every 150ms and starving
+		// keystroke handling on the single Bubble Tea goroutine (the sluggish-typing
+		// symptom, same disconnected state as a pinned "reconnecting…"). The loop
+		// re-arms via maybeStartWorking once live events flow again post-reconnect.
+		if m.turnActive && !m.reconnecting {
 			return m, workTickCmd()
 		}
 		m.working = false
@@ -405,18 +572,29 @@ func (m *TranscriptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.cancelStream()
 		if m.reconnect == nil {
+			// A permanently-ended self-streaming transcript has no reconnect to
+			// re-replay and clear replay state, so settle the prompt line out of
+			// any "loading transcript…"/working state rather than wedging on it
+			// (Workstream C boundary review; latent — production foreground
+			// transcripts always have a non-nil reconnect).
+			m.replaying = false
+			m.working = false
 			m.appendBlock(blockInfo, "[stream ended]")
 			return m, nil
 		}
 		if !m.reconnecting {
 			m.reconnecting = true
+			m.reconnectStartedAt = nowFunc()
 			m.appendBlock(blockInfo, "[connection lost — reconnecting…]")
 		}
-		return m, m.doReconnect
+		return m, m.startReconnect()
 
 	case tReconnectedMsg:
 		m.client = msg.client
 		m.reconnecting = false
+		m.reconnectGaveUp = false
+		m.reconnectStartedAt = time.Time{}
+		m.reconnectStageKnown = false
 		m.terminating = false
 		// M37: re-anchor the permission grace to now. The model is reused across
 		// an auto-reconnect, so a pending box keeps its original `since`; after a
@@ -430,6 +608,18 @@ func (m *TranscriptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.startEventStream()
 
 	case tReconnectFailedMsg:
+		// Permanent condition: the session was deleted from the cluster. Retrying
+		// can never succeed, so stop the loop and show a terminal "session gone"
+		// state instead of an endless "reconnecting…" (Fix D). The user leaves with
+		// q; the background dashboard already reflects the deletion.
+		if errors.Is(msg.err, session.ErrSessionGone) {
+			m.reconnecting = false
+			m.reconnectGaveUp = true
+			m.turnActive = false
+			m.working = false
+			m.appendBlock(blockError, "✗ session no longer exists — press q to return to the dashboard")
+			return m, nil
+		}
 		m.reconnectAttempts++
 		delay := reconnectBackoff(m.reconnectAttempts)
 		// Throttle transcript spam: show the first few failures (with the growing
@@ -445,7 +635,18 @@ func (m *TranscriptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Tick(delay, func(time.Time) tea.Msg { return tRetryReconnectMsg{} })
 
 	case tRetryReconnectMsg:
-		return m, m.doReconnect
+		return m, m.startReconnect()
+
+	case reconnectStageMsg:
+		// Live connect-stage update from the in-flight reconnect (FU1). Keep
+		// draining until the channel closes so the header tracks the resume.
+		if msg.done {
+			return m, nil
+		}
+		m.reconnectStage = msg.stage
+		m.reconnectDetail = msg.detail
+		m.reconnectStageKnown = true
+		return m, m.waitForReconnectStage
 
 	case turnErrMsg:
 		// The turn never started server-side (StartTurn POST failed), so no
@@ -478,6 +679,40 @@ func (m *TranscriptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// scrollbarDragTo handles a left-button press/drag at coordinates relative to
+// the transcript content's top-left (the caller subtracts the modal's inner
+// origin). If it lands on the scrollbar column over the body it jumps the scroll
+// position proportionally (drag-to-position) and returns true; otherwise it
+// returns false so the event falls through to normal handling. It is the inverse
+// of kit.Scrollbar's pos math: a row near the top maps to offset 0, near the
+// bottom to the max offset.
+func (m *TranscriptModel) scrollbarDragTo(relX, relY int) bool {
+	// bodyTop = header(1) + divider(1); the scrollbar sits in the rightmost body
+	// column (bodyView reserves m.width-1 for content, +1 for the bar).
+	const bodyTop = 2
+	bodyH := m.body.Height()
+	if relX != m.width-1 || relY < bodyTop || relY >= bodyTop+bodyH {
+		return false
+	}
+	maxOffset := m.body.TotalHeight() - bodyH
+	if maxOffset <= 0 {
+		return true // on the bar, but nothing to scroll
+	}
+	denom := bodyH - 1
+	if denom < 1 {
+		denom = 1
+	}
+	frac := float64(relY-bodyTop) / float64(denom)
+	if frac < 0 {
+		frac = 0
+	} else if frac > 1 {
+		frac = 1
+	}
+	target := int(math.Round(frac * float64(maxOffset)))
+	m.body.ScrollBy(target - m.body.Offset())
+	return true
+}
+
 // View renders the transcript screen (full-screen variant; see modalContent
 // for the command-center modal overlay).
 func (m *TranscriptModel) View() tea.View {
@@ -488,7 +723,7 @@ func (m *TranscriptModel) View() tea.View {
 	}
 	if m.showHelp {
 		overlay := lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center,
-			m.helpUI.view(m.width), lipgloss.WithWhitespaceChars(" "))
+			m.helpUI.view(m.width), pageWhitespace())
 		v := tea.NewView(overlay)
 		v.AltScreen = true
 		return v
@@ -529,6 +764,31 @@ func fitModal(s string, w, h int) string {
 	return strings.Join(lines, "\n")
 }
 
+// previewView renders the transcript's history (header + divider + scrollable
+// body) with a connect banner where the composer would normally sit. It is used
+// during ScreenConnecting (Fix A) so a session's conversation is visible while
+// its pod resumes, instead of a blank splash. Read-only: no input box.
+func (m *TranscriptModel) previewView(w, h int, banner string) string {
+	m.width, m.height = w, h
+	bannerH := lipgloss.Height(banner)
+	// header(1) + divider(1) + body + blank(1) + banner.
+	bodyH := h - 3 - bannerH
+	if bodyH < 1 {
+		bodyH = 1
+	}
+	m.body.SetSize(max(1, w-1), bodyH)
+	m.syncBody()
+	m.body.GotoBottom()
+	parts := []string{
+		m.renderHeader(),
+		styleDivider.Render(strings.Repeat("─", w)),
+		m.bodyView(),
+		"",
+		banner,
+	}
+	return strings.Join(parts, "\n")
+}
+
 // renderTranscript builds the actual transcript string for the current size.
 func (m *TranscriptModel) renderTranscript(w, h int) string {
 	parts := []string{m.renderHeader(), styleDivider.Render(strings.Repeat("─", w)), m.bodyView()}
@@ -549,7 +809,9 @@ func (m *TranscriptModel) renderTranscript(w, h int) string {
 	if m.search.open {
 		parts = append(parts, m.renderSearchBar(w))
 	}
-	parts = append(parts, m.renderInput(), m.renderStatusLine())
+	// A blank line sets the input apart from the transcript so the composer has
+	// room to breathe instead of butting against the last message (roominess).
+	parts = append(parts, "", m.renderInput(), m.renderStatusLine())
 	return strings.Join(parts, "\n")
 }
 
@@ -589,15 +851,35 @@ func (m *TranscriptModel) layout() {
 		searchH = 1
 	}
 
-	// total - header(1) - divider(1) - input(1) - permission box - palette - search - status line
-	vpH := m.height - 3 - statusLineRows - permH - palH - searchH
+	// Size the composer first so inputRows() (which wraps on this width) is
+	// accurate, then reserve the body height around the boxed input. Box inner
+	// width = full width - scrollbar(1) - border(2) - padding(2).
+	m.input.SetWidth(max(10, m.width-5))
+	// header(1) + divider(1) + input gap(1) + box(border 2 + rows) + hint row(1).
+	inputH := m.inputRows() + 3
+	vpH := m.height - 3 - inputH - statusLineRows - permH - palH - searchH
 	if vpH < 1 {
 		vpH = 1
 	}
 	// Reserve one column on the right for the transcript scrollbar (§D).
 	m.body.SetSize(max(1, m.width-1), vpH)
-	m.input.SetWidth(max(10, m.width-12))
 	m.syncBody()
+}
+
+// maxInputRows caps how tall the composer grows before it scrolls internally.
+const maxInputRows = 6
+
+// inputRows is the composer's current display height (1..maxInputRows), driving
+// both the box render and the body-height reservation in layout.
+func (m *TranscriptModel) inputRows() int {
+	n := m.input.LineCount()
+	if n < 1 {
+		n = 1
+	}
+	if n > maxInputRows {
+		n = maxInputRows
+	}
+	return n
 }
 
 // renderUnreadDivider draws a subtle "new since you left" line.
@@ -611,15 +893,77 @@ func (m *TranscriptModel) renderUnreadDivider() string {
 	return lipgloss.NewStyle().Foreground(theme.TextMuted).Render(line)
 }
 
+// A2.1 (Calm) role gutter. gutterInset is the left inset a guttered message (or
+// a place-indented subordinate block) occupies: 1 pad column + the 2-cell role
+// bar "▌ ". Wrapping blocks render that much narrower so the bar + text still fit
+// the body width.
+const gutterInset = 3
+
+// gutterPrefix puts a slim role-colored bar (Charple for the assistant, Guac for
+// the user) down the left of every line of a message block — replacing the old
+// "❯ " prefix. The bar is its own styled span so it never bleeds into the line.
+func gutterPrefix(s string, bar color.Color) string {
+	b := lipgloss.NewStyle().Foreground(bar).Render("▌ ")
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		lines[i] = " " + b + l
+	}
+	return strings.Join(lines, "\n")
+}
+
+// placeIndent indents a subordinate block (tool card, footer, notice, reasoning)
+// by gutterInset spaces so it aligns under the message column rather than under
+// the role bar.
+func placeIndent(s string) string {
+	pad := strings.Repeat(" ", gutterInset)
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		lines[i] = pad + l
+	}
+	return strings.Join(lines, "\n")
+}
+
+// renderBlock renders a transcript block with its Calm chrome: user/assistant
+// blocks get the role gutter bar; every other (subordinate) kind is indented to
+// the message column. The raw content is produced by renderBlockRaw; an empty
+// raw render stays empty (no stray bar/indent on a blank line).
 func (m *TranscriptModel) renderBlock(b tblock) string {
+	raw := m.renderBlockRaw(b)
+	if raw == "" {
+		return ""
+	}
 	switch b.kind {
 	case blockUser:
-		return styleTUser.Render("❯ " + b.text)
+		return gutterPrefix(raw, theme.Guac)
 	case blockAssistant:
-		wrap := m.width - 2
-		if wrap < 20 {
-			wrap = 20
-		}
+		return gutterPrefix(raw, theme.Charple)
+	default:
+		return placeIndent(raw)
+	}
+}
+
+// assistantWrapWidth is the markdown word-wrap width for an assistant message
+// body. It MUST be identical for the live streaming tail and the finalized block
+// (T1): the tail wraps at this width while streaming, and if the finalized block
+// wrapped even one column narrower, the extra wrapped lines would push the
+// content up and the view would lurch off the bottom at message.completed. It
+// reserves the gutter chrome (gutterInset) plus one column for the scrollbar.
+func (m *TranscriptModel) assistantWrapWidth() int {
+	w := m.width - 2 - gutterInset
+	if w < 20 {
+		w = 20
+	}
+	return w
+}
+
+// renderBlockRaw renders a block's bare content (no gutter/indent). Wrapping
+// kinds reserve gutterInset columns so the chrome added by renderBlock fits.
+func (m *TranscriptModel) renderBlockRaw(b tblock) string {
+	switch b.kind {
+	case blockUser:
+		return styleTUser.Render(b.text)
+	case blockAssistant:
+		wrap := m.assistantWrapWidth()
 		// Route assistant blocks through chat.AssistantItem + the pooled
 		// glamour renderer (chat.MarkdownRenderer), replacing the per-layout
 		// m.md allocation. RawRender emits no focus prefix, preserving
@@ -639,7 +983,7 @@ func (m *TranscriptModel) renderBlock(b tblock) string {
 		return ai.RawRender(wrap)
 	case blockToolCard:
 		if b.tool != nil {
-			w := m.width - 2
+			w := m.width - 2 - gutterInset
 			if w < 10 {
 				w = 10
 			}
@@ -657,7 +1001,7 @@ func (m *TranscriptModel) renderBlock(b tblock) string {
 		return b.text
 	case blockSubagent:
 		if b.sub != nil {
-			w := m.width - 2
+			w := m.width - 2 - gutterInset
 			if w < 10 {
 				w = 10
 			}
@@ -794,12 +1138,16 @@ func (m *TranscriptModel) renderToolCard(c *toolCard, width int) string {
 		icon = "✗"
 		iconColor = theme.Coral
 	}
+	// A2.4 (Calm): mute the tool card — name in TextSecondary (not bold Malibu)
+	// and arg in TextMuted; only the status icon keeps its color. Quiets the
+	// densest, most-repeated transcript element without losing the at-a-glance
+	// pass/fail/running signal.
 	iconR := lipgloss.NewStyle().Foreground(iconColor).Render(icon)
-	name := lipgloss.NewStyle().Foreground(theme.Malibu).Bold(true).Render(c.tool)
+	name := lipgloss.NewStyle().Foreground(theme.TextSecondary).Render(c.tool)
 
 	line := iconR + " " + name
 	if c.arg != "" {
-		line += "  " + lipgloss.NewStyle().Foreground(theme.TextBody).Render(truncate(c.arg, max(8, width/2)))
+		line += "  " + lipgloss.NewStyle().Foreground(theme.TextMuted).Render(truncate(c.arg, max(8, width/2)))
 	}
 	if c.summary != "" {
 		sumColor := theme.TextMuted
@@ -915,8 +1263,25 @@ func (m *TranscriptModel) renderHeader() string {
 	left := styleDetailTitle.Render(m.title)
 
 	var right string
-	if m.reconnecting {
-		right = styleTError.Render("reconnecting…")
+	if m.reconnectGaveUp {
+		right = styleTError.Render("session gone")
+	} else if m.reconnecting {
+		// Show the live connect stage (FU1) — "reconnecting — Starting pod" — so a
+		// slow cold-pod resume reads as real progress, falling back to a plain
+		// label until the first stage arrives. Elapsed time is appended (Fix D).
+		label := "reconnecting…"
+		if m.reconnectStageKnown {
+			label = "reconnecting — " + connectStageLabel(m.reconnectStage)
+			if m.reconnectDetail != "" {
+				label += " " + m.reconnectDetail
+			}
+		}
+		if !m.reconnectStartedAt.IsZero() {
+			if el := nowFunc().Sub(m.reconnectStartedAt); el >= time.Second {
+				label += fmt.Sprintf(" (%s)", roundDur(el))
+			}
+		}
+		right = styleTError.Render(label)
 	} else {
 		glyph := glyphStyle(m.status).Render(m.status.Glyph() + " " + chatStatusLabel(m.status))
 		meta := styleTInfo.Render(m.agent + " · " + filepath.Base(m.projectPath))
@@ -939,32 +1304,55 @@ func (m *TranscriptModel) renderInput() string {
 	} else {
 		m.input.Placeholder = "press i to type a message…"
 	}
-	// The right side shows the live working indicator during a turn; otherwise a
-	// mode-appropriate hint.
-	right := kit.KbdRow([2]string{"i", "type"}, [2]string{"q", "detach"})
+
+	// The composer sits in a rounded box that spans the body width (one column
+	// reserved for the scrollbar gutter). Its border brightens to Charple when
+	// you're typing (INSERT) and stays quiet otherwise, so the box itself signals
+	// focus instead of a separate badge.
+	boxW := max(20, m.width-1)
+	m.input.SetWidth(boxW - 4) // border(2) + padding(2)
+	m.input.SetHeight(m.inputRows())
+	borderColor := theme.BorderMedium
 	if m.imode == modeInsert {
-		right = kit.KbdRow([2]string{"↵", "send"}, [2]string{"esc", "done"})
+		borderColor = theme.Charple
 	}
-	if m.turnActive {
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(borderColor).
+		Padding(0, 1).
+		Width(boxW - 2). // content width; the border adds the other 2 columns
+		Render(m.input.View())
+
+	// A thin row under the box: the vim-mode badge on the left (only when modal
+	// editing is on), and the live working/loading indicator (or key hints)
+	// right-aligned.
+	var right string
+	switch {
+	case m.vimEnabled && m.imode == modeNormal:
+		right = kit.KbdRow([2]string{"i", "type"}, [2]string{"q", "detach"})
+	case m.vimEnabled:
+		right = kit.KbdRow([2]string{"↵", "send"}, [2]string{"⇧↵", "newline"})
+	default:
+		// Vim off: the prompt is always focused, so surface how to leave (esc when
+		// idle, or ctrl+]) instead of the modal "i to type" hint.
+		right = kit.KbdRow([2]string{"↵", "send"}, [2]string{"esc", "detach"})
+	}
+	if m.replaying {
+		right = m.loadingStatus()
+	} else if m.turnActive {
 		right = m.workingStatus()
 	}
-	badge := m.modeBadge()
-	// Size the input to the space left after the mode badge, a separating space,
-	// the gap, and the right-side hint, so the prompt line never overflows the
-	// modal width and bleeds styled content onto the dashboard behind it (a
-	// contributor to the stray dark line, TODO.md). The textinput pads/scrolls
-	// its content to this width.
-	avail := m.width - lipgloss.Width(badge) - 1 - lipgloss.Width(right) - 1
-	if avail < 10 {
-		avail = 10
+	badge := ""
+	if m.vimEnabled {
+		badge = m.modeBadge()
 	}
-	m.input.SetWidth(avail)
-	left := badge + " " + m.input.View()
-	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)
+	gap := m.width - lipgloss.Width(badge) - lipgloss.Width(right)
 	if gap < 1 {
 		gap = 1
 	}
-	return left + strings.Repeat(" ", gap) + right
+	hint := badge + strings.Repeat(" ", gap) + right
+
+	return box + "\n" + hint
 }
 
 // buildPermissionBox renders the inline gold-bordered permission prompt with a
@@ -1158,10 +1546,13 @@ func (m *TranscriptModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.turnActive {
 			return m, m.interruptTurn()
 		}
-		if m.imode == modeInsert {
+		if m.vimEnabled && m.imode == modeInsert {
 			m.enterNormal()
 			return m, nil
 		}
+		// Vim off: a bare esc has no local meaning here. escapeConsumes already
+		// returned false for this case, so the App intercepted esc as a detach and
+		// this handler isn't reached — the return is just a safe fallthrough.
 		return m, nil
 	}
 	if key == "ctrl+]" || key == "ctrl+4" {
@@ -1256,11 +1647,12 @@ func (m *TranscriptModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
-	// NORMAL mode owns the keyboard once the overlays and permission prompts
-	// above have had their turn: i/a enter INSERT, j/k/g/G scroll, / searches,
-	// q detaches, and every other key is swallowed so the blurred prompt never
-	// collects stray letters.
-	if m.imode == modeNormal {
+	// NORMAL mode (vim modal editing on) owns the keyboard once the overlays and
+	// permission prompts above have had their turn: i/a enter INSERT, j/k/g/G
+	// scroll, / searches, q detaches, and every other key is swallowed so the
+	// blurred prompt never collects stray letters. With vim off imode is pinned
+	// to INSERT, so this never engages and keys flow to the prompt.
+	if m.vimEnabled && m.imode == modeNormal {
 		cmd, handled := m.normalKey(key, msg)
 		if handled {
 			return m, cmd
@@ -1276,7 +1668,8 @@ func (m *TranscriptModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// the input so multi-line prompts can be edited without leaving the chat.
 	if key == "shift+enter" || key == "alt+enter" {
 		m.input.SetValue(m.input.Value() + "\n")
-		m.input.SetCursor(len(m.input.Value()))
+		m.input.CursorEnd()
+		m.layout() // the box grew a row — re-reserve body height
 		return m, nil
 	}
 
@@ -1383,14 +1776,36 @@ func (m *TranscriptModel) submitText(text string) tea.Cmd {
 	if text == "" {
 		return nil
 	}
+	m.dropTrailingFooter() // A2.2: only the latest turn keeps a footer
 	m.appendBlock(blockUser, text)
 	m.beginTurn()
 	return tea.Batch(startTurnCmd(m.client, m.ref, text, m.mode.apiValue(), m.modelOverride), m.maybeStartWorking())
 }
 
+// dropTrailingFooter removes the previous turn's footer block when a new turn
+// begins, so only the latest turn carries the dim "◇ model · via … · cost"
+// footer instead of one accumulating per turn (A2.2). It only removes the footer
+// when it is the trailing block — which is the common case, since the footer is
+// the last thing appended on turn.completed. This keeps the removal strictly
+// index-safe (truncating the tail shifts no earlier flatTools/droppedPartialIdx
+// index). If a post-turn block was appended after the footer (e.g. an
+// "[interrupted]"/"[reconnected]" notice or an orphan tool result), the footer is
+// buried and intentionally left in place rather than risk an interior splice that
+// would invalidate those index maps; the result is at most one extra dim footer.
+func (m *TranscriptModel) dropTrailingFooter() {
+	if n := len(m.blocks); n > 0 && m.blocks[n-1].kind == blockFooter {
+		m.blocks = m.blocks[:n-1]
+		m.syncBody()
+	}
+}
+
 // beginTurn enters the busy state for a freshly started turn and resets the
 // live working indicator (elapsed clock + token/cost counters).
 func (m *TranscriptModel) beginTurn() {
+	// Replay/streamed turns reach here without going through submitText, so drop
+	// the prior footer here too (no-op in the interactive path, where the new
+	// user block is already the trailing block).
+	m.dropTrailingFooter()
 	m.status = StatusBusy
 	m.turnActive = true
 	m.turnStart = time.Now()
@@ -1410,11 +1825,30 @@ func workTickCmd() tea.Cmd {
 // maybeStartWorking schedules the work-tick loop if a turn is active and the
 // loop is not already running. Returns nil otherwise so no timer runs idle.
 func (m *TranscriptModel) maybeStartWorking() tea.Cmd {
-	if !m.working && m.turnActive {
+	// Don't animate "working" while replaying history (Workstream C): a replayed
+	// turn.started must not drive the live spinner. Once the boundary flips
+	// replaying false, the next call starts the loop if the turn is still active.
+	if !m.working && m.turnActive && !m.replaying {
 		m.working = true
 		return workTickCmd()
 	}
 	return nil
+}
+
+// loadingStatus renders the prompt-line indicator shown while catching up
+// historical events after an attach/reconnect (Workstream C): an honest "loading
+// transcript…" with the count caught up so far, instead of the live "working…"
+// spinner that made replay feel like the model was running (#1).
+func (m *TranscriptModel) loadingStatus() string {
+	ell := anim.Ellipsis(m.workFrame / spinnerSubRate)
+	if anim.ReduceMotion() {
+		ell = "…"
+	}
+	msg := "loading transcript" + ell
+	if m.replayedCount > 0 {
+		msg += fmt.Sprintf(" %d", m.replayedCount)
+	}
+	return lipgloss.NewStyle().Foreground(theme.Malibu).Render("⟳ " + msg)
 }
 
 // workingStatus renders the live indicator shown on the prompt line during a
@@ -1558,11 +1992,35 @@ func (m *TranscriptModel) seedSize(w, h int) {
 // a model whose own SSE stream has not been started.
 func (m *TranscriptModel) ingest(ev session.Event) {
 	_ = m.handleEvent(ev)
+	// Workstream C: the warm/background feed must mirror events to the cache too.
+	// Otherwise a session observed only in the background advances lastSeq without
+	// ever caching, leaving a permanent hole that a later cold attach can't
+	// backfill (it would resume past the gap and drop that history). maybeCache is
+	// idempotent per seq, so the warm→foreground handoff can't double-write.
+	m.maybeCache(ev)
 }
 
 func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
+	// Workstream C: the replay/live boundary marker. Not a persisted event (no
+	// seq) — it only flips us out of replay so a genuinely in-flight turn (whose
+	// turnActive survived the catch-up) resumes "working", while a session that
+	// merely caught up history settles to idle.
+	if ev.Type == session.EventStreamLive {
+		m.replaying = false
+		return nil
+	}
 	if ev.Seq > m.lastSeq {
 		m.lastSeq = ev.Seq
+	}
+	if m.replaying {
+		m.replayedCount++
+		// Watermark boundary: once we've caught up to the seq the dashboard knew
+		// about at attach, the catch-up is done — flip to live even if the runner
+		// never sends the replay-complete marker. (attachSeq>0 guard so a stream
+		// with no known cursor relies solely on the marker.)
+		if m.attachSeq > 0 && m.lastSeq >= m.attachSeq {
+			m.replaying = false
+		}
 	}
 
 	var cmd tea.Cmd
@@ -1581,6 +2039,11 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		if p.Model != "" {
 			m.model = p.Model
 			m.ctxLimit = models.Limit(p.Model).ContextLimit
+			if m.defaultModel == "" {
+				// First resolved id is the account/session default; remember it so
+				// /model-default can restore the status line to it.
+				m.defaultModel = p.Model
+			}
 		}
 		if p.Cwd != "" {
 			m.cwd = p.Cwd
@@ -1712,6 +2175,9 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 			// of appending a second copy of the same reply.
 			if strings.TrimSpace(text) != "" {
 				m.blocks[m.droppedPartialIdx].text = text
+				// In-place text mutation of an immutable-kind block: force its
+				// fingerprint to recompute so the memoized reconcile re-renders it.
+				m.markBlockDirty(m.droppedPartialIdx)
 			}
 			m.droppedPartialIdx = -1
 			m.syncBody()
@@ -1800,6 +2266,7 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		// fresh pod, so getPodForSandbox (R7) returns the new one.
 		if !m.reconnecting {
 			m.reconnecting = true
+			m.reconnectStartedAt = nowFunc()
 			m.appendBlock(blockInfo, "[auto-reconnecting…]")
 		}
 
@@ -1908,6 +2375,39 @@ func (m *TranscriptModel) finalizeStreaming() int {
 // SSE stream + reconnect (mirrors tui.Model)
 // --------------------------------------------------------------------------
 
+// loadCachedTranscript rebuilds the transcript from the host-side cache on a cold
+// open (Workstream C), advancing lastSeq to the cached head so the stream resumes
+// from there. Guarded to a genuinely cold model (no blocks, no cursor): a warm
+// model promoted to the foreground already holds its history, so re-loading would
+// duplicate it. The replayed events feed the SAME handleEvent the live stream
+// uses (so blocks/state stay identical), but are NOT re-written to the cache.
+func (m *TranscriptModel) loadCachedTranscript() {
+	if m.cache == nil || len(m.blocks) > 0 || m.lastSeq > 0 {
+		return
+	}
+	events, err := m.cache.LoadEvents(m.ref.ID)
+	if err != nil || len(events) == 0 {
+		return
+	}
+	// Replay the cache synchronously (no UI shown yet); startEventStream then sets
+	// the replay/loading state from the watermark for the remaining delta.
+	//
+	// Bulk mode: apply every event to m.blocks WITHOUT reconciling the list per
+	// event — a naive replay calls syncBody→reconcileItems once per event, and
+	// each reconcile re-fingerprints all prior items (hashing each block's full
+	// text) and rebuilds the item set, making the cold load O(N^2). Suppress that,
+	// then reconcile exactly once after the loop, so replay is O(N).
+	m.bulkReplay = true
+	for i := range events {
+		_ = m.handleEvent(events[i])
+		if events[i].Seq > m.lastCachedSeq {
+			m.lastCachedSeq = events[i].Seq // already on disk; don't re-append
+		}
+	}
+	m.bulkReplay = false
+	m.syncBody()
+}
+
 func (m *TranscriptModel) startEventStream() tea.Cmd {
 	// Tear down any prior stream first (e.g. on reconnect) so we don't leak its
 	// context/connection (NEW-5).
@@ -1915,6 +2415,13 @@ func (m *TranscriptModel) startEventStream() tea.Cmd {
 		m.streamCancel()
 		m.streamCancel = nil
 	}
+	// Enter replay ONLY when there is history to catch up to (the dashboard's
+	// cursor is ahead of what we've rendered). A fresh session (attachSeq 0) or a
+	// warm reattach already caught up never shows "loading transcript…". The state
+	// clears at the watermark (handleEvent) or the runner's replay-complete marker,
+	// whichever comes first — so it self-clears even against an older runner.
+	m.replaying = m.attachSeq > m.lastSeq
+	m.replayedCount = 0
 	ctx, cancel := context.WithCancel(context.Background())
 	events, err := m.client.Events(ctx, m.ref, m.lastSeq)
 	if err != nil {
@@ -1944,6 +2451,17 @@ func (m *TranscriptModel) cancelStream() {
 	m.events = nil
 }
 
+// eventBatchMax caps how many buffered events one waitForEvent collapses into a
+// single batch, so a relentless stream still yields to the render/key loop
+// between batches rather than spinning the drain forever.
+const eventBatchMax = 512
+
+// waitForEvent blocks for the next event, then non-blockingly drains any
+// already-buffered events into one batch. Coalescing a burst of stream deltas
+// into a single Update+View is what keeps a fast turn from re-rendering per
+// delta and starving keystrokes (T1 lag). If the channel closes mid-drain the
+// batch is delivered as-is; the next waitForEvent's blocking receive then
+// surfaces tStreamEndedMsg.
 func (m *TranscriptModel) waitForEvent() tea.Msg {
 	if m.events == nil {
 		return nil
@@ -1952,7 +2470,19 @@ func (m *TranscriptModel) waitForEvent() tea.Msg {
 	if !ok {
 		return tStreamEndedMsg{}
 	}
-	return tEventMsg(ev)
+	batch := []session.Event{ev}
+	for len(batch) < eventBatchMax {
+		select {
+		case ev, ok := <-m.events:
+			if !ok {
+				return tEventBatchMsg(batch)
+			}
+			batch = append(batch, ev)
+		default:
+			return tEventBatchMsg(batch)
+		}
+	}
+	return tEventBatchMsg(batch)
 }
 
 // reconnectVerboseAttempts is how many failed reconnects emit a transcript line
@@ -1973,13 +2503,68 @@ func reconnectBackoff(attempt int) time.Duration {
 	return d
 }
 
+// reconnectAttemptTimeout bounds a single reconnect attempt. It must comfortably
+// exceed a cold-pod resume (schedule + image pull + boot + 30s runner health),
+// which can run past two minutes on a cold node, or a legitimate slow resume
+// would be cut short and bounced into the backoff loop. Retries continue after
+// it; the give-up is driven by error classification (ErrSessionGone), not this.
+const reconnectAttemptTimeout = 180 * time.Second
+
+// reconnectStageMsg carries one connect-stage update from the in-flight
+// doReconnect into the Update loop. done=true signals the stage channel closed
+// (the attempt finished) so the waiter stops.
+type reconnectStageMsg struct {
+	stage  ConnectStage
+	detail string
+	done   bool
+}
+
+// startReconnect opens a fresh stage channel and launches both the reconnect
+// attempt and the stage drainer, so the header can show live resume progress.
+func (m *TranscriptModel) startReconnect() tea.Cmd {
+	m.reconnectStages = make(chan reconnectStageMsg, 8)
+	m.reconnectStage = 0
+	m.reconnectDetail = ""
+	m.reconnectStageKnown = false
+	return tea.Batch(m.doReconnect, m.waitForReconnectStage)
+}
+
+// waitForReconnectStage drains one stage update from the current reconnect's
+// channel, mirroring waitForEvent. It re-subscribes (via the Update handler)
+// until doReconnect closes the channel.
+func (m *TranscriptModel) waitForReconnectStage() tea.Msg {
+	ch := m.reconnectStages
+	if ch == nil {
+		return reconnectStageMsg{done: true}
+	}
+	msg, ok := <-ch
+	if !ok {
+		return reconnectStageMsg{done: true}
+	}
+	return msg
+}
+
 func (m *TranscriptModel) doReconnect() tea.Msg {
 	if m.reconnect == nil {
 		return tReconnectFailedMsg{err: fmt.Errorf("no reconnect available")}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ch := m.reconnectStages
+	onStage := func(s ConnectStage, detail string) {
+		if ch == nil {
+			return
+		}
+		// Non-blocking: never stall the reconnect on a slow/absent UI drainer.
+		select {
+		case ch <- reconnectStageMsg{stage: s, detail: detail}:
+		default:
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), reconnectAttemptTimeout)
 	defer cancel()
-	client, err := m.reconnect(ctx)
+	client, err := m.reconnect(ctx, onStage)
+	if ch != nil {
+		close(ch) // unblock the stage waiter; this attempt is done
+	}
 	if err != nil {
 		return tReconnectFailedMsg{err: err}
 	}

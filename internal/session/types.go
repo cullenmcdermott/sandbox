@@ -6,7 +6,17 @@
 // remote runner share these types over HTTP+SSE.
 package session
 
-import "time"
+import (
+	"errors"
+	"time"
+)
+
+// ErrSessionGone is returned by a connect/reconnect attempt when the session no
+// longer exists in the cluster (its Sandbox CRD was deleted). It is a permanent,
+// non-retryable condition: callers (e.g. the TUI reconnect loop) classify it with
+// errors.Is to give up and show a terminal "session gone" state instead of
+// retrying forever.
+var ErrSessionGone = errors.New("session no longer exists")
 
 // Backend identifiers selecting which agent backend the runner uses. These are
 // the canonical values for Spec.Backend / State.Backend, shared across the CLI,
