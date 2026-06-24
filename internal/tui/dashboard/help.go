@@ -146,7 +146,7 @@ func keymapCategories(km KeyMap) []helpCategory {
 // commandCategories builds help categories from the slash-command registry.
 func commandCategories() []helpCategory {
 	var cats []helpCategory
-	for _, g := range commandGroups() {
+	for _, g := range commandGroups(nil) {
 		var entries []helpEntry
 		for _, c := range g.cmds {
 			entries = append(entries, helpEntry{key: c.name, desc: c.desc})

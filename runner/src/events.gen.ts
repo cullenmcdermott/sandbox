@@ -27,6 +27,7 @@ export type EventType =
   | 'rate_limit.updated'
   | 'workspace.status'
   | 'session.title'
+  | 'models.available'
   | 'error';
 
 /** Every event type, in schema order. */
@@ -55,6 +56,7 @@ export const ALL_EVENT_TYPES: EventType[] = [
   'rate_limit.updated',
   'workspace.status',
   'session.title',
+  'models.available',
   'error',
 ];
 
@@ -66,6 +68,16 @@ export interface TodoItem {
   status: string;
   /** present-tense form shown while in_progress */
   activeForm?: string;
+}
+
+/** one model from the SDK's supportedModels() list (models.available), used to populate the in-session /model palette dynamically instead of the hardcoded opus/sonnet/haiku aliases. */
+export interface ModelInfo {
+  /** model id to use in API calls / --model (e.g. claude-opus-4-8) */
+  value: string;
+  /** human-readable name (e.g. 'Opus 4.8') */
+  displayName: string;
+  /** short capability description; may be empty */
+  description?: string;
 }
 
 /** payload for session.started events: the model, pod cwd, tools, and applied permission mode reported by the SDK init message. The CLI uses model+cwd for the status line and the model id to look up the context-window limit (ctx%). */
@@ -148,6 +160,8 @@ export interface UsagePayload {
 export interface RateLimitPayload {
   /** rate_limits_available: true only for claude.ai subscription sessions */
   available: boolean;
+  /** claude.ai subscription type ('pro'/'max'/'team'/'enterprise'), or empty/absent for headless setup-token, API-key, or 3rd-party-provider sessions where plan limits do not apply. When `available` is false and this is empty, the TUI renders 'usage n/a (headless auth)' so the absent windows read as an auth-mode limitation rather than a bug. */
+  subscriptionType?: string;
   /** 5-hour window utilization, 0-100 */
   fiveHourUtil: number;
   /** ISO 8601 instant the 5-hour window resets; empty if unknown */
@@ -177,6 +191,12 @@ export interface WorkspaceStatusPayload {
 /** payload for session.title events: a short conversation-derived summary emitted once per session after the first assistant turn. */
 export interface SessionTitlePayload {
   title: string;
+}
+
+/** payload for models.available events: the list of models the account/SDK supports (Query.supportedModels()), used to populate the in-session /model palette dynamically. Emitted once per session, fetched in-turn on the SDK init message (same open-control-channel window as rate_limit.updated). Absent until the first turn runs; the TUI falls back to the opus/sonnet/haiku aliases until it arrives. */
+export interface ModelsAvailablePayload {
+  /** the supported models, in SDK order */
+  models: ModelInfo[];
 }
 
 /** payload for todo.updated events: the agent's current task list, emitted by the runner whenever the SDK TodoWrite tool runs. The TUI renders it as a checklist. */

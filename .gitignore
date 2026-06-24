@@ -10,3 +10,4 @@ runner/dist/
 # Cross-compiled / scratch binaries that must never be committed via `git add -A`
 /dist/
 /mockup
+/tuikit-demo

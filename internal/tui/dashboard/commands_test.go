@@ -47,15 +47,18 @@ func TestModelSwitchUpdatesStatuslineImmediately(t *testing.T) {
 }
 
 func TestSlashFilter(t *testing.T) {
-	if got := len(filteredGroups("")); got != 5 {
+	// Fresh model: no models.available yet, so the Model group uses the alias
+	// fallback (/opus /sonnet /haiku /model-default).
+	mf := &TranscriptModel{}
+	if got := len(filteredGroups(mf, "")); got != 5 {
 		t.Errorf("empty query groups = %d, want 5 (Session/Mode/Model/Tools/Help)", got)
 	}
-	cmds := flatCmds("plan")
+	cmds := flatCmds(mf, "plan")
 	if len(cmds) != 1 || cmds[0].name != "/plan" {
 		t.Errorf("filter 'plan' = %v, want [/plan]", cmds)
 	}
 	// The Model group adds a /sonnet switch (and matches by name substring).
-	if c := flatCmds("/sonnet"); len(c) != 1 || c[0].name != "/sonnet" {
+	if c := flatCmds(mf, "/sonnet"); len(c) != 1 || c[0].name != "/sonnet" {
 		t.Errorf("filter '/sonnet' = %v, want [/sonnet]", c)
 	}
 	// Typing "model" matches the "Model" group name, so all four model commands
@@ -63,14 +66,14 @@ func TestSlashFilter(t *testing.T) {
 	// /model-default (the only one with "model" in its own name/desc). This is
 	// the bug that made /model appear broken: the palette collapsed to one entry
 	// and pressing Enter accidentally ran /model-default.
-	if c := flatCmds("model"); len(c) != 4 {
+	if c := flatCmds(mf, "model"); len(c) != 4 {
 		t.Errorf("filter 'model' (group-name match) = %d cmds, want 4 (/opus /sonnet /haiku /model-default)", len(c))
 	}
 	// Filtering matches descriptions too ("/clear" desc has "transcript").
-	if len(flatCmds("transcript")) == 0 {
+	if len(flatCmds(mf, "transcript")) == 0 {
 		t.Errorf("description filter found nothing for 'transcript'")
 	}
-	if len(flatCmds("zzznope")) != 0 {
+	if len(flatCmds(mf, "zzznope")) != 0 {
 		t.Errorf("nonsense query should match nothing")
 	}
 }
@@ -83,7 +86,7 @@ func TestSlashPaletteNavigation(t *testing.T) {
 		t.Fatal("palette should be open for '/'")
 	}
 	// down advances the selection but is clamped to the flat list length.
-	n := len(flatCmds(""))
+	n := len(flatCmds(m, ""))
 	for i := 0; i < n+5; i++ {
 		m.handleKey(keyMsg("down"))
 	}
@@ -93,6 +96,90 @@ func TestSlashPaletteNavigation(t *testing.T) {
 	m.handleKey(keyMsg("up"))
 	if m.cmdSel != n-2 {
 		t.Errorf("cmdSel after up = %d, want %d", m.cmdSel, n-2)
+	}
+}
+
+// ORACLE: a models.available event populates m.availableModels.
+func TestModelsAvailableEventPopulatesModel(t *testing.T) {
+	m := &TranscriptModel{}
+	payload, err := json.Marshal(session.ModelsAvailablePayload{Models: []session.ModelInfo{
+		{Value: "claude-opus-4-8", DisplayName: "Opus 4.8", Description: "most capable"},
+		{Value: "claude-sonnet-4-6", DisplayName: "Sonnet 4.6"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.handleEvent(session.Event{Type: session.EventModelsAvailable, Payload: payload})
+	if len(m.availableModels) != 2 || m.availableModels[0].Value != "claude-opus-4-8" {
+		t.Fatalf("availableModels = %+v, want 2 entries led by claude-opus-4-8", m.availableModels)
+	}
+}
+
+// COUNTER: once models.available has landed, the /model palette lists the real
+// account models by slug (not the opus/sonnet/haiku aliases), keeps
+// /model-default last, and each entry's handler selects the full model id.
+func TestModelPaletteUsesDynamicListWhenPresent(t *testing.T) {
+	m := NewTranscript(&fakeRunnerClient{}, transcriptSession(), nil)
+	m.width, m.height = 80, 24
+	m.availableModels = []session.ModelInfo{
+		{Value: "claude-opus-4-8", DisplayName: "Opus 4.8", Description: "most capable"},
+		{Value: "claude-haiku-4-5", DisplayName: "Haiku 4.5"},
+	}
+	cmds := flatCmds(m, "model") // group-name match → whole Model group
+	var names []string
+	for _, c := range cmds {
+		names = append(names, c.name)
+	}
+	want := []string{"/opus-4-8", "/haiku-4-5", "/model-default"}
+	if len(names) != len(want) {
+		t.Fatalf("dynamic model palette = %v, want %v", names, want)
+	}
+	for i, w := range want {
+		if names[i] != w {
+			t.Errorf("model cmd[%d] = %q, want %q", i, names[i], w)
+		}
+	}
+	// No bare aliases when the dynamic list is present.
+	for _, c := range cmds {
+		if c.name == "/opus" || c.name == "/sonnet" || c.name == "/haiku" {
+			t.Errorf("dynamic palette should not include bare alias %q", c.name)
+		}
+	}
+	// The first entry's handler selects the FULL model id, not the slug.
+	cmds[0].run(m)
+	if m.modelOverride != "claude-opus-4-8" {
+		t.Errorf("dynamic /opus-4-8 set modelOverride=%q, want claude-opus-4-8", m.modelOverride)
+	}
+}
+
+// COUNTER: with no models.available yet, the palette falls back to the stable
+// opus/sonnet/haiku aliases (nil model also yields the fallback).
+func TestModelPaletteFallsBackToAliases(t *testing.T) {
+	for _, m := range []*TranscriptModel{nil, {}} {
+		got := modelGroupCmds(m)
+		want := []string{"/opus", "/sonnet", "/haiku", "/model-default"}
+		if len(got) != len(want) {
+			t.Fatalf("fallback model cmds = %d, want %d", len(got), len(want))
+		}
+		for i, w := range want {
+			if got[i].name != w {
+				t.Errorf("fallback cmd[%d] = %q, want %q", i, got[i].name, w)
+			}
+		}
+	}
+}
+
+func TestModelSlug(t *testing.T) {
+	cases := map[string]string{
+		"claude-opus-4-8":           "opus-4-8",
+		"claude-3-5-haiku-20241022": "3-5-haiku-20241022",
+		"some-other-model":          "some-other-model",
+		"Opus 4":                    "opus-4",
+	}
+	for in, want := range cases {
+		if got := modelSlug(in); got != want {
+			t.Errorf("modelSlug(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 

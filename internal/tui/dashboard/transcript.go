@@ -201,10 +201,15 @@ type TranscriptModel struct {
 	// event arrives. Reset times parse from RFC3339; zero => unknown.
 	rlSeen      bool
 	rlAvailable bool
-	rl5hUtil    float64
-	rl5hReset   time.Time
-	rl7dUtil    float64
-	rl7dReset   time.Time
+	// rlSubscription is the claude.ai plan ('pro'/'max'/…), empty for headless
+	// setup-token / API-key sessions. When rlAvailable is false and this is
+	// empty, the status line shows "usage n/a (headless auth)" so the missing
+	// windows read as an auth-mode limitation, not a glitch.
+	rlSubscription string
+	rl5hUtil       float64
+	rl5hReset      time.Time
+	rl7dUtil       float64
+	rl7dReset      time.Time
 	// Per-model weekly caps (Max plans). The *Seen flag distinguishes an absent
 	// window from a present-but-0% one; the status line surfaces the one whose
 	// model matches the attached model (see activeModelWindow).
@@ -214,6 +219,12 @@ type TranscriptModel struct {
 	rlSonnetSeen  bool
 	rlSonnetUtil  float64
 	rlSonnetReset time.Time
+
+	// availableModels is the account's supported-model list (models.available),
+	// used to build the /model palette dynamically. Empty until the first turn's
+	// init fetch arrives; the palette falls back to the opus/sonnet/haiku
+	// aliases meanwhile (see commands.go modelGroupCmds).
+	availableModels []session.ModelInfo
 
 	// caps holds terminal capabilities (copied from the dashboard Model on
 	// attach). Gates the opt-in ctx-gauge sweep + other Ghostty effects; a zero
@@ -2077,6 +2088,7 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		_ = json.Unmarshal(ev.Payload, &p)
 		m.rlSeen = true
 		m.rlAvailable = p.Available
+		m.rlSubscription = p.SubscriptionType
 		m.rl5hUtil = p.FiveHourUtil
 		m.rl7dUtil = p.SevenDayUtil
 		m.rl5hReset = parseResetTime(p.FiveHourResetsAt)
@@ -2091,6 +2103,12 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 			m.rlSonnetUtil = *p.SevenDaySonnetUtil
 		}
 		m.rlSonnetReset = parseResetTime(p.SevenDaySonnetResetsAt)
+
+	case session.EventModelsAvailable:
+		var p session.ModelsAvailablePayload
+		if json.Unmarshal(ev.Payload, &p) == nil && len(p.Models) > 0 {
+			m.availableModels = p.Models
+		}
 
 	case session.EventTurnCompleted:
 		m.finalizeStreaming()

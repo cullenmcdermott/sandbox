@@ -31,7 +31,7 @@ Returns the runner's `session.json` state:
 {
   "id": "claude-sdk-7f3a",
   "backend": "claude-sdk",
-  "projectPath": "/session/workspace/my-project",
+  "projectPath": "/Users/you/git/my-project",
   "status": "idle",
   "claudeSession": "sdk-session-id",
   "lastTurnId": "turn-12",

@@ -501,6 +501,7 @@ export async function runTurn(
       const usedResume = options.resume;
       const q: Query = query({ prompt, options });
       let rateLimitsFetched = false;
+      let modelsFetched = false;
       let staleResume = false;
       try {
         for await (const msg of q) {
@@ -522,6 +523,13 @@ export async function runTurn(
           if (!rateLimitsFetched && msg.type === 'system' && msg.subtype === 'init') {
             rateLimitsFetched = true;
             void fetchAndEmitRateLimits(q, sessionId, turnId);
+          }
+          // Likewise fetch the SDK's supported-model list once per turn on init
+          // (same open-control-channel window) so the TUI's /model palette lists
+          // the account's real models instead of the hardcoded aliases.
+          if (!modelsFetched && msg.type === 'system' && msg.subtype === 'init') {
+            modelsFetched = true;
+            void fetchAndEmitModels(q, sessionId, turnId);
           }
         }
         // Stream ended without throwing. Unless we skipped a stale result (and
@@ -592,11 +600,16 @@ async function fetchAndEmitRateLimits(q: Query, sessionId: string, turnId: strin
   try {
     const usage = await q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET();
     const rl = usage?.rate_limits;
+    // subscription_type is 'pro'/'max'/etc. on a claude.ai session, or null for
+    // headless setup-token / API-key / 3P sessions. Pass it through so the TUI
+    // can label the unavailable case "n/a (headless auth)" instead of a blank.
+    const sub = usage?.subscription_type;
     if (!usage?.rate_limits_available || !rl) {
       appendEvent(sessionId, turnId, 'rate_limit.updated', {
         available: false,
         fiveHourUtil: 0,
         sevenDayUtil: 0,
+        ...(sub ? { subscriptionType: sub } : {}),
       });
       return;
     }
@@ -609,6 +622,7 @@ async function fetchAndEmitRateLimits(q: Query, sessionId: string, turnId: strin
     const sonnet = rl.seven_day_sonnet;
     appendEvent(sessionId, turnId, 'rate_limit.updated', {
       available: true,
+      ...(sub ? { subscriptionType: sub } : {}),
       fiveHourUtil: five?.utilization ?? 0,
       sevenDayUtil: week?.utilization ?? 0,
       ...(five?.resets_at ? { fiveHourResetsAt: five.resets_at } : {}),
@@ -623,6 +637,33 @@ async function fetchAndEmitRateLimits(q: Query, sessionId: string, turnId: strin
     // raced shut: never fatal — emit nothing and keep the turn healthy.
     console.error(
       'fetchAndEmitRateLimits (non-fatal):',
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
+/**
+ * Fetch the account's supported models via the SDK control channel and emit a
+ * models.available event so the TUI can build the /model palette dynamically
+ * (instead of the hardcoded opus/sonnet/haiku aliases). Same constraints as
+ * fetchAndEmitRateLimits: must run while the control channel is open (during a
+ * turn, after init) and is fire-and-forget — any failure is swallowed so the
+ * turn stays healthy and the TUI just keeps the alias fallback.
+ */
+async function fetchAndEmitModels(q: Query, sessionId: string, turnId: string): Promise<void> {
+  try {
+    const models = await q.supportedModels();
+    if (!Array.isArray(models) || models.length === 0) return;
+    appendEvent(sessionId, turnId, 'models.available', {
+      models: models.map((m) => ({
+        value: m.value,
+        displayName: m.displayName,
+        ...(m.description ? { description: m.description } : {}),
+      })),
+    });
+  } catch (err) {
+    console.error(
+      'fetchAndEmitModels (non-fatal):',
       err instanceof Error ? err.message : err,
     );
   }

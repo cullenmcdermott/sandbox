@@ -78,7 +78,12 @@ type UsagePayload struct {
 // model — a non-nil pointer to 0 means present at 0% (distinct from absent). See
 // the runner's fetchAndEmitRateLimits in runner/src/claude.ts.
 type RateLimitPayload struct {
-	Available        bool    `json:"available"`
+	Available bool `json:"available"`
+	// SubscriptionType is the claude.ai plan ('pro'/'max'/'team'/'enterprise'),
+	// or empty for headless setup-token / API-key / 3P sessions. When Available
+	// is false and this is empty, the status line shows "usage n/a (headless
+	// auth)" rather than a bare blank row.
+	SubscriptionType string  `json:"subscriptionType,omitempty"`
 	FiveHourUtil     float64 `json:"fiveHourUtil"`
 	FiveHourResetsAt string  `json:"fiveHourResetsAt,omitempty"`
 	SevenDayUtil     float64 `json:"sevenDayUtil"`
@@ -136,6 +141,24 @@ type WorkspaceStatusPayload struct {
 // SessionTitlePayload in runner/src/types.ts.
 type SessionTitlePayload struct {
 	Title string `json:"title"`
+}
+
+// ModelInfo is one model from the SDK's supportedModels() list (models.available),
+// used to populate the in-session /model palette dynamically instead of the
+// hardcoded opus/sonnet/haiku aliases.
+type ModelInfo struct {
+	Value       string `json:"value"`       // model id for --model (e.g. claude-opus-4-8)
+	DisplayName string `json:"displayName"` // human-readable name (e.g. "Opus 4.8")
+	Description string `json:"description,omitempty"`
+}
+
+// ModelsAvailablePayload is the payload for models.available events: the list of
+// models the account/SDK supports (Query.supportedModels()). Emitted once per
+// session, fetched in-turn on the SDK init message (same open-control-channel
+// window as rate_limit.updated). Absent until the first turn; the TUI falls back
+// to the opus/sonnet/haiku aliases until it arrives.
+type ModelsAvailablePayload struct {
+	Models []ModelInfo `json:"models"`
 }
 
 // TodoItem is a single entry in a todo.updated list, mirroring the SDK

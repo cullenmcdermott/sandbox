@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 
@@ -149,6 +150,29 @@ func (p *ExternalPane) Init() tea.Cmd {
 			if rerr != nil {
 				p.out <- ptyChunk{ok: false}
 				close(p.out)
+				return
+			}
+		}
+	}()
+
+	// Drain the emulator's reply buffer back to the child PTY. The vt emulator
+	// answers terminal capability queries (DA, DSR/cursor-position, DECRQM, OSC
+	// 10/11 color) by writing to an internal io.Pipe exposed only via Read();
+	// opencode's opentui renderer measures cell/Unicode width on startup with OSC
+	// 66 + CSI 6n and BLOCKS until it gets those cursor-position reports. Without
+	// this pump the replies never reach the child, so it never paints (blank pane)
+	// — and because the reply pipe is unbuffered, the emu.Write() in apply() (on
+	// the Bubble Tea main loop) would itself block on the first query, freezing
+	// the whole dashboard. close() closes the emulator's reply pipe so this
+	// goroutine's blocked emu.Read returns EOF and it exits.
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, rerr := p.emu.Read(buf)
+			if n > 0 {
+				_, _ = ptmx.Write(buf[:n])
+			}
+			if rerr != nil {
 				return
 			}
 		}
@@ -327,6 +351,22 @@ func (p *ExternalPane) close() {
 	if p.ptmx != nil {
 		_ = p.ptmx.Close()
 		p.ptmx = nil
+	}
+	// Stop the reply-pump goroutine by closing the emulator's reply pipe (its
+	// InputPipe writer) directly rather than calling emu.Close(). emu.Read (pump
+	// goroutine) and emu.Close (this main-loop call) both touch the emulator's
+	// internal `closed` bool with no synchronization — a data race. Closing the
+	// pipe writer makes the pump's blocked emu.Read return EOF without writing
+	// `closed`, so that field stays write-free and the race is gone by
+	// construction. (vt.SafeEmulator does not help: its Read is unlocked and it
+	// doesn't override Close.) Fall back to emu.Close() only if the input pipe
+	// isn't the expected *io.PipeWriter, so the goroutine can't leak.
+	if p.emu != nil {
+		if pw, ok := p.emu.InputPipe().(*io.PipeWriter); ok {
+			_ = pw.CloseWithError(io.EOF)
+		} else {
+			_ = p.emu.Close()
+		}
 	}
 	if p.cmd != nil && p.cmd.Process != nil && !p.exited {
 		_ = p.cmd.Process.Kill()

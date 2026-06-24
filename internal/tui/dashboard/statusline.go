@@ -444,7 +444,8 @@ func (m *TranscriptModel) renderStatusLine() string {
 	// fixed two rows regardless, so the body height never reflows.
 	body := lipgloss.NewStyle().Foreground(theme.TextBody)
 	row2 := ""
-	if m.rlSeen && m.rlAvailable {
+	switch {
+	case m.rlSeen && m.rlAvailable:
 		f5 := m.rl5hUtil / 100
 		f7 := m.rl7dUtil / 100
 		row2 = label.Render("5h: ") + blockBar(f5, 8, rampColor(f5)) +
@@ -459,6 +460,16 @@ func (m *TranscriptModel) renderStatusLine() string {
 				lipgloss.NewStyle().Foreground(rampColor(mUtil/100)).Render(fmt.Sprintf("%d%%", int(mUtil+0.5))) +
 				muted.Render(" · "+lbl+" in "+fmtReset(mReset))
 		}
+	case m.rlSeen && !m.rlAvailable:
+		// Plan limits don't apply to this session. Rather than leave row 2 blank
+		// (reads as a glitch — the original "usage unavailable" complaint), name
+		// the reason. An empty subscription type means headless setup-token /
+		// API-key auth, where the experimental /usage API carries no plan limits.
+		reason := "n/a"
+		if m.rlSubscription == "" {
+			reason = "n/a (headless auth)"
+		}
+		row2 = label.Render("usage: ") + muted.Render(reason)
 	}
 
 	return " " + row1 + "\n " + row2

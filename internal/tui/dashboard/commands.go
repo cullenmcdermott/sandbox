@@ -38,8 +38,11 @@ type cmdGroup struct {
 }
 
 // commandGroups is the grouped slash-command registry. Client-side commands run
-// locally; /diff runs `git diff` via the runner exec endpoint.
-func commandGroups() []cmdGroup {
+// locally; /diff runs `git diff` via the runner exec endpoint. The Model group
+// is built from m (its live supportedModels() list when present, else the
+// alias fallback); m may be nil for contexts with no session (e.g. the static
+// help reference), which yields the alias fallback.
+func commandGroups(m *TranscriptModel) []cmdGroup {
 	return []cmdGroup{
 		{name: "Session", glyph: "◆", cmds: []slashCmd{
 			{"/clear", "clear the transcript view", func(m *TranscriptModel) tea.Cmd {
@@ -60,12 +63,7 @@ func commandGroups() []cmdGroup {
 			{"/yolo", "bypass all permissions", setModeCmd(modeBypass)},
 			{"/vim", "toggle vim-style modal editing (off by default)", toggleVimCmd},
 		}},
-		{name: "Model", glyph: "✸", cmds: []slashCmd{
-			{"/opus", "switch to Opus for new turns", setModelCmd("opus", "Opus")},
-			{"/sonnet", "switch to Sonnet for new turns", setModelCmd("sonnet", "Sonnet")},
-			{"/haiku", "switch to Haiku for new turns", setModelCmd("haiku", "Haiku")},
-			{"/model-default", "revert to the account/session default model", setModelCmd("", "account default")},
-		}},
+		{name: "Model", glyph: "✸", cmds: modelGroupCmds(m)},
 		{name: "Tools", glyph: "▣", cmds: []slashCmd{
 			{"/diff", "show the working-tree diff", func(m *TranscriptModel) tea.Cmd {
 				return m.runShell("git --no-pager diff")
@@ -98,6 +96,39 @@ func setModeCmd(mode permMode) func(*TranscriptModel) tea.Cmd {
 		m.appendBlock(blockInfo, "mode → "+mode.label())
 		return nil
 	}
+}
+
+// modelGroupCmds builds the Model palette group. With a live supportedModels()
+// list (from a models.available event), it lists each real account model by its
+// id; before that arrives — or with no session (nil m) — it falls back to the
+// stable opus/sonnet/haiku aliases. /model-default is always the last entry.
+func modelGroupCmds(m *TranscriptModel) []slashCmd {
+	var cmds []slashCmd
+	if m != nil && len(m.availableModels) > 0 {
+		for _, mi := range m.availableModels {
+			desc := mi.DisplayName
+			if mi.Description != "" {
+				desc += " — " + mi.Description
+			}
+			cmds = append(cmds, slashCmd{"/" + modelSlug(mi.Value), desc, setModelCmd(mi.Value, mi.DisplayName)})
+		}
+	} else {
+		cmds = []slashCmd{
+			{"/opus", "switch to Opus for new turns", setModelCmd("opus", "Opus")},
+			{"/sonnet", "switch to Sonnet for new turns", setModelCmd("sonnet", "Sonnet")},
+			{"/haiku", "switch to Haiku for new turns", setModelCmd("haiku", "Haiku")},
+		}
+	}
+	return append(cmds, slashCmd{"/model-default", "revert to the account/session default model", setModelCmd("", "account default")})
+}
+
+// modelSlug turns a model id into a short, unique palette-command suffix:
+// "claude-opus-4-8" -> "opus-4-8". Strips the "claude-" prefix when present and
+// normalizes spaces to dashes; otherwise returns the lowercased value.
+func modelSlug(value string) string {
+	s := strings.ToLower(value)
+	s = strings.TrimPrefix(s, "claude-")
+	return strings.ReplaceAll(s, " ", "-")
 }
 
 // setModelCmd returns a handler that selects the model for subsequent turns
@@ -149,10 +180,10 @@ func (m *TranscriptModel) openHelp() {
 // order. A group-name match (e.g. "model" → "Model" group) includes the whole
 // group so typing /model shows all model-switching commands, not just
 // /model-default.
-func filteredGroups(query string) []cmdGroup {
+func filteredGroups(m *TranscriptModel, query string) []cmdGroup {
 	q := strings.ToLower(strings.TrimSpace(query))
 	var out []cmdGroup
-	for _, g := range commandGroups() {
+	for _, g := range commandGroups(m) {
 		groupMatch := q != "" && strings.Contains(strings.ToLower(g.name), q)
 		var cmds []slashCmd
 		for _, c := range g.cmds {
@@ -168,9 +199,9 @@ func filteredGroups(query string) []cmdGroup {
 }
 
 // flatCmds is the flat, selectable command list for the current query.
-func flatCmds(query string) []slashCmd {
+func flatCmds(m *TranscriptModel, query string) []slashCmd {
 	var out []slashCmd
-	for _, g := range filteredGroups(query) {
+	for _, g := range filteredGroups(m, query) {
 		out = append(out, g.cmds...)
 	}
 	return out
@@ -186,7 +217,7 @@ func (m *TranscriptModel) paletteQuery() string {
 // --- palette rendering (compact grouped list) -----------------------------
 
 func (m *TranscriptModel) renderPalette(width int) string {
-	groups := filteredGroups(m.paletteQuery())
+	groups := filteredGroups(m, m.paletteQuery())
 	boxW := width - 4
 	if boxW < 30 {
 		boxW = 30
@@ -245,12 +276,12 @@ func (m *TranscriptModel) paletteKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 		}
 		return nil, true
 	case "down":
-		if n := len(flatCmds(m.paletteQuery())); m.cmdSel < n-1 {
+		if n := len(flatCmds(m, m.paletteQuery())); m.cmdSel < n-1 {
 			m.cmdSel++
 		}
 		return nil, true
 	case "enter":
-		cmds := flatCmds(m.paletteQuery())
+		cmds := flatCmds(m, m.paletteQuery())
 		var cmd tea.Cmd
 		if len(cmds) > 0 && m.cmdSel < len(cmds) {
 			cmd = cmds[m.cmdSel].run(m)
@@ -266,7 +297,7 @@ func (m *TranscriptModel) paletteKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 	// selection and re-layout (the palette height changes as results filter).
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
-	if n := len(flatCmds(m.paletteQuery())); m.cmdSel >= n {
+	if n := len(flatCmds(m, m.paletteQuery())); m.cmdSel >= n {
 		m.cmdSel = 0
 	}
 	m.layout()

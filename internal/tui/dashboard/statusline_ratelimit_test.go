@@ -80,19 +80,51 @@ func TestStatusLineShowsRealRateLimits(t *testing.T) {
 	})
 }
 
-// COUNTER: when plan limits don't apply (API-key/Bedrock/Vertex), the windows
-// are hidden — never shown as fabricated percentages.
+// COUNTER: when plan limits don't apply, the windows are never shown as
+// fabricated percentages. A headless (empty subscription) session names the
+// reason — "usage n/a (headless auth)" — so the missing windows read as an
+// auth-mode limitation rather than the bug-sounding bare blank / "unavailable".
 func TestStatusLineHidesUnavailableRateLimits(t *testing.T) {
 	m := &TranscriptModel{}
-	m.rlSeen, m.rlAvailable = true, false
+	m.rlSeen, m.rlAvailable = true, false // headless: rlSubscription stays ""
 	out := stripANSI(m.renderStatusLine())
-	// A2.5: when plan limits don't apply, the rate-limit row is BLANK — no window
-	// labels, no placeholder text, and (as before) never fabricated percentages.
 	if strings.Contains(out, "5h:") || strings.Contains(out, "weekly:") {
 		t.Errorf("unavailable rate limits must not render a window row: %q", out)
 	}
 	if strings.Contains(out, "30%") || strings.Contains(out, "17%") {
 		t.Errorf("unavailable rate limits must not fabricate percentages: %q", out)
+	}
+	if !strings.Contains(out, "n/a (headless auth)") {
+		t.Errorf("headless session should explain the missing usage windows: %q", out)
+	}
+}
+
+// ORACLE + COUNTER: subscriptionType rides through rate_limit.updated into the
+// model, and the rendered reason distinguishes headless (empty subscription →
+// "headless auth") from an unavailable-but-known-plan session (plain "n/a", no
+// "headless" qualifier).
+func TestStatusLineUnavailableReasonFromSubscription(t *testing.T) {
+	// Headless setup-token: subscription empty → labelled "(headless auth)".
+	headless, _ := json.Marshal(session.RateLimitPayload{Available: false})
+	mh := &TranscriptModel{}
+	mh.handleEvent(session.Event{Type: session.EventRateLimitUpdated, Payload: headless})
+	if mh.rlSubscription != "" {
+		t.Fatalf("headless rlSubscription = %q, want empty", mh.rlSubscription)
+	}
+	if out := stripANSI(mh.renderStatusLine()); !strings.Contains(out, "n/a (headless auth)") {
+		t.Errorf("empty subscription should render '(headless auth)': %q", out)
+	}
+
+	// Unavailable but a plan is known (e.g. missing profile scope): plain "n/a".
+	known, _ := json.Marshal(session.RateLimitPayload{Available: false, SubscriptionType: "max"})
+	mk := &TranscriptModel{}
+	mk.handleEvent(session.Event{Type: session.EventRateLimitUpdated, Payload: known})
+	if mk.rlSubscription != "max" {
+		t.Fatalf("rlSubscription = %q, want max", mk.rlSubscription)
+	}
+	out := stripANSI(mk.renderStatusLine())
+	if !strings.Contains(out, "usage: n/a") || strings.Contains(out, "headless") {
+		t.Errorf("known-plan-but-unavailable should render plain 'n/a' (no 'headless'): %q", out)
 	}
 }
 

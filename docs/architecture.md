@@ -88,7 +88,7 @@ sequenceDiagram
     CLI->>R: GET /healthz
     CLI->>K: read RUNNER_TOKEN from Secret
     CLI->>M: write ssh alias + mutagen sync create
-    M-->>R: sync project into /session/workspace (SSH)
+    M-->>R: sync project into the host project path (SSH)
     CLI-->>U: open TUI
     U->>CLI: submit prompt
     CLI->>R: POST /sessions/:id/turns (Bearer token)
@@ -108,7 +108,10 @@ sequenceDiagram
 /session/state/sandbox/audit.jsonl    PostToolUse audit entries
 /session/state/sandbox/outputs/       generated output files
 /session/state/claude/                CLAUDE_CONFIG_DIR
-/session/workspace/<project path>     cwd handed to the SDK (mirrors host path)
+/session/workspace/<project path>     workspace files in the PVC (legacy /session view)
+<project path>                        the same files, bind-mounted at the real host path
+                                      via subPath — this is the cwd handed to the SDK, so
+                                      transcripts land under ~/.claude/projects/<host path>
 ```
 
 **Cluster Secrets:**
@@ -150,7 +153,8 @@ ssh/config                            per-session Host aliases (Include'd from ~
 
 Mutagen runs three session groups (see `internal/sync`):
 
-1. **project** — local repo ⇄ `/session/workspace/<path>` (two-way-safe),
+1. **project** — local repo ⇄ the pod's `<project path>` (the real host path the
+   workspace subtree is bind-mounted at, two-way-safe),
 2. **config inputs** — `~/.claude/{skills,agents,commands,hooks}` → pod (one-way), and
 3. **transcripts** — pod `~/.claude/{projects,todos,tasks}` → local (one-way).
 

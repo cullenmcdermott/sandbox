@@ -19,6 +19,14 @@
         {"json": "status", "type": "string", "optional": false, "doc": "pending | in_progress | completed"},
         {"json": "activeForm", "type": "string", "optional": true, "doc": "present-tense form shown while in_progress"}
       ]
+    },
+    "ModelInfo": {
+      "doc": "one model from the SDK's supportedModels() list (models.available), used to populate the in-session /model palette dynamically instead of the hardcoded opus/sonnet/haiku aliases.",
+      "fields": [
+        {"json": "value", "type": "string", "optional": false, "doc": "model id to use in API calls / --model (e.g. claude-opus-4-8)"},
+        {"json": "displayName", "type": "string", "optional": false, "doc": "human-readable name (e.g. 'Opus 4.8')"},
+        {"json": "description", "type": "string", "optional": true, "doc": "short capability description; may be empty"}
+      ]
     }
   },
   "eventTypes": [
@@ -46,6 +54,7 @@
     "rate_limit.updated",
     "workspace.status",
     "session.title",
+    "models.available",
     "error"
   ],
   "payloads": {
@@ -119,6 +128,7 @@
       "doc": "payload for rate_limit.updated events: the claude.ai plan usage windows (5-hour + weekly, plus the optional per-model weekly Opus/Sonnet caps) and their reset instants, fetched from the SDK's structured /usage data (Query.usage_EXPERIMENTAL...). `available` is false for API-key/Bedrock/Vertex sessions where plan limits do not apply; the TUI hides the windows then rather than fabricating values. Utilizations are 0-100; resets are ISO 8601 (RFC3339) and may be empty when the SDK reports null. The per-model windows are absent (nil pointer / undefined) unless the plan has a separate cap for that model; the status line surfaces the one matching the attached model. The runner emits this during a turn (the control channel is only open until the result closes stdin), so the status line shows real reset times instead of projecting 5h/7d from the wall clock.",
       "fields": [
         {"json": "available", "type": "bool", "optional": false, "doc": "rate_limits_available: true only for claude.ai subscription sessions"},
+        {"json": "subscriptionType", "type": "string", "optional": true, "doc": "claude.ai subscription type ('pro'/'max'/'team'/'enterprise'), or empty/absent for headless setup-token, API-key, or 3rd-party-provider sessions where plan limits do not apply. When `available` is false and this is empty, the TUI renders 'usage n/a (headless auth)' so the absent windows read as an auth-mode limitation rather than a bug."},
         {"json": "fiveHourUtil", "type": "float", "optional": false, "doc": "5-hour window utilization, 0-100"},
         {"json": "fiveHourResetsAt", "type": "string", "optional": true, "doc": "ISO 8601 instant the 5-hour window resets; empty if unknown"},
         {"json": "sevenDayUtil", "type": "float", "optional": false, "doc": "weekly (7-day) window utilization, 0-100"},
@@ -142,6 +152,12 @@
       "doc": "payload for session.title events: a short conversation-derived summary emitted once per session after the first assistant turn.",
       "fields": [
         {"json": "title", "type": "string", "optional": false}
+      ]
+    },
+    "ModelsAvailablePayload": {
+      "doc": "payload for models.available events: the list of models the account/SDK supports (Query.supportedModels()), used to populate the in-session /model palette dynamically. Emitted once per session, fetched in-turn on the SDK init message (same open-control-channel window as rate_limit.updated). Absent until the first turn runs; the TUI falls back to the opus/sonnet/haiku aliases until it arrives.",
+      "fields": [
+        {"json": "models", "type": "objectArray", "items": "ModelInfo", "optional": false, "doc": "the supported models, in SDK order"}
       ]
     },
     "TodoUpdatedPayload": {

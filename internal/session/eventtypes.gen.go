@@ -29,6 +29,7 @@ const (
 	EventRateLimitUpdated     EventType = "rate_limit.updated"
 	EventWorkspaceStatus      EventType = "workspace.status"
 	EventSessionTitle         EventType = "session.title"
+	EventModelsAvailable      EventType = "models.available"
 	EventError                EventType = "error"
 )
 
@@ -59,5 +60,6 @@ var AllEventTypes = []EventType{
 	EventRateLimitUpdated,
 	EventWorkspaceStatus,
 	EventSessionTitle,
+	EventModelsAvailable,
 	EventError,
 }

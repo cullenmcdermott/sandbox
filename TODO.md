@@ -1,5 +1,36 @@
 # TODO
 
+## ~~opencode external pane hangs blank on attach~~ **DONE (2026-06-23)**
+
+`opencode attach` opened to a blank pane and the dashboard froze (Ctrl+] would
+not escape). Root cause: the embedded PTY pane never drained the vt emulator's
+reply buffer back to the child. opencode's opentui renderer probes terminal
+capabilities on startup (OSC 66 + `CSI 6n` cell-width measurement, plus DA/DSR/
+DECRQM/OSC 10-11) and *blocks* until it gets the cursor-position reports. The
+emulator generates those replies onto an internal **unbuffered `io.Pipe`**
+(`vt/emulator.go:102`) readable only via `emu.Read()`, which we never called —
+so (1) opencode never painted, and (2) the `emu.Write()` in `apply()` on the
+Bubble Tea main loop blocked on the first reply, wedging the event loop.
+
+- **Fix:** reply-pump goroutine `emu.Read()` → `ptmx.Write()` started in
+  `external_pane.go:Init()`; `close()` now calls `emu.Close()` so the pump exits
+  and any pending `emu.Write` unblocks. Verified with a live `opencode serve`
+  1.17.7 repro: blank/0-glyph → full TUI paint once the pump was added.
+
+### Follow-up / caveat — **DONE (2026-06-23)**
+
+- `emu.Read` (pump goroutine) vs `emu.Close` (main loop) raced on the vt
+  emulator's internal `closed` bool (`emu.Write` only *reads* it, so Read+Write
+  don't race; only Close *writes* it). **`vt.SafeEmulator` does NOT fix this** —
+  its `Read` doesn't take the mutex and it doesn't override `Close`, so the exact
+  same `closed` read/write stays unsynchronized. Real fix: `close()` now unblocks
+  the pump by closing the emulator's reply pipe directly
+  (`emu.InputPipe().(*io.PipeWriter).CloseWithError(io.EOF)`) instead of calling
+  `emu.Close()` — the pump's blocked `emu.Read` returns EOF via the pipe and
+  `closed` is never written, so the field is write-free and the race is gone by
+  construction (`internal/tui/dashboard/external_pane.go:close`). Falls back to
+  `emu.Close()` only if the input pipe isn't the expected `*io.PipeWriter`.
+
 ## ~~Transcript load / typing / reconnect performance~~ **DONE (2026-06-23)**
 
 Deep-dive fixes for: slow transcript load despite cache, sluggish typing, and a
@@ -71,8 +102,8 @@ auth).
 * Improve the agent picker modal, shuld feel like picking a fighter in tekken or something with cool animations and a good "avatar"/"portrait" for each one. If you waant I can have chatgpt generate images that we can turn into ascii/ansi art?
 * ~~Investigate "Syncing Files" taking a long time ... reconnecting should feel much faster~~ **MOSTLY FIXED (2026-06-23).** Root cause: `connect()` (`internal/cli/connect.go`) ran a **blocking 12s `mutagen FlushAll`** in `StageSync` on *every* connection — both foreground attach AND every background passive-stream open (`startLiveSSECmd`, now one per running/warm session). `mutagen sync flush` forces a full scan/reconcile, so on a large repo over slow wifi it consumed the whole budget, making every reattach feel like a fresh "Syncing Files…" even when nothing changed. Fix: `CreateAll` now returns whether the load-bearing **project** sync session was freshly created (first-ever sync) vs already existed (reconnect); `connect()` only blocks on the initial flush for a first sync (where it settles the upload + surfaces a broken transport, RV20/RV21) and on reconnect returns immediately, kicking a **detached** flush so mutagen re-establishes the transport on the new port-forward promptly. The per-session **sync indicator** (synced/syncing/stalled glyph) added in the warm-hide work now surfaces progress live on the dashboard. Tests: `internal/sync/sync_test.go` (`TestCreateAll` created=true, `TestCreateAllIdempotent` created=false). **Both follow-ups also done (2026-06-23):** (1) **Observer connect** — background passive streams now use a lightweight `connectObserver` (port-forward + runner health only; skips mutagen sync create/flush, reaper-ensure, opencode-readiness), injected as `RunOptions.ObserverConnector` and used by `startLiveSSECmd`/`reconnectLiveSSECmd`/approve-fallback (closes the long-standing RV8 "heavyweight per-session bg connector"). (2) **First-sync progress** — the connect stage callback now carries a detail string; the first-sync flush polls `internal/sync` `StagingPhase` (robust substring match) and the connecting stepper shows "Syncing files — uploading/scanning/applying" instead of a frozen label. Tests: `TestBackgroundStreamPrefersObserverConnector`/`…FallsBackToFullConnector`, `TestConnectingStepperDetail`, `TestParseStagingPhase`.
 * ~~renaming doesnt work? I can hit shift+R but then can't type in the box or edit the name~~ **FIXED** — `handleKey` never routed keypresses while `m.renaming` was true (overlay rendered, but every key fell through to navigation). Added a `m.renaming` guard + `handleRenameKey` (enter commits, esc cancels, backspace deletes, printable runes append) in `internal/tui/dashboard/model.go`; tests in `triage_fixes_test.go` (`TestRenameKeyboardInput`, `TestRenameEscapeCancels`).
-* usage limits are "unavailble" in the status line??? — **ROOT-CAUSED (2026-06-22): not a code bug. It's an SDK auth-mode limitation.** The runner *is* emitting `rate_limit.updated` with `{"available":false}` (confirmed: 3 rows in a live pod's `events.db`), and the status line correctly renders that as "unavailable" (`statusline.go:436`, gated on `m.rlSeen && m.rlAvailable`). The runner emits `available:false` because the experimental usage API returns `rate_limits_available:false` under the pod's headless `CLAUDE_CODE_OAUTH_TOKEN` (the `claude setup-token` long-lived OAuth token, `subscription_type:null`). Verified by running `q.usage_EXPERIMENTAL_…()` two ways: laptop **keychain** subscription → `subscription_type:max`, `rate_limits_available:true`, real data (5h 73%/7d 44%); same call with the **pod's CLAUDE_CODE_OAUTH_TOKEN** → `subscription_type:null`, `rate_limits_available:false`. Pod SDK = `0.3.181` (== package.json), so not a version skew. **Conclusion:** the experimental `/usage` API doesn't carry subscription rate limits over setup-token auth; nothing to fix in this repo until the upstream API (marked `DO_NOT_RELY_ON_THIS_API_YET`) supports OAuth tokens. *Possible cosmetic follow-up:* pass `subscription_type` through `rate_limit.updated` so the TUI can show "usage n/a (headless auth)" instead of the bug-sounding "unavailable", or hide the 5h/weekly rows entirely when `subscription_type==null`.
-* no `/model` that lets me select from available models (by querying the anthropic api or something...? how to make this dynamic?) — partially DONE (see "Done" section: `/model` palette + `--model`). Dynamic list still open: wire the SDK's `supportedModels()` instead of hardcoded `opus`/`sonnet`/`haiku` aliases.
+* usage limits are "unavailble" in the status line??? — **ROOT-CAUSED (2026-06-22): not a code bug. It's an SDK auth-mode limitation.** The runner *is* emitting `rate_limit.updated` with `{"available":false}` (confirmed: 3 rows in a live pod's `events.db`), and the status line correctly renders that as "unavailable" (`statusline.go:436`, gated on `m.rlSeen && m.rlAvailable`). The runner emits `available:false` because the experimental usage API returns `rate_limits_available:false` under the pod's headless `CLAUDE_CODE_OAUTH_TOKEN` (the `claude setup-token` long-lived OAuth token, `subscription_type:null`). Verified by running `q.usage_EXPERIMENTAL_…()` two ways: laptop **keychain** subscription → `subscription_type:max`, `rate_limits_available:true`, real data (5h 73%/7d 44%); same call with the **pod's CLAUDE_CODE_OAUTH_TOKEN** → `subscription_type:null`, `rate_limits_available:false`. Pod SDK = `0.3.181` (== package.json), so not a version skew. **Conclusion:** the experimental `/usage` API doesn't carry subscription rate limits over setup-token auth; nothing to fix in this repo until the upstream API (marked `DO_NOT_RELY_ON_THIS_API_YET`) supports OAuth tokens. ~~*Possible cosmetic follow-up:* pass `subscription_type` through `rate_limit.updated` so the TUI can show "usage n/a (headless auth)" instead of the bug-sounding "unavailable", or hide the 5h/weekly rows entirely when `subscription_type==null`.~~ **DONE (2026-06-23).** Added an optional `subscriptionType` field to `RateLimitPayload` (`schema/events.json` → `just gen` regenerated `events.gen.ts`; hand-written `internal/session/event.go`). The runner threads `usage.subscription_type` into `rate_limit.updated` in both branches (`runner/src/claude.ts` `fetchAndEmitRateLimits`). The TUI captures it (`transcript.go` `rlSubscription`) and the status line (`statusline.go` row 2) now renders `usage: n/a (headless auth)` when limits are unavailable *and* the subscription is empty (headless setup-token / API-key), or a plain `usage: n/a` when a plan is known but unavailable — instead of a mystery blank row. Tests: `statusline_ratelimit_test.go` (`TestStatusLineHidesUnavailableRateLimits` updated, `TestStatusLineUnavailableReasonFromSubscription` added). NB: still unverified against a live subscription pod (no live Claude auth in the dev sandbox); the rendering + event plumbing are golden-tested.
+* ~~no `/model` that lets me select from available models (by querying the anthropic api or something...? how to make this dynamic?)~~ **DONE (2026-06-23).** The `/model` palette is now driven by the SDK's real model list. New `models.available` event (`schema/events.json` `ModelInfo`/`ModelsAvailablePayload` → `just gen`): the runner calls `q.supportedModels()` once per turn on the SDK init message (same open-control-channel window as `rate_limit.updated`) and emits the list (`runner/src/claude.ts` `fetchAndEmitModels`, fire-and-forget). The TUI captures it (`transcript.go` `availableModels`) and `commands.go` `modelGroupCmds(m)` builds the Model palette group from the live list — one entry per account model, named by `modelSlug(value)` (`claude-opus-4-8` → `/opus-4-8`), each selecting the **full** id; `/model-default` stays last. Falls back to the stable `opus`/`sonnet`/`haiku` aliases until the first turn's list arrives (and for the static `/help` reference). `resolveModel` already passes full ids straight to `--model`, so no runner-side alias map needed. Tests: `commands_test.go` (`TestModelsAvailableEventPopulatesModel`, `TestModelPaletteUsesDynamicListWhenPresent`, `TestModelPaletteFallsBackToAliases`, `TestModelSlug`) + `schema_test.go` registry. NB: the live model list only appears after the first turn (control channel constraint) and is unverified against a live pod (no Claude auth in the dev sandbox); the event plumbing + palette are unit-tested.
 * ~~The chat pane floating window/modal should make the background more grayed out and should have a little border~~ **DONE (2026-06-22).** `app.go:modalView` now (1) wraps the transcript in a rounded-border `kit.Card` (purple `theme.Charple` border, `theme.Surface` fill), sizing the inner content to `mw-2 × mh-2` so the framed card stays exactly `mw×mh` and lines up with the drop shadow; (2) replaces the live dashboard background with `dimBackdrop()` — strips each line's ANSI colors and re-renders them as dim text on the flat page bg, so the dashboard reads as ghosted/out-of-focus context and live rows (e.g. the colored status line) no longer bleed through at full brightness past the modal edges.
 
 ## Resumable transcripts: make the pod cwd the real host path (Option B)
@@ -142,9 +173,15 @@ so synced k8s sessions didn't appear in the list. Fix:
   to the new folder; in-session resume-by-id continuity across the migration may
   break. Acceptable per OSS-prep "aggressive breaking changes OK"; call out in
   release notes.
-- **Stale docs.** `docs/architecture.md` (lines ~91/111/153) and
-  `docs/runner-api.md` (~34) still describe cwd/sync as `/session/workspace/...`.
-  Update to the real-host-path model.
+- ~~**Stale docs.** `docs/architecture.md` (lines ~91/111/153) and
+  `docs/runner-api.md` (~34) still describe cwd/sync as `/session/workspace/...`.~~
+  **DONE (2026-06-23).** Updated all four to the real-host-path model: the
+  sequence-diagram sync target, the State-&-storage block (now shows the PVC
+  `/session/workspace/<path>` view *and* the bind-mounted real `<project path>`
+  = SDK cwd, with the `~/.claude/projects/<host path>` transcript note), the File
+  sync project endpoint, and the `runner-api.md` `projectPath` example
+  (`/Users/you/git/my-project`). The one remaining `/session/workspace` mention
+  in `architecture.md:111` is correct — it's the real PVC-internal path.
 - **todos/tasks sync.** `projects` is the load-bearing one for resume;
   `~/.claude/todos` + `~/.claude/tasks` are keyed by session id and ancillary —
   keep syncing (cheap) but they're not required for conversation resume.
@@ -223,6 +260,8 @@ P1–P13 coverage table.
   `/usage` view if we want complete parity.
 - The black-line fix is verified by golden tests + static analysis; confirm
   visually in a live TUI attach.
-- `/model` offers `opus`/`sonnet`/`haiku` aliases + a free-form gap. If we want
+- ~~`/model` offers `opus`/`sonnet`/`haiku` aliases + a free-form gap. If we want
   an exact model list, wire the SDK's `supportedModels()` (a streaming-mode
-  control request) instead of hardcoded aliases.
+  control request) instead of hardcoded aliases.~~ **DONE (2026-06-23)** — see the
+  `/model` dynamic-list entry under "Manual Additions" (the `models.available`
+  event + `modelGroupCmds`). Aliases remain only as the pre-first-turn fallback.

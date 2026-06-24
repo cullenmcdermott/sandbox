@@ -64,6 +64,7 @@ func (s schema) tsFieldType(f fieldSchema) string {
 // generated output is stable.
 var objectOrder = []string{
 	"TodoItem",
+	"ModelInfo",
 }
 
 // payloadOrder is the order payload interfaces are emitted in the TS output.
@@ -79,6 +80,7 @@ var payloadOrder = []string{
 	"RateLimitPayload",
 	"WorkspaceStatusPayload",
 	"SessionTitlePayload",
+	"ModelsAvailablePayload",
 	"TodoUpdatedPayload",
 	"ErrorPayload",
 }
