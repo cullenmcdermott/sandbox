@@ -56,6 +56,11 @@ export interface SessionState {
   sandbox_session_id: string;
   backend: string;
   claude_session_id: string;
+  /** Persisted opencode server session id (the opencode analogue of
+   * claude_session_id). Lets opencode turns continue the same conversation
+   * across pod restarts instead of re-creating a fresh session each boot.
+   * Empty until the first opencode turn creates one. */
+  opencode_session_id: string;
   project_path: string;
   status: 'idle' | 'busy' | 'error';
   last_turn_id: string;

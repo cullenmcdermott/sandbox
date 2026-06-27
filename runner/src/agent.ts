@@ -13,6 +13,7 @@
 
 import type { RunnerConfig } from './session.js';
 import { claudeAgent } from './claude.js';
+import { opencodeAgent } from './opencode-turn.js';
 
 export interface Agent {
   // runTurn runs a single user-prompted turn to completion: it streams the
@@ -35,17 +36,18 @@ export interface Agent {
 
 // selectAgent returns the Agent implementation for a backend id (the value of
 // SANDBOX_BACKEND / Spec.Backend), or null for backends that are NOT driven
-// through the runner's turn path. `opencode-server` is such a backend: the
-// runner only supervises `opencode serve` (see opencode.ts) while the local
-// `opencode attach` client drives turns directly, so it has no Agent and its
-// /turns route is rejected with 409. An unknown backend still throws so the
-// runner fails fast at startup rather than at first turn.
+// through the runner's turn path. Both shipping backends now implement the turn
+// seam: claude-sdk via the Claude Agent SDK, and opencode-server by bridging to
+// the in-pod `opencode serve` over its HTTP API (opencode-turn.ts) — additive to
+// the interactive `opencode attach` path, which still talks to the same server.
+// The null return is kept for any future supervise-only backend. An unknown
+// backend throws so the runner fails fast at startup rather than at first turn.
 export function selectAgent(backend: string): Agent | null {
   switch (backend) {
     case 'claude-sdk':
       return claudeAgent;
     case 'opencode-server':
-      return null;
+      return opencodeAgent;
     default:
       throw new Error(`unsupported backend: ${backend} (known: claude-sdk, opencode-server)`);
   }

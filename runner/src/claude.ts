@@ -200,6 +200,11 @@ export function buildOptions(
       ...process.env,
       CLAUDE_CONFIG_DIR,
       CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
+      // The spawned `claude` binary refuses --dangerously-skip-permissions
+      // (bypassPermissions mode) when running as root unless IS_SANDBOX=1. The
+      // pod sets this too (k8s buildEnv), but set it on the spawn env directly so
+      // bypass also works for local/non-k8s dev where the pod env is absent.
+      IS_SANDBOX: process.env.IS_SANDBOX ?? '1',
     },
     settingSources: [],
     abortController: abort,
@@ -223,8 +228,15 @@ export function buildOptions(
         },
       ],
     },
-    canUseTool: makeCanUseTool(sessionId, turnId, abort.signal),
   };
+
+  // canUseTool drives the interactive permission prompt. In bypassPermissions
+  // (yolo) mode the SDK never issues permission requests, so wiring canUseTool is
+  // contradictory and pointless — omit it (mirrors the title summarizer, which
+  // also runs bypass without canUseTool).
+  if (permissionMode !== 'bypassPermissions') {
+    options.canUseTool = makeCanUseTool(sessionId, turnId, abort.signal);
+  }
 
   // Model selection: a per-turn override (the in-session /model switch) wins
   // over the session default (SANDBOX_MODEL / cfg.model); an empty value leaves
@@ -737,7 +749,16 @@ function liveTitleDeps(cfg: RunnerConfig, sessionId: string, turnId: string): Ti
         allowDangerouslySkipPermissions: true,
         allowedTools: [],
         disallowedTools: DEFAULT_DISALLOWED_TOOLS,
-        env: { ...process.env, CLAUDE_CONFIG_DIR, CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' },
+        // IS_SANDBOX: this summarizer always runs bypassPermissions, so without it
+        // the root guard in the spawned binary rejects every title generation as
+        // uid 0 (silently swallowed by maybeGenerateTitle's catch — auto-titling
+        // was quietly broken). See buildOptions for the full rationale.
+        env: {
+          ...process.env,
+          CLAUDE_CONFIG_DIR,
+          CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
+          IS_SANDBOX: process.env.IS_SANDBOX ?? '1',
+        },
         settingSources: [],
         // Resume the just-completed conversation for context, but FORK it: the
         // TITLE_PROMPT Q&A is written to a throwaway forked session, never to the

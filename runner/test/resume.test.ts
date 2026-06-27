@@ -43,6 +43,7 @@ function freshState(over: Partial<SessionState> = {}): SessionState {
     sandbox_session_id: 'sess-test',
     backend: 'claude-sdk',
     claude_session_id: '',
+    opencode_session_id: '',
     project_path: tmpProject(),
     status: 'idle',
     last_turn_id: '',

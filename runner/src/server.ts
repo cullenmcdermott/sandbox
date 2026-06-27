@@ -51,8 +51,9 @@ function ok(res: ServerResponse, body: unknown, status = 200): void {
 export function startServer(): void {
   const cfg = loadConfig();
   // Resolve the agent backend up front so an unknown SANDBOX_BACKEND fails at
-  // startup rather than on the first turn. May be null for backends not driven
-  // through the runner turn path (opencode-server); the /turns route 409s then.
+  // startup rather than on the first turn. Both shipping backends (claude-sdk,
+  // opencode-server) implement the turn seam; null is reserved for any future
+  // supervise-only backend, whose /turns route then 409s.
   const agent = selectAgent(cfg.backend);
   const server = createServer((req, res) => {
     handle(req, res, cfg, agent).catch((err) => {
@@ -136,8 +137,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, cfg: ReturnType
   if (turnsMatch && method === 'POST') {
     if (turnsMatch[1] !== sid) return notFound(res, 'session not found');
     if (!agent) {
-      // opencode-server: turns are driven by the local `opencode attach`
-      // client talking to `opencode serve` directly, not through the runner.
+      // A supervise-only backend (no Agent) does not accept runner turns. Both
+      // shipping backends do, so this is only reached for a future such backend.
       res.writeHead(409, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: `backend ${cfg.backend} does not accept runner turns` }));
       return;
@@ -174,12 +175,22 @@ async function handle(req: IncomingMessage, res: ServerResponse, cfg: ReturnType
     return ok(res, turnResp);
   }
 
-  // /sessions/:id/turns/:turn_id/interrupt (POST)
-  const interruptMatch = /^\/sessions\/([^/]+)\/turns\/([^/]+)\/interrupt$/.exec(path);
+  // /sessions/:id/turns/:turn_id/interrupt (POST). The turn segment may be EMPTY
+  // (note [^/]* not [^/]+): the client doesn't always know the live turn id when
+  // the user hits esc — it can fire before StartTurn's response or the first SSE
+  // event lands, so the TUI sends an empty segment ("…/turns//interrupt"). When
+  // the id is empty or doesn't match an active turn, fall back to the session's
+  // sole active turn. R4 guarantees at most one active turn, so "interrupt the
+  // active turn" is unambiguous without an id.
+  const interruptMatch = /^\/sessions\/([^/]+)\/turns\/([^/]*)\/interrupt$/.exec(path);
   if (interruptMatch && method === 'POST') {
     if (interruptMatch[1] !== sid) return notFound(res, 'session not found');
-    const turnId = interruptMatch[2];
-    const turn = reg.activeTurns.get(turnId);
+    const reqTurnId = interruptMatch[2];
+    let turnId = reqTurnId;
+    let turn = reqTurnId ? reg.activeTurns.get(reqTurnId) : undefined;
+    if (!turn && reg.activeTurns.size === 1) {
+      [[turnId, turn]] = reg.activeTurns.entries();
+    }
     if (!turn) return notFound(res, 'turn not found or not active');
     turn.abort.abort();
     appendEvent(sid, turnId, 'turn.interrupted', { reason: 'client interrupt' });

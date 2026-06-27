@@ -45,6 +45,7 @@ function emptyState(cfg: RunnerConfig): SessionState {
     project_path: cfg.projectPath,
     status: 'idle',
     claude_session_id: '',
+    opencode_session_id: '',
     last_turn_id: '',
     last_activity: new Date().toISOString(),
   };
@@ -74,6 +75,7 @@ export function loadSessionState(cfg: RunnerConfig): SessionState {
       project_path: parsed.project_path ?? cfg.projectPath,
       status: reconcileLoadedStatus(parsed.status),
       claude_session_id: parsed.claude_session_id ?? '',
+      opencode_session_id: parsed.opencode_session_id ?? '',
       last_turn_id: parsed.last_turn_id ?? '',
       last_activity: parsed.last_activity ?? new Date().toISOString(),
       ...(parsed.model ? { model: parsed.model } : {}),
@@ -236,6 +238,34 @@ class SessionRegistry {
   clearClaudeSession(): void {
     if (!this.state.claude_session_id) return;
     this.state.claude_session_id = '';
+    this.state.last_activity = new Date().toISOString();
+    saveSessionState(this.state);
+  }
+
+  /**
+   * Persist the opencode server session id (the opencode analogue of
+   * setClaudeSession). The opencode turn adapter calls this once it has resolved
+   * (created or resumed) a session so subsequent turns — and turns after a pod
+   * restart — continue the same conversation instead of starting fresh. No-op
+   * when unchanged to avoid a redundant session.json write each turn.
+   */
+  setOpencodeSession(opencodeSessionId: string): void {
+    if (!opencodeSessionId || this.state.opencode_session_id === opencodeSessionId) return;
+    this.state.opencode_session_id = opencodeSessionId;
+    this.state.last_activity = new Date().toISOString();
+    saveSessionState(this.state);
+  }
+
+  /**
+   * Drop the persisted opencode session id (the opencode analogue of
+   * clearClaudeSession). Called by the opencode adapter when a prompt fails with
+   * a missing-session error (the server lost the session, e.g. an independent
+   * `opencode serve` restart) so the next turn recreates it instead of failing
+   * forever. No-op when already empty.
+   */
+  clearOpencodeSession(): void {
+    if (!this.state.opencode_session_id) return;
+    this.state.opencode_session_id = '';
     this.state.last_activity = new Date().toISOString();
     saveSessionState(this.state);
   }

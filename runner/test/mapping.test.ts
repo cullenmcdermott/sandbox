@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { mapMessage, todoUpdatedPayload, type EmitFn } from '../src/mapping.js';
+import { assertMapperInvariants } from './backend-contract.js';
 
 /** Collect emitted events into a list for assertions. */
 function collector(): { events: Array<{ type: string; payload: Record<string, unknown> }>; emit: EmitFn } {
@@ -236,6 +237,7 @@ test('result success → turn.completed + usage + completed observation', () => 
   const costUsage = events.find((e) => e.type === 'usage.updated' && e.payload.totalCostUsd === 0.05);
   assert.ok(costUsage, 'expected a usage.updated carrying total_cost_usd');
   assert.deepEqual(res, { completed: true });
+  assertMapperInvariants(events); // same cross-backend contract as opencode
 });
 
 // ORACLE: a failed result message → turn.failed (with a non-empty message) and
@@ -259,6 +261,7 @@ test('result error → turn.failed + error', () => {
   assert.equal(err!.payload.code, 'error_max_turns');
   assert.equal(err!.payload.message, 'hit the max turn limit');
   assert.deepEqual(res, {}, 'a failed result is not a normal completion');
+  assertMapperInvariants(events); // same cross-backend contract as opencode
 });
 
 // ORACLE: a stream_event text delta → message.delta with delta:true.
