@@ -68,9 +68,12 @@ func TestAssistantBlockChatPoolMemoized(t *testing.T) {
 		t.Fatal("chat.MarkdownRenderer did not memoize — pool not engaged")
 	}
 
-	// Rendering twice must not panic and must be stable.
+	// Rendering twice must not panic and must be stable. (Capture into separate
+	// vars: comparing the same call expression to itself is a no-op — SA4000.)
 	b := tblock{kind: blockAssistant, text: "**hi**"}
-	if m.renderBlock(b) != m.renderBlock(b) {
+	first := m.renderBlock(b)
+	second := m.renderBlock(b)
+	if first != second {
 		t.Fatal("renderBlock(blockAssistant) not stable across calls")
 	}
 }

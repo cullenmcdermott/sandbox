@@ -104,10 +104,13 @@ func catCellColor(r rune) (color.Color, bool) {
 	}
 }
 
+const catID uint32 = 0x00CA75
+
+// Cell counts (untyped ints): split from catID so they don't visually inherit its
+// uint32 type (SA9004).
 const (
-	catID   uint32 = 0x00CA75
-	catCols        = 32 // placement width in cells (cells are ~2:1, so this …
-	catRows        = 16 // … with this height shows the square photo ~square
+	catCols = 32 // placement width in cells (cells are ~2:1, so this …
+	catRows = 16 // … with this height shows the square photo ~square
 )
 
 // showKittyImage opens the cat popup and returns the command that transmits the

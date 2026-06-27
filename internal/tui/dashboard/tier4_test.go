@@ -115,7 +115,7 @@ func TestConnectingStepperOpencodeNoRegress(t *testing.T) {
 
 	// Stage values must be monotonic with connect()'s emission order: Sync before
 	// Opencode. A regression here is exactly what made the screen look stuck.
-	if !(StageSync < StageOpencode) {
+	if StageSync >= StageOpencode {
 		t.Fatalf("StageSync (%d) must sort before StageOpencode (%d)", StageSync, StageOpencode)
 	}
 
