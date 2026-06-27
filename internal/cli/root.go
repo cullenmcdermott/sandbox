@@ -91,11 +91,13 @@ func NewRoot() *cobra.Command {
 	cmd.AddCommand(newSuspendCmd())
 	cmd.AddCommand(newResumeCmd())
 	cmd.AddCommand(newCancelCmd())
+	cmd.AddCommand(newTurnCmd())
 	cmd.AddCommand(newDestroyCmd())
 	cmd.AddCommand(newShellCmd())
 	cmd.AddCommand(newRenameCmd())
 	cmd.AddCommand(newReapCmd())
 	cmd.AddCommand(newTraceCmd())
+	cmd.AddCommand(newAuthCmd())
 	return cmd
 }
 
