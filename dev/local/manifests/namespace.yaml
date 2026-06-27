@@ -1,0 +1,22 @@
+# agent-sessions namespace for the local local KIND cluster.
+#
+# Adapted from k8s/namespace.yaml. The CLI defaults to this namespace name
+# (`agent-sessions`, see internal/k8s/backend.go). The runner currently runs as
+# root + sshd, which is compatible with the `baseline` PodSecurity profile
+# (enforced below) but warns under `restricted` (tracked hardening; see
+# SECURITY.md).
+#
+# NOTE for the local dev env: kindnet does NOT enforce NetworkPolicy, so the egress
+# boundary from k8s/networkpolicy-*.yaml is intentionally NOT applied here — it
+# would be a silent no-op. See dev/local/README.md.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agent-sessions
+  labels:
+    app.kubernetes.io/part-of: sandbox
+    # PodSecurity Admission (https://kubernetes.io/docs/concepts/security/pod-security-admission/)
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest

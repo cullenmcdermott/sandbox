@@ -15,5 +15,9 @@
 # distroless/static ships ca-certificates (for in-cluster k8s API TLS) and runs
 # as nonroot by default.
 FROM gcr.io/distroless/static-debian12:nonroot
-COPY dist/sandbox-linux-amd64 /usr/local/bin/sandbox
+# TARGETARCH is set automatically by buildkit (for --platform linux/amd64 it is
+# "amd64"). Prod builds keep the historical amd64 binary; the KIND lab (arm64
+# node) sets it to arm64 so the copied static binary matches the node arch.
+ARG TARGETARCH=amd64
+COPY dist/sandbox-linux-${TARGETARCH} /usr/local/bin/sandbox
 ENTRYPOINT ["/usr/local/bin/sandbox"]

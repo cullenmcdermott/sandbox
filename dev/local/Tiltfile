@@ -1,0 +1,46 @@
+# Tiltfile — dev loop for the local KIND dev environment.
+#
+# This file lives in dev/local/. Repo root is ../../ ; the runner sources are at
+# ../../runner. Run `tilt up` from this directory (the flox env provides tilt),
+# or use the just recipes (`just kind-up && just dev-image && just kind-test`).
+#
+# Prereqs: the KIND cluster `sandbox-local` exists and KUBECONFIG points at
+# dev/local/.kubeconfig (the recipes handle this). Tilt talks to the
+# kind-sandbox-local context.
+
+# Refuse to run against anything but the local cluster — never touch a remote one.
+allow_k8s_contexts('kind-sandbox-local')
+
+# --- runner image ------------------------------------------------------------
+# Build sandbox-runner:dev from the runner/ context. Tilt detects that the
+# kind-sandbox-local context is a KIND cluster and loads each freshly built image
+# into the node itself, so there is NO explicit `kind load` here — an explicit
+# load at parse time would race the build (the tag doesn't exist yet). The
+# kind-load-vs-Hall image-delivery swap lives in the justfile `dev-image` recipe
+# (the scripted/test path); Tilt owns delivery on the live-dev path.
+#
+# Hall (https://hall.kvick.dev): a host image mirror that lets the KIND node pull
+# sandbox-runner:dev straight from the local Docker store. It's the justfile
+# `dev-image` delivery path (auto-detected, `kind load` fallback) and is set up
+# host-side (see dev/local/README.md "Image delivery"). Colima/arm64 is UNVERIFIED
+# — verify on your box before relying on it for the scripted path.
+#
+# live_update reloads in-pod source on edits to runner/src without a full rebuild.
+docker_build(
+    'sandbox-runner:dev',
+    context='../../runner',
+    dockerfile='../../runner/Dockerfile',
+    live_update=[
+        sync('../../runner/src', '/app/src'),
+    ],
+)
+
+# --- cluster manifests -------------------------------------------------------
+# Vendored agent-sandbox controller + CRD (do not edit), then the local manifests
+# (agent-sessions namespace, agent-reaper ns/SA/RBAC).
+k8s_yaml('agent-sandbox/manifest.yaml')
+k8s_yaml('manifests/namespace.yaml')
+k8s_yaml('manifests/agent-reaper.yaml')
+
+# Provider-key Secrets are applied out-of-band from dev/local/secret.local.yaml
+# (gitignored); see dev/local/secret-template.yaml.

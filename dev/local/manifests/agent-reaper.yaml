@@ -1,0 +1,69 @@
+# agent-reaper namespace, ServiceAccount, and RBAC for the idle reaper.
+#
+# internal/k8s/reaper.go runs a per-session reaper as a Job in namespace
+# agent-reaper under ServiceAccount sandbox-reaper. The reaper polls the runner's
+# /idle endpoint (port-forward) and, after IdleTimeout, suspends the Sandbox by
+# setting replicas=0 (Get+Update on the Sandbox). To do that against
+# agent-sessions it needs to read Sandboxes/pods/secrets and patch Sandboxes.
+#
+# This is DEFENSIVE for the local dev env: the turn-loop integration tests never trigger
+# the reaper, but EnsureReaper must have a home and these RBAC objects must apply
+# cleanly. A ClusterRole + ClusterRoleBinding is the simplest correct grant for a
+# single-tenant dev cluster (scope is the whole cluster, which here is just this local dev env).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agent-reaper
+  labels:
+    app.kubernetes.io/part-of: sandbox
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sandbox-reaper
+  namespace: agent-reaper
+  labels:
+    app.kubernetes.io/part-of: sandbox
+    app.kubernetes.io/name: sandbox-reaper
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sandbox-reaper
+  labels:
+    app.kubernetes.io/part-of: sandbox
+rules:
+  # Suspend = Get + Update (replicas->0) on the Sandbox the session owns.
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  # Status reads while evaluating idle (Sandbox status / pod readiness).
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes/status"]
+    verbs: ["get"]
+  # Resolve the session pod and port-forward to its runner /idle endpoint.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/portforward"]
+    verbs: ["create"]
+  # Read the per-session runner bearer token Secret.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sandbox-reaper
+  labels:
+    app.kubernetes.io/part-of: sandbox
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: sandbox-reaper
+subjects:
+  - kind: ServiceAccount
+    name: sandbox-reaper
+    namespace: agent-reaper

@@ -1,0 +1,28 @@
+agent-sandbox v0.4.6
+
+Upstream release/repo: https://github.com/kubernetes-sigs/agent-sandbox
+Release tag:           v0.4.6  (https://github.com/kubernetes-sigs/agent-sandbox/releases/tag/v0.4.6)
+Controller image:      registry.k8s.io/agent-sandbox/agent-sandbox-controller:v0.4.6
+
+manifest.yaml in this directory is the helm-rendered install of the upstream
+chart, pinned to the controller image tag above and with leader election
+DISABLED (single-replica single-node controller — leader election only adds a Lease
+dependency and slows startup). It is VENDORED: edit upstream + re-render, never
+hand-edit manifest.yaml.
+
+Regenerate with (run against a checkout of the upstream repo at tag v0.4.6):
+
+    helm template agent-sandbox ./charts/agent-sandbox \
+        --namespace agent-sandbox-system \
+        --include-crds \
+        --set image.tag=v0.4.6 \
+        --set controller.leaderElect=false \
+        > manifest.yaml
+
+Notes:
+  - --include-crds keeps the Sandbox CRD (sandboxes.agents.x-k8s.io, group
+    agents.x-k8s.io) in the same file so a single `kubectl apply` installs both
+    the CRD and the controller Deployment (agent-sandbox-controller in ns
+    agent-sandbox-system).
+  - The chart path / value keys above match upstream v0.4.6; if a future bump
+    renames them, update this file alongside the regenerated manifest.

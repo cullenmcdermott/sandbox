@@ -1,0 +1,14 @@
+# KIND cluster for the disposable local dev environment.
+#
+# Recipes pass `--name sandbox-local` => kube context `kind-sandbox-local`. The env
+# always writes its kubeconfig to dev/local/.kubeconfig (gitignored) and a context
+# guard ensures we never act against a remote cluster.
+#
+# Single control-plane node is enough: the agent-sandbox controller, the session
+# pods, and the reaper Jobs all schedule onto it. The API server keeps its
+# default loopback bind (127.0.0.1) — good for the context guard and fine for
+# port-forward-based access. Node arch follows the Docker host (Colima arm64).
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane

@@ -1,4 +1,7 @@
 # Reaper image (Dockerfile.reaper) only needs the prebuilt binary in dist/.
 # Exclude everything else so the build context stays small.
 *
-!dist/sandbox-linux-amd64
+# Re-include every per-arch reaper binary: prod builds amd64, the local KIND
+# local dev (dev-image) cross-builds the host arch (arm64 on Colima). Dockerfile.reaper
+# COPYs dist/sandbox-linux-${TARGETARCH}.
+!dist/sandbox-linux-*

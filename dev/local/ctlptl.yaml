@@ -1,0 +1,18 @@
+# ctlptl owns the local KIND cluster lifecycle (apply/delete) so `just kind-up` /
+# `just dev-nuke` are declarative and idempotent. ctlptl wraps `kind` (the product)
+# and reuses the existing dev/local/kind.yaml node config verbatim.
+#
+# No registry block on purpose: locally-built images are delivered to the node by
+# Hall (host daemon that mirrors the Docker store; see dev/local/README.md), with
+# `kind load` as the fallback in `just dev-image`.
+#
+# `ctlptl apply -f dev/local/ctlptl.yaml` creates the cluster if absent, reuses it
+# if present; `ctlptl delete -f dev/local/ctlptl.yaml` tears down the node(s).
+apiVersion: ctlptl.dev/v1alpha1
+kind: Cluster
+product: kind
+name: kind-sandbox-local
+kindV1Alpha4Cluster:
+  name: sandbox-local
+  nodes:
+    - role: control-plane
