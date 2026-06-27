@@ -10,7 +10,7 @@ func TestModalBackdropCaching(t *testing.T) {
 	app := NewApp(nil, nil, nil)
 	app.width, app.height = 80, 24
 
-	d1 := app.dimmedBackdrop(80, 24)
+	d1 := app.opaqueBackdrop(80, 24)
 	if !app.modalBackdropValid {
 		t.Fatal("backdrop should be valid after first build")
 	}
@@ -19,7 +19,7 @@ func TestModalBackdropCaching(t *testing.T) {
 	}
 
 	// Repeated render at the same size with no dashboard change → cache hit.
-	d2 := app.dimmedBackdrop(80, 24)
+	d2 := app.opaqueBackdrop(80, 24)
 	if app.bdBuilds != 1 {
 		t.Errorf("expected cache hit (no rebuild), got %d builds", app.bdBuilds)
 	}
@@ -29,13 +29,13 @@ func TestModalBackdropCaching(t *testing.T) {
 
 	// A dashboard delegation invalidates the cache → next render rebuilds.
 	app.modalBackdropValid = false
-	app.dimmedBackdrop(80, 24)
+	app.opaqueBackdrop(80, 24)
 	if app.bdBuilds != 2 {
 		t.Errorf("invalidation should force a rebuild, got %d builds", app.bdBuilds)
 	}
 
 	// A size change rebuilds even while valid.
-	app.dimmedBackdrop(100, 30)
+	app.opaqueBackdrop(100, 30)
 	if app.bdBuilds != 3 {
 		t.Errorf("size change should rebuild, got %d builds", app.bdBuilds)
 	}

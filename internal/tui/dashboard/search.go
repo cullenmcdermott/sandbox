@@ -196,6 +196,10 @@ func (m *TranscriptModel) scrollToMatch() {
 
 	m.body.GotoTop()
 	m.body.ScrollBy(line)
+	// A search jump is absolute positioning, not a "follow the live tail" intent.
+	// Clear follow so a match that happens to land on the last line doesn't re-arm
+	// auto-scroll and yank the view to the bottom on the next streamed delta.
+	m.body.SetFollow(false)
 }
 
 // renderSearchBar renders the bottom search input overlay.

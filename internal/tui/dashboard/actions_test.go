@@ -50,7 +50,8 @@ type fakeRunnerClient struct {
 	startedModes   []string
 	startedModels  []string
 	resolved       []session.PermissionDecision
-	interrupts     int // count of InterruptTurn calls
+	interrupts     int               // count of InterruptTurn calls
+	interruptRefs  []session.TurnRef // the TurnRef each InterruptTurn was called with
 	execCommands   []string
 	execResult     *session.ExecResult
 	startErr       error // if set, StartTurn fails with it (still records the prompt)
@@ -68,8 +69,9 @@ func (f *fakeRunnerClient) StartTurn(_ context.Context, ref session.Ref, in sess
 	}
 	return session.TurnRef{Session: ref.ID}, nil
 }
-func (f *fakeRunnerClient) InterruptTurn(context.Context, session.Ref, session.TurnRef) error {
+func (f *fakeRunnerClient) InterruptTurn(_ context.Context, _ session.Ref, turn session.TurnRef) error {
 	f.interrupts++
+	f.interruptRefs = append(f.interruptRefs, turn)
 	return nil
 }
 func (f *fakeRunnerClient) ResolvePermission(_ context.Context, _ session.Ref, d session.PermissionDecision) error {

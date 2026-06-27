@@ -2235,17 +2235,13 @@ func (m *Model) renderDetailLines(width, height int) []string {
 	// Show last connector error if any (kit §ErrorBlock, design-system §2.3).
 	if m.connectErr != nil {
 		lines = append(lines, "")
-		for _, l := range strings.Split(kit.ErrorBlock(m.connectErr.Error(), "", ""), "\n") {
-			lines = append(lines, l)
-		}
+		lines = append(lines, strings.Split(kit.ErrorBlock(m.connectErr.Error(), "", ""), "\n")...)
 	}
 
 	// Show last action error if any (kit §ErrorBlock, design-system §2.3).
 	if m.actionErr != nil {
 		lines = append(lines, "")
-		for _, l := range strings.Split(kit.ErrorBlock(m.actionErr.Error(), "", ""), "\n") {
-			lines = append(lines, l)
-		}
+		lines = append(lines, strings.Split(kit.ErrorBlock(m.actionErr.Error(), "", ""), "\n")...)
 	}
 
 	// ─ preview ─ : tail of the warm transcript for this session, so moving

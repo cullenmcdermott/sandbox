@@ -909,10 +909,10 @@ func (a *App) modalView() tea.View {
 	shadow := solidBlock(mw, mh, theme.Shadow)
 
 	layers := []*lipgloss.Layer{
-		// Ghost the dashboard behind the popup so it reads as "out of focus"
-		// context instead of bleeding live (colored) rows past the modal edges.
-		// Reused across keystrokes via the backdrop cache (Fix E).
-		lipgloss.NewLayer(a.dimmedBackdrop(w, h)).X(0).Y(0).Z(0),
+		// A fully opaque page-colored fill behind the popup: the dashboard is
+		// hidden entirely (no dimmed ghost bleeding through) so the modal reads as
+		// a focused sheet. Reused across keystrokes via the backdrop cache (Fix E).
+		lipgloss.NewLayer(a.opaqueBackdrop(w, h)).X(0).Y(0).Z(0),
 		lipgloss.NewLayer(shadow).X(mx + 2).Y(my + 1).Z(1),
 		lipgloss.NewLayer(modal).X(mx).Y(my).Z(2),
 	}
@@ -924,28 +924,30 @@ func (a *App) modalView() tea.View {
 	return v
 }
 
-// dimmedBackdrop returns the dimmed dashboard backdrop for the modal, served from
-// cache when the dashboard render is unchanged (Fix E). The cache is invalidated
-// whenever a message is delegated to the dashboard (it may have changed) or the
-// size differs, so a transcript-only keystroke — which never touches the
-// dashboard — reuses the prior frame instead of re-rendering the whole dashboard
-// and re-running the per-line dim pass.
-func (a *App) dimmedBackdrop(w, h int) string {
+// opaqueBackdrop returns a fully opaque page-colored fill drawn behind the
+// transcript modal, served from a size-keyed cache so every keystroke's View
+// reuses it instead of re-filling (Fix E). It is a SOLID fill, not a dimmed
+// ghost of the dashboard: nothing behind the modal shows through, so the modal
+// reads as a focused sheet rather than a translucent overlay. The cache is
+// invalidated on a dashboard delegation or a size change; for a solid fill the
+// dashboard-change rebuild is a harmless no-op (the block is size-only).
+func (a *App) opaqueBackdrop(w, h int) string {
 	if a.modalBackdropValid && a.modalBackdropW == w && a.modalBackdropH == h {
 		return a.modalBackdrop
 	}
 	a.bdBuilds++
-	d := dimBackdrop(a.dashboard.View().Content, w, h)
+	d := solidBlock(w, h, theme.Page)
 	a.modalBackdrop, a.modalBackdropW, a.modalBackdropH = d, w, h
 	a.modalBackdropValid = true
 	return d
 }
 
-// dimBackdrop ghosts the dashboard behind a modal: it strips each line's colors
-// and re-renders them as dim text on the flat page background, normalized to a
-// solid w×h block. The result is recognizably the dashboard, but recessed — so
-// a floating popup reads as the focus and live rows (e.g. the status line) don't
-// bleed through at full brightness past the modal's edges.
+// dimBackdrop ghosts content behind a modal: it strips each line's colors and
+// re-renders them as dim text on the flat page background, normalized to a solid
+// w×h block — recognizable but recessed. Used by the reconnect splash to keep
+// the cached conversation visible (dimmed) behind the stepper. The transcript
+// modal does NOT use this; it uses opaqueBackdrop (a solid fill) so nothing
+// shows through.
 func dimBackdrop(bg string, w, h int) string {
 	dim := lipgloss.NewStyle().Foreground(theme.TextDim).Background(theme.Page)
 	lines := strings.Split(bg, "\n")
@@ -1175,10 +1177,12 @@ func (a *App) connectingView() tea.View {
 
 	if reconnecting {
 		// Dim the cached conversation as a backdrop and float the stepper over it
-		// as a modal from frame one. The card is fully opaqued (withBackground) so
-		// the dimmed chat behind it can't bleed through the stepper's transparent
-		// gaps; it mirrors the chat modal's framing (border + shadow) so the two
-		// read as siblings.
+		// as a modal from frame one. Unlike the transcript modal (whose backdrop is
+		// a solid opaque fill), the reconnect splash intentionally keeps the dimmed
+		// conversation visible so the user sees *which* session is reconnecting
+		// (TestConnectingPreviewShowsCachedHistory). The card is fully opaqued
+		// (withBackground) so the dimmed chat can't bleed through the stepper's
+		// transparent gaps; it mirrors the chat modal's framing (border + shadow).
 		backdrop := dimBackdrop(a.connectingPreview.previewView(a.width, a.height, ""), a.width, a.height)
 		cardW := lipgloss.Width(body) + 2 // + rounded border
 		card := withBackground(kit.Card(kit.CardOpts{

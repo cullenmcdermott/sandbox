@@ -25,6 +25,31 @@ type List struct {
 	offsetIdx     int // index of first (partially) visible item
 	offsetLine    int // lines of items[offsetIdx] hidden above top (>=0)
 	cache         map[Item]*entry
+
+	// follow is the durable "stick to the bottom" intent. When true, appends and
+	// viewport resizes re-pin to the new last line instead of leaving the offset
+	// stranded mid-content. It is set by GotoBottom and by a downward scroll that
+	// reaches the end, and cleared by any upward scroll or GotoTop. This replaces
+	// the old fragile "re-measure AtBottom after the change" inference, which
+	// dropped the pin whenever a resize SHRANK the viewport before the measurement
+	// (the composer growing, a palette opening) — the at-bottom check then read
+	// false against the unchanged offset and auto-scroll silently stopped.
+	// Defaults false: a fresh list sits at the top until something pins it.
+	follow bool
+}
+
+// Following reports whether the list is pinned to the bottom (auto-scrolling).
+func (l *List) Following() bool { return l.follow }
+
+// SetFollow sets the bottom-pin intent explicitly. Pass true and the next
+// SetItems/AppendItems/SetSize re-pins to the bottom; pass false to leave the
+// viewport where it is. Used for programmatic positioning (e.g. a search jump)
+// that must not be mistaken for the user choosing to follow the live tail.
+func (l *List) SetFollow(follow bool) {
+	l.follow = follow
+	if follow {
+		l.GotoBottom()
+	}
 }
 
 type entry struct {
@@ -48,6 +73,12 @@ func (l *List) SetSize(width, height int) {
 	}
 	l.width = width
 	l.height = height
+	// Re-pin to the new bottom when following, so a shrinking viewport (composer
+	// growing, palette/permission box opening) keeps the latest content in view
+	// instead of stranding the offset above the fold.
+	if l.follow {
+		l.GotoBottom()
+	}
 }
 
 func (l *List) SetItems(items ...Item) {
@@ -75,10 +106,18 @@ func (l *List) SetItems(items ...Item) {
 	if oldIdx != l.offsetIdx {
 		l.offsetLine = 0
 	}
+	// When following, re-pin to the new bottom so freshly reconciled content
+	// (new blocks, a grown streaming tail) stays in view.
+	if l.follow {
+		l.GotoBottom()
+	}
 }
 
 func (l *List) AppendItems(items ...Item) {
 	l.items = append(l.items, items...)
+	if l.follow {
+		l.GotoBottom()
+	}
 }
 
 func (l *List) Len() int    { return len(l.items) }
@@ -157,6 +196,7 @@ func (l *List) ScrollBy(lines int) {
 	}
 	if lines > 0 {
 		if l.AtBottom() {
+			l.follow = true // already at the bottom → following
 			return
 		}
 		l.offsetLine += lines
@@ -165,7 +205,7 @@ func (l *List) ScrollBy(lines int) {
 			l.offsetLine -= cur
 			l.offsetIdx++
 			if l.offsetIdx > len(l.items)-1 {
-				l.GotoBottom()
+				l.GotoBottom() // sets follow=true
 				return
 			}
 			cur = l.heightAt(l.offsetIdx)
@@ -174,8 +214,11 @@ func (l *List) ScrollBy(lines int) {
 		if l.offsetIdx > li || (l.offsetIdx == li && l.offsetLine > ll) {
 			l.offsetIdx, l.offsetLine = li, ll
 		}
+		// A downward scroll re-arms follow only if it actually reached the end.
+		l.follow = l.AtBottom()
 	} else {
-		// up
+		// up — leaving the live bottom, so stop following.
+		l.follow = false
 		l.offsetLine += lines // lines is negative
 		for l.offsetLine < 0 {
 			l.offsetIdx--
@@ -191,10 +234,12 @@ func (l *List) ScrollBy(lines int) {
 func (l *List) GotoTop() {
 	l.offsetIdx = 0
 	l.offsetLine = 0
+	l.follow = false
 }
 
 func (l *List) GotoBottom() {
 	l.offsetIdx, l.offsetLine = l.lastOffsetItem()
+	l.follow = true
 }
 
 func (l *List) Invalidate(it Item) {

@@ -294,7 +294,12 @@ func (m *TranscriptModel) bodyView() string {
 	// viewport (§D). The body width was reserved one column short in layout, so
 	// the bar (or a blank filler column) sits flush without shifting content.
 	bar := kit.Scrollbar(h, m.body.TotalHeight(), h, m.body.Offset())
-	body := lipgloss.NewStyle().Width(max(1, m.width-1)).Height(h).Render(out)
+	// Normalize to an exact (m.width-1)×h rectangle so the scrollbar attaches
+	// flush and short content fills the height. fitModal is the cheap ANSI-aware
+	// pad/truncate; the equivalent lipgloss Style.Width().Height().Render() costs
+	// ~830µs / 33k allocs per frame on a long transcript (the scroll-lag hot
+	// spot), versus a few µs here, with byte-identical output for in-width lines.
+	body := fitModal(out, max(1, m.width-1), h)
 	if bar == "" {
 		return body
 	}

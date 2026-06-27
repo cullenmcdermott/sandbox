@@ -5,7 +5,7 @@ package dashboard
 // model ─ cwd ─ branch ─ ctx%/limit + dot-bar · $cost, two rate-limit rows,
 // and the permission-mode line. No background band — it blends into the chat
 // like the real CC statusline (just colored text). Adapted from the original
-// UX-lab statusline prototype (statusCC + dotBar + modeLine), themed via the
+// UX-lab statusline prototype (statusCC + dotBar + modeTag), themed via the
 // Phase-0a tokens.
 
 import (
@@ -40,9 +40,9 @@ type permMode int
 
 const (
 	modeDefault     permMode = iota // SDK "default": ask before each tool
-	modeAcceptEdits                 // SDK "acceptEdits": auto-accept edits (attach default)
+	modeAcceptEdits                 // SDK "acceptEdits": auto-accept edits
 	modePlan                        // SDK "plan": read-only planning
-	modeBypass                      // SDK "bypassPermissions": yolo
+	modeBypass                      // SDK "bypassPermissions": yolo (session default)
 )
 
 // apiValue is the TurnInput.Mode string sent to the runner for this mode.
@@ -63,27 +63,9 @@ func (p permMode) apiValue() string {
 // shift+tab order from the design doc.
 func (p permMode) next() permMode { return permMode((int(p) + 1) % 4) }
 
-// modeLine renders the CC-style permission-mode footer (row 4 of the status
-// line): a bold glyph+label in the mode's hue.
-func (p permMode) modeLine() string {
-	var glyph, label string
-	var col color.Color
-	switch p {
-	case modeAcceptEdits:
-		glyph, label, col = "⏵⏵", "auto mode on", theme.Guac
-	case modeDefault:
-		glyph, label, col = "⏵", "ask each tool", theme.Malibu
-	case modePlan:
-		glyph, label, col = "⏸", "plan mode on", theme.Gold
-	case modeBypass:
-		glyph, label, col = "⏵⏵", "bypass permissions on", theme.Coral
-	}
-	return lipgloss.NewStyle().Foreground(col).Bold(true).Render(glyph + " " + label)
-}
-
 // modeTag is the compact permission-mode tag for the collapsed status row (A2.5):
-// a glyph + short label in the mode's hue, vs modeLine's verbose "auto mode on"
-// footer form. Not bold — it sits as a quiet trailing tag on row 1.
+// a glyph + short label in the mode's hue. Not bold — it sits as a quiet trailing
+// tag on row 1.
 func (p permMode) modeTag() string {
 	var glyph, label string
 	var col color.Color

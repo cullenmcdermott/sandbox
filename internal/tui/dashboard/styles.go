@@ -24,7 +24,6 @@ var (
 	styleRowSelected  lipgloss.Style
 	styleSelectionBar lipgloss.Style
 	styleRelTime      lipgloss.Style
-	styleAgent        lipgloss.Style
 	styleDetailTitle  lipgloss.Style
 	styleDivider      lipgloss.Style
 	styleHelp         lipgloss.Style
@@ -52,7 +51,6 @@ func rebuildStyles() {
 	styleRowSelected = lipgloss.NewStyle().Foreground(theme.TextBright).Background(theme.Raised)
 	styleSelectionBar = lipgloss.NewStyle().Foreground(theme.OnBrand)
 	styleRelTime = lipgloss.NewStyle().Foreground(theme.TextSecondary)
-	styleAgent = lipgloss.NewStyle().Foreground(theme.TextMuted)
 	styleDetailTitle = lipgloss.NewStyle().Foreground(theme.TextBright).Bold(true)
 	styleDivider = lipgloss.NewStyle().Foreground(theme.BorderMedium)
 	styleHelp = lipgloss.NewStyle().

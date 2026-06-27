@@ -168,7 +168,12 @@ type TranscriptModel struct {
 
 	status     SessionStatus
 	turnActive bool
-	lastSeq    uint64
+	// activeTurnID is the runner's id for the in-flight turn, captured from the
+	// turn.started event. It is the precise target for an interrupt; when it is
+	// still empty (esc fired before turn.started lands) the interrupt request
+	// carries an empty segment and the runner falls back to its sole active turn.
+	activeTurnID session.TurnID
+	lastSeq      uint64
 
 	// Live working indicator (#4): set while a turn runs.
 	turnStart     time.Time
@@ -424,8 +429,12 @@ func NewTranscript(client RunnerClient, sess Session, reconnect ReconnectFunc) *
 		body:        list.New(),
 		input:       in,
 		imode:       modeInsert, // vim off by default → always-focused INSERT
-		mode:        modeAcceptEdits,
-		reconnect:   reconnect,
+		// Sessions start in bypassPermissions (yolo) by default — the agent runs
+		// without per-tool permission prompts. Relies on the IS_SANDBOX root-guard
+		// fix (k8s buildEnv + runner spawn env); without it the first turn would
+		// exit 1. Cycle with shift+tab or /auto /normal /plan to step down.
+		mode:      modeBypass,
+		reconnect: reconnect,
 		// Replay watermark (Workstream C): the dashboard's last-known seq for this
 		// session. 0 => a fresh session, so we never show a "loading transcript…"
 		// flash; >0 => catch-up is done once the stream reaches it (works without
@@ -671,6 +680,13 @@ func (m *TranscriptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.turnActive = false
 		m.working = false
 		m.appendBlock(blockError, "✗ "+msg.err.Error())
+		return m, nil
+
+	case interruptFailedMsg:
+		// The interrupt request didn't reach the runner (the turn keeps running).
+		// Surface it as a dim notice rather than silently doing nothing, so a
+		// future regression in the interrupt path is visible.
+		m.appendBlock(blockInfo, "[interrupt failed: "+msg.err.Error()+"]")
 		return m, nil
 
 	case shellResultMsg:
@@ -1749,35 +1765,47 @@ func (m *TranscriptModel) submit() tea.Cmd {
 	return m.submitText(text)
 }
 
-// queueSteer sends the queued prompt immediately, interrupting the active turn.
+// queueSteer steers the active turn with the queued prompt: interrupt now, and
+// let the EventTurnInterrupted handler submit the queued prompt once the runner
+// has torn the turn down. It must NOT submit concurrently — a new turn POSTed
+// while the old one is still active is rejected with 409 (R4 single-active-turn
+// gate). Keeping queuedPrompt set defers the submit to interrupt-confirmation,
+// sequencing it correctly. (If the interrupt is somehow lost, the queued prompt
+// still flushes when the turn finishes naturally — EventTurnCompleted.)
 func (m *TranscriptModel) queueSteer() tea.Cmd {
-	text := m.queuedPrompt
-	m.queuedPrompt = ""
-	if text == "" {
+	if m.queuedPrompt == "" {
 		return nil
 	}
-	return tea.Batch(
-		func() tea.Msg {
-			_ = m.client.InterruptTurn(context.Background(), m.ref, session.TurnRef{})
-			return nil
-		},
-		m.submitText(text),
-	)
+	if !m.turnActive {
+		// No turn to interrupt (it already ended) — just send the queued prompt.
+		text := m.queuedPrompt
+		m.queuedPrompt = ""
+		return m.submitText(text)
+	}
+	return m.interruptTurn()
 }
 
-// interruptTurn cancels the active turn without injecting a new prompt. A bare
-// esc maps here while a turn runs and there is no queued prompt to steer with;
+// interruptTurn cancels the active turn. A bare esc maps here while a turn runs;
 // the runner answers with EventTurnInterrupted, which clears turnActive and
-// appends the "[interrupted]" marker.
+// appends the "[interrupted]" marker (and flushes any queued steer prompt). The
+// turn id targets this exact turn; when it is still empty (esc before
+// turn.started landed) the runner falls back to its sole active turn.
 func (m *TranscriptModel) interruptTurn() tea.Cmd {
 	if !m.turnActive {
 		return nil
 	}
+	ref := session.TurnRef{Session: m.ref.ID, Turn: m.activeTurnID}
 	return func() tea.Msg {
-		_ = m.client.InterruptTurn(context.Background(), m.ref, session.TurnRef{})
+		if err := m.client.InterruptTurn(context.Background(), m.ref, ref); err != nil {
+			return interruptFailedMsg{err: err}
+		}
 		return nil
 	}
 }
+
+// interruptFailedMsg surfaces an interrupt request failure so a future
+// regression is visible (a dim notice) instead of a silent no-op.
+type interruptFailedMsg struct{ err error }
 
 // submitText starts a turn for the given prompt text, recording the user block
 // and entering the busy state. Shared by interactive submit and the auto-
@@ -1819,6 +1847,9 @@ func (m *TranscriptModel) beginTurn() {
 	m.dropTrailingFooter()
 	m.status = StatusBusy
 	m.turnActive = true
+	// Clear the previous turn's id; turn.started repopulates it. Until then an
+	// interrupt relies on the runner's sole-active-turn fallback.
+	m.activeTurnID = ""
 	m.turnStart = time.Now()
 	m.inTok, m.outTok, m.costUSD = 0, 0, 0
 }
@@ -2043,6 +2074,9 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		if !m.turnActive {
 			m.beginTurn()
 		}
+		// Capture the runner's turn id so esc can target this exact turn (works on
+		// attach/replay too, where StartTurn was never called locally).
+		m.activeTurnID = ev.TurnID
 
 	case session.EventSessionStarted:
 		var p session.SessionStartedPayload
@@ -2122,7 +2156,7 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		if m.queuedPrompt != "" {
 			q := m.queuedPrompt
 			m.queuedPrompt = ""
-			m.submitText(q)
+			cmd = m.submitText(q) // capture so the queued turn's POST actually runs
 		}
 
 	case session.EventTurnInterrupted:
@@ -2130,7 +2164,14 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		m.status = StatusNeedsInput
 		m.turnActive = false
 		m.appendBlock(blockInfo, "[interrupted]")
-		m.queuedPrompt = ""
+		// A queued prompt here means the interrupt was a steer (queueSteer keeps
+		// queuedPrompt set): now that the turn is torn down, submit it as the next
+		// turn — sequenced after the interrupt so it can't 409 against the old one.
+		if m.queuedPrompt != "" {
+			q := m.queuedPrompt
+			m.queuedPrompt = ""
+			cmd = m.submitText(q)
+		}
 
 	case session.EventTurnFailed:
 		m.finalizeStreaming()

@@ -1,6 +1,10 @@
 package dashboard
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/cullenmcdermott/sandbox/internal/session"
+)
 
 // Vim modal editing is OFF by default: the transcript opens in INSERT with the
 // prompt focused so every key types (no "press i" surprise). /vim (setVim)
@@ -86,20 +90,69 @@ func TestEscInterruptsActiveTurn(t *testing.T) {
 	}
 }
 
-func TestEscSteerTakesPriorityOverInterrupt(t *testing.T) {
+func TestEscInterruptTargetsLiveTurnID(t *testing.T) {
+	// Regression: the interrupt used to send an empty TurnRef, producing the URL
+	// /sessions/<id>/turns//interrupt which the runner route never matched, so esc
+	// never actually cancelled the turn. The TUI must send the turn id captured
+	// from turn.started.
+	fc := &fakeRunnerClient{}
+	m := NewTranscript(fc, transcriptSession(), nil)
+	m.width, m.height = 80, 24
+	m.handleEvent(session.Event{Type: session.EventTurnStarted, TurnID: "turn-42"})
+	if !m.turnActive {
+		t.Fatal("turn.started did not mark the turn active")
+	}
+	_, cmd := m.handleKey(keyMsg("esc"))
+	if cmd == nil {
+		t.Fatal("esc during active turn produced no command")
+	}
+	cmd()
+	if len(fc.interruptRefs) != 1 {
+		t.Fatalf("interrupts = %d, want 1", len(fc.interruptRefs))
+	}
+	if got := fc.interruptRefs[0].Turn; got != "turn-42" {
+		t.Fatalf("interrupt sent turn id %q, want %q (empty id is the bug)", got, "turn-42")
+	}
+}
+
+func TestEscSteerInterruptsThenSubmitsAfterInterruptEvent(t *testing.T) {
 	fc := &fakeRunnerClient{}
 	m := NewTranscript(fc, transcriptSession(), nil)
 	m.width, m.height = 80, 24
 	m.turnActive = true
 	m.queuedPrompt = "steer me"
+
+	// esc with a queued prompt STEERS (not a bare interrupt): it fires the
+	// interrupt now but RETAINS the queued prompt, deferring the new turn until
+	// turn.interrupted confirms the old turn is gone — otherwise the follow-up
+	// POST 409s against the still-active turn (R4).
 	_, cmd := m.handleKey(keyMsg("esc"))
 	if cmd == nil {
 		t.Fatal("esc with a queued prompt produced no command")
 	}
-	// queueSteer (interrupt + inject) consumes the queued prompt; a plain
-	// interrupt would leave it intact. The consumed prompt proves steer won.
+	cmd() // executes the InterruptTurn call
+	if fc.interrupts != 1 {
+		t.Fatalf("steer: interrupts = %d, want 1", fc.interrupts)
+	}
+	if m.queuedPrompt != "steer me" {
+		t.Fatalf("steer dropped the queued prompt early: %q (want retained until turn.interrupted)", m.queuedPrompt)
+	}
+
+	// The runner answers turn.interrupted → the queued prompt is flushed as the
+	// next turn (begins a new turn; the start cmd POSTs the prompt).
+	flush := m.handleEvent(mkEvent(session.EventTurnInterrupted, nil))
 	if m.queuedPrompt != "" {
-		t.Fatalf("esc steer left queuedPrompt = %q, want consumed", m.queuedPrompt)
+		t.Fatalf("turn.interrupted left queuedPrompt = %q, want flushed", m.queuedPrompt)
+	}
+	if !m.turnActive {
+		t.Fatal("steer flush did not begin the next turn (turnActive=false)")
+	}
+	if flush == nil {
+		t.Fatal("turn.interrupted with a queued steer produced no follow-up command")
+	}
+	execCmd(flush) // drives startTurnCmd → StartTurn
+	if len(fc.startedPrompts) != 1 || fc.startedPrompts[0] != "steer me" {
+		t.Fatalf("steer did not POST the queued prompt: startedPrompts = %v", fc.startedPrompts)
 	}
 }
 
