@@ -523,6 +523,16 @@ func (b *Backend) waitForPodReady(ctx context.Context, ref session.Ref) error {
 		if err != nil || pod == nil {
 			return false, nil
 		}
+		// A pod being deleted is NOT a valid ready target. On resume (replicas 0→1)
+		// the OLD pod terminates while still briefly Ready; it is momentarily the
+		// only pod, so getPodForSandbox falls back to it (R7). Without this guard
+		// waitForPodReady returns against that dying pod — resume reports "ready"
+		// ~10-15s before the genuinely-new pod is up, and a turn started in that
+		// window lands on the terminating/booting pod and is orphaned. Keep polling
+		// until a non-terminating pod is Ready.
+		if pod.DeletionTimestamp != nil {
+			return false, nil
+		}
 		if startErr := podStartupError(pod); startErr != nil {
 			return false, startErr
 		}
@@ -811,6 +821,13 @@ func buildEnv(spec session.Spec, name string) []corev1.EnvVar {
 	env := []corev1.EnvVar{
 		{Name: "CLAUDE_CONFIG_DIR", Value: "/session/state/claude"},
 		{Name: "CLAUDE_CODE_DISABLE_AUTO_MEMORY", Value: "1"},
+		// The runner pod runs as root (no USER directive yet — see Dockerfile).
+		// The bundled `claude` binary refuses --dangerously-skip-permissions
+		// (bypassPermissions / yolo mode, and the always-bypass auto-title
+		// summarizer) when running as uid 0 unless IS_SANDBOX=1. The pod genuinely
+		// IS a network-isolated sandbox (default-deny ingress + egress allowlist),
+		// so this is semantically honest and unblocks the root guard.
+		{Name: "IS_SANDBOX", Value: "1"},
 		{Name: "SANDBOX_SESSION_ID", Value: name},
 		{Name: "SANDBOX_BACKEND", Value: spec.Backend},
 		{Name: "PROJECT_PATH", Value: spec.ProjectPath},

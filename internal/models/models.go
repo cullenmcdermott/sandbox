@@ -124,16 +124,58 @@ func (p *provider) effClient() *http.Client {
 	return &http.Client{Timeout: httpTimeout}
 }
 
+// canonicalProviders are models.dev provider ids to trust first when one model id
+// is listed by several providers. The same model is commonly mirrored by
+// aggregators/clouds (azure, venice, llmgateway, …) — sometimes with a STALE
+// context limit (azure lists claude-opus-4-8 at 200k vs anthropic's 1M) or
+// different prices (venice: 6/30 vs anthropic: 5/25). The model's true vendor is
+// authoritative, so prefer it; `opencode` is the canonical source for this CLI's
+// opencode backend models.
+var canonicalProviders = []string{"anthropic", "opencode", "openai", "google", "google-vertex"}
+
+// providerRank orders providers for a deterministic pick: canonical providers in
+// listed order first, every other provider after (compared lexicographically by
+// name, below). Lower is preferred.
+func providerRank(prov string) int {
+	for i, c := range canonicalProviders {
+		if c == prov {
+			return i
+		}
+	}
+	return len(canonicalProviders)
+}
+
+// preferProvider reports whether a should win over b for the same model id: lower
+// rank first, then lexicographically smaller name. Total order ⇒ deterministic.
+func preferProvider(a, b string) bool {
+	ra, rb := providerRank(a), providerRank(b)
+	if ra != rb {
+		return ra < rb
+	}
+	return a < b
+}
+
 func (p *provider) limit(modelID string) Info {
 	tbl := p.load()
 	key := normalize(modelID)
 	if tbl != nil {
-		// models.dev groups by provider; the normalized key is unique enough
-		// that we search across providers.
-		for _, models := range tbl {
-			if e, ok := models[key]; ok {
-				return Info{ContextLimit: e.ContextLimit, InputPrice: e.InputPrice, OutputPrice: e.OutputPrice}
+		// models.dev groups by provider and the SAME model id appears under many
+		// providers (anthropic, azure, venice, …) with differing limits/prices.
+		// Ranging the provider map returned a RANDOM match, so a model's reported
+		// context limit and prices flickered between runs (a real status-line bug).
+		// Pick deterministically, preferring the model's true vendor, and use that
+		// one provider's complete entry so limit + prices stay coherent.
+		best := ""
+		for prov := range tbl {
+			if _, ok := tbl[prov][key]; !ok {
+				continue
 			}
+			if best == "" || preferProvider(prov, best) {
+				best = prov
+			}
+		}
+		if best != "" {
+			return Info(tbl[best][key]) // modelEntry and Info are field-identical
 		}
 	}
 	return staticFallback(key)

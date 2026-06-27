@@ -87,6 +87,37 @@ func TestOfflineFallback(t *testing.T) {
 	}
 }
 
+// multiProviderAPI mirrors the real models.dev shape where ONE model id is listed
+// by several providers with conflicting context limits and prices — the case that
+// made limit() nondeterministic (a random provider's entry won).
+const multiProviderAPI = `{
+  "azure":     {"name":"Azure","models":{"claude-opus-4-8":{"id":"claude-opus-4-8","limit":{"context":200000,"output":64000},"cost":{"input":5,"output":25}}}},
+  "venice":    {"name":"Venice","models":{"claude-opus-4-8":{"id":"claude-opus-4-8","limit":{"context":1000000,"output":64000},"cost":{"input":6,"output":30}}}},
+  "anthropic": {"name":"Anthropic","models":{"claude-opus-4-8":{"id":"claude-opus-4-8","limit":{"context":1000000,"output":64000},"cost":{"input":5,"output":25}}}},
+  "llmgateway":{"name":"LLMGateway","models":{"claude-opus-4-8":{"id":"claude-opus-4-8","limit":{"context":1000000,"output":64000},"cost":{"input":5,"output":25}}}}
+}`
+
+// A model listed by many providers must resolve to ONE stable, canonical entry —
+// anthropic's (1M context, 5/25), never azure's stale 200k or venice's 6/30 — on
+// EVERY call. Pre-fix, the map range returned a random provider, so the reported
+// context limit and prices flickered between runs (a real status-line bug caught
+// by the cross-backend UX-parity test).
+func TestMultiProviderDeterministicCanonical(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(multiProviderAPI))
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(srv.URL, t.TempDir())
+	for i := 0; i < 64; i++ { // many calls: the old map-range nondeterminism would surface
+		got := p.limit("claude-opus-4-8")
+		if got.ContextLimit != 1000000 || got.InputPrice != 5 || got.OutputPrice != 25 {
+			t.Fatalf("call %d: got %+v, want anthropic's {1000000, 5, 25} (deterministic + canonical)", i, got)
+		}
+	}
+}
+
 func TestUnknownIDFallback(t *testing.T) {
 	p := newTestProvider("http://127.0.0.1:0", t.TempDir())
 	got := p.limit("gpt-4o")
