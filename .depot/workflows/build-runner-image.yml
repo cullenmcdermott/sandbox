@@ -1,3 +1,13 @@
+# Depot CI build+publish of the runner image. Moved off GitHub Actions as part of
+# the clean cut to Depot.
+#
+# CHANGED FROM THE GHA VERSION (review for your setup):
+#   - runs-on: kubevirt-runners (self-hosted homelab) -> depot-ubuntu-24.04 (Depot cloud).
+#   - DROPPED the Tailscale step: it joined the tailnet for the self-hosted runner;
+#     a Depot cloud runner reaches the PUBLIC ghcr.io directly, and the base images
+#     (node:24-slim, distroless) are public. Re-add Tailscale only if the build
+#     genuinely needs a tailnet-internal resource.
+#   - Consider `depot/build-push-action` for faster, cached builds on Depot.
 name: Build Runner Image
 
 on:
@@ -5,11 +15,11 @@ on:
     branches: [main]
     paths:
       - 'runner/**'
-      - '.github/workflows/build-runner-image.yml'
+      - '.depot/workflows/build-runner-image.yml'
   pull_request:
     paths:
       - 'runner/**'
-      - '.github/workflows/build-runner-image.yml'
+      - '.depot/workflows/build-runner-image.yml'
   workflow_dispatch:
 
 permissions:
@@ -22,15 +32,8 @@ env:
 jobs:
   build:
     name: Build and Push
-    runs-on: kubevirt-runners
+    runs-on: depot-ubuntu-24.04
     steps:
-      - name: Tailscale
-        uses: tailscale/github-action@v4
-        with:
-          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
-          tags: tag:ci
-
       - uses: actions/checkout@v6
 
       - name: Login to GHCR

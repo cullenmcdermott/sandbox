@@ -1,16 +1,11 @@
-# golangci-lint v2 configuration. Conservative starting point that is GREEN on
-# the current tree, per the "start non-strict, ratchet later" plan. Generated
-# files (// Code generated …) are auto-excluded by the `generated: lax` default.
+# golangci-lint v2 configuration. GREEN on the current tree. Generated files
+# (// Code generated …) are auto-excluded by the `generated: lax` default. The
+# version here is the same one Flox pins (.flox/env/manifest.toml) and CI installs,
+# so `just lint` runs the identical linters locally and in CI.
 #
-# Enabled now (clean today): errcheck, govet, ineffassign, unused + gofmt formatting.
-#
-# Deferred to a future ratchet (each needs a dedicated cleanup pass). Turning
-# these on today would fail CI on pre-existing issues outside current scope:
-#   - staticcheck (~11: deprecated test APIs, style QF/S, one real SA4000 test bug)
-#   - goimports   (import-grouping churn across many files)
-#
-# Not installed on the Nix host — run via CI (the hard gate) or locally with
-# `nix run nixpkgs#golangci-lint -- run`.
+# Enabled: errcheck, govet, ineffassign, unused, staticcheck (SA/S/QF/ST) +
+# gofmt/goimports formatting. The only carve-outs are two SA1019 deprecations that
+# cannot be migrated cleanly today (see the exclusion rules below).
 version: "2"
 
 run:
@@ -19,15 +14,14 @@ run:
     - e2e
 
 linters:
-  # Start from an empty set and opt in, so the remaining deferred linter
-  # (staticcheck, on by default in v2's "standard" set) stays off until its
-  # cleanup pass. Re-enabling it is a one-line change once the debt is paid.
+  # Start from an empty set and opt in.
   default: none
   enable:
     - errcheck
     - govet
     - ineffassign
     - unused
+    - staticcheck
   exclusions:
     generated: lax
     paths:
@@ -41,7 +35,19 @@ linters:
       - path: _test\.go
         linters:
           - errcheck
+      # SA1019: agent-sandbox v0.4.6's generated fake only exposes the (now
+      # client-gen-deprecated) NewSimpleClientset — NewClientset is NOT generated
+      # at this version, so we can't migrate. Revisit on an agent-sandbox bump.
+      - linters:
+          - staticcheck
+        text: "SA1019:.*NewSimpleClientset is deprecated"
+      # SA1019: go/parser.ParseDir is deprecated for go/packages; the migration is
+      # heavy and out of scope for the lint ratchet. Tracked as a follow-up.
+      - linters:
+          - staticcheck
+        text: "SA1019:.*ParseDir"
 
 formatters:
   enable:
     - gofmt
+    - goimports

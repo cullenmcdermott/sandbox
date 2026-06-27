@@ -1,3 +1,7 @@
+# Depot CI (https://depot.dev/docs/ci) — GitHub Actions-compatible YAML executed on
+# Depot's compute instead of GitHub's. Connect with the Depot GitHub App + `depot ci
+# migrate`; until then this is dark (the .github/workflows/ versions were removed for
+# the clean cut to Depot).
 name: CI
 
 on:
@@ -15,7 +19,7 @@ jobs:
   # verify (anti-cheat scan + race tests twice).
   check:
     name: just check
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
 
@@ -31,9 +35,9 @@ jobs:
         uses: extractions/setup-just@v3
 
       - name: Install golangci-lint
-        # Pinned to match .golangci.yml's v2 schema. Installed onto PATH so that
-        # `just lint` runs it for real (the hard enforcement point) rather than
-        # skipping it as a local dev shell does.
+        # Pinned to match .golangci.yml's v2 schema (== the Flox-pinned local
+        # version, .flox/env/manifest.toml). Installed onto PATH so `just lint`
+        # runs it for real (the hard enforcement point).
         run: |
           curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
             | sh -s -- -b "$(go env GOPATH)/bin" v2.12.2
