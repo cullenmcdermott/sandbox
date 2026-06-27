@@ -87,7 +87,7 @@ per-session Secret (`<session-id>-runner`); you do not manage it manually.
   them with `--runner-image <ref>` and `--reaper-image <ref>`. (A wrong or
   unreachable image leaves the pod in `ImagePullBackOff`, which `sandbox claude`
   reports instead of hanging.) The runner image is also built in CI via
-  `.github/workflows/build-runner-image.yml` if you prefer to wire up your own
+  `.depot/workflows/build-runner-image.yml` if you prefer to wire up your own
   registry there.
 
 ## Build

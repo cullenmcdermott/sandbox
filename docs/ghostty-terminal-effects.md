@@ -1,6 +1,8 @@
 # Ghostty terminal effects for the dashboard TUI
 
-Status: proposed / not started
+Status: CONVERGED — Stages 1–3 implemented; the convergence ledger (§8) reached
+CONVERGED at run-8. This is a living doc that re-derives status from the code each
+run; outstanding work is any Stage 4+ effect plus manual live-Ghostty verification.
 Owner: TUI (`internal/tui/dashboard`)
 Scope: opt-in visual + signalling enhancements that light up when we detect a
 capable terminal (primarily Ghostty), degrading cleanly everywhere else.

@@ -1,9 +1,9 @@
 # Verification Protocol (shared)
 
-These three specs (`01-list.md`, `02-streaming-markdown.md`, `03-assistant-cache.md`) are
-**implementation-ready**: an implementer with no extra context should be able to build each
-package and prove it correct. This file defines the verification philosophy and the shared
-gates they all use.
+This file defines the verification philosophy and the shared gates used across the
+repo (the `just check` / `just verify` gate that CI runs). It is the durable
+reference an implementer uses to prove a package correct; it is not tied to any
+specific spec file.
 
 ## The principle: hard to fake, not "trust me"
 

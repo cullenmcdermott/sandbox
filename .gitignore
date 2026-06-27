@@ -11,3 +11,8 @@ runner/dist/
 /dist/
 /mockup
 /tuikit-demo
+
+# KIND local dev cluster (dev/local): the local kubeconfig and any provider-secret
+# overlay are machine-local and may carry credentials — never commit them.
+dev/local/.kubeconfig
+dev/local/secret.local.yaml

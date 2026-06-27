@@ -30,14 +30,18 @@ survives detach, suspend/resume, and CLI restarts.
 | Pod | `runner/src/server.ts` | node:http server, bearer auth, routes (see `runner-api.md`) |
 | Pod | `runner/src/claude.ts` | Claude Agent SDK `query()`, hooks, permission flow, event mapping |
 | Pod | `runner/src/opencode.ts` | OpenCode backend: supervises `opencode serve` for `sandbox opencode` sessions |
+| Pod | `runner/src/opencode-turn.ts` | OpenCode turn adapter: drives a one-shot turn via the `opencode serve` HTTP API (@opencode-ai/sdk), mapping its events into the normalized model |
 | Pod | `runner/src/events.ts` | SQLite event log; append-before-stream; SSE replay |
 
-There are **two agent backends**: the default `claude-sdk` (the Claude Agent SDK
-driven through the runner's HTTP+SSE turns API) and `opencode` (a supervised
-`opencode serve` process the local `sandbox opencode` command attaches to via a
-PTY pane; turns are driven by the local `opencode` client, not the runner's
-turns route). The idle reaper is a per-session Kubernetes Job that polls the
-runner's `/idle` and suspends the Sandbox (replicas→0) after the idle timeout.
+There are **two agent backends**, both implementing the runner's `Agent` turn
+seam (`runner/src/agent.ts`): the default `claude-sdk` (the Claude Agent SDK) and
+`opencode` (a supervised `opencode serve` process). Both accept one-shot runner
+turns through the HTTP+SSE turns API — claude-sdk via the SDK, opencode by
+bridging to `opencode serve`'s own API (`opencode-turn.ts`). The interactive
+`sandbox opencode` PTY pane still attaches to the same `opencode serve` directly;
+the runner adapter is additive. The idle reaper is a per-session Kubernetes Job
+that polls the runner's `/idle` and suspends the Sandbox (replicas→0) after the
+idle timeout.
 
 ```mermaid
 flowchart LR
