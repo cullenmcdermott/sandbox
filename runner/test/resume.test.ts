@@ -64,7 +64,7 @@ const resumeOf = (
   turnId: string,
   clientResume?: string,
 ): string | undefined =>
-  buildOptions(c, turnId, clientResume, undefined, undefined, undefined, new AbortController()).resume;
+  buildOptions(c, turnId, clientResume, undefined, undefined, undefined, undefined, new AbortController()).resume;
 
 // --- effectiveResume: the defaulting precedence --------------------------
 

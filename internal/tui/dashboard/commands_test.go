@@ -50,8 +50,8 @@ func TestSlashFilter(t *testing.T) {
 	// Fresh model: no models.available yet, so the Model group uses the alias
 	// fallback (/opus /sonnet /haiku /model-default).
 	mf := &TranscriptModel{}
-	if got := len(filteredGroups(mf, "")); got != 5 {
-		t.Errorf("empty query groups = %d, want 5 (Session/Mode/Model/Tools/Help)", got)
+	if got := len(filteredGroups(mf, "")); got != 6 {
+		t.Errorf("empty query groups = %d, want 6 (Session/Mode/Model/Effort/Tools/Help)", got)
 	}
 	cmds := flatCmds(mf, "plan")
 	if len(cmds) != 1 || cmds[0].name != "/plan" {
@@ -68,6 +68,12 @@ func TestSlashFilter(t *testing.T) {
 	// and pressing Enter accidentally ran /model-default.
 	if c := flatCmds(mf, "model"); len(c) != 4 {
 		t.Errorf("filter 'model' (group-name match) = %d cmds, want 4 (/opus /sonnet /haiku /model-default)", len(c))
+	}
+	// Likewise typing "effort" matches the "Effort" group name, surfacing all six
+	// static levels (low/medium/high/xhigh/ultracode/auto), not just those with
+	// "effort" in their own name.
+	if c := flatCmds(mf, "effort"); len(c) != 6 {
+		t.Errorf("filter 'effort' (group-name match) = %d cmds, want 6", len(c))
 	}
 	// Filtering matches descriptions too ("/clear" desc has "transcript").
 	if len(flatCmds(mf, "transcript")) == 0 {
@@ -166,6 +172,49 @@ func TestModelPaletteFallsBackToAliases(t *testing.T) {
 				t.Errorf("fallback cmd[%d] = %q, want %q", i, got[i].name, w)
 			}
 		}
+	}
+}
+
+// ORACLE (in-session /effort): the static Effort palette records the SDK wire
+// value as the per-turn override and threads it onto the next turn. The crux is
+// the label→wire mapping — /effort-ultracode stores "max", not "ultracode" — and
+// that /effort-auto clears the override back to the SDK adaptive default.
+func TestEffortOverrideThreadedToTurn(t *testing.T) {
+	fc := &fakeRunnerClient{}
+	m := NewTranscript(fc, transcriptSession(), nil)
+	m.width, m.height = 80, 24
+
+	// A prompt before any /effort selection sends an empty effort.
+	startTurnCmd(fc, m.ref, "first", m.mode.apiValue(), m.modelOverride, m.effortOverride)()
+	if len(fc.startedEfforts) != 1 || fc.startedEfforts[0] != "" {
+		t.Fatalf("default effort = %v, want one empty entry", fc.startedEfforts)
+	}
+
+	// /effort-high sets the override to the verbatim SDK level.
+	m.input.SetValue("/effort-high")
+	m.handleKey(keyMsg("enter"))
+	if m.effortOverride != "high" {
+		t.Fatalf("effortOverride after /effort-high = %q, want high", m.effortOverride)
+	}
+
+	// /effort-ultracode stores the WIRE value "max" (ultracode is only the label).
+	m.input.SetValue("/effort-ultracode")
+	m.handleKey(keyMsg("enter"))
+	if m.effortOverride != "max" {
+		t.Fatalf("effortOverride after /effort-ultracode = %q, want max", m.effortOverride)
+	}
+
+	// The next turn carries the selected effort.
+	startTurnCmd(fc, m.ref, "second", m.mode.apiValue(), m.modelOverride, m.effortOverride)()
+	if got := fc.startedEfforts[len(fc.startedEfforts)-1]; got != "max" {
+		t.Errorf("turn effort = %q, want max", got)
+	}
+
+	// /effort-auto clears the override (SDK adaptive default).
+	m.input.SetValue("/effort-auto")
+	m.handleKey(keyMsg("enter"))
+	if m.effortOverride != "" {
+		t.Errorf("effortOverride after /effort-auto = %q, want empty", m.effortOverride)
 	}
 }
 

@@ -64,6 +64,7 @@ func commandGroups(m *TranscriptModel) []cmdGroup {
 			{"/vim", "toggle vim-style modal editing (off by default)", toggleVimCmd},
 		}},
 		{name: "Model", glyph: "✸", cmds: modelGroupCmds(m)},
+		{name: "Effort", glyph: "⚡", cmds: effortGroupCmds()},
 		{name: "Tools", glyph: "▣", cmds: []slashCmd{
 			{"/diff", "show the working-tree diff", func(m *TranscriptModel) tea.Cmd {
 				return m.runShell("git --no-pager diff")
@@ -149,6 +150,38 @@ func setModelCmd(id, label string) func(*TranscriptModel) tea.Cmd {
 		}
 		m.ctxLimit = models.Limit(m.model).ContextLimit
 		m.appendBlock(blockInfo, "model → "+label)
+		return nil
+	}
+}
+
+// effortGroupCmds builds the STATIC /effort palette group. Unlike the Model
+// group it never varies by session — the SDK reasoning-effort levels are a
+// closed enum. Each entry's wire value is the real SDK EffortLevel; the top tier
+// "max" is shown under the recognizable label "ultracode" (label → wire value:
+// ultracode → "max"). /effort-auto clears the override (empty => SDK adaptive
+// thinking). Typing /effort surfaces the whole group via the group-name match in
+// filteredGroups.
+func effortGroupCmds() []slashCmd {
+	return []slashCmd{
+		{"/effort-low", "minimal reasoning effort", setEffortCmd("low", "low")},
+		{"/effort-medium", "moderate reasoning effort", setEffortCmd("medium", "medium")},
+		{"/effort-high", "high reasoning effort", setEffortCmd("high", "high")},
+		{"/effort-xhigh", "very high reasoning effort", setEffortCmd("xhigh", "xhigh")},
+		{"/effort-ultracode", "max reasoning effort", setEffortCmd("max", "ultracode")},
+		{"/effort-auto", "revert to adaptive (SDK default) effort", setEffortCmd("", "auto")},
+	}
+}
+
+// setEffortCmd returns a handler that selects the reasoning-effort level for
+// subsequent turns (sent as TurnInput.Effort on the next prompt) and confirms it
+// in the transcript. level is the SDK wire value ("low".."max"; "max" is labeled
+// "ultracode"); an empty level clears the override (SDK adaptive thinking).
+// Modeled on setModeCmd — no ctxLimit recompute, no display-model mutation; the
+// status-line effort tag reads m.effortOverride directly.
+func setEffortCmd(level, label string) func(*TranscriptModel) tea.Cmd {
+	return func(m *TranscriptModel) tea.Cmd {
+		m.effortOverride = level
+		m.appendBlock(blockInfo, "effort → "+label)
 		return nil
 	}
 }

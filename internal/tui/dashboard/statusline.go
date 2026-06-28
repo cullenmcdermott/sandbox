@@ -82,6 +82,32 @@ func (p permMode) modeTag() string {
 	return lipgloss.NewStyle().Foreground(col).Render(glyph + " " + label)
 }
 
+// effortTag is the compact reasoning-effort tag for the collapsed status row,
+// rendered only when the user has set a per-turn /effort override. It mirrors
+// modeTag's shape (a glyph + short label in a hue). The SDK wire value "max"
+// renders as "ultracode" (its UI label); the other levels show verbatim. Hue
+// climbs by intensity (Malibu→Guac→Gold→Peach→Coral for low→max) so a higher
+// tier reads hotter at a glance.
+func effortTag(level string) string {
+	label := level
+	var col color.Color
+	switch level {
+	case "low":
+		col = theme.Malibu
+	case "medium":
+		col = theme.Guac
+	case "high":
+		col = theme.Gold
+	case "xhigh":
+		col = theme.Peach
+	case "max":
+		label, col = "ultracode", theme.Coral
+	default:
+		col = theme.TextMuted
+	}
+	return lipgloss.NewStyle().Foreground(col).Render("⚡ " + label)
+}
+
 // label is the short human name of the mode (for /command confirmations).
 func (p permMode) label() string {
 	switch p {
@@ -417,6 +443,12 @@ func (m *TranscriptModel) renderStatusLine() string {
 	}
 	// Mode moves onto row 1 as a compact trailing tag (was the separate row 4).
 	row1 += muted.Render(" · ") + m.mode.modeTag()
+	// Effort tag trails the mode, but ONLY when a /effort override is set — gated
+	// on non-empty so the default status line stays byte-identical (no golden
+	// churn). It reflects the request, not an SDK confirmation (no echo exists).
+	if m.effortOverride != "" {
+		row1 += muted.Render(" · ") + effortTag(m.effortOverride)
+	}
 
 	// Row 2: a single compact claude.ai plan-usage row (5-hour + weekly util bars,
 	// reset countdowns, and the attached model's weekly cap when present), from

@@ -166,7 +166,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, cfg: ReturnType
     const turn = reg.registerTurn(turnId, body.prompt);
     // Fire and forget: the turn runs in the background, streaming events to
     // SSE clients. The HTTP response returns immediately with the turnId.
-    agent.runTurn(cfg, turnId, body.prompt, body.resume, body.allowedTools, body.mode, body.model, turn.abort).catch((err) => {
+    agent.runTurn(cfg, turnId, body.prompt, body.resume, body.allowedTools, body.mode, body.model, body.effort, turn.abort).catch((err) => {
       const message = err instanceof Error ? err.message : String(err);
       appendEvent(sid, turnId, 'error', { message });
       reg.finishTurn(turnId);

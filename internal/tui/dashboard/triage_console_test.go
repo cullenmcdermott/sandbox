@@ -171,15 +171,17 @@ func TestP4_RowAndDetailShowModelAndCtx(t *testing.T) {
 	}
 	m.sessions = []Session{s}
 
+	// Layout A: the row sub-line carries ctx% (the model itself lives in the
+	// detail pane, since the brand glyph already identifies the agent).
 	row := stripANSI(m.renderSessionRow(s, false, 80))
-	if !strings.Contains(row, "opus-4.8") {
-		t.Errorf("row should show the model; got:\n%s", row)
-	}
 	if !strings.Contains(row, "62%") {
 		t.Errorf("row should show ctx%%=62%%; got:\n%s", row)
 	}
 
 	detail := stripANSI(strings.Join(m.renderDetailLines(60, 20), "\n"))
+	if !strings.Contains(detail, "opus-4.8") {
+		t.Errorf("detail should show the model; got:\n%s", detail)
+	}
 	if !strings.Contains(detail, "ctx 62%") {
 		t.Errorf("detail model line should show 'ctx 62%%'; got:\n%s", detail)
 	}

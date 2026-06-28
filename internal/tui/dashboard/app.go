@@ -758,18 +758,28 @@ func (a *App) withToast(v tea.View) tea.View {
 	if a.dashboard == nil || a.screen == ScreenExternal || a.dashboard.toast == nil {
 		return v
 	}
+	// The toast earns its keep only when a modal/splash hides the session list. On
+	// the bare dashboard the row glyphs already show every session's attention
+	// state, so floating a toast over the list is the redundant noise the user
+	// saw. The backend picker counts as "still on the list", so suppress there too.
+	if a.screen == ScreenDashboard && !a.picker.open {
+		return v
+	}
 	w, h := a.width, a.height
 	if w == 0 || h == 0 {
 		return v
 	}
-	toast := a.dashboard.renderToast(w)
-	if toast == "" {
+	// Position the whole box as one layer at the computed column so every row is
+	// indented together (see renderToast — the old per-string space padding only
+	// shifted line 0 and sheared the box).
+	box, x := a.dashboard.renderToast(w)
+	if box == "" {
 		return v
 	}
 	canvas := lipgloss.NewCanvas(w, h)
 	canvas.Compose(lipgloss.NewCompositor(
 		lipgloss.NewLayer(v.Content).X(0).Y(0).Z(0),
-		lipgloss.NewLayer(toast).X(0).Y(2).Z(10),
+		lipgloss.NewLayer(box).X(x).Y(2).Z(10),
 	))
 	v.Content = canvas.Render()
 	return v
@@ -801,12 +811,13 @@ func (a *App) screenView() tea.View {
 	}
 }
 
-// withTerminalSignals prepends the Stage 2 zero-width OSC control strings to the
-// composed frame: the OSC 9;4 tab-progress state (recomputed each frame from the
-// session aggregate) and any one-shot desktop notification queued during Update.
-// Both are no-ops on a non-Ghostty terminal (progressState returns None and
-// pendingOSC is never set), so non-Ghostty output is byte-identical to today.
-// The external (opencode) PTY screen is left untouched — it owns the terminal.
+// withTerminalSignals prepends the Stage 2 zero-width OSC 9;4 tab-progress state
+// (recomputed each frame from the session aggregate) to the composed frame. It is
+// a no-op on a non-Ghostty terminal (progressState returns None), so non-Ghostty
+// output is byte-identical to today. The desktop notification does NOT ride here —
+// the v2 cell renderer drops escapes spliced into View content, so it is emitted
+// out-of-band via tea.Raw from the toastMsg handler. The external (opencode) PTY
+// screen is left untouched — it owns the terminal.
 func (a *App) withTerminalSignals(v tea.View) tea.View {
 	if a.dashboard == nil || a.screen == ScreenExternal {
 		return v
@@ -822,8 +833,10 @@ func (a *App) withTerminalSignals(v tea.View) tea.View {
 		pre.WriteString(terminal.OSCProgress(p))
 		a.progressActive = false
 	}
-	// One-shot desktop notification queued by the toast transition.
-	pre.WriteString(a.dashboard.takePendingOSC())
+	// Note: the desktop notification is NOT emitted here. Control strings spliced
+	// into a Bubble Tea v2 View are dropped by the cell renderer, so the toast
+	// transition fires it out-of-band via tea.Raw instead (see the toastMsg
+	// handler in model.go).
 	// Stage 3: one-shot Kitty image transmission queued by the transcript's ctx
 	// gauge when its value changed this frame (the only sanctioned out-of-band
 	// write — it rides the frame on the changing frame, not every frame).

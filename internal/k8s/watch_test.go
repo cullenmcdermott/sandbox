@@ -113,10 +113,14 @@ func TestSandboxToState(t *testing.T) {
 	tests := []struct {
 		name     string
 		replicas int32
+		ready    string // "" = no Ready condition; else metav1.ConditionStatus
 		want     session.Status
 	}{
-		{"running", 1, session.StatusCreating}, // no pod check → creating
-		{"suspended", 0, session.StatusSuspended},
+		{"starting", 1, "", session.StatusCreating},             // replicas want a pod, not Ready yet
+		{"not-ready", 1, "False", session.StatusCreating},       // pod exists but not Ready
+		{"ready", 1, "True", session.StatusRunning},             // Ready=True → running, no pod Get
+		{"suspended", 0, "", session.StatusSuspended},           // replicas 0 → suspended
+		{"suspended-ready", 0, "True", session.StatusSuspended}, // Ready=True on a 0-replica suspend doesn't un-suspend
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -125,9 +129,15 @@ func TestSandboxToState(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "test-" + tc.name},
 				Spec:       agentv1alpha1.SandboxSpec{Replicas: &r},
 			}
+			if tc.ready != "" {
+				sb.Status.Conditions = []metav1.Condition{{
+					Type:   string(agentv1alpha1.SandboxConditionReady),
+					Status: metav1.ConditionStatus(tc.ready),
+				}}
+			}
 			st := sandboxToState(sb)
 			if st.Status != tc.want {
-				t.Errorf("sandboxToState(%d replicas): got %v, want %v", tc.replicas, st.Status, tc.want)
+				t.Errorf("sandboxToState(replicas=%d ready=%q): got %v, want %v", tc.replicas, tc.ready, st.Status, tc.want)
 			}
 		})
 	}

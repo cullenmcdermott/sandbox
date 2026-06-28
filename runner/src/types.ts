@@ -91,6 +91,15 @@ export interface TurnRequestBody {
    * its session default (SANDBOX_MODEL) and then the account default.
    */
   model?: string;
+  /**
+   * Reasoning-effort level for this turn (the in-session /effort switch): one of
+   * 'low' | 'medium' | 'high' | 'xhigh' | 'max'. Omitted/empty (or any unknown
+   * value) => the runner leaves options.effort unset (SDK adaptive-thinking
+   * default). Supported on Fable 5 / Opus 4.6+ / Sonnet 4.6 only; silently
+   * ignored on other models. The wire value is the real SDK enum — the TUI
+   * displays 'max' as "ultracode".
+   */
+  effort?: string;
 }
 
 /** POST /sessions/:id/turns response: the assigned turn id. */

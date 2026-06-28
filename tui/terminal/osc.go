@@ -61,6 +61,43 @@ func OSCNotify(title, body string) string {
 	return esc + "]777;notify;" + title + ";" + body + bel
 }
 
+// OSC9Notify returns an OSC 9 desktop-notification escape carrying a single
+// message line — the form iTerm2, WezTerm and kitty understand. Unlike OSC 777
+// it has no separate title/body field, so callers join them. Form:
+// ESC ] 9 ; <msg> ST. An empty message yields "". The returned string is
+// zero-width but, like all of these, MUST be written out-of-band (e.g. tea.Raw)
+// — a Bubble Tea v2 View drops control strings spliced into its content.
+func OSC9Notify(msg string) string {
+	msg = sanitizeOSC(msg)
+	if msg == "" {
+		return ""
+	}
+	return esc + "]9;" + msg + bel
+}
+
+// NotifyString returns the desktop-notification escape appropriate for the host
+// terminal, or "" when it isn't one we can target. Ghostty (and rxvt) take the
+// OSC 777 form with a title + body; iTerm2 and WezTerm take OSC 9 with a single
+// message, so title and body are joined with an em dash. Centralising the choice
+// here keeps the notify gate from being Ghostty-exclusive.
+func NotifyString(c Caps, title, body string) string {
+	switch {
+	case c.IsGhostty:
+		return OSCNotify(title, body)
+	case c.IsITerm2 || c.IsWezTerm:
+		msg := title
+		if body != "" {
+			if msg != "" {
+				msg += " — "
+			}
+			msg += body
+		}
+		return OSC9Notify(msg)
+	default:
+		return ""
+	}
+}
+
 // sanitizeOSC strips bytes that would prematurely terminate or corrupt an OSC
 // string: ESC, BEL, the ST sequence, semicolons (the OSC field separator), and
 // newlines/carriage returns. This keeps an attacker- or data-controlled title

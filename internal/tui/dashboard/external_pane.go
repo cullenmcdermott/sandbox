@@ -126,7 +126,14 @@ func (p *ExternalPane) Init() tea.Cmd {
 	// Auth: the server URL is positional; basic-auth user via -u and the
 	// password via OPENCODE_SERVER_PASSWORD in the env (never argv, so it stays
 	// out of the host process list).
-	cmd := exec.Command("opencode", "attach", p.creds.URL, "-u", p.creds.Username)
+	//
+	// --continue resumes the prior conversation. The opencode session lives on the
+	// server (XDG_DATA_HOME on the pod's PVC, durable across suspend/resume), but
+	// the attach client must be told to continue it or it opens an empty session —
+	// so without this flag every (re)attach loses history. One session per pod
+	// means "the last session" is unambiguously the user's previous conversation;
+	// on the first-ever attach (none yet) opencode falls back to a new session.
+	cmd := exec.Command("opencode", "attach", p.creds.URL, "-u", p.creds.Username, "--continue")
 	cmd.Env = append(os.Environ(), "OPENCODE_SERVER_PASSWORD="+p.creds.Password, "TERM=xterm-256color")
 
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)})

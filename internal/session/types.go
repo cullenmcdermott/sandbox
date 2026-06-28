@@ -124,6 +124,13 @@ type TurnInput struct {
 	// runner falls back to its session default (Spec.Model / SANDBOX_MODEL) and
 	// then the account default.
 	Model string `json:"model,omitempty"`
+	// Effort overrides the reasoning-effort level for this turn (the in-session
+	// /effort switch): one of "low", "medium", "high", "xhigh", "max". Empty =>
+	// the runner leaves options.effort unset (SDK adaptive-thinking default).
+	// Supported on Fable 5 / Opus 4.6+ / Sonnet 4.6 only; silently ignored
+	// elsewhere. NOTE: the wire value is the real SDK enum — the TUI displays
+	// "max" as "ultracode".
+	Effort string `json:"effort,omitempty"`
 }
 
 // TurnRef addresses a specific turn.

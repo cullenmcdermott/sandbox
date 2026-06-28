@@ -40,6 +40,23 @@ func TestDetectGhosttyCaseInsensitive(t *testing.T) {
 	}
 }
 
+// The notify-capable terminals are detected from TERM_PROGRAM so the desktop
+// notification isn't Ghostty-exclusive.
+func TestDetectNotifyTerminals(t *testing.T) {
+	iterm := detect(envFromMap(map[string]string{"TERM_PROGRAM": "iTerm.app"}), colorprofile.TrueColor)
+	if !iterm.IsITerm2 || iterm.IsWezTerm || iterm.IsGhostty {
+		t.Fatalf("iTerm.app: got IsITerm2=%v IsWezTerm=%v IsGhostty=%v", iterm.IsITerm2, iterm.IsWezTerm, iterm.IsGhostty)
+	}
+	wez := detect(envFromMap(map[string]string{"TERM_PROGRAM": "WezTerm"}), colorprofile.TrueColor)
+	if !wez.IsWezTerm || wez.IsITerm2 || wez.IsGhostty {
+		t.Fatalf("WezTerm: got IsITerm2=%v IsWezTerm=%v IsGhostty=%v", wez.IsITerm2, wez.IsWezTerm, wez.IsGhostty)
+	}
+	ghostty := detect(envFromMap(map[string]string{"TERM_PROGRAM": "ghostty"}), colorprofile.TrueColor)
+	if ghostty.IsITerm2 || ghostty.IsWezTerm {
+		t.Fatalf("ghostty must not be flagged iTerm2/WezTerm")
+	}
+}
+
 func TestDetectNonGhostty(t *testing.T) {
 	c := detect(envFromMap(map[string]string{"TERM_PROGRAM": "iTerm.app"}), colorprofile.TrueColor)
 	if c.IsGhostty {

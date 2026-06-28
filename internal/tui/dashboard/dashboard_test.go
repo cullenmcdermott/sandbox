@@ -9,6 +9,7 @@ import (
 
 	"github.com/cullenmcdermott/sandbox/internal/k8s"
 	"github.com/cullenmcdermott/sandbox/internal/session"
+	"github.com/cullenmcdermott/sandbox/tui/terminal"
 	"github.com/cullenmcdermott/sandbox/tui/theme"
 )
 
@@ -205,6 +206,10 @@ func TestApplyPodEventPatch(t *testing.T) {
 // a tick loop is already running must not spawn a second concurrent loop.
 func TestToastTickLoopGuarded(t *testing.T) {
 	m := New(nil)
+	// Pin an untargetable terminal so the per-toast desktop-notification cmd
+	// doesn't enter the batch — this test is only about the tick-loop guard, and
+	// New() detects the host terminal's real caps via terminal.Detect().
+	m.caps = terminal.Caps{}
 	_, cmd1 := m.Update(toastMsg{id: "s1", title: "a"})
 	if !m.toastTickActive {
 		t.Fatal("first toast should mark the tick loop active")

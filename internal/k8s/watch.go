@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/cache"
 
 	agentv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
@@ -193,14 +194,24 @@ func (b *Backend) Watch(ctx context.Context) (<-chan StateEvent, error) {
 	return out, nil
 }
 
-// sandboxToState derives a session.State from a Sandbox object without
-// making additional API calls. Pod readiness is unknown at this level (false
-// by default); the caller may enrich it via Backend.Status if needed.
+// sandboxToState derives a session.State from a Sandbox object without making
+// additional API calls. Everything it needs is on the Sandbox the informer
+// already holds: lifecycle status comes from .spec.replicas + the Ready/Finished
+// status conditions, and the identity fields are read back from the runner
+// container's env (write-once, see buildEnv). This lets the cluster watch emit
+// fully-formed RUNNING transitions in realtime — no per-event pod Get.
 func sandboxToState(sb *agentv1alpha1.Sandbox) session.State {
 	st := session.State{
 		ID:          session.ID(sb.Name),
 		SandboxName: sb.Name,
 		CreatedAt:   sb.CreationTimestamp.Time,
+		// Recover the identity fields the pod was created with so a session that
+		// first appears via the watch (created in another terminal while the
+		// dashboard is open) carries its real ProjectPath (needed to open the SSE
+		// stream / Mutagen sync) and Backend (claude vs opencode). Pure functions
+		// of sb — no API call. Mirrors statusFromSandbox.
+		ProjectPath: sandboxEnv(sb, "PROJECT_PATH"),
+		Backend:     sandboxEnv(sb, "SANDBOX_BACKEND"),
 	}
 
 	replicas := int32(1)
@@ -208,15 +219,25 @@ func sandboxToState(sb *agentv1alpha1.Sandbox) session.State {
 		replicas = *sb.Spec.Replicas
 	}
 
-	if replicas == 0 {
+	switch {
+	case replicas == 0:
 		st.Status = session.StatusSuspended
-	} else {
-		// Without a pod list call we default to CREATING; the TUI will refine
-		// to RUNNING once an early Backend.List or a pod event updates the entry.
+	case sandboxReady(sb):
+		// The controller sets Ready=True only once the backing pod is Running,
+		// its PodReady condition is true, and it has pod IPs (and any required
+		// Service is ready) — see agent-sandbox controllers/sandbox_controller.go
+		// computeReadyCondition. For a non-suspended Sandbox that is exactly "the
+		// runner is up and serving", so map it straight to RUNNING. This is what
+		// lets a newly-created or just-resumed session flip to running (and start
+		// its SSE stream) from a watch event alone, with no pod-list call.
+		st.Status = session.StatusRunning
+		st.PodReady = true
+	default:
+		// Replicas want a pod but it isn't Ready yet (pulling image, starting).
 		st.Status = session.StatusCreating
 	}
 
-	// Detect failure from the Finished condition.
+	// Detect failure from the Finished condition (overrides the above).
 	for _, cond := range sb.Status.Conditions {
 		if cond.Type == string(agentv1alpha1.SandboxConditionFinished) {
 			if cond.Reason == agentv1alpha1.SandboxReasonPodFailed {
@@ -225,11 +246,18 @@ func sandboxToState(sb *agentv1alpha1.Sandbox) session.State {
 		}
 	}
 
-	// Copy labels: project path and backend may be stored as annotations
-	// or environment variables. For now we leave them zero — they'll be
-	// filled in by the seed Backend.List call (which calls Status, which
-	// knows the pod env).
-	_ = sb.Labels // reserved for future label-based extraction
-
 	return st
+}
+
+// sandboxReady reports whether the Sandbox's Ready status condition is True. The
+// agent-sandbox controller owns this condition and only sets it True when the
+// backing pod is genuinely serving (Running + PodReady + has pod IPs), so for a
+// non-suspended Sandbox it is equivalent to the dashboard's RUNNING state.
+func sandboxReady(sb *agentv1alpha1.Sandbox) bool {
+	for _, cond := range sb.Status.Conditions {
+		if cond.Type == string(agentv1alpha1.SandboxConditionReady) {
+			return cond.Status == metav1.ConditionTrue
+		}
+	}
+	return false
 }

@@ -2,8 +2,11 @@ package dashboard
 
 import (
 	"encoding/json"
+	"fmt"
 	"image/color"
+	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/cullenmcdermott/sandbox/internal/models"
@@ -179,6 +182,13 @@ type Session struct {
 	// IdleSince is when the runner started counting this session idle (zero = not
 	// idle-counting, e.g. a turn is active). Drives the "suspends in ~X" hint.
 	IdleSince time.Time
+
+	// Branch and Dirty are the workspace git state reported by the runner
+	// (workspace.status events; see WorkspaceStatusPayload). Empty Branch means
+	// not-a-git-repo or not-yet-reported. Surfaced on the list row's sub-line and
+	// persisted in the snapshot so the branch shows for cold sessions on relaunch.
+	Branch string
+	Dirty  bool
 }
 
 // CtxPercent returns the rounded context-window utilization (0–100) for the
@@ -208,10 +218,16 @@ func (s Session) Unread() int {
 	return int(s.lastSeq - s.seenSeq)
 }
 
-// ShortID returns the first 4 hex chars of the session id — the row
-// disambiguator (there is no git-branch field in the data model, P2).
+// ShortID returns a 4-hex row disambiguator (there is no git-branch field in the
+// data model, P2). Session ids are "<backend>-<pathHash>-<rndSuffix>" (see
+// newSessionID), so the meaningful part is the trailing random suffix — taking
+// the head of the id would just yield the backend prefix ("clau"), which is
+// identical for every Claude session and duplicates the agent label.
 func (s Session) ShortID() string {
 	id := string(s.ID())
+	if i := strings.LastIndex(id, "-"); i >= 0 && i+1 < len(id) {
+		id = id[i+1:]
+	}
 	if len(id) > 4 {
 		return id[:4]
 	}
@@ -311,6 +327,110 @@ func (s Session) AgentLabel() string {
 	return client
 }
 
+// statusLabel is the human status word shown on the list row's sub-line. It
+// favours plain verbs ("working" over "busy", "needs input" over "needs-input")
+// since it is read as prose next to the colored agent glyph, not parsed.
+func statusLabel(s SessionStatus) string {
+	switch s {
+	case StatusBusy:
+		return "working"
+	case StatusWaiting:
+		return "waiting"
+	case StatusNeedsInput:
+		return "needs input"
+	case StatusIdle:
+		return "idle"
+	case StatusSuspended:
+		return "suspended"
+	case StatusFailed:
+		return "failed"
+	default:
+		return "unknown"
+	}
+}
+
+// liveAction is the short "what is it doing right now" clause that follows the
+// status word: the in-flight lifecycle action, the pending permission's tool, or
+// the most recent tool while a turn runs. Empty when there is nothing live to
+// add (idle/suspended/needs-input with no detail).
+func (s Session) liveAction() string {
+	if s.PendingAction != "" {
+		return s.PendingAction + "…"
+	}
+	switch s.DashStatus {
+	case StatusWaiting:
+		if s.PendingPermissionTool != "" {
+			return "perm " + s.PendingPermissionTool
+		}
+		return "needs you"
+	case StatusBusy:
+		if n := len(s.RecentTools); n > 0 {
+			t := s.RecentTools[n-1]
+			label := strings.ToLower(t.Tool)
+			if t.Arg != "" {
+				label += " " + t.Arg
+			}
+			return label
+		}
+	}
+	return ""
+}
+
+// branchLabel is the git branch with a trailing "*" dirty marker, or "" when no
+// branch is known (cwd not a repo, or not yet reported by the runner).
+func (s Session) branchLabel() string {
+	if s.Branch == "" {
+		return ""
+	}
+	if s.Dirty {
+		return s.Branch + "*"
+	}
+	return s.Branch
+}
+
+// homeDir is resolved once; the sub-line collapses it to "~" for compactness.
+var homeDir, _ = os.UserHomeDir()
+
+// shortProjectPath renders the project directory home-collapsed ("~/git/foo")
+// for the list row's sub-line. Empty input yields "".
+func shortProjectPath(p string) string {
+	if p == "" {
+		return ""
+	}
+	if homeDir != "" && (p == homeDir || strings.HasPrefix(p, homeDir+string(os.PathSeparator))) {
+		return "~" + p[len(homeDir):]
+	}
+	return p
+}
+
+// sublineParts is the ordered "·"-joined metadata that follows the colored
+// status word on the list row's sub-line (Layout A): what it's doing, where it
+// lives (project + branch), then dim lifecycle context. Ordered most- to
+// least-important so the right end is what truncation drops first on a narrow pane.
+func (s Session) sublineParts() []string {
+	var parts []string
+	if a := s.liveAction(); a != "" {
+		parts = append(parts, a)
+	}
+	if p := shortProjectPath(s.State.ProjectPath); p != "" {
+		parts = append(parts, p)
+	}
+	if b := s.branchLabel(); b != "" {
+		parts = append(parts, b)
+	}
+	if pct := s.CtxPercent(); pct > 0 {
+		parts = append(parts, fmt.Sprintf("ctx %d%%", pct))
+	}
+	if u := s.Unread(); u > 0 {
+		parts = append(parts, fmt.Sprintf("●%d", u))
+	}
+	if !s.State.CreatedAt.IsZero() {
+		parts = append(parts, "created "+s.State.CreatedAt.Format("Jan 2"))
+	}
+	parts = append(parts, s.ShortID())
+	return parts
+}
+
 // DeriveStatus maps a session.State to the six-state dashboard SessionStatus.
 // It is the cluster-derived baseline; live runner events (ApplyRunnerEvent)
 // refine a running session to busy/waiting/needs-input.
@@ -388,6 +508,10 @@ func (s *Session) applySnapshot(snap SessionSnapshot) {
 	s.CacheReadTokens = snap.CacheReadTokens
 	s.CacheWriteTokens = snap.CacheWriteTokens
 	s.TotalCostUSD = snap.TotalCostUSD
+	if snap.Branch != "" {
+		s.Branch = snap.Branch
+		s.Dirty = snap.Dirty
+	}
 	s.lastSeq = snap.LastSeq
 }
 
@@ -442,6 +566,19 @@ func ApplyRunnerEvent(sess *Session, ev session.Event) bool {
 		// (drives local resume — history.jsonl entry + `claude --resume <id>`).
 		if p.ClaudeSessionID != "" {
 			sess.ClaudeSessionID = p.ClaudeSessionID
+		}
+		return false
+
+	case session.EventWorkspaceStatus:
+		// Git branch + dirty marker for the list row's sub-line. Reported by the
+		// runner at session start and after each turn; does not change the
+		// six-state status. An empty branch (cwd not a git repo) leaves the slot
+		// blank rather than clobbering a previously-known branch.
+		var p session.WorkspaceStatusPayload
+		_ = json.Unmarshal(ev.Payload, &p) // malformed payload → zero value → no-op
+		if p.Branch != "" {
+			sess.Branch = p.Branch
+			sess.Dirty = p.Dirty
 		}
 		return false
 

@@ -49,6 +49,7 @@ type fakeRunnerClient struct {
 	startedPrompts []string
 	startedModes   []string
 	startedModels  []string
+	startedEfforts []string
 	resolved       []session.PermissionDecision
 	interrupts     int               // count of InterruptTurn calls
 	interruptRefs  []session.TurnRef // the TurnRef each InterruptTurn was called with
@@ -64,6 +65,7 @@ func (f *fakeRunnerClient) StartTurn(_ context.Context, ref session.Ref, in sess
 	f.startedPrompts = append(f.startedPrompts, in.Prompt)
 	f.startedModes = append(f.startedModes, in.Mode)
 	f.startedModels = append(f.startedModels, in.Model)
+	f.startedEfforts = append(f.startedEfforts, in.Effort)
 	if f.startErr != nil {
 		return session.TurnRef{}, f.startErr
 	}

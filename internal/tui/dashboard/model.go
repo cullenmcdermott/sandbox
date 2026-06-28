@@ -274,6 +274,12 @@ type Model struct {
 	toast           *notification
 	toastTickActive bool
 
+	// notifiedAttention is the set of background sessions already notified for
+	// their CURRENT attention episode, so a steady-state waiting session doesn't
+	// re-toast (and re-fire its OS notification) every time its 8s toast expires.
+	// An entry is cleared when its session leaves attention (edge, not level).
+	notifiedAttention map[session.ID]bool
+
 	// attachedID is the session the user is currently attached to (set by the
 	// App on attach, cleared on detach). It is excluded from background-attention
 	// toasts so the session you're already looking at never toasts itself.
@@ -302,6 +308,12 @@ type Model struct {
 	// Watch context cancel — called when the model is torn down so the
 	// informer goroutine stops.
 	watchCancel context.CancelFunc
+
+	// watchCh is the open cluster-watch event channel. Held so the PodEventMsg
+	// handler can re-issue watchNextCmd after each event — the self-perpetuating
+	// reader idiom (mirrors liveSSEChannels). Without re-issuing, the watch would
+	// deliver exactly one event for the model's whole lifetime and then go deaf.
+	watchCh <-chan k8s.StateEvent
 
 	// liveSSECancels holds the cancel function for each session's live-status
 	// SSE stream. Keyed by session.ID. Cancelled on quit or when the session
@@ -410,13 +422,6 @@ type Model struct {
 	// default in tests) lights up nothing, so output matches today exactly.
 	// See docs/ghostty-terminal-effects.md.
 	caps terminal.Caps
-
-	// pendingOSC holds a one-shot OSC control string (currently a desktop
-	// notification) queued during Update and drained into the next frame by the
-	// root App.View. Riding the frame string keeps notifications on the single
-	// sanctioned output channel (Stage 2). Empty when nothing is queued; only
-	// ever set when caps.IsGhostty.
-	pendingOSC string
 }
 
 // New constructs a dashboard Model. backend may be nil (for unit tests that
@@ -544,6 +549,8 @@ type SessionSnapshot struct {
 	CacheReadTokens       int
 	CacheWriteTokens      int
 	TotalCostUSD          float64
+	Branch                string
+	Dirty                 bool
 }
 
 // SnapshotStore persists the per-session live read-model across restarts so the
@@ -626,7 +633,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case PodEventMsg:
 		m.seeded = true // first watch event counts as loaded (U2)
 		cmd := m.applyPodEvent(msg.Event)
-		return m, tea.Batch(cmd, m.maybeStartAnim())
+		cmds := []tea.Cmd{cmd, m.maybeStartAnim()}
+		// Re-arm the reader for the next event. Guarded so reducer tests that drive
+		// applyPodEvent via a synthetic PodEventMsg (and never set watchCh) don't
+		// spawn a Cmd blocked forever on a nil channel.
+		if m.watchCh != nil {
+			cmds = append(cmds, watchNextCmd(m.watchCh))
+		}
+		return m, tea.Batch(cmds...)
 
 	case animTickMsg:
 		// One gated loop drives all motion (§C.2). The busy glyph advances at a
@@ -765,25 +779,29 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			status:    msg.status,
 			createdAt: time.Now(),
 		}
-		// Stage 2: alongside the in-TUI toast, queue a real OS notification so a
-		// background session needing attention escapes the terminal. Rides the
-		// next frame via App.View (the one sanctioned non-Stage-3 output path).
-		// Gated on Ghostty and the global off switch (NO_COLOR /
-		// SANDBOX_REDUCE_MOTION). The toast dedup upstream makes this one-shot per
-		// session attention state.
-		if m.caps.IsGhostty && !m.caps.ReduceMotion {
-			if osc := terminal.OSCNotify(msg.title, msg.note); osc != "" {
-				m.pendingOSC = osc
+		var cmds []tea.Cmd
+		// Alongside the in-TUI toast, fire a real OS notification so a background
+		// session needing attention escapes the terminal even when the user has
+		// tabbed away. It MUST go out-of-band via tea.Raw: Bubble Tea v2's cell
+		// renderer silently drops control strings spliced into View content (the
+		// same reason Kitty graphics use tea.Raw — see cmd/tuikit-demo/kitty.go).
+		// NotifyString picks the right escape per terminal (OSC 777 on Ghostty,
+		// OSC 9 on iTerm2/WezTerm) and returns "" on terminals we can't target.
+		// Suppressed under the global off switch (NO_COLOR / SANDBOX_REDUCE_MOTION).
+		// The upstream edge-dedup makes this one-shot per attention episode.
+		if !m.caps.ReduceMotion {
+			if osc := terminal.NotifyString(m.caps, msg.title, msg.note); osc != "" {
+				cmds = append(cmds, tea.Raw(osc))
 			}
 		}
 		// Only start a tick loop if one isn't already running, else a burst of
 		// toasts spawns multiple concurrent loops (faster-than-spec animation +
 		// wasted timers). The running loop picks up the new toast on its next tick.
-		if m.toastTickActive {
-			return m, nil
+		if !m.toastTickActive {
+			m.toastTickActive = true
+			cmds = append(cmds, toastTickCmd())
 		}
-		m.toastTickActive = true
-		return m, toastTickCmd()
+		return m, tea.Batch(cmds...)
 
 	case actionResultMsg:
 		if msg.err != nil {
@@ -1085,6 +1103,8 @@ func (m *Model) saveSnapshot(s *Session, force bool) {
 		CacheReadTokens:       s.CacheReadTokens,
 		CacheWriteTokens:      s.CacheWriteTokens,
 		TotalCostUSD:          s.TotalCostUSD,
+		Branch:                s.Branch,
+		Dirty:                 s.Dirty,
 	})
 }
 
@@ -1327,11 +1347,12 @@ func (m *Model) applySeed(states []session.State) (*Model, []tea.Cmd) {
 }
 
 // mergeClusterState overlays the cluster-watch–derived fields onto an existing
-// rich session state. The watch's sandboxToState only carries lifecycle Status +
-// identity (project/model/backend/pod/last-activity are left zero), so a full
-// replace would blank the descriptive fields the seed List populated. The watch
-// is authoritative only for Status; everything else is preserved unless the
-// existing value is empty.
+// rich session state. The watch's sandboxToState carries lifecycle Status plus
+// identity (id/sandbox/created/project/backend) but not the runner-derived
+// descriptive fields (model/usage/last-activity), so a full replace would blank
+// what the seed List or SSE stream populated. The watch is authoritative only
+// for Status; the other fields are filled in only when the existing value is
+// empty (so an identity learned later from the cluster isn't lost).
 func mergeClusterState(existing, incoming session.State) session.State {
 	merged := existing
 	merged.Status = incoming.Status
@@ -1340,6 +1361,12 @@ func mergeClusterState(existing, incoming session.State) session.State {
 	}
 	if merged.CreatedAt.IsZero() {
 		merged.CreatedAt = incoming.CreatedAt
+	}
+	if merged.ProjectPath == "" {
+		merged.ProjectPath = incoming.ProjectPath
+	}
+	if merged.Backend == "" {
+		merged.Backend = incoming.Backend
 	}
 	return merged
 }
@@ -2068,22 +2095,13 @@ func (m *Model) renderSessionRow(s Session, selected bool, width int) string {
 	}
 	line1 := rowStyle.Render(bar + dotSlot + glyphRendered + title + " " + relTime)
 
-	// Line 2: dim sub-line indented under the title (bar+dot+glyph = 6 cols).
-	sub := s.AgentLabel() + "  " + s.ShortID()
-	if pct := s.CtxPercent(); pct > 0 {
-		sub += fmt.Sprintf("  %d%%", pct)
-	}
-	if u := s.Unread(); u > 0 {
-		sub += fmt.Sprintf("  ●%d", u)
-	}
-	if s.DashStatus == StatusFailed {
-		sub += "  ⚠"
-	}
+	// Line 2 (Layout A): the colored agent glyph in the gutter, then the colored
+	// status word, then a dim "·"-joined tail of what-it's-doing / where-it-lives
+	// / lifecycle context (see Session.sublineParts). The status word carries its
+	// own status accent; the rest is dim so the eye lands on agent + state first.
 	var subBg color.Color
-	subStyle := lipgloss.NewStyle().Foreground(theme.TextMuted)
 	if selected {
 		subBg = theme.Raised
-		subStyle = subStyle.Background(subBg)
 	}
 	// Brand mark in the gutter so every row is identifiable by agent at a glance.
 	// It is composed as its own styled cell (kept out of truncate, which is not
@@ -2095,7 +2113,25 @@ func (m *Model) renderSessionRow(s Session, selected bool, width int) string {
 		gutter = lipgloss.NewStyle().Background(subBg).Render("  ") + markCell +
 			lipgloss.NewStyle().Background(subBg).Render("   ")
 	}
-	body := subStyle.Width(width - 6).Render(truncate(sub, max(4, width-6)))
+
+	avail := max(4, width-6)
+	statusWord := statusLabel(s.DashStatus)
+	statusStyle := lipgloss.NewStyle().Foreground(glyphColor(s.DashStatus))
+	dimStyle := lipgloss.NewStyle().Foreground(theme.TextMuted)
+	if subBg != nil {
+		statusStyle = statusStyle.Background(subBg)
+		dimStyle = dimStyle.Background(subBg)
+	}
+	rest := ""
+	if parts := s.sublineParts(); len(parts) > 0 {
+		rest = truncate(" · "+strings.Join(parts, " · "), max(0, avail-lipgloss.Width(statusWord)))
+	}
+	used := lipgloss.Width(statusWord) + lipgloss.Width(rest)
+	pad := ""
+	if used < avail {
+		pad = strings.Repeat(" ", avail-used)
+	}
+	body := statusStyle.Render(statusWord) + dimStyle.Render(rest+pad)
 	line2 := gutter + body
 
 	return line1 + "\n" + line2
@@ -2336,15 +2372,6 @@ func (m *Model) progressState() terminal.Progress {
 	}
 }
 
-// takePendingOSC returns and clears any queued one-shot OSC string (the desktop
-// notification). The root App.View drains it once per frame; clearing here makes
-// it fire exactly once.
-func (m *Model) takePendingOSC() string {
-	s := m.pendingOSC
-	m.pendingOSC = ""
-	return s
-}
-
 func plural(n int) string {
 	if n == 1 {
 		return ""
@@ -2394,6 +2421,8 @@ func (m *Model) handleWatchReady(msg watchReadyMsg) (tea.Model, tea.Cmd) {
 		m.watchCancel() // cancel previous watch if any
 	}
 	m.watchCancel = msg.cancel
-	// Start reading events from the watch channel.
+	// Hold the channel so PodEventMsg can re-arm the reader after each event, and
+	// start reading the first event.
+	m.watchCh = msg.ch
 	return m, watchNextCmd(msg.ch)
 }

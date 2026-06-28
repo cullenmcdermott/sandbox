@@ -25,6 +25,13 @@ type Caps struct {
 	// target for the out-of-band OSC/Kitty effects.
 	IsGhostty bool
 
+	// IsITerm2 / IsWezTerm mark terminals that take OSC 9 desktop notifications
+	// (Ghostty uses OSC 777 instead — see NotifyString). Detected from
+	// TERM_PROGRAM. Used only to choose the desktop-notification escape, so the
+	// notify gate isn't Ghostty-exclusive.
+	IsITerm2  bool
+	IsWezTerm bool
+
 	// GhosttyVersion is TERM_PROGRAM_VERSION when IsGhostty (may be empty).
 	GhosttyVersion string
 
@@ -59,12 +66,15 @@ func Detect() Caps {
 // detect is the testable core: env is the lookup function and profile is the
 // already-detected color profile.
 func detect(env environ, profile colorprofile.Profile) Caps {
-	isGhostty := strings.EqualFold(env("TERM_PROGRAM"), "ghostty")
+	termProgram := env("TERM_PROGRAM")
+	isGhostty := strings.EqualFold(termProgram, "ghostty")
 	trueColor := profile == colorprofile.TrueColor || profile == colorprofile.ANSI256
 	reduceMotion := env("SANDBOX_REDUCE_MOTION") == "1" || env("NO_COLOR") != ""
 
 	c := Caps{
 		IsGhostty:    isGhostty,
+		IsITerm2:     strings.EqualFold(termProgram, "iTerm.app"),
+		IsWezTerm:    strings.EqualFold(termProgram, "WezTerm"),
 		TrueColor:    trueColor,
 		ReduceMotion: reduceMotion,
 	}

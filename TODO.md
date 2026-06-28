@@ -1,5 +1,11 @@
 # TODO — running notes
 
+## Human added needs triage
+* automatically create worktrees? How to handle ensuring they are merged in and not accidentally "lost"? Since mutagen should sync from my laptop it can merge into "main" from my laptop it just shouldn't try to pull from remote?
+* Match claude codex ux, make it feel familiar to claude code users to make sure we can expose all of the necessary options/features/configs but make sure its unique enough for us to not cause confusion. There should already be a plan for this, if not lets create one
+* Consider KRO to wrap resources into our own "custom resource"? Does it support custom status/conditions?
+* Expose CLI as a go library to be consumed by another go package for backend and tui stuff? Or just drive via pre-built CLI for now?
+
 Forward-looking backlog. Completed-work history was pruned on 2026-06-24 into
 [`docs/archive/done-log-2026-06.md`](docs/archive/done-log-2026-06.md). The full
 verified review behind most items below is
@@ -21,6 +27,12 @@ line and move the detail to the archive.
 - [ ] **Dashboard sits on skeleton bars forever (no error) when the cluster is
   unreachable.** seed/watch/reconcile swallow List/Watch errors and `seeded`
   never flips → no actionable failure state. `model.go:832-858,1931-1941`.
+- [ ] **OSC 9;4 tab-progress is dropped by the v2 cell renderer** (same class as
+  the desktop-notification bug fixed 2026-06-28). It's still prepended to
+  `v.Content` in `app.go` `withTerminalSignals` instead of going out-of-band via
+  `tea.Raw`, so Ghostty never paints tab progress. Fix needs edge-detection
+  (emit a `tea.Raw` only on the aggregate-state transition, not every frame).
+  `internal/tui/dashboard/app.go` `withTerminalSignals`, `progressState()`.
 
 ## New-session startup speed (ordered by likely win)
 

@@ -57,19 +57,36 @@ type toastMsg struct {
 // toastTickMsg drives the toast slide-in animation and auto-dismiss.
 type toastTickMsg struct{}
 
-// notifyIfBackgroundAttention checks whether any session other than the
-// attached one just became waiting/needs-input and emits a toastMsg.
+// notifyIfBackgroundAttention emits at most one toastMsg for a background session
+// (one other than the attached one) that has just ENTERED an attention state
+// (waiting / needs-input). It is edge-triggered, not level-triggered: a session
+// is notified once per attention episode and not again until it leaves and
+// re-enters attention. Without this, every SSE event re-toasted a still-waiting
+// session (and re-fired its OS notification) the moment its 8s toast expired, and
+// ≥2 waiting sessions ping-ponged the toast on each event.
 func (m *Model) notifyIfBackgroundAttention(attached session.ID) tea.Cmd {
+	if m.notifiedAttention == nil {
+		m.notifiedAttention = make(map[session.ID]bool)
+	}
+	var cmd tea.Cmd
 	for _, s := range m.sessions {
-		if s.ID() == attached {
+		id := s.ID()
+		if id == attached {
 			continue
 		}
 		if s.DashStatus != StatusWaiting && s.DashStatus != StatusNeedsInput {
+			// Left attention — forget it so a later attention episode re-notifies.
+			delete(m.notifiedAttention, id)
 			continue
 		}
-		// Only toast once per session per attention state: if we already have
-		// a toast for it, skip.
-		if m.toast != nil && m.toast.sessionID == s.ID() {
+		if m.notifiedAttention[id] {
+			continue // already notified this episode; don't re-fire
+		}
+		// Mark every concurrently-waiting session seen (so they don't each toast in
+		// turn on the next event — ⌃G cycles through them), but surface only the
+		// first as a toast.
+		m.notifiedAttention[id] = true
+		if cmd != nil {
 			continue
 		}
 		note := ClientLabel(s.State.Backend) + " · " + filepathBaseLocal(s.State.ProjectPath)
@@ -79,18 +96,22 @@ func (m *Model) notifyIfBackgroundAttention(attached session.ID) tea.Cmd {
 		if s.DashStatus == StatusWaiting && s.PendingPermissionTool != "" {
 			note = "wants: " + s.PendingPermissionTool
 		}
-		return func() tea.Msg {
-			return toastMsg{id: s.ID(), title: s.Title, note: note, status: s.DashStatus}
-		}
+		toast := toastMsg{id: id, title: s.Title, note: note, status: s.DashStatus}
+		cmd = func() tea.Msg { return toast }
 	}
-	return nil
+	return cmd
 }
 
-// renderToast builds the toast string for the current frame. It slides in from
-// the right edge during the first few frames.
-func (m *Model) renderToast(w int) string {
+// renderToast builds the toast box and the column it should sit at for the
+// current frame (it slides in from the right edge during the first few frames).
+// The caller composites the box as a single layer at that column — see
+// App.withToast — so the whole multi-line box moves together. (Prepending spaces
+// to the box string would only indent line 0, shearing the box: its top border
+// would land at the right while the body and bottom border collapsed to column
+// 0.) Returns ("", 0) when there is no toast.
+func (m *Model) renderToast(w int) (string, int) {
 	if m.toast == nil {
-		return ""
+		return "", 0
 	}
 	t := m.toast
 	pulse := []string{"·", "•", "●", "•"}[m.spinnerFrame%4]
@@ -155,7 +176,7 @@ func (m *Model) renderToast(w int) string {
 	if x > w-1 {
 		x = w - 1
 	}
-	return lipgloss.NewStyle().Width(w).Render(strings.Repeat(" ", x) + box)
+	return box, x
 }
 
 // firstLineOf returns the first line of a multi-line string.

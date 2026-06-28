@@ -63,7 +63,8 @@ Starts a new turn. Request body:
   "resume": "turn-11",
   "allowedTools": ["Read", "Edit", "Bash"],
   "mode": "acceptEdits",
-  "model": "opus"
+  "model": "opus",
+  "effort": "high"
 }
 ```
 `prompt` (non-empty string) is required; the rest are optional. `mode` is the
@@ -74,7 +75,14 @@ SDK permission mode — one of `default`, `acceptEdits`, `plan`, or
 mode.) `model` is the per-turn model override (the in-session `/model` switch) —
 an id or alias like `opus`, `sonnet`, `haiku`, or a full id; it wins over the
 session default (`SANDBOX_MODEL`, set from `claude --model`), and an empty value
-falls back to that default and then the account default. Returns 200 with:
+falls back to that default and then the account default. `effort` is the per-turn
+reasoning-effort override (the in-session `/effort` switch) — one of `low`,
+`medium`, `high`, `xhigh`, or `max`; it maps to the SDK's `options.effort`. An
+empty or unrecognized value leaves effort unset (SDK adaptive-thinking default).
+Effort is supported only on Fable 5 / Opus 4.6+ / Sonnet 4.6 and is silently
+ignored (or downgraded) on other models. The TUI displays the `max` tier under
+the label "ultracode", but the wire value sent here is always the real SDK enum.
+Returns 200 with:
 ```json
 {
   "turnId": "turn-13"

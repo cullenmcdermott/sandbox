@@ -125,6 +125,11 @@ kind-up:
         kubectl -n agent-sessions apply -f dev/local/secret.local.yaml
         echo "applied dev/local/secret.local.yaml into agent-sessions"
     fi
+    # Provision the Claude OAuth token Secret (anthropic-credentials) from 1Password
+    # (op) or $CLAUDE_CODE_OAUTH_TOKEN — mirrors the ESO-provisioned Secret on a real
+    # cluster so `just dev` (claude) works without hand-maintaining secret.local.yaml.
+    # Non-fatal: a missing token just leaves the claude backend plumbing-only.
+    bash dev/local/claude-creds.sh ensure-secret || true
     printf '\033[32m%s\033[0m\n' "kind up: context kind-sandbox-local (KUBECONFIG=dev/local/.kubeconfig)"
 
 # Tear the local dev env down: delete the cluster (via ctlptl) and drop its local
@@ -259,6 +264,26 @@ dev-reset:
     kubectl delete pvc --all -n agent-sessions --ignore-not-found --wait=false || true
     kubectl delete jobs --all -n agent-sessions --ignore-not-found --wait=false || true
     printf '\033[32m%s\033[0m\n' "dev-reset: rogue sandboxes/PVCs/reaper jobs cleared (cluster kept)"
+
+# (Re)provision the Claude OAuth token Secret (anthropic-credentials) in the local
+# cluster from 1Password (op) or $CLAUDE_CODE_OAUTH_TOKEN. Idempotent — safe to
+# re-run after rotating the token, without a full `kind-up`. `just dev-claude-secret`.
+dev-claude-secret:
+    #!/usr/bin/env bash
+    [ -n "${FLOX_ENV:-}" ] || exec flox activate -- just dev-claude-secret
+    set -euo pipefail
+    export KUBECONFIG="$PWD/dev/local/.kubeconfig"
+    if ! kind get clusters 2>/dev/null | grep -qx sandbox-local; then
+        echo "no 'sandbox-local' cluster — run 'just dev-up' first" >&2; exit 1
+    fi
+    bash dev/local/claude-creds.sh ensure-secret
+
+# Report where the Claude OAuth token resolves from (1Password / env), redacted.
+# A debugging aid — does NOT touch the cluster. `just dev-claude-creds`.
+dev-claude-creds:
+    #!/usr/bin/env bash
+    [ -n "${FLOX_ENV:-}" ] || exec flox activate -- just dev-claude-creds
+    bash dev/local/claude-creds.sh status
 
 # Full node reset: delete the KIND cluster (via ctlptl). Alias of kind-down.
 dev-nuke: kind-down

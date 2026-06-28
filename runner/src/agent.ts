@@ -30,6 +30,7 @@ export interface Agent {
     allowedTools: string[] | undefined,
     mode: string | undefined,
     model: string | undefined,
+    effort: string | undefined,
     abort: AbortController,
   ): Promise<void>;
 }

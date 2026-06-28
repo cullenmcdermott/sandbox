@@ -245,6 +245,35 @@ func TestTurnInputModeJSON(t *testing.T) {
 	}
 }
 
+func TestTurnInputEffortJSON(t *testing.T) {
+	// Effort marshals to the "effort" key and round-trips. The wire value is the
+	// real SDK enum ("max" for the TUI's "ultracode" label).
+	in := TurnInput{Prompt: "hi", Effort: "max"}
+	data, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if got := string(data); !strings.Contains(got, `"effort":"max"`) {
+		t.Errorf("expected effort key in %s", got)
+	}
+	var decoded TurnInput
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if decoded.Effort != "max" {
+		t.Errorf("effort: got %q, want max", decoded.Effort)
+	}
+
+	// Empty effort is omitted (default path => runner leaves options.effort unset).
+	data, err = json.Marshal(TurnInput{Prompt: "hi"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(data), "effort") {
+		t.Errorf("empty effort should be omitted, got %s", data)
+	}
+}
+
 func TestWorkspaceStatusPayloadRoundTrip(t *testing.T) {
 	p := WorkspaceStatusPayload{Branch: "main", Dirty: true, Ahead: 2, Behind: 1}
 	data, err := json.Marshal(p)

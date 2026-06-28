@@ -5,6 +5,42 @@ import (
 	"testing"
 )
 
+func TestNotifyString(t *testing.T) {
+	// Ghostty → OSC 777 with title + body.
+	if got := NotifyString(Caps{IsGhostty: true}, "sess", "wants: Bash"); got != "\x1b]777;notify;sess;wants: Bash\x07" {
+		t.Fatalf("ghostty: got %q", got)
+	}
+	// iTerm2 / WezTerm → OSC 9, title and body joined.
+	for _, c := range []Caps{{IsITerm2: true}, {IsWezTerm: true}} {
+		got := NotifyString(c, "sess", "claude")
+		if got != "\x1b]9;sess — claude\x07" {
+			t.Fatalf("osc9 terminal %+v: got %q", c, got)
+		}
+	}
+	// Untargetable terminal → "".
+	if got := NotifyString(Caps{}, "sess", "body"); got != "" {
+		t.Fatalf("unknown terminal must yield empty, got %q", got)
+	}
+	// Empty title → "" even on a capable terminal (nothing to notify).
+	if got := NotifyString(Caps{IsGhostty: true}, "", "body"); got != "" {
+		t.Fatalf("empty title must yield empty, got %q", got)
+	}
+}
+
+func TestOSC9Notify(t *testing.T) {
+	if got := OSC9Notify("hello"); got != "\x1b]9;hello\x07" {
+		t.Fatalf("got %q", got)
+	}
+	if got := OSC9Notify(""); got != "" {
+		t.Fatalf("empty message must yield empty, got %q", got)
+	}
+	// Semicolons/escapes are stripped so a data-controlled message can't inject
+	// extra OSC fields.
+	if got := OSC9Notify("a;b\x1bc"); got != "\x1b]9;abc\x07" {
+		t.Fatalf("sanitisation failed, got %q", got)
+	}
+}
+
 func TestOSCProgress(t *testing.T) {
 	for _, tc := range []struct {
 		p    Progress

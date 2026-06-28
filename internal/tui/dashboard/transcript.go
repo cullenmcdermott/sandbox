@@ -258,6 +258,13 @@ type TranscriptModel struct {
 	// on the next session.started.
 	defaultModel string
 
+	// effortOverride is the in-session /effort selection, sent as
+	// TurnInput.Effort on the next turn (empty => the SDK's adaptive-thinking
+	// default). Stores the SDK wire value ("max" for the "ultracode" label), not
+	// the display label. In-memory per-attach, NOT parked/snapshotted — same
+	// lifecycle as modelOverride.
+	effortOverride string
+
 	// lastKeyAt is the time of the previous key event, used to gate the inline
 	// permission box against type-ahead: an answer key (a/d/enter) only resolves
 	// once input has been quiet for permissionGraceQuiet since both the box
@@ -1818,7 +1825,7 @@ func (m *TranscriptModel) submitText(text string) tea.Cmd {
 	m.dropTrailingFooter() // A2.2: only the latest turn keeps a footer
 	m.appendBlock(blockUser, text)
 	m.beginTurn()
-	return tea.Batch(startTurnCmd(m.client, m.ref, text, m.mode.apiValue(), m.modelOverride), m.maybeStartWorking())
+	return tea.Batch(startTurnCmd(m.client, m.ref, text, m.mode.apiValue(), m.modelOverride, m.effortOverride), m.maybeStartWorking())
 }
 
 // dropTrailingFooter removes the previous turn's footer block when a new turn
@@ -2632,11 +2639,11 @@ func (m *TranscriptModel) doReconnect() tea.Msg {
 
 // startTurnCmd posts a new turn and surfaces a synchronous start failure; the
 // turn itself streams back over SSE.
-func startTurnCmd(client RunnerClient, ref session.Ref, prompt, mode, model string) tea.Cmd {
+func startTurnCmd(client RunnerClient, ref session.Ref, prompt, mode, model, effort string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if _, err := client.StartTurn(ctx, ref, session.TurnInput{Prompt: prompt, Mode: mode, Model: model}); err != nil {
+		if _, err := client.StartTurn(ctx, ref, session.TurnInput{Prompt: prompt, Mode: mode, Model: model, Effort: effort}); err != nil {
 			return turnErrMsg{err: err}
 		}
 		return nil

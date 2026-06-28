@@ -94,14 +94,6 @@ cluster with an enforcing CNI.
 
 ## (b) Provider keys
 
-Provider credentials are optional and supplied via gitignored Secrets:
-
-```bash
-cp dev/local/secret-template.yaml dev/local/secret.local.yaml
-# edit secret.local.yaml — fill in the keys you have (all keys optional)
-KUBECONFIG=dev/local/.kubeconfig kubectl apply -f dev/local/secret.local.yaml
-```
-
 The two Secrets (both in `agent-sessions`) and their env mappings:
 
 - `opencode-credentials`: `anthropic-api-key`→`ANTHROPIC_API_KEY`,
@@ -110,6 +102,35 @@ The two Secrets (both in `agent-sessions`) and their env mappings:
 
 The session pod starts before these exist; missing keys just leave the env var
 unset.
+
+### Claude OAuth token — auto-provisioned
+
+`just kind-up` (and `just dev`) auto-populates the `anthropic-credentials` Secret
+via `dev/local/claude-creds.sh`, mirroring the External-Secrets-Operator wiring a
+real cluster has. The token is resolved, first hit wins:
+
+1. **1Password** — `op read op://k8s-secrets/anthropic-credentials/api-key`
+   (override the ref with `SANDBOX_CLAUDE_OP_REF`). Requires the `op` CLI signed in.
+2. **host env** — `$CLAUDE_CODE_OAUTH_TOKEN`.
+
+If neither resolves, the claude backend stays plumbing-only (the pod still starts)
+and you get a warning. Re-provision after rotating the token without a full
+`kind-up` via **`just dev-claude-secret`**; check where your token resolves from
+(redacted) with **`just dev-claude-creds`**. On `flox activate` a non-invasive
+check warns if no token source is available (it never reads the secret, so it
+won't trigger a 1Password unlock prompt).
+
+### Other keys — manual overlay (optional)
+
+The opencode provider keys (and an explicit `anthropic-credentials` override) come
+from a gitignored Secret overlay; `kind-up` applies it before the auto-provision
+step, so an op/env token still takes precedence for the Claude token:
+
+```bash
+cp dev/local/secret-template.yaml dev/local/secret.local.yaml
+# edit secret.local.yaml — fill in the keys you have (all keys optional)
+KUBECONFIG=dev/local/.kubeconfig kubectl apply -f dev/local/secret.local.yaml
+```
 
 ## (c) Plumbing-only vs full-turn
 
@@ -132,6 +153,13 @@ recipes/tests guard on the context being exactly `kind-sandbox-local` before doi
 anything destructive. The Tiltfile pins `allow_k8s_contexts('kind-sandbox-local')`.
 This makes it impossible for the local dev env to act against a remote cluster, even if
 your ambient `~/.kube/config` points elsewhere.
+
+`flox activate` exports `KUBECONFIG=$FLOX_ENV_PROJECT/dev/local/.kubeconfig` (see
+the `[hook]` in `.flox/env/manifest.toml`), so even a bare `kubectl get pods` or
+`go run ./cmd/sandbox …` inside the env targets the local cluster by default —
+never a remote one by accident. The file is created by `just kind-up`; before then
+`kubectl` just sees an empty config. To talk to another cluster on purpose,
+override per-command: `KUBECONFIG=~/.kube/config kubectl …`.
 
 ## Regenerating the vendored controller manifest
 

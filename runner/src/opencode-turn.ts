@@ -491,6 +491,9 @@ async function runTurn(
   _allowedTools: string[] | undefined,
   _mode: string | undefined,
   model: string | undefined,
+  // opencode exposes no reasoning-effort knob, so the per-turn /effort override
+  // is a no-op here; the param exists only to satisfy the Agent.runTurn seam.
+  _effort: string | undefined,
   abort: AbortController,
 ): Promise<void> {
   const reg = getRegistry();

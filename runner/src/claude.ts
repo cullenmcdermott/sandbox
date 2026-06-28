@@ -15,7 +15,7 @@
 // Events are persisted (appendEvent) BEFORE being streamed, so SSE replay is
 // consistent with the live tail.
 
-import { query, type Options, type PermissionMode, type Query, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import { query, type EffortLevel, type Options, type PermissionMode, type Query, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { BetaContentBlock, BetaTextBlock } from '@anthropic-ai/sdk/resources/beta/messages/messages';
 import type { PermissionResult, HookCallback, HookInput, SyncHookJSONOutput } from '@anthropic-ai/claude-agent-sdk';
 import { mkdirSync } from 'node:fs';
@@ -93,6 +93,27 @@ export function resolveModel(
   sessionModel: string | undefined,
 ): string | undefined {
   return turnModel || sessionModel || undefined;
+}
+
+// The SDK EffortLevel enum (sdk.d.ts EffortLevel). "max" is the genuine top
+// tier; the TUI surfaces it under the label "ultracode".
+const VALID_EFFORTS: ReadonlySet<string> = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+
+/**
+ * Resolve a per-turn effort string (the in-session /effort switch,
+ * TurnRequestBody.effort) to a typed SDK EffortLevel, with a session default
+ * fallback that mirrors resolveModel's precedence. Returns undefined — so the
+ * caller leaves Options.effort unset (SDK adaptive thinking) — for an empty
+ * value OR any string outside the enum. Narrowing here (not a raw cast) is what
+ * keeps an invalid value from ever reaching the typed Options.effort and is
+ * required for `tsc --noEmit` to accept the assignment.
+ */
+export function resolveEffort(
+  turnEffort: string | undefined,
+  sessionEffort?: string | undefined,
+): EffortLevel | undefined {
+  const v = turnEffort || sessionEffort;
+  return v && VALID_EFFORTS.has(v) ? (v as EffortLevel) : undefined;
 }
 
 /**
@@ -174,6 +195,7 @@ export function buildOptions(
   allowedToolsOverride: string[] | undefined,
   mode: string | undefined,
   model: string | undefined,
+  effort: string | undefined,
   abort: AbortController,
 ): Options {
   const reg = getRegistry();
@@ -245,6 +267,14 @@ export function buildOptions(
   // "opus"/"sonnet"/"haiku" to the latest model the account can use.
   const resolvedModel = resolveModel(model, cfg.model);
   if (resolvedModel) options.model = resolvedModel;
+
+  // Effort selection: a per-turn override (the in-session /effort switch) sets
+  // the SDK reasoning-effort level; an empty/unknown value leaves options.effort
+  // unset so the SDK uses its adaptive-thinking default. resolveEffort narrows
+  // to the typed EffortLevel (a raw string fails tsc). The SDK silently drops or
+  // downgrades the level on models without that effort tier.
+  const resolvedEffort = resolveEffort(effort);
+  if (resolvedEffort) options.effort = resolvedEffort;
 
   // Resume defaulting (Workstream B): a client-supplied resume id wins;
   // otherwise default to the persisted Claude session head so every turn after
@@ -490,6 +520,7 @@ export async function runTurn(
   allowedToolsOverride: string[] | undefined,
   mode: string | undefined,
   model: string | undefined,
+  effort: string | undefined,
   abort: AbortController,
 ): Promise<void> {
   const reg = getRegistry();
@@ -509,7 +540,7 @@ export async function runTurn(
 
   try {
     for (;;) {
-      const options = buildOptions(cfg, turnId, clientResume, allowedToolsOverride, mode, model, abort);
+      const options = buildOptions(cfg, turnId, clientResume, allowedToolsOverride, mode, model, effort, abort);
       const usedResume = options.resume;
       const q: Query = query({ prompt, options });
       let rateLimitsFetched = false;
