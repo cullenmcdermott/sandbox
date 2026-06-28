@@ -1,10 +1,11 @@
 # TODO — running notes
 
 ## Human added needs triage
-* automatically create worktrees? How to handle ensuring they are merged in and not accidentally "lost"? Since mutagen should sync from my laptop it can merge into "main" from my laptop it just shouldn't try to pull from remote?
+* automatically create worktrees? How to handle ensuring they are merged in and not accidentally "lost"? Since mutagen should sync from my laptop it can merge into "main" from my laptop it just shouldn't try to pull from remote? TUI creates a work tree as part of creating a container. Agent should know to clean it up/give it a proper name before turning it into a pushable branch to be pushed by a human
 * Match claude codex ux, make it feel familiar to claude code users to make sure we can expose all of the necessary options/features/configs but make sure its unique enough for us to not cause confusion. There should already be a plan for this, if not lets create one
 * Consider KRO to wrap resources into our own "custom resource"? Does it support custom status/conditions?
 * Expose CLI as a go library to be consumed by another go package for backend and tui stuff? Or just drive via pre-built CLI for now?
+* why is hall.kvitch.dev not in use? Should we just remove that? Are we building our images in tilt and are they then automatically loaded into kind? 
 
 Forward-looking backlog. Completed-work history was pruned on 2026-06-24 into
 [`docs/archive/done-log-2026-06.md`](docs/archive/done-log-2026-06.md). The full
