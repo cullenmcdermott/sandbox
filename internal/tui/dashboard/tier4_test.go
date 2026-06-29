@@ -104,6 +104,32 @@ func TestConnectingStepperDetail(t *testing.T) {
 	}
 }
 
+// Phase 2 (cold-start splash): the pod-startup phase reported out of the connect
+// path under StageResume renders as a sub-detail on the "Starting pod" stage, so
+// a cold pod schedule + image pull reads as live progress ("Starting pod —
+// pulling image") instead of a frozen step. The backend emits the phase string
+// ("scheduling"/"pulling image"/"starting") via onStage(StageResume, detail).
+func TestConnectingStepperPodPhase(t *testing.T) {
+	t.Setenv("SANDBOX_REDUCE_MOTION", "1")
+	out := connectingStepper(StageResume, 0, "pulling image", nil)
+	var resumeLine string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, connectStageLabel(StageResume)) {
+			resumeLine = line
+		}
+	}
+	if resumeLine == "" {
+		t.Fatalf("StageResume line absent from stepper:\n%s", out)
+	}
+	if !strings.Contains(resumeLine, "pulling image") {
+		t.Fatalf("StageResume line missing pod phase detail: %q", resumeLine)
+	}
+	// The detail rides the "Starting pod" label, not a different stage.
+	if connectStageLabel(StageResume) != "Starting pod" {
+		t.Fatalf("StageResume label drifted from %q", "Starting pod")
+	}
+}
+
 // ORACLE: for an opencode connect at StageOpencode, the stepper shows the
 // "Starting opencode" step AND marks the immediately-prior StageSync done (✓) —
 // proving the checklist does not regress (the bug where StageOpencode sorted

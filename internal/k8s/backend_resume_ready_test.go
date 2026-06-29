@@ -63,7 +63,7 @@ func TestWaitForPodReadyIgnoresTerminatingPod(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
-	err := b.waitForPodReady(ctx, session.Ref{ID: "sess-resume"})
+	err := b.waitForPodReady(ctx, session.Ref{ID: "sess-resume"}, nil)
 	if err == nil {
 		t.Fatal("waitForPodReady reported ready against a terminating pod; it must keep waiting")
 	}
@@ -85,7 +85,7 @@ func TestWaitForPodReadyAcceptsNewNonTerminatingPod(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if err := b.waitForPodReady(ctx, session.Ref{ID: "sess-resume2"}); err != nil {
+	if err := b.waitForPodReady(ctx, session.Ref{ID: "sess-resume2"}, nil); err != nil {
 		t.Fatalf("waitForPodReady should accept the new non-terminating ready pod: %v", err)
 	}
 }

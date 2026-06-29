@@ -12,6 +12,7 @@ import { appendEvent, attachSseClient, lastSeq, sseTotalClientCount, MAX_SSE_CLI
 import { getRegistry, loadConfig, toStatusResponse } from './session.js';
 import { PORT, type PermissionRequestBody, type TurnRequestBody, type TurnResponse, type ExecRequestBody } from './types.js';
 import { selectAgent, type Agent } from './agent.js';
+import { opencodeTurnClient } from './opencode-turn.js';
 import { runExec } from './exec.js';
 import { appendAudit } from './audit.js';
 import { bashCommandBlocked } from './guards.js';
@@ -191,7 +192,22 @@ async function handle(req: IncomingMessage, res: ServerResponse, cfg: ReturnType
     if (!turn && reg.activeTurns.size === 1) {
       [[turnId, turn]] = reg.activeTurns.entries();
     }
-    if (!turn) return notFound(res, 'turn not found or not active');
+    if (!turn) {
+      // Interactive opencode turns don't register in reg.activeTurns — the live
+      // turn runs inside `opencode serve`, driven by the attached client, and is
+      // only mirrored by the passive observer (which sets last_turn_id). So
+      // `sandbox cancel` lands here with no matching runner turn; abort the
+      // opencode session directly instead of 404ing (Phase 4). The observer's next
+      // session.idle then emits turn.completed.
+      if (cfg.backend === 'opencode-server' && reg.state.opencode_session_id) {
+        const ocId = reg.state.opencode_session_id;
+        void opencodeTurnClient().session.abort({ path: { id: ocId } }).catch(() => {});
+        const interruptedTurn = turnId || reg.state.last_turn_id;
+        appendEvent(sid, interruptedTurn || undefined, 'turn.interrupted', { reason: 'client interrupt' });
+        return ok(res, { turnId: interruptedTurn }, 200);
+      }
+      return notFound(res, 'turn not found or not active');
+    }
     turn.abort.abort();
     appendEvent(sid, turnId, 'turn.interrupted', { reason: 'client interrupt' });
     return ok(res, { turnId }, 200);

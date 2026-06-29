@@ -28,9 +28,11 @@
   direction: enable `tea.MouseModeCellMotion` on `ScreenExternal` too (so wheel events arrive as `MouseWheelMsg`,
   not arrow keys), then translate wheel events into opencode's scroll key (`PageUp`/`PageDown` most likely).
   Requires verifying what key opencode actually uses to scroll its transcript view before committing to a key.
-  **Deferred (Phase 3, item 3):** the OSC + sync-statusline parts of Phase 3 landed; this
-  wheel-scroll/clickable-spots fix is grouped with the live-cluster session because it needs a
-  live opencode pane to confirm the scroll key. See `docs/ux-polish-plan.md` Phase 3.
+  **DONE (Phase 3, item 3):** enabled `tea.MouseModeCellMotion` on `ScreenExternal`.
+  A live PTY capture confirmed opencode enables mouse tracking itself (DECSET
+  1000/1002/1003 + SGR 1006), so `handleMouse` forwarding real SGR mouse lets
+  opencode's OWN wheel-scroll + clicks work — no manual `PageUp`/`PageDown`
+  translation needed. Tests in `phase3_item3_test.go`.
 Why does jst dev start a claude sessinon automatically?
 
 Forward-looking backlog. Completed-work history was pruned on 2026-06-24 into
@@ -83,19 +85,21 @@ line and move the detail to the archive.
   is load-bearing, create the 7 config/transcript syncs lazily); the two
   serial port-forwards (HTTP+SSH). `backend.go:226-260`, `sync.go:131-150`,
   `portforward.go:47`.
-- [ ] **Tighten `waitForPodReady` poll 2s→~500ms-1s** and surface pod-phase detail
-  to the connect stepper (it has full phase visibility today, reports nothing).
-  `backend.go:516-531`.
+- [~] **Tighten `waitForPodReady` poll 2s→~500ms-1s** and surface pod-phase detail
+  to the connect stepper. Pod-phase detail DONE (Phase 2): `waitForPodReady` now
+  takes an `onPhase(detail)` callback (`podPhaseDetail` classifier) reported under
+  StageResume. Poll-interval tightening still TODO (deferred perf, out of UX scope).
 - [ ] Defer/deprioritize `ensureReaper` and the launch-burst observer connects off
   the foreground connect path; drop the redundant connect-time Status Get +
   re-`ensureSSHKey` on the freshly-created path. `connect.go:93,144,184`.
 
 ## UX / communication
 
-- [ ] **Cold start shows a blank, frozen, TUI-less terminal** during pod
-  schedule + image pull (`sandbox claude`/`opencode`). Give it a TUI splash with
-  per-phase detail + elapsed timer (the team did this for SYNC/RECONNECT but not
-  the create/resume stage). `claude_remote.go:156-189`, `backend.go:516-531`.
+- [x] **Cold start shows a blank, frozen, TUI-less terminal** during pod
+  schedule + image pull. DONE + live-verified (Phase 2): the pod-ready wait moved
+  out of the pre-TUI `backend.Start` into the connect path (`establish`), so the
+  animated splash (per-phase detail `Starting pod — scheduling`/`pulling image`/
+  `starting` + elapsed timer) is already on screen during schedule + image pull.
 - [x] Connect/create splash has no elapsed timer (reconnect header does). Fixed
   (Phase 2): `App.connectStartedAt` rendered on the `connectingView` title via the
   `roundDur` reconnect idiom. Test in `phase2_ux_test.go`.
@@ -134,18 +138,22 @@ and should be the metrics source for every backend** — incl. external-pane one
 via a passive observer connection to the agent's event stream. See
 `docs/codex-integration-plan.md` "Parity bar".
 
-- [ ] **Runner-as-metrics-observer for external-pane backends.** Make the runner
-  subscribe to `opencode serve`'s event stream (and, for codex, the app-server
-  thread notifications) and emit normalized usage/tool/turn events → SSE → the
-  statusline gets ctx%/cost/recent-tools/live-status for opencode + codex like
-  claude. This is the real fix for the "permanently `StatusIdle`, no metrics" gap,
-  not accepting it as a PTY-model tradeoff. `session.go:427-529`, `external_pane.go`.
+- [x] **Runner-as-metrics-observer for external-pane backends.** DONE + live-verified
+  for opencode (Phase 4): `runner/src/opencode-observer.ts` subscribes to `opencode
+  serve`'s event stream always-on and emits normalized turn/usage/tool/title events
+  → SSE → the list row + external-pane statusline get live status/ctx%/cost/title.
+  No schema change. Codex remains TODO (same pattern, app-server thread
+  notifications). Verified in events.db: a real interactive turn produced the full
+  turn-1 sequence; `external_pane.go` statusRow now reads the live read-model.
 - [ ] OpenCode in-agent tool use is **neither audited nor gated** by the runner's
   Bash blocklist (Claude is). Security-relevant. `runner/src/server.ts:225-247`,
   `guards.ts`.
-- [ ] CLI `opencode` has no `--model` flag and no initial-prompt arg; `cancel` and
-  the suspend active-turn warning are inert for opencode. `claude_remote.go:23-71`,
-  `commands.go:52-61`.
+- [~] CLI `opencode` has no `--model` flag and no initial-prompt arg; `cancel` and
+  the suspend active-turn warning are inert for opencode. `cancel` now WORKS
+  (Phase 4): the observer sets `last_turn_id` and the interrupt route gained an
+  opencode-abort fallback (`server.ts`) — live-verified (`sandbox cancel` emits
+  `turn.interrupted`, was a 404 no-op). `--model`/initial-prompt arg + the suspend
+  warning's monotonic-`last_turn_id` false-positive still TODO. `claude_remote.go:23-71`.
 - [ ] Verify detach (Ctrl+]) + surrounding chrome behave identically for every
   backend's external pane.
 - [x] **opencode in-turn missing-session recovery (claude parity).** SUBSUMED by the

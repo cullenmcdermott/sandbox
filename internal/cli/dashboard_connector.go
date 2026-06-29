@@ -128,11 +128,12 @@ func newDashboardCreator(backend *k8s.Backend, runnerImage, reaperImage string) 
 			return dashboard.CreateResult{}, err
 		}
 
-		if err := backend.Start(ctx, ref); err != nil {
-			return dashboard.CreateResult{}, fmt.Errorf("start session: %w", err)
-		}
-
-		onStage(dashboard.StageResume, "")
+		// Pod readiness is awaited inside sc.connect (sessionConnector.establish),
+		// which reports the live pod phase under StageResume — so the new-session
+		// connect splash animates through scheduling → pulling image → starting
+		// rather than this path blocking on backend.Start before any progress shows
+		// (Phase 2). The Sandbox was just provisioned with replicas=1, so the pod is
+		// already starting.
 		sc := &sessionConnector{
 			backend:     backend,
 			ref:         ref,

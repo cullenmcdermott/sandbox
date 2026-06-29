@@ -154,7 +154,10 @@ func runStartSession(cmd *cobra.Command, backendName, prompt, runnerImage, reape
 
 	ctx := cmd.Context()
 
-	sid, ref, projectPath, err := provisionSession(ctx, backend, backendName, runnerImage, model)
+	// ref is intentionally discarded: the pod-ready wait (and thus the only former
+	// use of ref here, backend.Start) now lives in the dashboard connect path, which
+	// re-derives the Ref from the session id. We only need sid + projectPath below.
+	sid, _, projectPath, err := provisionSession(ctx, backend, backendName, runnerImage, model)
 	if err != nil {
 		return err
 	}
@@ -163,10 +166,12 @@ func runStartSession(cmd *cobra.Command, backendName, prompt, runnerImage, reape
 	// the `rename` command, so a custom name wins over the runner auto title.
 	applyCreateName(indexTitleStore{}, sid, name)
 
-	// Wait for pod ready.
-	if err := backend.Start(ctx, ref); err != nil {
-		return fmt.Errorf("start session: %w", err)
-	}
+	// Do NOT block on pod readiness here — that wait now happens inside the
+	// dashboard's connect path (sessionConnector.establish), so the animated
+	// connect splash (pod phase + elapsed timer) is already on screen during the
+	// schedule + image-pull instead of a frozen terminal before the TUI draws
+	// (Phase 2). The provisioned Sandbox is created with replicas=1, so the pod is
+	// already starting by the time RunAttached's initial attach reaches the wait.
 
 	// Launch the command center attached straight to this session. The
 	// dashboard's Connector owns the port-forward + client + reconnect, and

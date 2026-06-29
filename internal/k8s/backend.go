@@ -268,7 +268,17 @@ func (b *Backend) CreateSession(ctx context.Context, spec session.Spec) (session
 
 // Start waits for the session pod to be running and ready.
 func (b *Backend) Start(ctx context.Context, ref session.Ref) error {
-	return b.waitForPodReady(ctx, ref)
+	return b.waitForPodReady(ctx, ref, nil)
+}
+
+// StartWithProgress is Start with a callback invoked as the pod moves through its
+// startup phases — "scheduling" → "pulling image" → "starting" — so a caller can
+// animate a connect splash instead of blocking on a silent, frozen terminal while
+// the node schedules the pod and pulls the runner image (Phase 2). onPhase fires
+// only when the phase string changes (never with ""), and may be nil — in which
+// case this is exactly Start.
+func (b *Backend) StartWithProgress(ctx context.Context, ref session.Ref, onPhase func(detail string)) error {
+	return b.waitForPodReady(ctx, ref, onPhase)
 }
 
 // Exec runs a command in the session pod's runner container, streaming the
@@ -356,7 +366,7 @@ func (b *Backend) Resume(ctx context.Context, ref session.Ref) error {
 	if err := b.setReplicas(ctx, ref, 1); err != nil {
 		return err
 	}
-	return b.waitForPodReady(ctx, ref)
+	return b.waitForPodReady(ctx, ref, nil)
 }
 
 // Destroy deletes the Sandbox, PVC and per-session Secret. Irreversible.
@@ -513,7 +523,19 @@ func (b *Backend) setReplicas(ctx context.Context, ref session.Ref, replicas int
 // config, crash loop) so a broken runner image surfaces a clear message instead
 // of polling silently until the caller's deadline / forever (RV: `sandbox
 // claude` could hang indefinitely with zero feedback on an ImagePullBackOff pod).
-func (b *Backend) waitForPodReady(ctx context.Context, ref session.Ref) error {
+func (b *Backend) waitForPodReady(ctx context.Context, ref session.Ref, onPhase func(detail string)) error {
+	var lastDetail string
+	report := func(pod *corev1.Pod) {
+		if onPhase == nil {
+			return
+		}
+		// Only fire on a phase change so the connect splash channel isn't spammed
+		// every poll; "" (pod ready) reports nothing — the caller advances stages.
+		if d := podPhaseDetail(pod); d != "" && d != lastDetail {
+			lastDetail = d
+			onPhase(d)
+		}
+	}
 	return wait.PollUntilContextCancel(ctx, 2*time.Second, true, func(ctx context.Context) (bool, error) {
 		sb, err := b.agents.AgentsV1alpha1().Sandboxes(b.namespace).Get(ctx, string(ref.ID), metav1.GetOptions{})
 		if err != nil {
@@ -521,6 +543,7 @@ func (b *Backend) waitForPodReady(ctx context.Context, ref session.Ref) error {
 		}
 		pod, err := b.getPodForSandbox(ctx, sb)
 		if err != nil || pod == nil {
+			report(nil) // no pod yet → "scheduling"
 			return false, nil
 		}
 		// A pod being deleted is NOT a valid ready target. On resume (replicas 0→1)
@@ -536,8 +559,50 @@ func (b *Backend) waitForPodReady(ctx context.Context, ref session.Ref) error {
 		if startErr := podStartupError(pod); startErr != nil {
 			return false, startErr
 		}
+		report(pod)
 		return isPodReady(pod), nil
 	})
+}
+
+// podPhaseDetail returns a short, user-facing description of where a pod is in
+// its startup lifecycle, for the connect splash: "scheduling" (no pod yet, or
+// scheduled to no node), "pulling image" (scheduled, kubelet creating
+// containers — the image pull dominates a cold start), or "starting" (containers
+// up, readiness not yet passing). It returns "" once the pod is Ready, since the
+// caller then advances past the start stage.
+func podPhaseDetail(pod *corev1.Pod) string {
+	if pod == nil {
+		return "scheduling"
+	}
+	if isPodReady(pod) {
+		return ""
+	}
+	switch pod.Status.Phase {
+	case corev1.PodPending:
+		if !podScheduled(pod) {
+			return "scheduling"
+		}
+		// Scheduled but not Running: kubelet is creating containers — pulling the
+		// image and mounting volumes. The pull is the slow part of a cold start.
+		return "pulling image"
+	default:
+		// Running (or any other non-ready phase): containers exist, the runner is
+		// still coming up to readiness.
+		return "starting"
+	}
+}
+
+// podScheduled reports whether the scheduler has bound the pod to a node — the
+// boundary between "scheduling" and "pulling image" in podPhaseDetail. It prefers
+// the PodScheduled condition and falls back to a set NodeName when the condition
+// has not been written yet on a very fresh pod.
+func podScheduled(pod *corev1.Pod) bool {
+	for _, c := range pod.Status.Conditions {
+		if c.Type == corev1.PodScheduled {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return pod.Spec.NodeName != ""
 }
 
 // fatalWaitingReasons are kubelet container "waiting" reasons that mean the pod

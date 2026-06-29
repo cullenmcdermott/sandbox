@@ -447,7 +447,7 @@ func TestAppExternalPaneEscIsForwardedNotDetached(t *testing.T) {
 func TestAppExternalPaneErrorSurfaces(t *testing.T) {
 	app := NewApp(nil, nil, nil)
 	app.screen = ScreenExternal
-	app.external = NewExternalPane(Session{Title: "proj"}, OpencodeCreds{})
+	app.external = NewExternalPane(Session{Title: "proj"}, OpencodeCreds{}, nil)
 
 	app.Update(externalPaneFinishedMsg{err: errors.New("opencode attach: boom")})
 	if app.screen != ScreenDashboard {

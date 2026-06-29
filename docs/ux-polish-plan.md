@@ -29,26 +29,42 @@ cluster-free code first, then do one focused live-cluster session that brings up
       `resolvePermission` returns `permResolveErrMsg` (`transcript.go`), `seedFailedMsg` +
       `m.seedErr` + retry/error state in `renderRowLines`, `esc`-dismiss in `handleKey`.
       7 regression tests in `phase1_ux_test.go`; full dashboard suite green.
-- [~] **Phase 2** — Cold-start splash + elapsed timer
-      — **elapsed timer DONE** (`feat/ux-polish`): `App.connectStartedAt` set in
-      `connectCmd`/`createCmd`, cleared on ready/failed/cancel, rendered on the
-      `connectingView` title via the `roundDur` reconnect idiom; tests in
-      `phase2_ux_test.go`. **Cold-start pod-phase splash still TODO** — it spans
-      `internal/k8s` + `internal/cli` and wants live-cluster verification, so it's
-      grouped with the cluster work (see the sequencing note below).
-- [~] **Phase 3** — Terminal-signal & sync visibility (OSC tab-progress, sync statusline, opencode wheel/click)
-      — **cluster-free items DONE** (`feat/ux-polish`): (1) OSC 9;4 tab-progress now
-      rides `tea.Raw` from `App.Update` on the session-aggregate transition,
-      edge-triggered against a new `App.lastProgress` (replaces `progressActive`);
-      `withTerminalSignals` keeps only the Kitty prepend; `lastProgress` resets while
-      `ScreenExternal` so progress re-asserts on return. (2) chat statusline gained a
-      file-sync segment (`TranscriptModel.syncStatus` + `syncSegment()`, ✓/⟳/⚠, coral
-      on stall) fed from the dashboard's warm-session poll. Tests: rewritten
-      `osc_signals_test.go` (Raw-emission three-state walk + external suppression +
-      non-vacuous View-splice guard) + new `phase3_ux_test.go`. **Item 3 (opencode
-      wheel-scroll/click) deferred** — needs a live opencode pane to confirm the
-      scroll key; grouped with the live-cluster session.
-- [ ] **Phase 4** — Runner metrics observer → opencode parity (title, live status, ctx%/cost, cancel/suspend)
+- [x] **Phase 2** — Cold-start splash + elapsed timer
+      — DONE + LIVE-VERIFIED (`feat/ux-polish`). Elapsed timer (prior) + cold-start
+      pod-phase splash: `waitForPodReady` gained an `onPhase(detail)` callback +
+      `podPhaseDetail` classifier (scheduling/pulling image/starting); `StartWithProgress`
+      keeps the `Start` interface stable; the pod-ready wait moved into
+      `sessionConnector.establish` (reports under StageResume) and the pre-TUI
+      `backend.Start` was dropped from `claude_remote.go` + `dashboard_connector.go` so the
+      connect splash owns the wait. `connectCmd`/`createCmd` aligned (StageCheck init, 300s
+      budget). Tests: `backend_phase_test.go` (classifier + callback), tier4 StageResume
+      detail. Live: `sandbox claude` shows `Starting pod — scheduling` + `(1s)` timer on a
+      cold node instead of a frozen terminal.
+- [x] **Phase 3** — Terminal-signal & sync visibility (OSC tab-progress, sync statusline, opencode wheel/click)
+      — DONE (`feat/ux-polish`). Items 1–2 (OSC 9;4 tab-progress via `tea.Raw`; chat
+      sync-status segment) landed prior. **Item 3 (opencode wheel-scroll + clickable spots)
+      now done**: `View()` enables `tea.MouseModeCellMotion` on `ScreenExternal` so the host
+      reports wheel/click to the app, where `handleMouse` re-encodes them as SGR mouse for
+      opencode's PTY. Verified live (PTY capture) that opencode itself enables mouse tracking
+      (DECSET 1000/1002/1003 + SGR 1006), so its NATIVE wheel-scroll + clicks take over once
+      the host stops mapping the wheel to arrow keys — no manual scroll-key translation
+      needed (simpler than the plan's hypothesis). Tests: `phase3_item3_test.go`
+      (wheel→SGR forward + View MouseMode guard).
+- [x] **Phase 4** — Runner metrics observer → opencode parity (title, live status, ctx%/cost, cancel/suspend)
+      — DONE + LIVE-VERIFIED (`feat/ux-polish`). `runner/src/opencode-observer.ts` is an
+      always-on passive subscriber to `opencode serve`'s event stream that frames each
+      interactive turn as a synthetic turn — reusing a fresh `createOpencodeTurnMapper` per
+      cycle (avoids forking the battle-tested mapper) — emitting
+      turn.started/session.started(model)/usage/message/turn.completed and setting
+      last_turn_id/model/status. **No schema change** (existing events carry every parity
+      surface; `just gen` clean). `server.ts` interrupt route gained an opencode-abort
+      fallback so `sandbox cancel` interrupts (was a 404 no-op). Go side: `ApplyRunnerEvent`
+      is already backend-agnostic (list-row parity needs NO change); the external pane got a
+      live-session handle + `DisplayTitle`/ctx%/cost/status in `statusRow` (`app.go`
+      keep-passive-SSE on opencode attach + `external_pane.go`). Tests: 7 observer unit +
+      3 Go; `tsc` + 118 runner tests + no gen drift. Live (events.db): a real interactive
+      turn produced the full `turn-1` sequence, `last_turn_id`+`model` set, status busy→idle;
+      `sandbox cancel` emitted `turn.interrupted`.
 - [x] **Phase 5** — Docs & README (accuracy + humanize + launch structure)
       — landed on `feat/ux-polish`: 3 accuracy fixes (each re-verified against code) —
       "start (or reuse)" → "start a **new** session" (`README.md` ×3 + the `claude`
@@ -60,7 +76,17 @@ cluster-free code first, then do one focused live-cluster session that brings up
       added launch sections (Why-use-this, Try-it-locally/kind, Install path,
       Status/maturity note, Contributing, hero demo-GIF slot). Verified by an
       adversarial multi-agent review (doc-accuracy + voice clean).
-- [ ] **Phase 6** — Real asciinema demos via local kind, embedded in the README
+- [~] **Phase 6** — Real asciinema demos via local kind, embedded in the README
+      — **pipeline proven, recording BLOCKED on the host mutagen daemon.** The harness
+      (PTY driver → asciicast v2 → `agg`) works and captured a clean Claude cold-start
+      splash→chat (`phase2.cast` → 51KB GIF). But the shared mutagen daemon has ~651
+      sync sessions accumulated (mixed with the maintainer's *real* cluster sessions, so
+      not safe to mass-prune), and that contention makes every new session connect crawl
+      through "Syncing files — scanning" (~75s), which is dead air no `--idle-time-limit`
+      can rescue. Clean turn-bearing demos need a healthy daemon first
+      (`mutagen sync terminate` the orphans whose pods are gone) — a maintainer call.
+      Sync-free shots (bare-`sandbox` dashboard) are still recordable. Demos are
+      outward-facing and want maintainer sign-off, so none are committed yet.
 
 Update the box, add a one-line "landed: <commit/summary>" under each phase as it
 completes, and move detail to `docs/archive/done-log-2026-06.md` per repo convention.

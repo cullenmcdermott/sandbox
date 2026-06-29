@@ -104,6 +104,22 @@ func (sc *sessionConnector) establish(ctx context.Context, onStage func(dashboar
 		}
 	}
 
+	// Block until the pod is actually running and ready before port-forwarding.
+	// For a freshly created session the pod is still scheduling and pulling the
+	// runner image; for a just-resumed one the new pod is booting. Reporting the
+	// phase under StageResume keeps the connect splash animating ("Starting pod —
+	// pulling image") with the elapsed timer, instead of the caller blocking on a
+	// frozen terminal before the TUI even draws (Phase 2). Observer streams
+	// (full=false) only attach to already-warm sessions, so they skip the explicit
+	// wait and lean on the runner /healthz poll below.
+	if full {
+		if err := sc.backend.StartWithProgress(ctx, sc.ref, func(detail string) {
+			onStage(dashboard.StageResume, detail)
+		}); err != nil {
+			return nil, fmt.Errorf("wait for pod: %w", err)
+		}
+	}
+
 	stage(dashboard.StageForward)
 	opencode := st.Backend == session.BackendOpenCode
 	var handles []session.ForwardHandle

@@ -428,9 +428,6 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.connectingFor = nil
 		a.connectErr = nil
 		a.connectStartedAt = time.Time{}
-		// Cancel the dashboard's background SSE for this session so we don't
-		// have two concurrent SSE clients to the same runner (B2).
-		a.dashboard.cancelLiveSSE(msg.sess.ID())
 		// opencode-server sessions don't have a Go transcript; the local
 		// `opencode attach` client owns the UI, embedded as a Tier-2 PTY pane.
 		if msg.opencodeCreds != nil {
@@ -440,12 +437,23 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.external.close()
 				a.external = nil
 			}
-			pane := NewExternalPane(msg.sess, *msg.opencodeCreds)
+			// Phase 4: do NOT cancel the background passive SSE here (unlike the
+			// transcript path below). The external pane is not a runner SSE client —
+			// `opencode attach` is a separate connection to `opencode serve` — so the
+			// passive stream is the ONLY thing feeding the runner observer's live
+			// status/title/ctx%/cost into the read-model the pane's status row reads.
+			// It's a passive stream, so it doesn't hold the idle reaper open.
+			id := msg.sess.ID()
+			pane := NewExternalPane(msg.sess, *msg.opencodeCreds, func() Session { return a.dashboard.sessionByID(id) })
 			pane.w, pane.h = a.width, a.height
 			a.external = pane
 			a.screen = ScreenExternal
 			return a, pane.Init()
 		}
+		// Cancel the dashboard's background SSE for this (claude) session so we
+		// don't run two concurrent SSE clients to the same runner: the transcript
+		// installs its own active client below (B2).
+		a.dashboard.cancelLiveSSE(msg.sess.ID())
 		// Reuse, in priority order: the preview already built (and cache-loaded)
 		// for this connect (Fix A); the warm model retained from a background
 		// stream; otherwise a fresh cold model. In every case we install the live
@@ -776,17 +784,24 @@ func (a *App) parkTranscript(m *TranscriptModel) {
 // badge/toasts stay visible around the edges.
 func (a *App) View() tea.View {
 	v := a.withTerminalSignals(a.withToast(a.screenView()))
-	// Force an opaque page background on every screen except the external PTY,
-	// which owns the terminal. Without this, unpainted cells (splash whitespace,
-	// overlay margins, preview gaps) show the terminal's own — possibly
-	// transparent — background and bleed through (T9). Unconditional by decision.
-	// Cell-motion mouse is enabled here too so the transcript scrollbar can be
-	// wheel-scrolled and click-dragged (T1); the external screen keeps its own
-	// terminal/mouse handling untouched. Trade-off: native click-drag text
-	// selection is replaced by app mouse capture (shift+drag still selects).
+	// Cell-motion mouse capture on EVERY screen, the external opencode PTY
+	// included. The embedded opencode TUI enables mouse tracking itself (verified
+	// live: it sets DECSET 1000/1002/1003 + SGR 1006), but those requests reach
+	// only the emulator — the HOST terminal's mouse mode is owned by this outer
+	// program. With MouseMode left off on ScreenExternal, the host (e.g. Ghostty)
+	// instead translated the wheel into arrow keys, which fell through to opencode
+	// as Up/Down and hijacked its prompt history. Capturing here routes
+	// wheel/click/drag to the app, where handleMouse re-encodes them as SGR mouse
+	// and writes them to opencode's PTY — so opencode's own wheel-scroll and
+	// clickable spots work (Phase 3 item 3). On the transcript it drives the
+	// scrollbar wheel/click-drag (T1). Trade-off: app mouse capture replaces native
+	// click-drag selection (shift+drag still selects).
+	v.MouseMode = tea.MouseModeCellMotion
+	// Opaque page background everywhere EXCEPT the external pane, which paints its
+	// own — otherwise unpainted cells (splash whitespace, overlay margins) bleed the
+	// terminal's possibly-transparent background through (T9).
 	if a.screen != ScreenExternal {
 		v.BackgroundColor = theme.Page
-		v.MouseMode = tea.MouseModeCellMotion
 	}
 	return v
 }
@@ -1035,7 +1050,11 @@ func (a *App) connectCmd(sess Session) tea.Cmd {
 			}
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	// 300s: this connect path now owns the cold-start pod wait (schedule + image
+	// pull) that used to run in a pre-TUI backend.Start, so an attach/resume onto a
+	// cold node must not be cut off mid-pull. Matches createCmd's budget for the
+	// equivalent provision+wait (Phase 2).
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	a.connectCancel = cancel
 	ch := make(chan connectUpdateMsg, 8)
 	a.connectCh = ch
@@ -1082,7 +1101,12 @@ func (a *App) createCmd(backend string) tea.Cmd {
 	a.connectCancel = cancel
 	ch := make(chan connectUpdateMsg, 8)
 	a.connectCh = ch
-	a.connectStage = StageResume
+	// The Creator's connect path (establish) emits StageCheck first, then advances
+	// to StageResume while the freshly-provisioned pod schedules + pulls its image.
+	// Initialize at StageCheck so the stepper doesn't briefly regress Resume→Check
+	// on the first emitted update (the pod wait moved out of a pre-connect
+	// backend.Start into establish — Phase 2).
+	a.connectStage = StageCheck
 	a.connectDetail = ""
 	a.connectStartedAt = nowFunc()
 	a.connectingOpencode = backend == session.BackendOpenCode

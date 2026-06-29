@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -38,6 +39,13 @@ import (
 type ExternalPane struct {
 	sess  Session
 	creds OpencodeCreds
+
+	// liveSession, when set, returns the current dashboard read-model Session for
+	// this pane's id — refreshed by the background passive SSE stream that the
+	// runner's opencode observer feeds (Phase 4). The status row reads it so live
+	// title/status/ctx%/cost track the in-pane turn, instead of the static snapshot
+	// captured at construction. nil in tests/standalone → falls back to p.sess.
+	liveSession func() Session
 
 	emu  *vt.Emulator
 	ptmx *os.File
@@ -76,8 +84,18 @@ type ptyOutputMsg struct {
 	chunk ptyChunk
 }
 
-func NewExternalPane(sess Session, creds OpencodeCreds) *ExternalPane {
-	return &ExternalPane{sess: sess, creds: creds, w: extDefaultW, h: extDefaultH, activeModes: make(map[ansi.DECMode]bool)}
+func NewExternalPane(sess Session, creds OpencodeCreds, liveSession func() Session) *ExternalPane {
+	return &ExternalPane{sess: sess, creds: creds, liveSession: liveSession, w: extDefaultW, h: extDefaultH, activeModes: make(map[ansi.DECMode]bool)}
+}
+
+// session returns the live read-model Session when a liveSession accessor is set
+// (the attached dashboard's, fed by the passive observer stream), else the static
+// snapshot captured at construction.
+func (p *ExternalPane) session() Session {
+	if p.liveSession != nil {
+		return p.liveSession()
+	}
+	return p.sess
 }
 
 // emuSize is the emulator/PTY size: full width, height minus the reserved
@@ -398,15 +416,36 @@ func (p *ExternalPane) View() tea.View {
 	return v
 }
 
-// statusRow is the reserved last line: session · client · model · detach hint.
+// statusRow is the reserved last line: title · opencode · model · live status ·
+// ctx% · cost, with a detach hint on the right. The live status/ctx%/cost come
+// from the runner's passive opencode observer (Phase 4) via the dashboard
+// read-model, reaching parity with the claude statusline's surfaced metrics.
 // (^] / ctrl+] only — esc is forwarded to opencode so its own overlays can use it.)
 func (p *ExternalPane) statusRow() string {
-	model := p.sess.Model
+	s := p.session()
+	model := s.Model
+	// Display the bare model id, dropping the "provider/" prefix the observer emits
+	// (e.g. "opencode/big-pickle" → "big-pickle").
+	if i := strings.LastIndex(model, "/"); i >= 0 && i+1 < len(model) {
+		model = model[i+1:]
+	}
 	if model == "" {
 		model = "opencode"
 	}
-	left := lipgloss.NewStyle().Foreground(theme.Charple).Bold(true).Render(p.sess.Title) +
-		lipgloss.NewStyle().Foreground(theme.TextMuted).Render(" · opencode · "+model)
+	muted := lipgloss.NewStyle().Foreground(theme.TextMuted)
+	left := lipgloss.NewStyle().Foreground(theme.Charple).Bold(true).Render(s.DisplayTitle()) +
+		muted.Render(" · opencode · "+model)
+
+	// Live metrics, surfaced only once the observer has reported them (a fresh
+	// pane with no turn yet shows just title/model, no empty "idle · ctx 0%").
+	segs := []string{s.DashStatus.Glyph() + " " + s.DashStatus.String()}
+	if pct := s.CtxPercent(); pct > 0 {
+		segs = append(segs, fmt.Sprintf("ctx %d%%", pct))
+	}
+	if s.TotalCostUSD > 0 {
+		segs = append(segs, fmt.Sprintf("$%.4f", s.TotalCostUSD))
+	}
+	left += muted.Render(" · " + strings.Join(segs, " · "))
 	right := kit.Kbd("^]", "dash")
 
 	w := p.w

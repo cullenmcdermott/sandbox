@@ -11,6 +11,7 @@ import { startServer } from './server.js';
 import { resolveWorkspaceDir } from './exec.js';
 import { startOpencodeSupervisor, type OpencodeSupervisor } from './opencode.js';
 import { warmupOpencodeSession } from './opencode-turn.js';
+import { startOpencodeObserver, type OpencodeObserver } from './opencode-observer.js';
 
 // Seconds before SIGKILL, reported in session.terminating so the TUI can show
 // an accurate countdown. Mirrors the pod's terminationGracePeriodSeconds.
@@ -20,6 +21,10 @@ let shuttingDown = false;
 
 // Set for opencode-server sessions: the supervised `opencode serve` child.
 let opencode: OpencodeSupervisor | null = null;
+
+// Set for opencode-server sessions: the always-on passive metrics observer that
+// turns interactive opencode turns into normalized SSE events (Phase 4).
+let observer: OpencodeObserver | null = null;
 
 /**
  * Graceful shutdown on SIGTERM (node drain/reboot, suspend, eviction). Warn
@@ -35,6 +40,9 @@ function shutdown(signal: string): void {
   // full grace window; we await its exit below (bounded by STOP_GRACE_MS) before
   // process.exit so we never orphan it (O5).
   const opencodeStopped = opencode ? opencode.stop() : Promise.resolve();
+  // Stop the passive observer too (closes its event-stream subscription) so its
+  // reconnect loop doesn't keep the process alive past the grace window.
+  const observerStopped = observer ? observer.stop() : Promise.resolve();
 
   let turnsAborted = 0;
   try {
@@ -55,7 +63,7 @@ function shutdown(signal: string): void {
   // Give SSE writes a moment to flush to attached clients, then wait for the
   // opencode child to exit (so it never outlives us) and close cleanly.
   setTimeout(() => {
-    void opencodeStopped.finally(() => {
+    void Promise.all([opencodeStopped, observerStopped]).finally(() => {
       closeEventLog();
       process.exit(0);
     });
@@ -106,6 +114,10 @@ function main(): void {
     // Pre-create the opencode session so `opencode attach --continue` finds a
     // valid session on first launch rather than falling back to a "dummy" ID.
     void warmupOpencodeSession();
+    // Start the always-on metrics observer so interactive opencode turns surface
+    // live status/title/cost/tools on the runner SSE channel (Phase 4). It owns
+    // its own reconnect loop, so it must not block boot on serve readiness.
+    observer = startOpencodeObserver();
   }
 
   startServer();
