@@ -12,7 +12,11 @@ and files stay local. It targets a cluster running the
 [agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) controller
 (v0.4.6).
 
-<!-- DEMO (hero, Phase 6): cold-start Claude turn → docs/demos/claude-turn.gif -->
+<p align="center">
+  <img src="docs/demos/claude-cold-start.gif" alt="Cold-starting a Claude session on Kubernetes from a local terminal: the pod schedules and the workspace syncs, then a streaming chat turn" width="820">
+  <br>
+  <sub><em>Cold-start a Claude session: the pod schedules + syncs (fast-forwarded), then you chat — all from your terminal.</em></sub>
+</p>
 
 > **Status — early.** The component boundaries and the auth/env wiring are
 > implemented and unit-tested, but the end-to-end file-sync path (Mutagen over
@@ -30,6 +34,16 @@ and files stay local. It targets a cluster running the
   attention to whichever one needs input next.
 - **A free laptop** — the cluster does the work; your machine just renders the UI
   and syncs files.
+
+Persistence in practice: suspend a session (the pod is torn down, the PVC kept),
+then re-attach — the pod cold-starts and the conversation picks up exactly where
+you left it, follow-up and all.
+
+<p align="center">
+  <img src="docs/demos/opencode-resume.gif" alt="Resuming a suspended OpenCode session: the pod cold-starts from the PVC and the prior conversation is restored, then a follow-up prompt continues it" width="820">
+  <br>
+  <sub><em>Resume a suspended OpenCode session: the cold pod restarts, the conversation is restored, and a follow-up just continues.</em></sub>
+</p>
 
 ## How it works
 

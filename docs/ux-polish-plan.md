@@ -76,17 +76,17 @@ cluster-free code first, then do one focused live-cluster session that brings up
       added launch sections (Why-use-this, Try-it-locally/kind, Install path,
       Status/maturity note, Contributing, hero demo-GIF slot). Verified by an
       adversarial multi-agent review (doc-accuracy + voice clean).
-- [~] **Phase 6** — Real asciinema demos via local kind, embedded in the README
-      — **pipeline proven, recording BLOCKED on the host mutagen daemon.** The harness
-      (PTY driver → asciicast v2 → `agg`) works and captured a clean Claude cold-start
-      splash→chat (`phase2.cast` → 51KB GIF). But the shared mutagen daemon has ~651
-      sync sessions accumulated (mixed with the maintainer's *real* cluster sessions, so
-      not safe to mass-prune), and that contention makes every new session connect crawl
-      through "Syncing files — scanning" (~75s), which is dead air no `--idle-time-limit`
-      can rescue. Clean turn-bearing demos need a healthy daemon first
-      (`mutagen sync terminate` the orphans whose pods are gone) — a maintainer call.
-      Sync-free shots (bare-`sandbox` dashboard) are still recordable. Demos are
-      outward-facing and want maintainer sign-off, so none are committed yet.
+- [x] **Phase 6** — Real asciinema demos via local kind, embedded in the README
+      — DONE. Two real, captioned demo GIFs recorded against the local kind cluster and
+      embedded in the README: a **Claude cold-start** hero (`docs/demos/claude-cold-start.gif`
+      — pod-phase splash → live-typed prompt → streaming reply) and an **OpenCode cold
+      resume** (`docs/demos/opencode-resume.gif` — suspend → re-attach cold-starts the pod →
+      conversation restored → follow-up continues). Pipeline (in scratchpad, reusable):
+      a PTY driver (`tui_driver.py`) records the cast + a marker timeline; `gif_annotate.py`
+      renders via agg (idle preserved so cast-time maps to frames), resamples per a
+      caption-spec (fast-forward the cold-start, hold the final answer), composites caption
+      strips, and optimizes with gifsicle. Frame-level QA by reading the per-frame PNGs.
+      Unblocked once the leaked mutagen daemon was pruned (660→25) + the GC landed.
 
 Update the box, add a one-line "landed: <commit/summary>" under each phase as it
 completes, and move detail to `docs/archive/done-log-2026-06.md` per repo convention.
