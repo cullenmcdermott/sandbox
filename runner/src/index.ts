@@ -10,6 +10,7 @@ import { loadConfig, loadSessionState, initRegistry, getRegistry } from './sessi
 import { startServer } from './server.js';
 import { resolveWorkspaceDir } from './exec.js';
 import { startOpencodeSupervisor, type OpencodeSupervisor } from './opencode.js';
+import { warmupOpencodeSession } from './opencode-turn.js';
 
 // Seconds before SIGKILL, reported in session.terminating so the TUI can show
 // an accurate countdown. Mirrors the pod's terminationGracePeriodSeconds.
@@ -102,6 +103,9 @@ function main(): void {
   // claude SDK turn path (server.ts /turns) is simply unused for these sessions.
   if (reg.state.backend === 'opencode-server') {
     opencode = startOpencodeSupervisor();
+    // Pre-create the opencode session so `opencode attach --continue` finds a
+    // valid session on first launch rather than falling back to a "dummy" ID.
+    void warmupOpencodeSession();
   }
 
   startServer();

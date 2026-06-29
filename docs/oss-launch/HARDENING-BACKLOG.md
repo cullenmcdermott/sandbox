@@ -41,14 +41,6 @@ them as anchors, not exact addresses.
 
 ## Kubernetes / reliability
 
-- **C9 [HIGH] Missing readiness and liveness probes on the Sandbox pod.** Pod is
-  marked ready immediately on start, before the runner `/healthz` is responsive; a
-  crashed/hung runner is never detected or restarted. Suggested: livenessProbe
-  `GET /healthz` (initialDelay=10, period=30, timeout=5, failureThreshold=3);
-  readinessProbe same endpoint (initialDelay=5, period=10), used by the reaper to
-  gate suspension. *(Verified: no `ReadinessProbe`/`LivenessProbe` in backend.go.)*
-  → `internal/k8s/backend.go` (container spec, ~550-690)
-
 - **M20 [med] Pod runs as root — `runAsNonRoot`/`fsGroup` still not enforced.** BR1
   already landed `allowPrivilegeEscalation: false` + `capabilities.drop:[ALL]` (adding
   back only the sshd-privsep / agent defaults, which removes NET_RAW + MKNOD), and the
@@ -249,6 +241,9 @@ backlog above isn't misread as a list of regressions.
   cluster status authoritative when suspended/failed).
 - **C13** stuck-busy symptom (subsumed by C3); **C14** double-resolve (subsumed by C8's
   settled-guard).
+- **C9** readiness + liveness probes on the running pod (`GET /healthz`;
+  readinessProbe initialDelay=5/period=10, livenessProbe initialDelay=10/period=30,
+  same timeout/failureThreshold). Covered by `TestCreateSessionProbes`.
 - **BR1** container `securityContext`: `allowPrivilegeEscalation:false` +
   `capabilities.drop:[ALL]` (drops NET_RAW/MKNOD). *(runAsNonRoot still open — M20.)*
 - **BR4** stable per-PVC SSH host keys (`/session/state/sandbox/ssh`) instead of

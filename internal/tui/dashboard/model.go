@@ -203,6 +203,10 @@ type approveResultMsg struct {
 	err error
 }
 
+// seedFailedMsg signals that the initial cluster seed (backend.List) failed, so
+// the dashboard can show an actionable failure state instead of skeleton bars.
+type seedFailedMsg struct{ err error }
+
 // --------------------------------------------------------------------------
 // Spinner frames
 // --------------------------------------------------------------------------
@@ -244,6 +248,12 @@ type Model struct {
 	// processed. Before seeded, the list shows skeleton bars; after seeded with
 	// no sessions, it shows the first-run CTA (U2, spec 04-ux-responsiveness).
 	seeded bool
+
+	// seedErr holds the error from a failed initial seed (e.g. the cluster is
+	// unreachable). When set with no sessions yet, the list shows an actionable
+	// error + retry instead of skeleton bars forever. Cleared on a successful
+	// seed/watch event or an explicit retry.
+	seedErr error
 
 	// attentionFirst, when true, floats Waiting/NeedsInput sessions to the top of
 	// the list regardless of sort order (D4 attention routing). Toggled by the
@@ -630,8 +640,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.maybeStartAnim())
 		return next, tea.Batch(cmds...)
 
+	case seedFailedMsg:
+		// Initial seed failed (cluster unreachable): record it so the list shows an
+		// actionable error + retry. Don't flip m.seeded — a later successful
+		// seed/watch event or an explicit retry clears this.
+		m.seedErr = msg.err
+		return m, nil
+
 	case PodEventMsg:
 		m.seeded = true // first watch event counts as loaded (U2)
+		m.seedErr = nil // a watch event proves the cluster is reachable
 		cmd := m.applyPodEvent(msg.Event)
 		cmds := []tea.Cmd{cmd, m.maybeStartAnim()}
 		// Re-arm the reader for the next event. Guarded so reducer tests that drive
@@ -816,6 +834,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+
+	case approveResultMsg:
+		// Surface a failed approve/deny instead of leaving the optimistic UI
+		// looking successful: the decision never reached the runner, so the
+		// session is still blocked. Reuses the detail-pane ErrorBlock render.
+		if msg.err != nil {
+			m.actionErr = fmt.Errorf("resolve permission: %w", msg.err)
+		} else {
+			m.actionErr = nil
+		}
+		return m, nil
+
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
 	}
@@ -854,7 +884,9 @@ func (m *Model) seedCmd() tea.Cmd {
 		defer cancel()
 		states, err := backend.List(ctx)
 		if err != nil {
-			return nil // non-fatal: dashboard starts empty
+			// Surface the failure so the list can show an error + retry instead of
+			// hanging on skeleton bars forever (a later seed/watch/retry clears it).
+			return seedFailedMsg{err: err}
 		}
 		return seedMsg(states)
 	}
@@ -1330,6 +1362,7 @@ func (m *Model) applySeed(states []session.State) (*Model, []tea.Cmd) {
 	m.sortSessions()
 	m.clampCursor()
 	m.seeded = true
+	m.seedErr = nil // a successful seed proves the cluster is reachable
 
 	// Start live SSE streams for running sessions that don't already have one.
 	var cmds []tea.Cmd
@@ -1602,6 +1635,23 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Rename mode intercepts text input for the rename buffer.
 	if m.renaming {
 		return m.handleRenameKey(ks)
+	}
+
+	// When the initial cluster seed failed, the list shows an error + retry in
+	// place of skeleton bars. r re-issues the seed + watch (with no sessions to
+	// resume, this takes precedence over the resume binding harmlessly).
+	if m.seedErr != nil && ks == "r" {
+		m.seedErr = nil
+		return m, tea.Batch(m.seedCmd(), m.startWatchCmd())
+	}
+
+	// esc dismisses a lingering connect/action error in the detail pane. Overlays
+	// and input modes are handled above, so a bare esc here is safe to consume;
+	// when there's nothing to dismiss it falls through to the no-op default.
+	if ks == "esc" && (m.connectErr != nil || m.actionErr != nil) {
+		m.connectErr = nil
+		m.actionErr = nil
+		return m, nil
 	}
 
 	// q opens the pending-permission queue when sessions are waiting.
@@ -1947,6 +1997,21 @@ func (m *Model) render() string {
 // Session rows are two physical lines each; group headers are one. It returns the
 // rendered lines plus the count of display rows fully shown (so the caller can
 // summarize the overflow). Group headers and skeletons count as one line.
+// seedErrorLines renders the actionable failure state shown when the initial
+// cluster seed failed (e.g. the cluster is unreachable), so the list shows a
+// real error + retry affordance instead of skeleton bars forever.
+func (m *Model) seedErrorLines(width int) []string {
+	msg := "can't reach the cluster"
+	if m.seedErr != nil {
+		msg += ": " + m.seedErr.Error()
+	}
+	lines := []string{""}
+	lines = append(lines, strings.Split(kit.ErrorBlock(msg, "", ""), "\n")...)
+	lines = append(lines, "")
+	lines = append(lines, "  "+kit.KbdRow([2]string{"r", "retry"}, [2]string{"q", "quit"}))
+	return lines
+}
+
 func (m *Model) renderRowLines(rows []groupedSession, width, height int) ([]string, int) {
 	if len(rows) == 0 {
 		// U2: three-way state branch so "loading", "empty cluster", and
@@ -1956,6 +2021,10 @@ func (m *Model) renderRowLines(rows []groupedSession, width, height int) ([]stri
 			activeFilter = m.filterBuf
 		}
 		switch {
+		case m.seedErr != nil:
+			// Initial seed failed (e.g. unreachable cluster): show the error and a
+			// retry hint instead of skeleton bars forever.
+			return m.seedErrorLines(width), 0
 		case !m.seeded:
 			// Still loading the seed: show skeleton bars at list rhythm.
 			n := height
@@ -2265,7 +2334,7 @@ func (m *Model) renderDetailLines(width, height int) []string {
 			note = theme.GlyphFailed + " session failed"
 		}
 		lines = append(lines, " "+lipgloss.NewStyle().Foreground(glyphColor(s.DashStatus)).Render(note))
-		lines = append(lines, " "+kit.KbdRow([2]string{"↵", "attach"}, [2]string{"r", "rename"}, [2]string{"s", "suspend"}, [2]string{"x", "destroy"}))
+		lines = append(lines, " "+kit.KbdRow([2]string{"↵", "attach"}, [2]string{"R", "rename"}, [2]string{"x", "suspend"}, [2]string{"!", "destroy"}))
 	}
 
 	// Show last connector error if any (kit §ErrorBlock, design-system §2.3).

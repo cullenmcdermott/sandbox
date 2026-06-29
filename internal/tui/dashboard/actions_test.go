@@ -23,9 +23,10 @@ type fakeBackend struct {
 	resumed   []session.ID
 	destroyed []session.ID
 	actionErr error
+	listErr   error // if set, List fails with it (drives the seed-failure path)
 }
 
-func (f *fakeBackend) List(context.Context) ([]session.State, error) { return nil, nil }
+func (f *fakeBackend) List(context.Context) ([]session.State, error) { return nil, f.listErr }
 func (f *fakeBackend) Watch(context.Context) (<-chan k8s.StateEvent, error) {
 	return nil, errors.New("no watch in tests")
 }
@@ -57,6 +58,7 @@ type fakeRunnerClient struct {
 	execResult     *session.ExecResult
 	startErr       error // if set, StartTurn fails with it (still records the prompt)
 	eventsErr      error // if set, Events fails to open the stream
+	resolveErr     error // if set, ResolvePermission fails with it (still records the decision)
 	passiveStreams int   // count of EventsPassive calls (RV6 background-stream path)
 }
 
@@ -78,7 +80,7 @@ func (f *fakeRunnerClient) InterruptTurn(_ context.Context, _ session.Ref, turn 
 }
 func (f *fakeRunnerClient) ResolvePermission(_ context.Context, _ session.Ref, d session.PermissionDecision) error {
 	f.resolved = append(f.resolved, d)
-	return nil
+	return f.resolveErr
 }
 func (f *fakeRunnerClient) Events(context.Context, session.Ref, uint64) (<-chan session.Event, error) {
 	if f.eventsErr != nil {
@@ -391,6 +393,54 @@ func TestAppAttachOpencodeExternalPane(t *testing.T) {
 	}
 	if app.external != nil {
 		t.Error("external pane not released after exit")
+	}
+}
+
+// TestAppExternalPaneEscIsForwardedNotDetached guards the triage fix:
+// esc must NOT detach from the opencode external pane — the embedded opencode
+// TUI uses esc to dismiss its own overlays/escape input mode, so the App must
+// let it pass through to the child. Only ctrl+] / ctrl+4 detach.
+func TestAppExternalPaneEscIsForwardedNotDetached(t *testing.T) {
+	app := NewApp(nil, nil, nil)
+	app.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+
+	sess := Session{
+		State: session.State{ID: "oc1", Backend: session.BackendOpenCode},
+		Title: "proj",
+	}
+	app.Update(attachReadyMsg{
+		sess:          sess,
+		client:        &fakeRunnerClient{},
+		opencodeCreds: &OpencodeCreds{Username: "opencode", Password: "secret", URL: "http://127.0.0.1:5000"},
+	})
+	if app.screen != ScreenExternal {
+		t.Fatalf("screen = %v, want ScreenExternal", app.screen)
+	}
+
+	// esc must keep the user inside the opencode pane (forwarded to the child).
+	app.Update(keyMsg("esc"))
+	if app.screen != ScreenExternal {
+		t.Errorf("esc detached the external pane (screen=%v) — opencode needs esc for its own overlays", app.screen)
+	}
+	if app.external == nil {
+		t.Error("external pane was torn down on esc; expected to stay live for re-attach")
+	}
+
+	// ctrl+] is the explicit detach chord for the external pane.
+	app.Update(keyMsg("ctrl+]"))
+	if app.screen != ScreenDashboard {
+		t.Errorf("ctrl+] did not detach the external pane: screen = %v, want ScreenDashboard", app.screen)
+	}
+
+	// Re-attaching minimizes a still-live pane instantly (no connector run);
+	// esc must still pass through, not detach, after the restore.
+	app.Update(attachMsg{sess: sess})
+	if app.screen != ScreenExternal {
+		t.Fatalf("restore: screen = %v, want ScreenExternal", app.screen)
+	}
+	app.Update(keyMsg("esc"))
+	if app.screen != ScreenExternal {
+		t.Errorf("esc detached the restored external pane (screen=%v); should forward to opencode", app.screen)
 	}
 }
 

@@ -120,11 +120,24 @@ and you get a warning. Re-provision after rotating the token without a full
 check warns if no token source is available (it never reads the secret, so it
 won't trigger a 1Password unlock prompt).
 
+### OpenCode Zen API key — auto-provisioned
+
+`just kind-up` also auto-populates the `opencode-credentials` Secret (key:
+`opencode-api-key`) via `dev/local/opencode-creds.sh`. Same source precedence:
+
+1. **1Password** — `op read op://k8s-secrets/opencode-credentials/opencode-api-key`
+   (override with `SANDBOX_OPENCODE_OP_REF`). Requires the `op` CLI signed in.
+2. **host env** — `$OPENCODE_API_KEY`.
+
+Re-provision without a full `kind-up` via **`just dev-opencode-secret`**; check
+the source (redacted) with **`just dev-opencode-creds`**.
+
 ### Other keys — manual overlay (optional)
 
-The opencode provider keys (and an explicit `anthropic-credentials` override) come
-from a gitignored Secret overlay; `kind-up` applies it before the auto-provision
-step, so an op/env token still takes precedence for the Claude token:
+The remaining opencode provider keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) and an
+explicit `anthropic-credentials` override come from a gitignored Secret overlay;
+`kind-up` applies it before the auto-provision steps, so op/env tokens still take
+precedence:
 
 ```bash
 cp dev/local/secret-template.yaml dev/local/secret.local.yaml

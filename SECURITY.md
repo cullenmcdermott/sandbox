@@ -63,7 +63,6 @@ the deployer's responsibility:
 These are known gaps for a v1 launch. They are tracked and welcome as
 contributions; none should be assumed to be mitigated:
 
-- **No readiness/liveness probes** on the runner pod.
 - **No `/metrics` endpoint and no structured logging** in the runner.
 - **Runner image is tagged `:latest`**, not digest-pinned.
 - **No SBOM, image scan, or build provenance** for published images.

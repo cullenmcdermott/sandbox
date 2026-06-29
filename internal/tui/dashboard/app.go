@@ -148,6 +148,12 @@ type App struct {
 	// connectStage is the latest ConnectStage reported by the connector (U1).
 	connectStage ConnectStage
 
+	// connectStartedAt is when the current connect/create began; the connecting
+	// splash shows the elapsed time so a slow cold-pod resume reads as progress
+	// rather than a freeze. Zero when not connecting. (Mirrors the transcript
+	// reconnect header's elapsed timer.)
+	connectStartedAt time.Time
+
 	// connectDetail is the latest live sub-status for the current stage (e.g.
 	// "uploading" during the initial file sync); "" when there is none.
 	connectDetail string
@@ -368,6 +374,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			a.connectingFor = nil
 			a.connectingPreview = nil
+			a.connectStartedAt = time.Time{}
 			a.screen = ScreenDashboard
 			return a, nil
 		}
@@ -416,6 +423,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// straight through — no adapter needed.
 		a.connectingFor = nil
 		a.connectErr = nil
+		a.connectStartedAt = time.Time{}
 		// Cancel the dashboard's background SSE for this session so we don't
 		// have two concurrent SSE clients to the same runner (B2).
 		a.dashboard.cancelLiveSSE(msg.sess.ID())
@@ -499,6 +507,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Connector failed: stay on the dashboard and show the error inline.
 		a.connectingFor = nil
 		a.connectingPreview = nil
+		a.connectStartedAt = time.Time{}
 		a.connectErr = msg.err
 		a.dashboard.connectErr = msg.err
 		a.screen = ScreenDashboard
@@ -657,13 +666,17 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if kp, ok := msg.(tea.KeyPressMsg); ok {
 			switch kp.String() {
-			case "esc", "ctrl+]", "ctrl+4":
-				// Universal escape: minimize back to the dashboard WITHOUT tearing
-				// down the pane — the child keeps running so re-open is instant.
+			case "ctrl+]", "ctrl+4":
+				// Detach (back to the dashboard) without tearing down the pane —
+				// the child keeps running so re-open is instant. esc is NOT in
+				// this set: the embedded opencode TUI uses esc to dismiss its own
+				// overlays / escape input mode, so intercepting it here would
+				// trap the user inside opencode's screen with no way out for the
+				// pane's own UI. Use ctrl+] (or ctrl+4) to detach.
 				a.screen = ScreenDashboard
 				return a, dashCmd
 			default:
-				// Everything else is forwarded to the embedded opencode client.
+				// Everything else (incl. esc) is forwarded to the embedded opencode client.
 				a.external.handleKey(kp)
 				return a, dashCmd
 			}
@@ -1015,6 +1028,7 @@ func (a *App) connectCmd(sess Session) tea.Cmd {
 	a.connectCh = ch
 	a.connectStage = StageCheck
 	a.connectDetail = ""
+	a.connectStartedAt = nowFunc()
 	go func() {
 		defer cancel()
 		onStage := func(s ConnectStage, detail string) {
@@ -1057,6 +1071,7 @@ func (a *App) createCmd(backend string) tea.Cmd {
 	a.connectCh = ch
 	a.connectStage = StageResume
 	a.connectDetail = ""
+	a.connectStartedAt = nowFunc()
 	a.connectingOpencode = backend == session.BackendOpenCode
 	go func() {
 		defer cancel()
@@ -1150,6 +1165,13 @@ func (a *App) connectingView() tea.View {
 	title := verb + "…"
 	if a.connectingFor != nil {
 		title = fmt.Sprintf("%s to %s…", verb, a.connectingFor.Title)
+	}
+	// Append a live elapsed timer (≥1s) so a slow cold-pod resume reads as
+	// progress, not a freeze — mirrors the transcript reconnect header.
+	if !a.connectStartedAt.IsZero() {
+		if el := nowFunc().Sub(a.connectStartedAt); el >= time.Second {
+			title += fmt.Sprintf(" (%s)", roundDur(el))
+		}
 	}
 
 	titleLine := lipgloss.NewStyle().

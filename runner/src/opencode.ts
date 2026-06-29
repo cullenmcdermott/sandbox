@@ -157,7 +157,7 @@ export function startOpencodeSupervisor(
     const proc = spawnFn(
       'opencode',
       ['serve', '--hostname', '0.0.0.0', '--port', String(port)],
-      { stdio: 'inherit', env },
+      { stdio: 'inherit', env, cwd: env.PROJECT_PATH ?? process.cwd() },
     );
     proc.on('exit', (code, signal) => {
       if (stopped) return;

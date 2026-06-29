@@ -130,6 +130,9 @@ kind-up:
     # cluster so `just dev` (claude) works without hand-maintaining secret.local.yaml.
     # Non-fatal: a missing token just leaves the claude backend plumbing-only.
     bash dev/local/claude-creds.sh ensure-secret || true
+    # Provision the OpenCode Zen API key Secret (opencode-credentials) from 1Password
+    # (op) or $OPENCODE_API_KEY — same pattern as above. Non-fatal.
+    bash dev/local/opencode-creds.sh ensure-secret || true
     printf '\033[32m%s\033[0m\n' "kind up: context kind-sandbox-local (KUBECONFIG=dev/local/.kubeconfig)"
 
 # Tear the local dev env down: delete the cluster (via ctlptl) and drop its local
@@ -284,6 +287,25 @@ dev-claude-creds:
     #!/usr/bin/env bash
     [ -n "${FLOX_ENV:-}" ] || exec flox activate -- just dev-claude-creds
     bash dev/local/claude-creds.sh status
+
+# (Re)provision the OpenCode Zen API key Secret (opencode-credentials) in the local
+# cluster from 1Password (op) or $OPENCODE_API_KEY. Idempotent. `just dev-opencode-secret`.
+dev-opencode-secret:
+    #!/usr/bin/env bash
+    [ -n "${FLOX_ENV:-}" ] || exec flox activate -- just dev-opencode-secret
+    set -euo pipefail
+    export KUBECONFIG="$PWD/dev/local/.kubeconfig"
+    if ! kind get clusters 2>/dev/null | grep -qx sandbox-local; then
+        echo "no 'sandbox-local' cluster — run 'just dev-up' first" >&2; exit 1
+    fi
+    bash dev/local/opencode-creds.sh ensure-secret
+
+# Report where the OpenCode Zen API key resolves from (1Password / env), redacted.
+# A debugging aid — does NOT touch the cluster. `just dev-opencode-creds`.
+dev-opencode-creds:
+    #!/usr/bin/env bash
+    [ -n "${FLOX_ENV:-}" ] || exec flox activate -- just dev-opencode-creds
+    bash dev/local/opencode-creds.sh status
 
 # Full node reset: delete the KIND cluster (via ctlptl). Alias of kind-down.
 dev-nuke: kind-down

@@ -607,3 +607,38 @@ async function runTurn(
 }
 
 export const opencodeAgent: Agent = { runTurn };
+
+/**
+ * Pre-create an opencode session during runner startup so that
+ * `opencode attach --continue` finds a valid session immediately and does not
+ * fall back to a "dummy" placeholder ID (which OpenCode rejects, showing an
+ * error dialog). If a session already exists in state (pod resume), this is a
+ * no-op. Non-fatal: the turn path (ensureSession in runTurn) retries on first
+ * user prompt if this fails.
+ */
+export async function warmupOpencodeSession(env: NodeJS.ProcessEnv = process.env): Promise<void> {
+  const reg = getRegistry();
+  if (reg.state.opencode_session_id) return; // already have a session from a prior pod run
+
+  const client = opencodeTurnClient(env);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 60_000);
+  try {
+    for (let attempt = 0; attempt < 20 && !ctrl.signal.aborted; attempt++) {
+      const res = await client.session
+        .create({ body: { title: 'sandbox runner session' } })
+        .catch(() => undefined);
+      if (res && !res.error && res.data) {
+        reg.setOpencodeSession(res.data.id);
+        console.log(`opencode: pre-created session ${res.data.id}`);
+        return;
+      }
+      await new Promise<void>((r) => setTimeout(r, 500));
+    }
+    console.error('opencode warmup: session.create timed out; turn path will retry');
+  } catch (e) {
+    console.error('opencode warmup: session pre-create failed:', e);
+  } finally {
+    clearTimeout(timer);
+  }
+}

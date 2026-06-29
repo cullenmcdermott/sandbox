@@ -109,6 +109,11 @@ type tReconnectFailedMsg struct{ err error }
 type tRetryReconnectMsg struct{}
 type turnErrMsg struct{ err error }
 
+// permResolveErrMsg surfaces a failed permission approve/deny so the optimistic
+// "[permission approved]" block isn't left looking successful when the decision
+// never reached the runner (the session is still blocked waiting on it).
+type permResolveErrMsg struct{ err error }
+
 // TranscriptModel is the Bubble Tea model for a single attached session.
 type TranscriptModel struct {
 	client      RunnerClient
@@ -694,6 +699,13 @@ func (m *TranscriptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Surface it as a dim notice rather than silently doing nothing, so a
 		// future regression in the interrupt path is visible.
 		m.appendBlock(blockInfo, "[interrupt failed: "+msg.err.Error()+"]")
+		return m, nil
+
+	case permResolveErrMsg:
+		// The approve/deny never reached the runner, so the agent is still blocked
+		// on the permission. Surface it loudly instead of leaving the optimistic
+		// "[permission approved/denied]" block looking successful.
+		m.appendBlock(blockError, "✗ permission not delivered: "+msg.err.Error())
 		return m, nil
 
 	case shellResultMsg:
@@ -1997,7 +2009,9 @@ func (m *TranscriptModel) resolvePermission(allow bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		_ = client.ResolvePermission(ctx, ref, decision)
+		if err := client.ResolvePermission(ctx, ref, decision); err != nil {
+			return permResolveErrMsg{err: err}
+		}
 		return nil
 	}
 }

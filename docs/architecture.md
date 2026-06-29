@@ -199,12 +199,14 @@ that diverges. Scope is event payloads only — HTTP request/response bodies and
 - **Network:** default-deny ingress; egress allows DNS + public 80/443 only —
   RFC1918, CGNAT/tailnet, and link-local/metadata ranges are excluded, so a
   session cannot reach the API server, in-cluster services, or `169.254.169.254`
-  (see the example `k8s/agent-sessions/networkpolicy.yaml` in this repo; the
-  maintainer's real cluster wiring is a separate private deployment).
+  (see the example manifests in this repo, `k8s/networkpolicy-default-deny.yaml`
+  + `k8s/networkpolicy-egress-allow.yaml`; the maintainer's real cluster wiring
+  is a separate private deployment).
 - **Pod hardening:** `seccompProfile: RuntimeDefault`; namespace is PodSecurity
-  Admission `baseline` enforce / `restricted` warn. The runner currently runs as
-  **root** (sshd + single-uid workspace ownership); moving to non-root +
-  `fsGroup` + capability drops is a tracked follow-up.
+  Admission `baseline` enforce / `restricted` warn. Container `securityContext`
+  drops all capabilities and sets `allowPrivilegeEscalation: false` (BR1).
+  The runner still runs as **root** (sshd + single-uid workspace ownership);
+  moving to non-root + `fsGroup` is a tracked follow-up (M20).
 - **Tool guardrails:** the runner's PreToolUse hook blocks host/cluster/credential
   Bash patterns (defense-in-depth, not a boundary), and PostToolUse writes an
   audit log.
@@ -219,8 +221,8 @@ separately):
 - The full turn round-trip (token auth + model response) against a live runner.
 - Mutagen actually syncing over the SSH port-forward (root login, agent install),
   including `attach` re-sync and `sandbox sync --pause/--resume/--terminate`.
-- Container-level hardening (non-root, `fsGroup`, dropped capabilities) without
-  breaking sshd privilege separation.
+- Container-level hardening (non-root + `fsGroup`; capability drops already landed
+  in BR1) without breaking sshd privilege separation.
 
 ## See also
 

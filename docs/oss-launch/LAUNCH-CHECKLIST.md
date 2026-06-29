@@ -39,7 +39,8 @@ The `docs/oss-launch/` directory itself is internal working material — delete 
   repo, or document an imagePullSecret.
 
 ## Post-launch hardening (tracked in HARDENING-BACKLOG.md — not blocking)
-- [ ] Readiness/liveness probes on the pod spec (`internal/k8s/backend.go`).
+- [x] Readiness/liveness probes on the pod spec (`internal/k8s/backend.go`; covered
+  by `internal/k8s/backend_test.go` `TestCreateSessionProbes`).
 - [ ] `/metrics` endpoint + structured logging in the runner.
 - [ ] Pin the runner image to a digest (not `:latest`) in
   `.github/workflows/build-runner-image.yml`.

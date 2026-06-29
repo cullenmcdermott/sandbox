@@ -138,7 +138,10 @@ and the command is killed after a 30s timeout (`exitCode` 124). Request body:
 Every `/exec` call writes an entry to the audit log (`audit.jsonl`, tool
 `Exec`), mirroring the PostToolUse(Bash) audit so the `!cmd` shell passthrough is
 never an unaudited escape. Commands matching the runner's blocked-Bash patterns
-are still executed but flagged (`blocked: true`) in the audit row.
+are **refused pre-spawn** (never executed): the response carries
+`"exitCode": 126` (constant `EXEC_BLOCKED_EXIT`) with the audit row tagged
+`blocked: true`. Exit code `127` indicates a spawn / wrapper failure (the
+process never ran). Successful commands report their real child exit code.
 
 ### `GET /sessions/:id/events?after=<seq>&passive=<0|1>`
 SSE stream. Emits one `data: <json>` line per event. The stream stays open
@@ -199,15 +202,22 @@ The `todo.updated` event surfaces the agent's plan/checklist. Payload:
 the `TodoWrite` tool; the CLI renders the list with a per-item status glyph.
 
 The `rate_limit.updated` event carries the claude.ai plan usage windows for the
-status line. Payload: `{ available, fiveHourUtil, fiveHourResetsAt, sevenDayUtil,
-sevenDayResetsAt }` — utilizations are 0–100 and resets are RFC3339. The runner
-fetches this from the SDK's structured `/usage` data
+status line. Payload (see `schema/events.json` `RateLimitPayload` for the
+authoritative list): `{ available, subscriptionType, fiveHourUtil,
+fiveHourResetsAt, sevenDayUtil, sevenDayResetsAt, sevenDayOpusUtil,
+sevenDayOpusResetsAt, sevenDaySonnetUtil, sevenDaySonnetResetsAt }` —
+utilizations are 0–100 and resets are RFC3339 (and may be empty when the SDK
+reports null). The runner fetches this from the SDK's structured `/usage` data
 (`Query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET`) once per
 turn, fired on the SDK init message (the control channel is only open until the
 turn's result closes stdin). `available` is `false` for API-key/Bedrock/Vertex
 sessions where plan limits do not apply; the CLI then hides the windows rather
-than fabricating values. Best-effort: if the experimental call fails, no event
-is emitted.
+than fabricating values. `subscriptionType` (`pro`/`max`/`team`/`enterprise`)
+lets the status line distinguish headless (empty), API-key, and subscription
+sessions. The per-model `sevenDayOpus*` / `sevenDaySonnet*` fields are absent
+(nil / undefined) unless the plan has a separate weekly cap for that model; the
+status line surfaces the one matching the attached model. Best-effort: if the
+experimental call fails, no event is emitted.
 
 ## Persistence
 
@@ -223,15 +233,19 @@ streams the same `/events` data this contract serves.
 
 ## Debug logging
 
-Both the CLI and the runner can emit a **structured JSON-line debug log** to
-stderr — one JSON object per line, so it is greppable and `jq`-pipeable. There is
-no tracing dependency; this is deliberately lightweight.
+The CLI can emit a **structured JSON-line debug log** to stderr — one JSON object
+per line, so it is greppable and `jq`-pipeable. There is no tracing dependency;
+this is deliberately lightweight.
 
 Enable it:
 
 - **CLI:** pass `--debug` (e.g. `sandbox --debug trace <id>`) or set
   `SANDBOX_DEBUG=1`.
-- **Runner:** set `SANDBOX_DEBUG=1` in the pod environment.
+
+> The runner (`runner/src/**`) does **not** emit structured debug logs today —
+> only ad-hoc `console.log`/`console.error`. Structured runner logging is
+> tracked as **C10** in `docs/oss-launch/HARDENING-BACKLOG.md`; do not rely on
+> `SANDBOX_DEBUG` taking effect inside the pod.
 
 Each line is a single JSON object with this schema:
 
@@ -240,7 +254,7 @@ Each line is a single JSON object with this schema:
 | `time` | string (RFC3339) | when the record was emitted |
 | `level` | string | `DEBUG` \| `INFO` \| `WARN` \| `ERROR` |
 | `msg` | string | short, stable, human-readable event label |
-| `component` | string | `cli` or `runner` — so interleaved logs are attributable |
+| `component` | string | `cli` — so interleaved logs are attributable (runner emits no structured logs today; see C10) |
 | *(extra)* | any | arbitrary structured key/values (e.g. `session`, `seq`, `count`) |
 
 Example:

@@ -398,7 +398,8 @@ func (p *ExternalPane) View() tea.View {
 	return v
 }
 
-// statusRow is the reserved last line: session · client · model · escape hint.
+// statusRow is the reserved last line: session · client · model · detach hint.
+// (^] / ctrl+] only — esc is forwarded to opencode so its own overlays can use it.)
 func (p *ExternalPane) statusRow() string {
 	model := p.sess.Model
 	if model == "" {

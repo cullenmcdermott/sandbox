@@ -1,11 +1,34 @@
 # TODO — running notes
 
+> **UX/UI polish push (2026-06-28):** the in-scope UX work below is now organized
+> into a phased, resumable plan at [`docs/ux-polish-plan.md`](docs/ux-polish-plan.md)
+> (6 phases, each with a self-contained restart prompt). Branch: `feat/ux-polish`.
+> Under-the-hood perf/infra items here stay deferred per that plan's "Deferred" section.
+
 ## Human added needs triage
 * automatically create worktrees? How to handle ensuring they are merged in and not accidentally "lost"? Since mutagen should sync from my laptop it can merge into "main" from my laptop it just shouldn't try to pull from remote? TUI creates a work tree as part of creating a container. Agent should know to clean it up/give it a proper name before turning it into a pushable branch to be pushed by a human
 * Match claude codex ux, make it feel familiar to claude code users to make sure we can expose all of the necessary options/features/configs but make sure its unique enough for us to not cause confusion. There should already be a plan for this, if not lets create one
 * Consider KRO to wrap resources into our own "custom resource"? Does it support custom status/conditions?
 * Expose CLI as a go library to be consumed by another go package for backend and tui stuff? Or just drive via pre-built CLI for now?
-* why is hall.kvitch.dev not in use? Should we just remove that? Are we building our images in tilt and are they then automatically loaded into kind? 
+* ~~why is hall.kvitch.dev not in use?~~ **DONE 2026-06-28 (investigation).** Typo — the real URL is **hall.kvick.dev** (one `k`). Hall IS wired in: `justfile:156-162` auto-detects `hall status` and skips `kind load` when active, `dev/local/README.md:57-81` documents the one-time host setup, and `dev/local/Tiltfile:22` records the swap. It is **optional** — `SANDBOX_USE_HALL=0` forces `kind load`; without the daemon running, `dev-image` falls back. Built images are NOT auto-loaded into KIND via Tilt (Tilt's KIND integration handles it; the scripted `dev-image` recipe is the manual path) — see the `dev/local/README.md` "Image delivery" section.
+* It seems like opencode doesn't get an agent generated title and reports "idle" even when its working?
+* Should we make sure the opencode window feels like a modal on top of the dash like the claude code tui?
+* ~~make sure the background is opaque and NOT translucent everywhere!~~ **DONE 2026-06-28 (investigation).** `internal/tui/dashboard/app.go` `View()` forces `v.BackgroundColor = theme.Page` on every screen except `ScreenExternal` (which owns its terminal — opencode paints its own bg), and `modalView` composites a fully opaque page-colored backdrop layer behind the transcript modal (Fix E). Already enforced.
+* opencode tui seems to want to have a few spots be clickable... can we enable that?
+* ~~esc can't be used to close the chat because opencode needs esc to get out of some windows~~ **DONE 2026-06-28.** Dropped `esc` from the `ScreenExternal` detach set in `internal/tui/dashboard/app.go` (~:660); only `ctrl+]` / `ctrl+4` detach from the opencode pane now, so `esc` is forwarded to opencode for its own overlays. Regression test: `TestAppExternalPaneEscIsForwardedNotDetached` (`internal/tui/dashboard/actions_test.go`).
+* ~~When starting up fresh, drop into an empty dashboard don't automatically launch a claude session~~ **DONE 2026-06-28 (investigation).** Bare `sandbox` already drops into an empty dashboard — `internal/cli/root.go:60-82` calls `dashboard.Run` (no auto-attach); `Model.Init` (`internal/tui/dashboard/model.go:598`) only seeds the list + starts the cluster watch + warm-session poller, never emits `createSessionMsg` (which is only sent by the `n` key, `model.go:1743`). The only paths that auto-attach are `sandbox claude` / `sandbox attach` (intentional).
+* Speed up startup? - pre-cache agent images? What other things can we do, should we add some metrics/tracing/observability to this and other parts of the system for us to analyze later?
+* Add flox/nix support. Install by default and include agent guidance to use flox/nix. Additionally setup to pull from nix binary cache running inside k8s cluster (how to publish/update cache?)
+* **opencode wheel scroll hijacks prompt history (observation).** Inside the opencode external pane, scrolling the mouse wheel up navigates the
+  *user's previous prompts* (behaves like Up-arrow) instead of scrolling the conversation transcript. Root cause:
+  `app.go.View()` (around `if a.screen != ScreenExternal`) intentionally clears `v.MouseMode` on
+  `ScreenExternal` so the embedded opencode TUI owns the terminal — but with mouse reporting **off** on the host,
+  the terminal (Ghostty) falls back to the standard "wheel = Up/Down arrow keys" mapping. Those arrow keys fall
+  through `ScreenExternal` Update's `default` branch and are forwarded to opencode via `external.handleKey`. Fix
+  direction: enable `tea.MouseModeCellMotion` on `ScreenExternal` too (so wheel events arrive as `MouseWheelMsg`,
+  not arrow keys), then translate wheel events into opencode's scroll key (`PageUp`/`PageDown` most likely).
+  Requires verifying what key opencode actually uses to scroll its transcript view before committing to a key.
+Why does jst dev start a claude sessinon automatically?
 
 Forward-looking backlog. Completed-work history was pruned on 2026-06-24 into
 [`docs/archive/done-log-2026-06.md`](docs/archive/done-log-2026-06.md). The full
@@ -16,18 +39,20 @@ line and move the detail to the archive.
 
 ## Must-fix (correctness / honesty bugs)
 
-- [ ] **Detail-pane "needs you" key hints are wrong on 3 of 4 actions.** Says
-  x=destroy / s=suspend / r=rename, but really x=suspend, s=sort, r=resume,
-  destroy=`!`. Actively misleading. `internal/tui/dashboard/model.go:2232`,
-  `keymap.go:61-65`.
-- [ ] **Permission approve/deny errors are silently swallowed** (chat + dashboard).
-  The chat path `_ =`-drops `ResolvePermission` errors after optimistically
-  showing "approved"; `approveResultMsg` is constructed in 3 places with **no
-  handler**. Sibling of the interrupt-error fix. `transcript.go:1981-1995`,
-  `model.go:200-204,616-804,1189-1228`.
-- [ ] **Dashboard sits on skeleton bars forever (no error) when the cluster is
-  unreachable.** seed/watch/reconcile swallow List/Watch errors and `seeded`
-  never flips → no actionable failure state. `model.go:832-858,1931-1941`.
+- [x] **Detail-pane "needs you" key hints were wrong on 3 of 4 actions.** Fixed
+  2026-06-28: the row was unchanged in *intent* (attach / rename / suspend / destroy
+  for a waiting/needs-input/failed session) but each key char is now correct —
+  `↵ attach / R rename / x suspend / ! destroy` — matching `keymap.go` (rename is
+  the capital `R` binding; lowercase `r` is resume, which doesn't apply to these
+  states). `internal/tui/dashboard/model.go:2268`.
+- [x] **Permission approve/deny errors are silently swallowed** (chat + dashboard).
+  Fixed (Phase 1, `feat/ux-polish`): added `case approveResultMsg` → `m.actionErr`
+  in `model.go` Update; chat `resolvePermission` now returns `permResolveErrMsg`
+  and appends a `blockError`. Tests in `phase1_ux_test.go`.
+- [x] **Dashboard sits on skeleton bars forever (no error) when the cluster is
+  unreachable.** Fixed (Phase 1): `seedCmd` returns `seedFailedMsg`, `m.seedErr`
+  drives an error+`r`-retry branch in `renderRowLines`, self-heals on next
+  seed/watch. Tests in `phase1_ux_test.go`.
 - [ ] **OSC 9;4 tab-progress is dropped by the v2 cell renderer** (same class as
   the desktop-notification bug fixed 2026-06-28). It's still prepended to
   `v.Content` in `app.go` `withTerminalSignals` instead of going out-of-band via
@@ -67,12 +92,14 @@ line and move the detail to the archive.
   schedule + image pull (`sandbox claude`/`opencode`). Give it a TUI splash with
   per-phase detail + elapsed timer (the team did this for SYNC/RECONNECT but not
   the create/resume stage). `claude_remote.go:156-189`, `backend.go:516-531`.
-- [ ] Connect/create splash has no elapsed timer (reconnect header does).
-  `app.go:1130-1219`.
+- [x] Connect/create splash has no elapsed timer (reconnect header does). Fixed
+  (Phase 2): `App.connectStartedAt` rendered on the `connectingView` title via the
+  `roundDur` reconnect idiom. Test in `phase2_ux_test.go`.
 - [ ] Chat status line never surfaces file-sync state; a stalled sync is invisible
   while attached, and "stalled" offers no remedy hint. `statusline.go:372-476`,
   `model.go:2153-2161`.
-- [ ] connectErr/actionErr persist in the detail pane with no dismiss. `model.go:2235-2249`.
+- [x] connectErr/actionErr persist in the detail pane with no dismiss. Fixed
+  (Phase 1): bare `esc` dismisses both in `handleKey` (`model.go`). Test in `phase1_ux_test.go`.
 
 ## Performance
 
@@ -139,16 +166,17 @@ via a passive observer connection to the agent's event stream. See
 
 ## Stale docs to fix (review confirmed; not yet edited)
 
-- [ ] Probes ARE implemented (`backend.go:698-721`) but `SECURITY.md:66`,
-  `oss-launch/LAUNCH-CHECKLIST.md:42`, and `oss-launch/HARDENING-BACKLOG.md:44`
-  (C9, with a now-false "Verified: no probes" note) still list them missing.
-- [ ] `architecture.md:200-218` calls capability drops / `allowPrivilegeEscalation:false`
-  future work — already landed (BR1, `backend.go:733-743`); and `:198` links a
-  NetworkPolicy path that doesn't exist (real files are flat under `k8s/`).
-- [ ] `runner-api.md`: Debug-logging section claims the runner emits structured
-  JSON logs (it doesn't — only the CLI does); `/exec` "blocked but still executed"
-  is wrong (refused pre-spawn, exit 126); 126/127 exit codes + 4 `rate_limit.updated`
-  fields undocumented. `runner-api.md:130-245`.
+- [x] Probes ARE implemented (`backend.go:698-721`); SECURITY.md / LAUNCH-CHECKLIST /
+  HARDENING-BACKLOG now reflect that (C9 moved to "Already fixed"; L-CHECK checked
+  off; SECURITY bullets pruned). Done 2026-06-28.
+- [x] `architecture.md` "Security model" / "Unvalidated paths" now records that
+  capability drops + `allowPrivilegeEscalation:false` landed (BR1, `backend.go`), with
+  only non-root + `fsGroup` left as M20; the dead `k8s/agent-sessions/networkpolicy.yaml`
+  link replaced with the real flat `k8s/networkpolicy-*.yaml` files. Done 2026-06-28.
+- [x] `runner-api.md` corrected: `/exec` blocked → "refused pre-spawn, exit 126"
+  (127 for spawn failures); runner-side `SANDBOX_DEBUG` claim removed (C10 tracks
+  it); `rate_limit.updated` payload now lists all 10 fields
+  (incl. `subscriptionType` + per-model `sevenDay[Opus|Sonnet]*`). Done 2026-06-28.
 - [ ] README markets `sandbox claude` as "start (or reuse)" — it always mints a new
   session. `README.md:32-33,108`.
 - [x] ~~ghostty header "proposed/not started" + verification-protocol dead spec
