@@ -1,0 +1,35 @@
+{
+  description = "sandbox — run AI coding agents in remote Kubernetes sessions";
+
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+  };
+
+  outputs =
+    { self, nixpkgs }:
+    let
+      systems = [
+        "aarch64-darwin"
+        "x86_64-darwin"
+        "aarch64-linux"
+        "x86_64-linux"
+      ];
+      forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
+    in
+    {
+      packages = forAllSystems (pkgs: rec {
+        sandbox = pkgs.callPackage ./nix/package.nix { inherit self; };
+        default = sandbox;
+      });
+
+      devShells = forAllSystems (pkgs: {
+        default = pkgs.mkShell {
+          packages = [
+            pkgs.go
+            pkgs.gopls
+            pkgs.golangci-lint
+          ];
+        };
+      });
+    };
+}
