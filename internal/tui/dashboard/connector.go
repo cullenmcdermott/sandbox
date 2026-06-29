@@ -82,6 +82,31 @@ type Connector func(ctx context.Context, ref session.Ref, projectPath string, on
 // "stalled"/"unknown".
 type SyncProber func(ctx context.Context, id session.ID) string
 
+// OrphanSync is a sandbox mutagen sync session whose pod endpoint is unreachable
+// — a GC candidate. Identifier addresses the mutagen session; SessionID is the
+// sandbox session it belongs to.
+type OrphanSync struct {
+	Identifier string
+	SessionID  session.ID
+}
+
+// SyncReaper lists this tool's mutagen sync sessions whose pod endpoint is
+// unreachable (orphan candidates) and terminates specific ones by identifier.
+// Decoupled from internal/sync, like SyncProber.
+//
+// The dashboard's GC (piggybacked on the periodic cluster reconcile) terminates
+// an orphan ONLY when its session's pod is NOT up per the latest authoritative
+// snapshot — i.e. the session is gone, Suspended, or Failed (a Suspended session's
+// sync thrashes because the in-cluster idle reaper can't pause the host daemon) —
+// AND it has stayed that way past a grace window. So a Running session's sync
+// (even mid-blip) and a fresh session still scheduling are never touched. A
+// terminated sync is harmless to lose: the connect path re-creates it idempotently
+// (and resumes it if it was merely paused) on the next attach.
+type SyncReaper interface {
+	ListOrphans(ctx context.Context) ([]OrphanSync, error)
+	Terminate(ctx context.Context, identifiers []string) error
+}
+
 // CreateResult is the successful outcome of a Creator call: the newly created
 // session's observed State plus a live client and reconnect callback ready for
 // the transcript to attach to.

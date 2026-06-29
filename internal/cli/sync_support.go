@@ -125,6 +125,37 @@ func dashboardSyncProber() dashboard.SyncProber {
 	}
 }
 
+// dashboardSyncReaper builds the dashboard's orphaned-sync GC, backed by the
+// Mutagen sync manager. ListOrphans reports this tool's syncs whose pod endpoint
+// is down (sync.IsOrphanStatus); the dashboard decides which are durably dead
+// (session gone + past the grace) before terminating them by identifier.
+func dashboardSyncReaper() dashboard.SyncReaper {
+	return reaperAdapter{}
+}
+
+type reaperAdapter struct{}
+
+func (reaperAdapter) ListOrphans(ctx context.Context) ([]dashboard.OrphanSync, error) {
+	sessions, err := syncManager().List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var orphans []dashboard.OrphanSync
+	for _, s := range sessions {
+		if syncpkg.IsOrphanStatus(s.Status) {
+			orphans = append(orphans, dashboard.OrphanSync{
+				Identifier: s.Identifier,
+				SessionID:  session.ID(s.SessionID),
+			})
+		}
+	}
+	return orphans, nil
+}
+
+func (reaperAdapter) Terminate(ctx context.Context, identifiers []string) error {
+	return syncManager().TerminateByIdentifier(ctx, identifiers...)
+}
+
 // startMutagen writes the SSH alias for the current port-forward and (re)creates
 // the session's Mutagen sync sessions. It is idempotent across reconnects, and
 // reports whether the load-bearing project sync was freshly created (created=true,
@@ -142,6 +173,13 @@ func startMutagen(ctx context.Context, id, projectPath, privPath string, sshLoca
 	if err != nil {
 		return false, err
 	}
+	// Resume any syncs paused by a prior `sandbox suspend` BEFORE CreateAll. CreateAll
+	// is idempotent — for an already-existing (paused) sync it reports "already exists"
+	// and returns created=false WITHOUT un-pausing it — so without this, the most
+	// natural resume (just re-attaching, not running `sandbox resume`) would leave the
+	// session's files frozen with no error shown. Idempotent + best-effort: a no-op on
+	// non-paused sessions, "not found" treated as success.
+	_ = syncManager().ResumeAll(ctx, id)
 	return syncManager().CreateAll(ctx, syncpkg.Spec{
 		SessionID: id,
 		// The pod bind-mounts the workspace at the real host project path (see

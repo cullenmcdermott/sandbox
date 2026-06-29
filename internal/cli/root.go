@@ -76,6 +76,7 @@ func NewRoot() *cobra.Command {
 					EventCache:        indexEventCache{},
 					ObserverConnector: newDashboardObserverConnector(backend, ""),
 					SyncProber:        dashboardSyncProber(),
+					SyncReaper:        dashboardSyncReaper(),
 					IdleTimeout:       defaultReaperIdleTimeout,
 				})
 			})

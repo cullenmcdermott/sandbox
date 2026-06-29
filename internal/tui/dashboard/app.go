@@ -250,6 +250,12 @@ type RunOptions struct {
 	// SyncProber reports per-session sync health for the dashboard indicator.
 	SyncProber SyncProber
 
+	// SyncReaper enumerates + terminates orphaned mutagen syncs (those whose pod
+	// is gone). When set, the dashboard runs a periodic GC on the reconcile tick so
+	// the host mutagen daemon doesn't accumulate dead syncs from reaped/destroyed/
+	// out-of-band-deleted sessions. nil disables it.
+	SyncReaper SyncReaper
+
 	// IdleTimeout is the reaper idle-timeout, used to render the "suspends in"
 	// hint for warm sessions. Zero hides the hint.
 	IdleTimeout time.Duration
@@ -280,6 +286,9 @@ func (a *App) applyOpts(opts []RunOptions) {
 	}
 	if opts[0].SyncProber != nil {
 		a.dashboard = a.dashboard.WithSyncProber(opts[0].SyncProber)
+	}
+	if opts[0].SyncReaper != nil {
+		a.dashboard = a.dashboard.WithSyncReaper(opts[0].SyncReaper)
 	}
 	if opts[0].IdleTimeout > 0 {
 		a.dashboard = a.dashboard.WithIdleTimeout(opts[0].IdleTimeout)

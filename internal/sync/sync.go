@@ -70,61 +70,16 @@ var TranscriptSubs = []string{"projects", "todos", "tasks"}
 func (m *Manager) CreateAll(ctx context.Context, spec Spec) (created bool, err error) {
 	label := sessionLabel(spec.SessionID)
 
-	// 1. Project sync (two-way-safe). Skip rather than hand Mutagen an empty
-	// alpha URL — a missing ProjectPath means the caller couldn't resolve the
-	// local repo path (e.g. attaching to a session whose State lacks it), and a
-	// blank path would otherwise produce "unable to parse alpha URL: empty URL".
-	if spec.ProjectPath == "" {
-		return false, fmt.Errorf("sync: project path is empty for session %s; skipping project sync", spec.SessionID)
-	}
-	projectName := "sandbox-" + spec.SessionID + "-project"
-	// Ignore patterns prevent secrets, credentials, and large build trees from
-	// being pushed to the pod (C1). These are defense-in-depth defaults; users
-	// can add more via mutagen.yml in the project root.
-	args := []string{
-		"sync", "create",
-		"--name=" + projectName,
-		"--label", label,
-		// two-way-safe is data-preserving (M27): when only one side changed a
-		// path, the change propagates; when BOTH sides changed the same path
-		// (a conflict — e.g. the operator and the agent edit one file at once),
-		// Mutagen does NOT pick a winner or clobber either copy. It halts
-		// propagation for that path and surfaces it as a conflict, visible via
-		// `mutagen sync list <name>` (and `mutagen sync monitor`). The operator
-		// resolves it by removing the unwanted side's version, after which sync
-		// resumes. (Contrast two-way-resolved, which would auto-pick the local
-		// side and silently overwrite the pod's edit.)
-		"--mode=two-way-safe",
-		"--ignore-vcs",
-		// Secrets and credentials — never sync to the pod.
-		"--ignore=.env",
-		"--ignore=.env.*",
-		"--ignore=*.pem",
-		"--ignore=*.key",
-		"--ignore=*.p12",
-		"--ignore=*.pfx",
-		// Large build/dependency trees that belong on each side independently.
-		"--ignore=node_modules",
-		"--ignore=vendor",
-		"--ignore=.venv",
-		"--ignore=venv",
-		"--ignore=__pycache__",
-		"--ignore=.cache",
-		"--ignore=dist",
-		"--ignore=build",
-		"--ignore=target",
-		spec.ProjectPath, spec.SSHHost + ":" + spec.RemotePath,
-	}
-	if _, err := m.r.Output(ctx, nil, args...); err != nil {
-		// C8: use a more specific substring to avoid swallowing unrelated failures.
-		// Mutagen emits "session already exists" for idempotent re-creates.
-		if !isMutagenAlreadyExists(err) {
-			return false, fmt.Errorf("sync: create project session: %w", err)
+	// 1. Project sync (two-way-safe). Skip ONLY the project sync when ProjectPath is
+	// empty (e.g. attaching to a session whose State lacks the local repo path) —
+	// the config-input + transcript groups below need no project path, so aborting
+	// here would needlessly freeze agent-activity sync too. A blank alpha URL would
+	// otherwise fail with "unable to parse alpha URL: empty URL" (MF4).
+	if spec.ProjectPath != "" {
+		created, err = m.createProjectSync(ctx, spec, label)
+		if err != nil {
+			return false, err
 		}
-		// Already exists → this is a reconnect; the session will reconcile on its
-		// own. Leave created=false.
-	} else {
-		created = true
 	}
 
 	// 2. Config inputs (one-way host -> remote)
@@ -166,6 +121,60 @@ func (m *Manager) CreateAll(ctx context.Context, spec Spec) (created bool, err e
 	}
 
 	return created, nil
+}
+
+// createProjectSync creates the two-way-safe project sync for a session.
+// Idempotent: an already-existing session ("session already exists") is left as-is
+// and reported as created=false; only a fresh create reports created=true.
+func (m *Manager) createProjectSync(ctx context.Context, spec Spec, label string) (created bool, err error) {
+	projectName := "sandbox-" + spec.SessionID + "-project"
+	// Ignore patterns prevent secrets, credentials, and large build trees from
+	// being pushed to the pod (C1). These are defense-in-depth defaults; users
+	// can add more via mutagen.yml in the project root.
+	args := []string{
+		"sync", "create",
+		"--name=" + projectName,
+		"--label", label,
+		// two-way-safe is data-preserving (M27): when only one side changed a
+		// path, the change propagates; when BOTH sides changed the same path
+		// (a conflict — e.g. the operator and the agent edit one file at once),
+		// Mutagen does NOT pick a winner or clobber either copy. It halts
+		// propagation for that path and surfaces it as a conflict, visible via
+		// `mutagen sync list <name>` (and `mutagen sync monitor`). The operator
+		// resolves it by removing the unwanted side's version, after which sync
+		// resumes. (Contrast two-way-resolved, which would auto-pick the local
+		// side and silently overwrite the pod's edit.)
+		"--mode=two-way-safe",
+		"--ignore-vcs",
+		// Secrets and credentials — never sync to the pod.
+		"--ignore=.env",
+		"--ignore=.env.*",
+		"--ignore=*.pem",
+		"--ignore=*.key",
+		"--ignore=*.p12",
+		"--ignore=*.pfx",
+		// Large build/dependency trees that belong on each side independently.
+		"--ignore=node_modules",
+		"--ignore=vendor",
+		"--ignore=.venv",
+		"--ignore=venv",
+		"--ignore=__pycache__",
+		"--ignore=.cache",
+		"--ignore=dist",
+		"--ignore=build",
+		"--ignore=target",
+		spec.ProjectPath, spec.SSHHost + ":" + spec.RemotePath,
+	}
+	if _, err := m.r.Output(ctx, nil, args...); err != nil {
+		// C8: use a more specific substring to avoid swallowing unrelated failures.
+		// Mutagen emits "session already exists" for idempotent re-creates → not an
+		// error (a reconnect; the session reconciles on its own, created=false).
+		if !isMutagenAlreadyExists(err) {
+			return false, fmt.Errorf("sync: create project session: %w", err)
+		}
+		return false, nil
+	}
+	return true, nil
 }
 
 // Status returns mutagen's listing output for a session's sync sessions.
@@ -220,6 +229,91 @@ func (m *Manager) TerminateAll(ctx context.Context, sessionID string) error {
 	_, err := m.r.Output(ctx, nil, "sync", "terminate", "--label-selector="+label)
 	// C8: use specific mutagen "not found" message rather than bare "not found"
 	// which could match an unrelated error.
+	if err != nil && isMutagenNotFound(err) {
+		return nil
+	}
+	return err
+}
+
+// SyncSession is a sandbox-owned mutagen sync session (one of the ~8 created per
+// remote session), as reported by `mutagen sync list`. Used by the GC to find
+// orphans whose pod endpoint is gone.
+type SyncSession struct {
+	SessionID  string // sandbox session id (from the sandbox-session label)
+	Identifier string // mutagen session identifier (sync_...)
+	Name       string // mutagen session name (sandbox-<id>-<kind>)
+	Status     string // mutagen status enum string (Watching, ConnectingBeta, Paused, …)
+}
+
+// syncListTemplate emits one line per session: sessionID|identifier|name|status.
+// It reads the sandbox-session label so List can scope to THIS tool's k8s syncs:
+// the lima-based system-config manager shares the same host mutagen daemon but
+// labels its syncs sandbox-vm-id, which we must never touch.
+const syncListTemplate = `{{range .}}{{index .Labels "sandbox-session"}}|{{.Identifier}}|{{.Name}}|{{.Status}}{{"\n"}}{{end}}`
+
+// List returns every mutagen sync session owned by THIS tool — those carrying a
+// non-empty sandbox-session label. Sessions from other users of the same host
+// daemon (notably the lima sandbox-vm-id syncs) are excluded. A daemon with none
+// returns an empty slice (not an error).
+func (m *Manager) List(ctx context.Context) ([]SyncSession, error) {
+	out, err := m.r.Output(ctx, nil, "sync", "list", "--template", syncListTemplate)
+	if err != nil {
+		if isMutagenNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("sync: list sessions: %w", err)
+	}
+	return parseSyncList(out), nil
+}
+
+// parseSyncList parses syncListTemplate output, keeping only rows that carry a
+// sandbox-session label (ours). Lima syncs (empty first field) and blank lines
+// are dropped.
+func parseSyncList(out []byte) []SyncSession {
+	var sessions []SyncSession
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "|", 4)
+		if len(parts) != 4 || parts[0] == "" {
+			continue // not ours (no sandbox-session label) or malformed
+		}
+		sessions = append(sessions, SyncSession{
+			SessionID:  parts[0],
+			Identifier: parts[1],
+			Name:       parts[2],
+			Status:     parts[3],
+		})
+	}
+	return sessions
+}
+
+// IsOrphanStatus reports whether a mutagen status means the remote (pod) endpoint
+// is unreachable — the transport is down and mutagen is looping to reconnect a pod
+// that is (most likely) gone. It is cluster-agnostic: a sync that cannot reach its
+// pod is dead regardless of which cluster owned it. Paused (intentional, set by
+// `suspend`) and the connected working states (Watching/Scanning/Reconciling/
+// Staging/…) are treated as healthy.
+func IsOrphanStatus(status string) bool {
+	s := strings.ToLower(strings.TrimSpace(status))
+	if strings.Contains(s, "paused") {
+		return false
+	}
+	return strings.Contains(s, "connecting") || strings.Contains(s, "disconnected")
+}
+
+// TerminateByIdentifier terminates specific mutagen sync sessions by identifier —
+// the GC's surgical teardown of orphaned syncs, distinct from TerminateAll (which
+// targets every sync for one sandbox session by label). A "not found" (already
+// gone) is treated as success.
+func (m *Manager) TerminateByIdentifier(ctx context.Context, identifiers ...string) error {
+	if len(identifiers) == 0 {
+		return nil
+	}
+	args := append([]string{"sync", "terminate"}, identifiers...)
+	_, err := m.r.Output(ctx, nil, args...)
 	if err != nil && isMutagenNotFound(err) {
 		return nil
 	}

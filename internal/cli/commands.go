@@ -12,6 +12,7 @@ import (
 	"github.com/cullenmcdermott/sandbox/internal/k8s"
 	"github.com/cullenmcdermott/sandbox/internal/runner"
 	"github.com/cullenmcdermott/sandbox/internal/session"
+	syncpkg "github.com/cullenmcdermott/sandbox/internal/sync"
 	"github.com/cullenmcdermott/sandbox/internal/tui/dashboard"
 )
 
@@ -93,7 +94,7 @@ func newAttachCmd() *cobra.Command {
 					newDashboardCreator(backend, "", ""),
 					dashboard.SessionFromState(st),
 					"",
-					dashboard.RunOptions{DestroyHook: newLocalDestroyHook(), PreDestroyHook: newPreDestroySyncStop(), TitleStore: indexTitleStore{}, SnapshotStore: indexSnapshotStore{}, EventCache: indexEventCache{}, ObserverConnector: newDashboardObserverConnector(backend, ""), SyncProber: dashboardSyncProber(), IdleTimeout: defaultReaperIdleTimeout},
+					dashboard.RunOptions{DestroyHook: newLocalDestroyHook(), PreDestroyHook: newPreDestroySyncStop(), TitleStore: indexTitleStore{}, SnapshotStore: indexSnapshotStore{}, EventCache: indexEventCache{}, ObserverConnector: newDashboardObserverConnector(backend, ""), SyncProber: dashboardSyncProber(), SyncReaper: dashboardSyncReaper(), IdleTimeout: defaultReaperIdleTimeout},
 				)
 			})
 		},
@@ -359,5 +360,85 @@ func newSyncCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&resume, "resume", false, "resume sync sessions")
 	cmd.Flags().BoolVar(&terminate, "terminate", false, "terminate sync sessions and remove the SSH alias")
 	cmd.MarkFlagsMutuallyExclusive("pause", "resume", "terminate")
+	cmd.AddCommand(newSyncGCCmd())
+	return cmd
+}
+
+// newSyncGCCmd terminates orphaned Mutagen sync sessions: this tool's syncs whose
+// pod endpoint is gone (the session was destroyed, idle-reaped, dev-reset, or
+// kubectl-deleted) and that would otherwise retry the dead pod forever and pile up
+// in the host Mutagen daemon (the leak the dashboard GC also handles while a TUI
+// is open; this is the headless/manual sweep). It is conservative by construction:
+//   - scoped to this tool's syncs (the sandbox-session label) — never the lima
+//     sandbox-vm-id syncs that share the host daemon;
+//   - only syncs whose transport is down (IsOrphanStatus), so an actively-syncing
+//     session is never touched;
+//   - cross-referenced against the live cluster, so a running OR suspended session's
+//     sync is kept (it reconnects / resumes); and
+//   - it refuses to run if the cluster can't be listed — during an outage every
+//     sync looks down, and we must not mistake that for "all sessions gone".
+//
+// A terminated sync is safe to lose: the connect path re-creates it idempotently.
+func newSyncGCCmd() *cobra.Command {
+	var dryRun bool
+	cmd := &cobra.Command{
+		Use:   "gc",
+		Short: "Terminate orphaned file-sync sessions whose pod is gone",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx := cmd.Context()
+			mgr := syncManager()
+			syncs, err := mgr.List(ctx)
+			if err != nil {
+				return fmt.Errorf("sync gc: list syncs: %w", err)
+			}
+			// Authoritative live set. Refuse to proceed without it: during a cluster
+			// outage every pod is unreachable, so every sync would look orphaned and
+			// an empty live set would nuke them all.
+			backend, err := newBackend()
+			if err != nil {
+				return fmt.Errorf("sync gc needs cluster access to confirm live sessions: %w", err)
+			}
+			states, err := backend.List(ctx)
+			if err != nil {
+				return fmt.Errorf("sync gc: cannot list cluster sessions; refusing to run (an outage makes every sync look gone): %w", err)
+			}
+			live := make(map[string]bool, len(states))
+			for _, st := range states {
+				live[string(st.ID)] = true
+			}
+
+			var orphanIDs []string
+			bySession := map[string]int{}
+			for _, s := range syncs {
+				if !syncpkg.IsOrphanStatus(s.Status) {
+					continue // actively syncing → keep
+				}
+				if live[s.SessionID] {
+					continue // session still exists (running/suspended) → keep; it reconnects/resumes
+				}
+				orphanIDs = append(orphanIDs, s.Identifier)
+				bySession[s.SessionID]++
+			}
+			out := cmd.OutOrStdout()
+			if len(orphanIDs) == 0 {
+				fmt.Fprintln(out, "sync gc: no orphaned sync sessions.")
+				return nil
+			}
+			for sid, n := range bySession {
+				fmt.Fprintf(out, "  %s — %d orphaned sync session(s)\n", sid, n)
+			}
+			if dryRun {
+				fmt.Fprintf(out, "sync gc: %d orphaned sync session(s) across %d gone session(s) (dry-run — re-run without --dry-run to terminate).\n", len(orphanIDs), len(bySession))
+				return nil
+			}
+			if err := mgr.TerminateByIdentifier(ctx, orphanIDs...); err != nil {
+				return fmt.Errorf("sync gc: terminate orphans: %w", err)
+			}
+			fmt.Fprintf(out, "sync gc: terminated %d orphaned sync session(s) across %d gone session(s).\n", len(orphanIDs), len(bySession))
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "list orphaned syncs without terminating them")
 	return cmd
 }

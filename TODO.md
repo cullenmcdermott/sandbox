@@ -92,6 +92,34 @@ line and move the detail to the archive.
 - [ ] Defer/deprioritize `ensureReaper` and the launch-burst observer connects off
   the foreground connect path; drop the redundant connect-time Status Get +
   re-`ensureSSHKey` on the freshly-created path. `connect.go:93,144,184`.
+- [~] **Mutagen sync GC — leaked-sync cleanup (host-side resource leak).** Root cause:
+  the host mutagen daemon outlives the CLI and is blind to the cluster, so a session
+  that dies any way other than CLI `destroy`/`suspend` (the in-cluster **idle reaper**
+  replicas→0, `just dev-reset`/`dev-nuke` + `kubectl delete`, eviction/node-drain, CLI
+  crash/SIGKILL) leaks ~8 syncs (project + config-* + transcripts-*) retrying the gone
+  pod forever (`ConnectingBeta`) — observed 634 dead syncs in one daemon. **DONE
+  (this branch):** `Manager.List`/`IsOrphanStatus`/`TerminateByIdentifier` (scoped to
+  the `sandbox-session` label, never the lima `sandbox-vm-id` syncs); a dashboard GC on
+  the reconcile tick that reaps an orphan only when its session's pod is NOT
+  Running/Creating per the authoritative snapshot (so idle-reaped **Suspended** sessions
+  are cleaned, not protected — MF1) after a 90s grace; `sandbox sync gc [--dry-run]`
+  with a cluster-outage guard; `ResumeAll` on attach so a CLI-suspended session re-syncs
+  on re-attach (MF2); partial CreateAll recovery on empty ProjectPath (MF4). Adversarial
+  review verified. **Follow-ups (deferred, from the review):**
+  - **MF3 — cross-context over-reap.** The daemon is shared across kubeconfig contexts;
+    GC liveness is checked against one context, so a *different* k8s cluster's down sync
+    is reaped (churn, not data-loss: re-created on next attach). Fix: stamp syncs with
+    `--label sandbox-context=<ctx>` in `CreateAll` and scope `List`/`sync gc` to the
+    current context. Not triggered today (only one live k8s context in use).
+  - **MF5 — mid-session sync loss doesn't self-heal** while SSE is healthy (recovery
+    only runs in `establish` on SSE drop). Fix: when `SyncProber` reports an attached
+    session's sync is stalled/absent, re-run `CreateAll`+`Flush`.
+  - **SF1 — auto-GC only runs T+30s into an open TUI.** Fire `reconcileListCmd` in
+    `Init` so the clock starts at launch, and run the `sync gc` core best-effort at CLI
+    startup (after MF3 scoping). `internal/sync/sync.go`, `internal/tui/dashboard/model.go`,
+    `internal/cli/commands.go`.
+  - Make `just dev-reset`/`kind-down` run `sandbox sync gc` (or terminate the
+    local-cluster syncs) before deleting pods, so dev churn self-cleans.
 
 ## UX / communication
 

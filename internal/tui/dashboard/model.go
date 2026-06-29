@@ -118,6 +118,111 @@ func (m *Model) probeSyncCmd(id session.ID) tea.Cmd {
 	}
 }
 
+// syncGCGrace is how long a sync must stay orphaned (pod endpoint down) AND its
+// session stay absent from the cluster before the GC terminates it. It spans
+// several reconcile cycles (reconcileInterval = 30s), so a fresh session still
+// connecting (not yet listed), a brief pod restart, or a momentary cluster-list
+// gap never triggers a reap.
+const syncGCGrace = 90 * time.Second
+
+// orphanGCMsg carries the current orphaned mutagen syncs for a GC pass.
+type orphanGCMsg struct{ orphans []OrphanSync }
+
+// gcListOrphansCmd lists this tool's down/orphaned mutagen syncs off the Update
+// goroutine. nil when no reaper is configured (the GC is then a no-op). A list
+// error is swallowed — the next reconcile retries — so a flaky mutagen daemon
+// can't wedge the dashboard or, worse, look like "no orphans" and skip cleanup.
+func (m *Model) gcListOrphansCmd() tea.Cmd {
+	reaper := m.syncReaper
+	if reaper == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		orphans, err := reaper.ListOrphans(ctx)
+		if err != nil {
+			return nil
+		}
+		return orphanGCMsg{orphans: orphans}
+	}
+}
+
+// gcTerminateCmd terminates the given orphaned mutagen syncs off the Update
+// goroutine. A failure is non-fatal: the syncs stay orphaned and the next GC pass
+// retries (their grace entries were already cleared, so they re-accrue the grace).
+func (m *Model) gcTerminateCmd(ids []string) tea.Cmd {
+	reaper := m.syncReaper
+	if reaper == nil || len(ids) == 0 {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		_ = reaper.Terminate(ctx, ids)
+		return nil
+	}
+}
+
+// gcRunningSet is the set of session ids whose pod is (or is coming) up per the
+// authoritative cluster snapshot — Running or Creating. The sync GC protects only
+// these; everything else (Suspended, Failed, or absent/gone) has no live pod, so
+// its orphaned syncs are eligible for reaping after the grace window.
+func gcRunningSet(states []session.State) map[session.ID]bool {
+	s := make(map[session.ID]bool, len(states))
+	for _, st := range states {
+		if st.Status == session.StatusRunning || st.Status == session.StatusCreating {
+			s[st.ID] = true
+		}
+	}
+	return s
+}
+
+// reapOrphans applies the GC grace policy to the current orphan syncs and returns
+// a Cmd terminating those that are durably dead. An orphan is reaped only when (a)
+// its session's pod is NOT up per the latest authoritative snapshot (gcRunning) —
+// i.e. the session is gone, Suspended, or Failed, so the sync is thrashing a pod
+// that isn't there — AND (b) it has stayed that way for at least syncGCGrace. So a
+// running session's sync (even mid-blip) and a fresh session still scheduling are
+// never touched, while an idle-reaped or destroyed session's syncs are cleaned up.
+// A reaped sync is re-created idempotently by the next attach (and resumed if it
+// was merely paused). Grace entries for recovered orphans (pod came back, or
+// transport reconnected) are dropped so the map tracks only live candidates.
+func (m *Model) reapOrphans(orphans []OrphanSync) tea.Cmd {
+	if m.orphanSince == nil {
+		m.orphanSince = make(map[string]time.Time)
+	}
+	now := nowFunc()
+	seen := make(map[string]bool, len(orphans))
+	var due []string
+	for _, o := range orphans {
+		seen[o.Identifier] = true
+		// Protected: the session's pod is up (or scheduling) per the authoritative
+		// snapshot → its sync should be/become connected; never reap it.
+		if m.gcRunning[o.SessionID] {
+			delete(m.orphanSince, o.Identifier)
+			continue
+		}
+		// No live pod (gone/suspended/failed): start/continue the grace clock.
+		since, ok := m.orphanSince[o.Identifier]
+		if !ok {
+			m.orphanSince[o.Identifier] = now
+			continue
+		}
+		if now.Sub(since) >= syncGCGrace {
+			due = append(due, o.Identifier)
+			delete(m.orphanSince, o.Identifier)
+		}
+	}
+	// Drop grace entries for syncs that recovered (no longer in the orphan list).
+	for id := range m.orphanSince {
+		if !seen[id] {
+			delete(m.orphanSince, id)
+		}
+	}
+	return m.gcTerminateCmd(due)
+}
+
 // probeIdleCmd probes one warm session's idle-since time off the Update
 // goroutine, reusing the session's already-open background runner client.
 func (m *Model) probeIdleCmd(id session.ID) tea.Cmd {
@@ -365,6 +470,25 @@ type Model struct {
 	// nil disables the indicator (unit-test default).
 	syncProber SyncProber
 
+	// syncReaper enumerates + terminates this tool's orphaned mutagen syncs. nil
+	// disables the periodic sync GC (unit-test / no-backend default).
+	syncReaper SyncReaper
+
+	// orphanSince is the GC grace clock: mutagen sync identifier → first time it
+	// was observed orphaned (pod endpoint down) AND its session was NOT in
+	// gcRunning. An entry is dropped when the sync recovers or its session's pod
+	// comes back, so the map only tracks durably-dead candidates and can't grow.
+	orphanSince map[string]time.Time
+
+	// gcRunning is the set of session ids whose pod is (or is coming) up per the
+	// last authoritative cluster reconcile — Running or Creating. The sync GC
+	// protects ONLY these. A Suspended session (the idle reaper sets replicas=0
+	// from inside the cluster and cannot pause the host sync) is deliberately NOT
+	// protected, so its thrashing orphan syncs are reaped after the grace window —
+	// otherwise reaper-suspended sessions would leak ~8 Connecting syncs each
+	// forever (the original 634-leak, re-labeled "gone"→"suspended").
+	gcRunning map[session.ID]bool
+
 	// idleTimeout is the reaper idle-timeout, used to render the warm session
 	// "suspends in ~X" hint. Zero hides the hint.
 	idleTimeout time.Duration
@@ -499,6 +623,10 @@ func (m *Model) backgroundConnector() Connector {
 // WithSyncProber injects the sync-health probe used to render per-session sync
 // status. nil disables the indicator (unit-test default).
 func (m *Model) WithSyncProber(p SyncProber) *Model { m.syncProber = p; return m }
+
+// WithSyncReaper injects the orphaned-sync GC used to terminate mutagen syncs
+// whose session is gone. nil disables the GC (unit-test / no-backend default).
+func (m *Model) WithSyncReaper(r SyncReaper) *Model { m.syncReaper = r; return m }
 
 // WithIdleTimeout sets the reaper idle-timeout used to render the "suspends in"
 // hint. Zero disables the hint.
@@ -727,8 +855,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.reconcileListCmd(), reconcileTickCmd())
 
 	case reconcileMsg:
-		m.reconcile([]session.State(msg))
-		return m, nil
+		states := []session.State(msg)
+		m.reconcile(states)
+		// Capture the authoritative "pod is up" set from this snapshot for the sync
+		// GC. Using the fresh List (not m.sessions, which reconcile only prunes and
+		// whose per-session Status can be stale) means a watch-missed-but-running
+		// session is still protected, and a Suspended/gone one is correctly reaped.
+		m.gcRunning = gcRunningSet(states)
+		// Piggyback the orphaned-sync GC on the same snapshot. gcListOrphansCmd is
+		// nil without a reaper, so this is a no-op in tests.
+		return m, m.gcListOrphansCmd()
+
+	case orphanGCMsg:
+		return m, m.reapOrphans(msg.orphans)
 
 	case liveSSEReadyMsg:
 		// Guard: if the session was deleted or suspended while the connector
