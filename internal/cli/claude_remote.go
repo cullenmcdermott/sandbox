@@ -29,7 +29,7 @@ func newClaudeRemoteCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "claude [prompt]",
-		Short: "Start or attach a remote Claude SDK session and open the local TUI",
+		Short: "Start a new remote Claude SDK session and open the local TUI (resume with `attach`)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			prompt := ""
 			if len(args) > 0 {
@@ -45,8 +45,9 @@ func newClaudeRemoteCmd() *cobra.Command {
 	return cmd
 }
 
-// newOpencodeCmd starts (or, via the dashboard, reuses) a remote opencode-server
-// session and hands the terminal to the local `opencode attach` TUI. Unlike
+// newOpencodeCmd starts a new remote opencode-server session and hands the
+// terminal to the local `opencode attach` TUI. (Resuming an existing session is
+// `sandbox attach`, or picking it from the dashboard.) Unlike
 // `claude`, opencode owns its own input loop, so there is no initial-prompt
 // argument: the prompt is typed into the opencode TUI itself.
 func newOpencodeCmd() *cobra.Command {

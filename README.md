@@ -1,13 +1,35 @@
 # sandbox
 
-A Go CLI (`sandbox`) and TypeScript runner pod that run AI coding agents (the
-Claude Agent SDK) inside Kubernetes Sandbox pods with PVC persistence, a
-port-forwarded HTTP+SSE runner API, a local Bubble Tea TUI, and Mutagen file
-sync.
+Run **Claude** and **OpenCode** coding agents on a remote Kubernetes cluster
+instead of on your laptop. Each session is its own pod that keeps its state on a
+PVC, so you can detach, close the lid, and pick the conversation back up later —
+or run several agents in parallel without tying up your machine.
 
-This is the Kubernetes-native successor to the Lima-based local sandbox CLI. It
-targets a remote cluster running the [agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox)
-controller (v0.4.6).
+You drive it all from a local terminal UI: a command-center dashboard that lists
+your sessions, flags the ones waiting on you, and drops you into a live chat (or
+the agent's own TUI) on demand. The agents run on the cluster; your keystrokes
+and files stay local. It targets a cluster running the
+[agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) controller
+(v0.4.6).
+
+<!-- DEMO (hero, Phase 6): cold-start Claude turn → docs/demos/claude-turn.gif -->
+
+> **Status — early.** The component boundaries and the auth/env wiring are
+> implemented and unit-tested, but the end-to-end file-sync path (Mutagen over
+> SSH) and the runner image build have **not** been validated on a live cluster
+> yet. Treat this as a working prototype, not a turnkey product — see the
+> [unvalidated paths](docs/architecture.md#unvalidated-paths).
+
+## Why use this
+
+- **Isolation** — each agent runs in its own pod under a default-deny network
+  policy, not against your real shell, filesystem, or cluster credentials.
+- **Persistence** — session state lives on a PVC, so it survives detach,
+  suspend/resume, and CLI restarts. Reconnect and the event log replays.
+- **Parallelism** — start many sessions at once and let the dashboard route your
+  attention to whichever one needs input next.
+- **A free laptop** — the cluster does the work; your machine just renders the UI
+  and syncs files.
 
 ## How it works
 
@@ -27,18 +49,36 @@ model (with diagrams), and `docs/runner-api.md` for the HTTP+SSE contract.
 ## Quickstart
 
 ```bash
-sandbox                    # open the command-center dashboard (the primary entry):
+sandbox                    # open the command-center dashboard:
                            # session list, attention routing, attach, create
-sandbox claude "fix the flaky test"   # direct shortcut: start (or reuse) a Claude
-                                      # session for the current project and open its TUI
+sandbox claude "fix the flaky test"   # shortcut: start a NEW Claude session for
+                                      # the current project and open its TUI
 ```
 
-`sandbox` (no args) is the main way in — it opens the dashboard and lets you
-create, attach to, and route between sessions. `sandbox claude [prompt]` is the
-direct-session shortcut when you already know you want a Claude session here.
+`sandbox` with no args is the way in: it opens the dashboard, where you create,
+attach to, and route between sessions. `sandbox claude [prompt]` skips straight to
+a new Claude session for the current directory. It always starts a fresh session —
+to return to an existing one, run `sandbox attach <id>` or pick it from the
+dashboard.
 
 For development, `just` is the canonical command surface (`just` lists recipes,
 `just check` is the full CI gate). See `CLAUDE.md` for the toolchain notes.
+
+## Try it locally (no remote cluster)
+
+You don't need a real cluster to kick the tires. A disposable local
+[KIND](https://kind.sigs.k8s.io/) environment brings up the agent-sandbox
+controller and a runner image, then drops you into the TUI:
+
+```bash
+just doctor          # check the toolchain + Docker daemon
+just dev             # KIND up + controller + images + the Claude TUI
+just dev opencode    # …same, with the OpenCode backend
+```
+
+See [`dev/local/README.md`](dev/local/README.md) for the full local-dev guide —
+prerequisites, image delivery, and resetting between runs. (Live Claude/OpenCode
+turns still need credentials; the dashboard and session-list views don't.)
 
 ## Prerequisites
 
@@ -90,13 +130,20 @@ per-session Secret (`<session-id>-runner`); you do not manage it manually.
   `.depot/workflows/build-runner-image.yml` if you prefer to wire up your own
   registry there.
 
-## Build
+## Install
 
 ```bash
-# Go CLI
-go build ./cmd/sandbox/      # produces ./sandbox
+# From source — produces ./sandbox in the repo root:
+go build ./cmd/sandbox/
 
-# TypeScript runner (typecheck)
+# Or, once the module is published, install the CLI directly:
+go install github.com/cullenmcdermott/sandbox/cmd/sandbox@latest
+```
+
+Put the resulting `sandbox` binary somewhere on your `PATH` (e.g. `~/bin` or
+`/usr/local/bin`). To typecheck the TypeScript runner:
+
+```bash
 cd runner && npm install --ignore-scripts && ./node_modules/.bin/tsc --noEmit
 ```
 
@@ -105,8 +152,8 @@ cd runner && npm install --ignore-scripts && ./node_modules/.bin/tsc --noEmit
 | Command | Description |
 |---|---|
 | `sandbox` | Open the command-center dashboard (session list, attention routing, attach) |
-| `sandbox claude [prompt]` | Start (or reuse) a Claude Agent SDK session for the current project and open the TUI (`--model <id\|alias>` sets the session model; switch in-session with `/model`) |
-| `sandbox opencode` | Start (or reuse) an OpenCode-backend session (external `opencode serve` + attach) |
+| `sandbox claude [prompt]` | Start a **new** Claude Agent SDK session for the current project and open the TUI (`--model <id\|alias>` sets the session model; switch in-session with `/model`). To resume an existing one, use `sandbox attach` |
+| `sandbox opencode` | Start a **new** OpenCode-backend session (external `opencode serve` + attach) |
 | `sandbox attach <id>` | Reconnect to a running/suspended session and replay history |
 | `sandbox trace <id>` | Replay a session's normalized event timeline (`--json`, `--since`, `--tool` filters) |
 | `sandbox status` | List sessions and their status |
@@ -124,6 +171,13 @@ cd runner && npm install --ignore-scripts && ./node_modules/.bin/tsc --noEmit
 go test ./...
 go vet ./...
 ```
+
+## Contributing & support
+
+Contributions are welcome — start with [`CONTRIBUTING.md`](CONTRIBUTING.md) for the
+dev setup and the one codegen contract, and [`docs/architecture.md`](docs/architecture.md)
+for the design rationale behind the two-component split. For security issues,
+follow [`SECURITY.md`](SECURITY.md) instead of opening a public issue.
 
 ## License
 

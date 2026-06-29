@@ -449,6 +449,12 @@ func (m *TranscriptModel) renderStatusLine() string {
 	if m.effortOverride != "" {
 		row1 += muted.Render(" · ") + effortTag(m.effortOverride)
 	}
+	// File-sync health (warm-session poll, fed from the dashboard): a trailing
+	// glyph so a stalled mutagen sync is visible while attached. Gated on a
+	// non-empty status so the default (unprobed) status line stays byte-identical.
+	if seg := syncSegment(m.syncStatus); seg != "" {
+		row1 += muted.Render(" · ") + seg
+	}
 
 	// Row 2: a single compact claude.ai plan-usage row (5-hour + weekly util bars,
 	// reset countdowns, and the attached model's weekly cap when present), from
@@ -487,4 +493,25 @@ func (m *TranscriptModel) renderStatusLine() string {
 	}
 
 	return " " + row1 + "\n " + row2
+}
+
+// syncSegment renders the attached session's mutagen sync health as a compact
+// status-line segment (glyph + label), matching the dashboard detail pane's
+// glyphs (✓ synced / ⟳ syncing / ⚠ stalled). A stalled sync is coral to draw the
+// eye; the healthy states are muted so they don't compete with the live gauge.
+// An empty/unknown status returns "" so the status line stays unchanged.
+func syncSegment(status string) string {
+	glyph, ok := map[string]string{
+		"synced":  "✓",
+		"syncing": "⟳",
+		"stalled": "⚠",
+	}[status]
+	if !ok {
+		return ""
+	}
+	color := theme.TextMuted
+	if status == "stalled" {
+		color = theme.Coral
+	}
+	return lipgloss.NewStyle().Foreground(color).Render(glyph + " " + status)
 }

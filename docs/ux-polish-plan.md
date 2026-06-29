@@ -36,9 +36,30 @@ cluster-free code first, then do one focused live-cluster session that brings up
       `phase2_ux_test.go`. **Cold-start pod-phase splash still TODO** — it spans
       `internal/k8s` + `internal/cli` and wants live-cluster verification, so it's
       grouped with the cluster work (see the sequencing note below).
-- [ ] **Phase 3** — Terminal-signal & sync visibility (OSC tab-progress, sync statusline, opencode wheel/click)
+- [~] **Phase 3** — Terminal-signal & sync visibility (OSC tab-progress, sync statusline, opencode wheel/click)
+      — **cluster-free items DONE** (`feat/ux-polish`): (1) OSC 9;4 tab-progress now
+      rides `tea.Raw` from `App.Update` on the session-aggregate transition,
+      edge-triggered against a new `App.lastProgress` (replaces `progressActive`);
+      `withTerminalSignals` keeps only the Kitty prepend; `lastProgress` resets while
+      `ScreenExternal` so progress re-asserts on return. (2) chat statusline gained a
+      file-sync segment (`TranscriptModel.syncStatus` + `syncSegment()`, ✓/⟳/⚠, coral
+      on stall) fed from the dashboard's warm-session poll. Tests: rewritten
+      `osc_signals_test.go` (Raw-emission three-state walk + external suppression +
+      non-vacuous View-splice guard) + new `phase3_ux_test.go`. **Item 3 (opencode
+      wheel-scroll/click) deferred** — needs a live opencode pane to confirm the
+      scroll key; grouped with the live-cluster session.
 - [ ] **Phase 4** — Runner metrics observer → opencode parity (title, live status, ctx%/cost, cancel/suspend)
-- [ ] **Phase 5** — Docs & README (accuracy + humanize + launch structure)
+- [x] **Phase 5** — Docs & README (accuracy + humanize + launch structure)
+      — landed on `feat/ux-polish`: 3 accuracy fixes (each re-verified against code) —
+      "start (or reuse)" → "start a **new** session" (`README.md` ×3 + the `claude`
+      help string + the misleading opencode comment in `claude_remote.go`); the caps
+      "drops all" overstatement now names the re-added default set minus NET_RAW/MKNOD
+      (`architecture.md`, from `backend.go:745-752`); the transcript sync path corrected
+      to pod `/session/state/claude/{…}` (`CLAUDE_CONFIG_DIR`) → local `~/.claude/{…}`
+      in two spots. Humanized the README opening + de-duped the "entry point" phrasing;
+      added launch sections (Why-use-this, Try-it-locally/kind, Install path,
+      Status/maturity note, Contributing, hero demo-GIF slot). Verified by an
+      adversarial multi-agent review (doc-accuracy + voice clean).
 - [ ] **Phase 6** — Real asciinema demos via local kind, embedded in the README
 
 Update the box, add a one-line "landed: <commit/summary>" under each phase as it

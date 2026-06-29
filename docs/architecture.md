@@ -38,10 +38,9 @@ seam (`runner/src/agent.ts`): the default `claude-sdk` (the Claude Agent SDK) an
 `opencode` (a supervised `opencode serve` process). Both accept one-shot runner
 turns through the HTTP+SSE turns API — claude-sdk via the SDK, opencode by
 bridging to `opencode serve`'s own API (`opencode-turn.ts`). The interactive
-`sandbox opencode` PTY pane still attaches to the same `opencode serve` directly;
-the runner adapter is additive. The idle reaper is a per-session Kubernetes Job
-that polls the runner's `/idle` and suspends the Sandbox (replicas→0) after the
-idle timeout.
+`sandbox opencode` PTY pane attaches to that same `opencode serve` process
+directly. The idle reaper is a per-session Kubernetes Job that polls the runner's
+`/idle` and suspends the Sandbox (replicas→0) after the idle timeout.
 
 ```mermaid
 flowchart LR
@@ -115,7 +114,7 @@ sequenceDiagram
 /session/workspace/<project path>     workspace files in the PVC (legacy /session view)
 <project path>                        the same files, bind-mounted at the real host path
                                       via subPath — this is the cwd handed to the SDK, so
-                                      transcripts land under ~/.claude/projects/<host path>
+                                      transcripts land in CLAUDE_CONFIG_DIR/projects/<host path>
 ```
 
 **Cluster Secrets:**
@@ -160,7 +159,8 @@ Mutagen runs three session groups (see `internal/sync`):
 1. **project** — local repo ⇄ the pod's `<project path>` (the real host path the
    workspace subtree is bind-mounted at, two-way-safe),
 2. **config inputs** — `~/.claude/{skills,agents,commands,hooks}` → pod (one-way), and
-3. **transcripts** — pod `~/.claude/{projects,todos,tasks}` → local (one-way).
+3. **transcripts** — pod `/session/state/claude/{projects,todos,tasks}`
+   (`CLAUDE_CONFIG_DIR`) → local `~/.claude/{projects,todos,tasks}` (one-way).
 
 Transport is the system `ssh`, configured through a per-session `Host
 sandbox-<id>` block (`internal/sync/ssh.go`) pointing at the ephemeral
@@ -203,10 +203,13 @@ that diverges. Scope is event payloads only — HTTP request/response bodies and
   + `k8s/networkpolicy-egress-allow.yaml`; the maintainer's real cluster wiring
   is a separate private deployment).
 - **Pod hardening:** `seccompProfile: RuntimeDefault`; namespace is PodSecurity
-  Admission `baseline` enforce / `restricted` warn. Container `securityContext`
-  drops all capabilities and sets `allowPrivilegeEscalation: false` (BR1).
-  The runner still runs as **root** (sshd + single-uid workspace ownership);
-  moving to non-root + `fsGroup` is a tracked follow-up (M20).
+  Admission `baseline` enforce / `restricted` warn. The container `securityContext`
+  drops **all** capabilities, then re-adds only the default runtime set sshd's
+  privilege separation and the agent need (CHOWN, SETUID/SETGID, NET_BIND_SERVICE,
+  …) — notably **without** NET_RAW or MKNOD — and sets
+  `allowPrivilegeEscalation: false` (BR1). The runner still runs as **root**
+  (sshd + single-uid workspace ownership); moving to non-root + `fsGroup` is a
+  tracked follow-up (M20).
 - **Tool guardrails:** the runner's PreToolUse hook blocks host/cluster/credential
   Bash patterns (defense-in-depth, not a boundary), and PostToolUse writes an
   audit log.

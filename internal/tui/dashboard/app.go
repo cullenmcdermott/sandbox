@@ -101,11 +101,15 @@ type App struct {
 	transcript *TranscriptModel // nil until first attach
 	external   *ExternalPane    // nil unless attached to an opencode-server session
 
-	// progressActive tracks whether an OSC 9;4 tab-progress indicator is
-	// currently set, so View emits a one-shot "clear" when the aggregate returns
-	// to idle rather than re-emitting every frame (Stage 2). Only ever true on a
-	// Ghostty terminal.
-	progressActive bool
+	// lastProgress is the OSC 9;4 tab-progress state last emitted to the terminal.
+	// App.Update compares the live session aggregate against it and emits a tea.Raw
+	// only on a transition, so each state change writes exactly once (and idle goes
+	// quiet) instead of re-emitting every frame (Stage 2). It MUST ride tea.Raw,
+	// not View content: Bubble Tea v2's cell renderer drops control strings spliced
+	// into a frame (same reason the desktop notification + Kitty graphics use Raw).
+	// ProgressNone (the zero value) off-Ghostty / under ReduceMotion, so this is
+	// only ever meaningfully non-None on a Ghostty terminal.
+	lastProgress terminal.Progress
 
 	// picker is the new-session backend chooser overlay (`n`). When open it is
 	// rendered over the dashboard and intercepts key input.
@@ -593,6 +597,32 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.modalBackdropValid = false
 	}
 
+	// Emit the OSC 9;4 tab-progress signal out-of-band on an aggregate-state
+	// transition. It MUST go via tea.Raw: Bubble Tea v2's cell renderer drops
+	// control strings spliced into View content (the same reason the desktop
+	// notification and Kitty graphics ride tea.Raw, not View). Edge-triggered
+	// against a.lastProgress so each transition writes exactly once — not every
+	// frame — and idle goes quiet. progressState already returns ProgressNone
+	// off-Ghostty / under ReduceMotion, so this is a no-op there.
+	if a.screen == ScreenExternal {
+		// The opencode PTY owns the terminal and may write its own OSC 9;4, so we
+		// don't paint over it. Forget our last state while it's attached so the
+		// next non-external frame re-asserts the real progress instead of assuming
+		// the terminal still reflects what we last emitted.
+		a.lastProgress = terminal.ProgressNone
+	} else if p := a.dashboard.progressState(); p != a.lastProgress {
+		a.lastProgress = p
+		dashCmd = tea.Batch(dashCmd, tea.Raw(terminal.OSCProgress(p)))
+	}
+
+	// Mirror the dashboard's freshly-polled mutagen sync health into the attached
+	// transcript so its status line can surface a stalled sync. The dashboard
+	// already probes warm sessions (the foreground session is one of them), so
+	// this is a read of shared Session state after delegation — no new probe.
+	if a.screen == ScreenTranscript && a.transcript != nil {
+		a.transcript.syncStatus = a.dashboard.sessionByID(a.transcript.ref.ID).SyncStatus
+	}
+
 	switch a.screen {
 	case ScreenTranscript:
 		if a.transcript == nil {
@@ -824,44 +854,27 @@ func (a *App) screenView() tea.View {
 	}
 }
 
-// withTerminalSignals prepends the Stage 2 zero-width OSC 9;4 tab-progress state
-// (recomputed each frame from the session aggregate) to the composed frame. It is
-// a no-op on a non-Ghostty terminal (progressState returns None), so non-Ghostty
-// output is byte-identical to today. The desktop notification does NOT ride here —
-// the v2 cell renderer drops escapes spliced into View content, so it is emitted
-// out-of-band via tea.Raw from the toastMsg handler. The external (opencode) PTY
-// screen is left untouched — it owns the terminal.
+// withTerminalSignals prepends the one-shot Kitty image transmission (queued by
+// the transcript's ctx gauge on the frame its value changed) to the composed
+// frame. Tab-progress (OSC 9;4) and the desktop notification do NOT ride here:
+// Bubble Tea v2's cell renderer drops control strings spliced into View content,
+// so both go out-of-band via tea.Raw — the progress signal from App.Update on the
+// session-aggregate transition, the notification from the toastMsg handler. The
+// Kitty image is the lone sanctioned in-View write because its placeholder cells
+// must reference an image that already exists in the same frame. The external
+// (opencode) PTY screen is left untouched — it owns the terminal.
 func (a *App) withTerminalSignals(v tea.View) tea.View {
-	if a.dashboard == nil || a.screen == ScreenExternal {
+	if a.dashboard == nil || a.screen == ScreenExternal || a.transcript == nil {
 		return v
 	}
-	var pre strings.Builder
-	// Tab progress: emit when active, plus a single clear on the active→idle
-	// transition. progressState already returns None on non-Ghostty terminals.
-	p := a.dashboard.progressState()
-	if p != 0 { // terminal.ProgressNone == 0
-		pre.WriteString(terminal.OSCProgress(p))
-		a.progressActive = true
-	} else if a.progressActive {
-		pre.WriteString(terminal.OSCProgress(p))
-		a.progressActive = false
-	}
-	// Note: the desktop notification is NOT emitted here. Control strings spliced
-	// into a Bubble Tea v2 View are dropped by the cell renderer, so the toast
-	// transition fires it out-of-band via tea.Raw instead (see the toastMsg
-	// handler in model.go).
 	// Stage 3: one-shot Kitty image transmission queued by the transcript's ctx
-	// gauge when its value changed this frame (the only sanctioned out-of-band
-	// write — it rides the frame on the changing frame, not every frame).
-	// Prepended so the image exists before the placeholder cells reference it.
-	if a.transcript != nil {
-		pre.WriteString(a.transcript.takePendingKitty())
-	}
-
-	if pre.Len() == 0 {
+	// gauge when its value changed this frame (rides the changing frame, not every
+	// frame). Prepended so the image exists before the placeholder cells reference it.
+	kitty := a.transcript.takePendingKitty()
+	if kitty == "" {
 		return v
 	}
-	v.Content = pre.String() + v.Content
+	v.Content = kitty + v.Content
 	return v
 }
 

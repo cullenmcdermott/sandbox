@@ -28,6 +28,9 @@
   direction: enable `tea.MouseModeCellMotion` on `ScreenExternal` too (so wheel events arrive as `MouseWheelMsg`,
   not arrow keys), then translate wheel events into opencode's scroll key (`PageUp`/`PageDown` most likely).
   Requires verifying what key opencode actually uses to scroll its transcript view before committing to a key.
+  **Deferred (Phase 3, item 3):** the OSC + sync-statusline parts of Phase 3 landed; this
+  wheel-scroll/clickable-spots fix is grouped with the live-cluster session because it needs a
+  live opencode pane to confirm the scroll key. See `docs/ux-polish-plan.md` Phase 3.
 Why does jst dev start a claude sessinon automatically?
 
 Forward-looking backlog. Completed-work history was pruned on 2026-06-24 into
@@ -53,12 +56,13 @@ line and move the detail to the archive.
   unreachable.** Fixed (Phase 1): `seedCmd` returns `seedFailedMsg`, `m.seedErr`
   drives an error+`r`-retry branch in `renderRowLines`, self-heals on next
   seed/watch. Tests in `phase1_ux_test.go`.
-- [ ] **OSC 9;4 tab-progress is dropped by the v2 cell renderer** (same class as
-  the desktop-notification bug fixed 2026-06-28). It's still prepended to
-  `v.Content` in `app.go` `withTerminalSignals` instead of going out-of-band via
-  `tea.Raw`, so Ghostty never paints tab progress. Fix needs edge-detection
-  (emit a `tea.Raw` only on the aggregate-state transition, not every frame).
-  `internal/tui/dashboard/app.go` `withTerminalSignals`, `progressState()`.
+- [x] **OSC 9;4 tab-progress is dropped by the v2 cell renderer** (same class as
+  the desktop-notification bug fixed 2026-06-28). Fixed (Phase 3, `feat/ux-polish`):
+  the progress signal now rides `tea.Raw` from `App.Update`, edge-triggered against
+  `App.lastProgress` (replaces `progressActive`) so it emits once per aggregate-state
+  transition (idle/busy/error) and goes quiet when steady; `withTerminalSignals`
+  keeps only the Kitty prepend. `lastProgress` resets under `ScreenExternal` so it
+  re-asserts on detach. Tests in `osc_signals_test.go`.
 
 ## New-session startup speed (ordered by likely win)
 
@@ -95,9 +99,12 @@ line and move the detail to the archive.
 - [x] Connect/create splash has no elapsed timer (reconnect header does). Fixed
   (Phase 2): `App.connectStartedAt` rendered on the `connectingView` title via the
   `roundDur` reconnect idiom. Test in `phase2_ux_test.go`.
-- [ ] Chat status line never surfaces file-sync state; a stalled sync is invisible
-  while attached, and "stalled" offers no remedy hint. `statusline.go:372-476`,
-  `model.go:2153-2161`.
+- [x] Chat status line never surfaces file-sync state; a stalled sync is invisible
+  while attached. Fixed (Phase 3): a trailing row-1 sync segment (`syncSegment()`,
+  ✓ synced / ⟳ syncing / ⚠ stalled, coral on stall) driven by a new
+  `TranscriptModel.syncStatus` fed from the dashboard's warm-session poll after each
+  delegation (no new probe). Gated on non-empty so the default status line stays
+  byte-identical. Tests in `phase3_ux_test.go`. `statusline.go`, `app.go`.
 - [x] connectErr/actionErr persist in the detail pane with no dismiss. Fixed
   (Phase 1): bare `esc` dismisses both in `handleKey` (`model.go`). Test in `phase1_ux_test.go`.
 
@@ -177,8 +184,11 @@ via a passive observer connection to the agent's event stream. See
   (127 for spawn failures); runner-side `SANDBOX_DEBUG` claim removed (C10 tracks
   it); `rate_limit.updated` payload now lists all 10 fields
   (incl. `subscriptionType` + per-model `sevenDay[Opus|Sonnet]*`). Done 2026-06-28.
-- [ ] README markets `sandbox claude` as "start (or reuse)" — it always mints a new
-  session. `README.md:32-33,108`.
+- [x] README marketed `sandbox claude` as "start (or reuse)" — it always mints a new
+  session. Fixed (Phase 5): "start a **new** session" across `README.md` (Quickstart
+  comment, prose, Commands table ×2), the `claude` command help string, and the
+  misleading "via the dashboard, reuses" comment in `internal/cli/claude_remote.go`.
+  Resume is only `sandbox attach` / the dashboard list.
 - [x] ~~ghostty header "proposed/not started" + verification-protocol dead spec
   refs~~ — fixed 2026-06-24.
 

@@ -204,6 +204,14 @@ type TranscriptModel struct {
 	pending  *transcriptPermission
 	showDiff bool
 
+	// syncStatus mirrors the dashboard's polled mutagen sync health for THIS
+	// session ("synced"/"syncing"/"stalled"/""), fed by App after each dashboard
+	// delegation. Surfaced as a trailing row-1 status-line segment so a stalled
+	// file sync is visible while attached (it otherwise only showed in the
+	// dashboard detail pane). Empty renders nothing, so the default status line
+	// stays byte-identical — no golden churn.
+	syncStatus string
+
 	// Rate-limit windows (rate_limit.updated): real claude.ai plan utilization +
 	// reset instants from the SDK /usage data. rlAvailable is false for
 	// API-key/Bedrock/Vertex sessions; the status line hides the windows then
