@@ -1,7 +1,14 @@
 # Depot CI (https://depot.dev/docs/ci) — GitHub Actions-compatible YAML executed on
 # Depot's compute instead of GitHub's. Connect with the Depot GitHub App + `depot ci
-# migrate`; until then this is dark (the .github/workflows/ versions were removed for
-# the clean cut to Depot).
+# migrate`.
+#
+# Caching strategy mirrors github.com/cullenmcdermott/external-dns-nextdns:
+#   - Toolchain comes from the pinned Flox env (.flox/env/manifest.toml), not
+#     setup-go/setup-node/setup-just, so CI and local `just check` can't drift.
+#   - Nix store is cached (cache-nix-action) — Flox resolves packages out of it.
+#   - Go module + golangci-lint caches are restored via actions/cache.
+#   - Go BUILD cache is offloaded to Depot's remote cache (GOCACHEPROG=depot gocache),
+#     keyed by the depot.json project.
 name: CI
 
 on:
@@ -16,36 +23,63 @@ jobs:
   # Single gate that mirrors `just check` exactly, so local and CI cannot drift.
   # `just check` runs: gen (+generated-file diff gate) → fmt-check → lint
   # (golangci-lint + eslint) → build → vet → test (Go + runner) → typecheck →
-  # verify (anti-cheat scan + race tests twice).
+  # verify (anti-cheat scan + race tests twice) → e2e.
   check:
     name: just check
     runs-on: depot-ubuntu-24.04
+    env:
+      FLOX_DISABLE_METRICS: "true"
+      GOMODCACHE: /home/runner/.cache/go/pkg/mod
+      GOLANGCI_LINT_CACHE: /home/runner/.cache/golangci-lint
+      # Offload the Go build cache to Depot's remote cache instead of the local
+      # GOCACHE dir. `depot` is preinstalled + OIDC-authed on Depot runners and
+      # reads the project from depot.json.
+      GOCACHEPROG: depot gocache
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v6
+      - uses: cachix/install-nix-action@v31
         with:
-          go-version: '1.26'
+          nix_path: nixpkgs=channel:nixpkgs-unstable
 
-      - uses: actions/setup-node@v5
+      - name: Restore and save Nix store
+        uses: nix-community/cache-nix-action@v7
         with:
-          node-version: '24'
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('**/*.nix', '**/flake.lock', '.flox/env/manifest.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+          gc-max-store-size-linux: 5G
+          purge: true
+          purge-prefixes: nix-${{ runner.os }}-
+          purge-created: 0
+          purge-last-accessed: P1DT12H
+          purge-primary-key: never
 
-      - name: Install just
-        uses: extractions/setup-just@v3
+      - name: Cache Go dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            /home/runner/.cache/go/pkg/mod
+            /home/runner/.cache/golangci-lint
+          key: go-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            go-
 
-      - name: Install golangci-lint
-        # Pinned to match .golangci.yml's v2 schema (== the Flox-pinned local
-        # version, .flox/env/manifest.toml). Installed onto PATH so `just lint`
-        # runs it for real (the hard enforcement point).
+      - name: Install Flox
         run: |
-          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
-            | sh -s -- -b "$(go env GOPATH)/bin" v2.12.2
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          . /home/runner/.nix-profile/etc/profile.d/nix.sh
+          nix profile add \
+            --experimental-features "nix-command flakes" \
+            --accept-flake-config \
+            'github:flox/flox/v1.11.1'
 
+      - name: Activate Flox environment (verbose)
+        run: flox activate -vv -- true
+
+      # Linters/typecheck/tests need the runner's node_modules (eslint, tsc, the
+      # node:test suite). --ignore-scripts skips better-sqlite3's native build,
+      # which `just check` doesn't exercise (that's the image build's job).
       - name: Install runner deps
-        working-directory: runner
-        run: npm install --ignore-scripts
+        run: flox activate -- bash -c 'cd runner && npm install --ignore-scripts'
 
       - name: just check
-        run: just check
+        run: flox activate -- just check

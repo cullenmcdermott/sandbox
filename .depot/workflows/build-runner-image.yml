@@ -1,13 +1,9 @@
-# Depot CI build+publish of the runner image. Moved off GitHub Actions as part of
-# the clean cut to Depot.
+# Depot build + publish of the runner image (the TypeScript Claude/OpenCode runner).
 #
-# CHANGED FROM THE GHA VERSION (review for your setup):
-#   - runs-on: kubevirt-runners (self-hosted homelab) -> depot-ubuntu-24.04 (Depot cloud).
-#   - DROPPED the Tailscale step: it joined the tailnet for the self-hosted runner;
-#     a Depot cloud runner reaches the PUBLIC ghcr.io directly, and the base images
-#     (node:24-slim, distroless) are public. Re-add Tailscale only if the build
-#     genuinely needs a tailnet-internal resource.
-#   - Consider `depot/build-push-action` for faster, cached builds on Depot.
+# Multi-arch (amd64+arm64) via depot/build-push-action — Depot builds each platform
+# on a native builder (no QEMU) and caches layers in the project keyed by depot.json.
+# On Depot-hosted runners the action authenticates to Depot over OIDC (configure the
+# repo's trust relationship via the Depot GitHub App). GHCR push uses GITHUB_TOKEN.
 name: Build Runner Image
 
 on:
@@ -16,15 +12,18 @@ on:
     paths:
       - 'runner/**'
       - '.depot/workflows/build-runner-image.yml'
+      - 'depot.json'
   pull_request:
     paths:
       - 'runner/**'
       - '.depot/workflows/build-runner-image.yml'
+      - 'depot.json'
   workflow_dispatch:
 
 permissions:
   contents: read
   packages: write
+  id-token: write # OIDC token for depot/build-push-action
 
 env:
   IMAGE: ghcr.io/cullenmcdermott/sandbox-claude-runner
@@ -43,10 +42,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push
-        uses: docker/build-push-action@v6
+      - name: Build and push (multi-arch)
+        uses: depot/build-push-action@v1
         with:
           context: runner
+          platforms: linux/amd64,linux/arm64
+          # Only publish from main; PRs build both arches to catch breakage.
           push: ${{ github.ref == 'refs/heads/main' }}
           tags: |
             ${{ env.IMAGE }}:latest
