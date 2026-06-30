@@ -198,9 +198,14 @@ function sseFrame(evt: Event): string {
 }
 
 function broadcast(evt: Event): void {
+  // Serialize the SSE frame once, not once per client: the wire bytes are
+  // identical for every recipient, so a fan-out of N clients did N redundant
+  // JSON.stringify passes over the same event. Hoisting it makes broadcast
+  // O(clients) string writes with a single O(payload) serialization.
+  const frame = sseFrame(evt);
   for (const client of clients) {
     if (evt.seq <= client.afterSeq) continue;
-    writeSse(client.res, sseFrame(evt));
+    writeSse(client.res, frame);
   }
 }
 

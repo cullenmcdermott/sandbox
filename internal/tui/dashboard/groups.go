@@ -142,8 +142,12 @@ func (m *Model) commitRename() {
 // this includes repo headers; otherwise it is the same as visibleSessions.
 func (m *Model) visibleRows() []groupedSession {
 	if !m.groupView.open {
-		rows := make([]groupedSession, len(m.visibleSessions()))
-		for i, s := range m.visibleSessions() {
+		// Compute the filtered/sorted slice once. visibleSessions() runs a full
+		// FilterSessions + sortByAttention pass (each allocates and copies Session
+		// structs), so calling it twice here did that work twice every render.
+		visible := m.visibleSessions()
+		rows := make([]groupedSession, len(visible))
+		for i, s := range visible {
 			rows[i] = groupedSession{session: &s}
 		}
 		return rows

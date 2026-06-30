@@ -810,10 +810,19 @@ func fitModal(s string, w, h int) string {
 		lines = append(lines, "")
 	}
 	for i, l := range lines {
-		if lipgloss.Width(l) > w {
+		// Measure the display width once and reuse it: padRight would otherwise
+		// re-scan the line, doubling the ANSI width passes on this hot per-frame
+		// path (bodyView fits every visible line every frame). In-width lines —
+		// the common case on a wrapped transcript — now cost a single scan.
+		lw := lipgloss.Width(l)
+		if lw > w {
 			l = ansi.Truncate(l, w, "")
+			lw = lipgloss.Width(l) // re-measure: truncation lands at ≤w, may undershoot on a wide rune
 		}
-		lines[i] = padRight(l, w)
+		if lw < w {
+			l += strings.Repeat(" ", w-lw)
+		}
+		lines[i] = l
 	}
 	return strings.Join(lines, "\n")
 }
