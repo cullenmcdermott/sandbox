@@ -33,6 +33,7 @@ mutagen.pkg-path = "mutagen"
 golangci-lint.pkg-path = "golangci-lint"
 golangci-lint.version = "2.12.2"
 jq.pkg-path = "jq"
+just.pkg-path = "just"
 
 
 ## Environment Variables ---------------------------------------------
