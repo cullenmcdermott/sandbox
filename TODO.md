@@ -34,7 +34,22 @@
   1000/1002/1003 + SGR 1006), so `handleMouse` forwarding real SGR mouse lets
   opencode's OWN wheel-scroll + clicks work — no manual `PageUp`/`PageDown`
   translation needed. Tests in `phase3_item3_test.go`.
-Why does jst dev start a claude sessinon automatically?
+* ~~Why does `just dev` start a claude session automatically?~~ **DONE 2026-06-30
+  (investigation).** By design, not a bug. `just dev` runs the **`sandbox claude`**
+  subcommand (the explicit "start a new session" entrypoint), not bare `sandbox`
+  (the empty dashboard). Chain: `justfile:217` `dev backend="claude"` → `dev-tui`
+  (`:326`) → `exec go run ./cmd/sandbox {{backend}}` = `sandbox claude`
+  (`claude_remote.go:33-38` → `runStartSession(..., BackendClaudeSDK, ...)`, whose
+  own help reads "Start a **new** remote Claude SDK session"). It is routed through
+  the subcommand on purpose: `--runner-image`/`--reaper-image` (which pin the local
+  `:dev` build, `justfile:336-337`) exist **only** on the `claude`/`opencode`
+  subcommands, not on root (`root.go:85-86`). Bare `sandbox` passes empty image
+  strings (`root.go:69` → `newDashboardCreator(backend, "", "")`), so a dashboard
+  `n`-created session would pull the default `:latest` runner from GHCR
+  (`dashboard_connector.go:116-126`) instead of your fresh local build. **Open
+  product call (separate from this bug-or-not question):** if `just dev` should drop
+  into the *empty* dashboard instead, add a `dev-dash` recipe (or root-level image
+  flags so the empty path can still pin `:dev`).
 
 Forward-looking backlog. Completed-work history was pruned on 2026-06-24 into
 [`docs/archive/done-log-2026-06.md`](docs/archive/done-log-2026-06.md). The full
@@ -148,13 +163,21 @@ line and move the detail to the archive.
   off. `model.go:679`, `sync_support.go:118`, `status.go:42`.
 - [ ] Warm-session detail preview re-lays-out + reconciles the *entire* retained
   transcript every frame (no unchanged-guard). `model.go:2253`, `transcript.go:2008-2025`.
-- [ ] `visibleSessions()` re-filters+re-sorts the list 4+ times per frame
+- [~] `visibleSessions()` re-filters+re-sorts the list 4+ times per frame
   (called twice in one statement at `groups.go:145`). Memoize per frame.
+  **Partial (2026-06-30):** the literal double-call in `visibleRows()` is fixed —
+  `groups.go:145-146` now computes `visible := m.visibleSessions()` once and ranges
+  the local (behavior-identical; halves the FilterSessions+sortByAttention+copy work
+  in the render helper). **Remaining:** a true per-frame memo so repeated
+  `visibleRows()` calls within one render share a result. Deferred — needs cache
+  invalidation and `View()` is a value receiver, so it can't cheaply persist a cache.
 - [ ] `bodyView` still ~283µs/frame: `fitModal` does two ANSI `lipgloss.Width`
   scans per visible line every frame. `transcript_list.go:302`. (Open caveat from
   the prior perf pass.)
-- [ ] SSE `broadcast()` re-`JSON.stringify`s each event once per client; serialize
-  once. `runner/src/events.ts:200`.
+- [x] SSE `broadcast()` re-`JSON.stringify`s each event once per client; serialize
+  once. `runner/src/events.ts:200`. **DONE (verified 2026-06-30):** `broadcast()`
+  already hoists `sseFrame(evt)` to a single `const frame` before the client loop,
+  so fan-out is O(clients) writes with one O(payload) serialize. Stale checkbox.
 - [ ] Streaming-markdown safe-boundary predicates rescan the whole growing buffer
   per delta (O(N²) over a turn). `internal/tui/dashboard/chat/streaming_markdown.go:111-233`.
 
@@ -282,3 +305,96 @@ the CLI credential manager below.
   dropped runner-side; black-line/opacity fixes unverified in a live attach.
 - [ ] `~/.claude/todos` + `~/.claude/tasks` sync is ancillary (not required for
   resume) — keep but low priority.
+
+
+iiiiii
+
+## Agent visualization (claude TUI) — investigation + ideas (2026-06-29)
+
+Triggered by a live `claude-sdk` session screenshot: the tool-call transcript is a
+hard-to-scan monochrome wall, and sub-agent dispatch renders badly.
+
+**Observed problems**
+- **Sub-agent dispatch renders as a raw flat card, not the nested `subagentCard`.**
+  Detection is `p.Tool == "Task" || p.AgentName != ""` (`transcript.go:2291`), but the
+  SDK emitted tool name **`Agent`** with empty `AgentName`, so it fell through to
+  `startOrUpdateToolCard` (flat). Result: raw/garbled input shown
+  (`{"description": "…{"description": "…`, doubled — looks like streaming partial-JSON
+  accumulation), and no child-tool tree. **This is the #1 bug behind the screenshot.**
+- **`toolArg` has no `Agent`/`Task` case** (`transcript.go:1227-1264`): an Agent dispatch
+  on a flat card has no clean label — the generic field-getter looks for
+  file_path/command/pattern/url/query, none of which exist on an Agent input
+  (`description`/`prompt`/`subagent_type`).
+- **Args aren't sanitized for display.** Grep/Glob patterns show raw escaped regex with
+  literal `\n` and bled-in prompt text (`func \(m \*Model\) visibleRows\(\)…?\n`).
+  `collapseSpaces` only folds whitespace.
+- **`toolSummary` is generic** (`transcript.go:1266-1279`): every multi-line result
+  collapses to "N lines" — uninformative, and the line gets visually doubled
+  (header + echoed truncated continuation).
+
+**Ideas / fixes (cheap → richer)**
+1. **Fix sub-agent detection** (highest ROI): match `p.Tool == "Task" || p.Tool == "Agent"
+   || p.AgentName != ""`, and when `AgentName` is empty parse `subagent_type` from the
+   Agent input into the card's `agentName`. Restores the nested card + child tree and
+   kills the raw-JSON garble.
+2. **Add an `Agent`/`Task` case to `toolArg`** (description → first line of prompt) so even
+   a flat fallback reads cleanly.
+3. **Sanitize args**: strip/condense literal `\n`, fold escaped-regex noise, and never
+   render raw partial-JSON while a tool's input streams — show `<Tool> <spinner>` until the
+   input parses, then the clean label.
+4. **De-dupe the card to one line** per tool (`<glyph> <Tool> <arg> … <result>` with the
+   result right-aligned), not header + echoed continuation.
+5. **Tool-aware summaries** in `toolSummary` (pass the tool name, already available at
+   `transcript.go:2302-2303`): Grep → "N matches in M files", Edit/Write → "+X/−Y", Bash →
+   exit code + first output line, Read → "N lines".
+6. **Visual hierarchy**: color+icon by tool category (read/edit/exec/search/web) so the wall
+   isn't monochrome; consider collapsing consecutive same-tool runs.
+7. **Expandable flat cards** (like the subagent collapse) so truncated args/results can be
+   opened; right-align the result so the arg gets full width.
+8. **Diff affordance for Edit/Write/MultiEdit**: a 1-line +/- summary now; inline mini-diff
+   on expand later.
+
+Pointers: `internal/tui/dashboard/transcript.go` (`toolArg` 1227, `toolSummary` 1266,
+dispatch detection 2291, `finishToolCard` 1161, `startOrUpdateToolCard` 1131),
+`internal/tui/dashboard/subagent.go` (nested card render).
+
+## Session checkpoint — 2026-06-29 (host), branch `perf/tui-hotpath`
+
+Perf-cluster push + a live mutagen-sync debugging detour.
+
+- **Perf cluster (see "## Performance"):** item 4 `fitModal` single width scan
+  (`transcript.go:804`) **DONE** — checkbox there is stale. Item 5 SSE `broadcast`
+  serialize-once (`events.ts:200`) **DONE**. `visibleRows()` double-call **DONE**
+  (synced in from a pod agent). **Correction to the item-3 deferral:** `Model.View()` is a
+  **pointer** receiver (`model.go:995`), so the render-scoped memo IS feasible — set
+  `m.rendering=true` at View() top, keep a 1-frame cache, return it from
+  `visibleSessions()` only while rendering (must NOT cache across `Update`: element
+  mutations like `DashStatus`/`SyncStatus`/title change filter/sort output). The "value
+  receiver, can't persist a cache" note is wrong.
+  - **Item 1 (sync poll N→1):** add `Manager.StatusSummaryAll` = one `mutagen sync list
+    --template '…{{index .Labels "sandbox-session"}}|{{.Status}}|{{len .Conflicts}}…'`,
+    group by label, worst-of via `classify`; add a `BatchSyncProber` option; `syncPollTickMsg`
+    (`model.go:839`) issues 1 batch Cmd/tick. `--template` confirmed to expose Labels/Status/Conflicts.
+  - **Item 2 (warm preview):** cache `tailLines` (`transcript.go:2037`) keyed on `(lastSeq,width,n)`.
+  - **Item 6 (streaming-markdown):** rendering is already cached; the O(N²) is the boundary
+    predicates rescanning the whole buffer per delta. Bound them to `content[base:]`,
+    `base=len(stableSource)` (a safe boundary ⇒ fence closed + no open hazard; link-ref-defs
+    already excluded by the top-of-Render `hasLinkRefDef` reset ⇒ provably byte-identical).
+    Lowest payoff (byte ops vs the already-fast glamour renderer) — do last.
+- **Mutagen sync (airplane-wifi finding):** the shared host daemon accumulated **25 orphaned
+  lima (`sandbox-vm-id`) syncs** after VM deletion; their reconnect thrash starved real k8s
+  session syncs (`ConnectingBeta`, "files not showing up in pod"). Reaping them (38→13)
+  unblocked the rest — fresh connects then staged + settled to `Watching` in ~5s. Lima is
+  **fully retired** → its `sandbox-vm-id` syncs are pure garbage; wire lima teardown /
+  `just dev-reset` to terminate them. **BUMP MF5** (mid-session sync self-heal): the SSH
+  port-forward drops independently of HTTP/SSE, and recovery only runs in `establish`
+  (attach/SSE-drop), so a stalled-but-attached session never self-heals — the recurring
+  symptom. Fix: when `SyncProber` reports an attached session stalled/absent, re-run
+  `CreateAll`+`Flush`.
+- **Opacity bleed-through (connecting screen) — task open:** "Connecting to new session…"
+  shows ghost dashboard/transcript text behind the stepper. The transcript modal uses
+  `opaqueBackdrop` (solid `theme.Page` — fully opaque), but the connect/reconnect splash uses
+  `dimBackdrop` (intentional dim ghost). A *new* session has no convo to dim, yet ghost text
+  leaks → the connecting (non-reconnect) view composites a dim/partial backdrop instead of an
+  opaque fill. Fix: new-session connect should use `opaqueBackdrop`. Pointers:
+  `internal/tui/dashboard/app.go` `opaqueBackdrop`/`dimBackdrop` (~997-1032), connecting view (~1180-1270).
