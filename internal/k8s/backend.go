@@ -744,8 +744,9 @@ func buildSandbox(spec session.Spec) *agentv1alpha1.Sandbox {
 					},
 					Containers: []corev1.Container{
 						{
-							Name:  "runner",
-							Image: spec.RunnerImage,
+							Name:            "runner",
+							Image:           spec.RunnerImage,
+							ImagePullPolicy: corev1.PullAlways,
 							Ports: []corev1.ContainerPort{
 								{Name: "http", ContainerPort: portRunner},
 								{Name: "ssh", ContainerPort: portSSH},

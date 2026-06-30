@@ -25,7 +25,8 @@ const (
 	// get pods/secrets in agent-sessions.
 	ReaperServiceAccount = "sandbox-reaper"
 	// DefaultReaperImage is the image running the `sandbox reap` subcommand.
-	DefaultReaperImage = "registry.cullen.rocks/sandbox-reaper:latest"
+	// Public GHCR package built by Depot CI; pulled with imagePullPolicy: Always.
+	DefaultReaperImage = "ghcr.io/cullenmcdermott/sandbox-reaper:latest"
 )
 
 // ReaperOptions configures a per-session reaper Job.
@@ -147,8 +148,9 @@ func buildReaperJob(name, sid string, opts ReaperOptions) *batchv1.Job {
 					ServiceAccountName: ReaperServiceAccount,
 					RestartPolicy:      corev1.RestartPolicyNever,
 					Containers: []corev1.Container{{
-						Name:  "reaper",
-						Image: opts.Image,
+						Name:            "reaper",
+						Image:           opts.Image,
+						ImagePullPolicy: corev1.PullAlways,
 						Args: []string{
 							"reap",
 							"--namespace", opts.SessionNamespace,

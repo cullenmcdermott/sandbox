@@ -16,9 +16,9 @@ import (
 )
 
 // defaultRunnerImage is the runner image pulled by session pods. It points at
-// the zot registry (anonymous pull, same as the reaper image) rather than
-// GHCR, whose package is private and 403s on the cluster's anonymous pull.
-const defaultRunnerImage = "registry.cullen.rocks/sandbox-claude-runner:latest"
+// the public GHCR package built by Depot CI (.depot/workflows/); pods pull it
+// anonymously with imagePullPolicy: Always so :latest always reflects main.
+const defaultRunnerImage = "ghcr.io/cullenmcdermott/sandbox-claude-runner:latest"
 
 func newClaudeRemoteCmd() *cobra.Command {
 	var (

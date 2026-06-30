@@ -6,6 +6,7 @@
 > Under-the-hood perf/infra items here stay deferred per that plan's "Deferred" section.
 
 ## Human added needs triage
+* Do we need a "claude-runner" specific image or is that name a misnomer at this point?
 * automatically create worktrees? How to handle ensuring they are merged in and not accidentally "lost"? Since mutagen should sync from my laptop it can merge into "main" from my laptop it just shouldn't try to pull from remote? TUI creates a work tree as part of creating a container. Agent should know to clean it up/give it a proper name before turning it into a pushable branch to be pushed by a human
 * Match claude codex ux, make it feel familiar to claude code users to make sure we can expose all of the necessary options/features/configs but make sure its unique enough for us to not cause confusion. There should already be a plan for this, if not lets create one
 * Consider KRO to wrap resources into our own "custom resource"? Does it support custom status/conditions?
