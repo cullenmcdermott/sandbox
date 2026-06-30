@@ -605,6 +605,24 @@ func podScheduled(pod *corev1.Pod) bool {
 	return pod.Spec.NodeName != ""
 }
 
+// imagePullPolicy mirrors Kubernetes' own default rule, made explicit so it is
+// runtime-independent and survives a tag change. A :latest (or untagged) image
+// always re-pulls, so the GHCR :latest default tracks main without version
+// bumps; a pinned/local tag like :dev — delivered to the kind node via
+// `kind load`/Hall and absent from any registry — uses IfNotPresent so the
+// kubelet doesn't try (and fail) to pull it. The LastIndex(":") > LastIndex("/")
+// guard avoids mistaking a registry host:port (e.g. host:5000/img) for a tag.
+func imagePullPolicy(image string) corev1.PullPolicy {
+	tag := ""
+	if i := strings.LastIndex(image, ":"); i > strings.LastIndex(image, "/") {
+		tag = image[i+1:]
+	}
+	if tag == "" || tag == "latest" {
+		return corev1.PullAlways
+	}
+	return corev1.PullIfNotPresent
+}
+
 // fatalWaitingReasons are kubelet container "waiting" reasons that mean the pod
 // will not become ready without intervention. Each is a state kubelet reports
 // only after it has determined a real problem: the *BackOff reasons mean it has
@@ -746,7 +764,7 @@ func buildSandbox(spec session.Spec) *agentv1alpha1.Sandbox {
 						{
 							Name:            "runner",
 							Image:           spec.RunnerImage,
-							ImagePullPolicy: corev1.PullAlways,
+							ImagePullPolicy: imagePullPolicy(spec.RunnerImage),
 							Ports: []corev1.ContainerPort{
 								{Name: "http", ContainerPort: portRunner},
 								{Name: "ssh", ContainerPort: portSSH},

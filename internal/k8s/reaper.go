@@ -150,7 +150,7 @@ func buildReaperJob(name, sid string, opts ReaperOptions) *batchv1.Job {
 					Containers: []corev1.Container{{
 						Name:            "reaper",
 						Image:           opts.Image,
-						ImagePullPolicy: corev1.PullAlways,
+						ImagePullPolicy: imagePullPolicy(opts.Image),
 						Args: []string{
 							"reap",
 							"--namespace", opts.SessionNamespace,
