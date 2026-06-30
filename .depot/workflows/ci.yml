@@ -70,7 +70,7 @@ jobs:
           nix profile add \
             --experimental-features "nix-command flakes" \
             --accept-flake-config \
-            'github:flox/flox/v1.11.1'
+            'github:flox/flox/v1.12.2'
 
       - name: Activate Flox environment (verbose)
         run: flox activate -vv -- true
