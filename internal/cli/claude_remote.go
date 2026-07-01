@@ -1,24 +1,17 @@
 package cli
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/spf13/cobra"
 
-	"github.com/cullenmcdermott/sandbox/internal/index"
+	"github.com/cullenmcdermott/sandbox/client"
 	"github.com/cullenmcdermott/sandbox/internal/k8s"
 	"github.com/cullenmcdermott/sandbox/internal/session"
 	"github.com/cullenmcdermott/sandbox/internal/tui/dashboard"
 )
-
-// defaultRunnerImage is the runner image pulled by session pods. It points at
-// the public GHCR package built by Depot CI (.depot/workflows/); pods pull it
-// anonymously with imagePullPolicy: Always so :latest always reflects main.
-const defaultRunnerImage = "ghcr.io/cullenmcdermott/sandbox-claude-runner:latest"
 
 func newClaudeRemoteCmd() *cobra.Command {
 	var (
@@ -38,7 +31,7 @@ func newClaudeRemoteCmd() *cobra.Command {
 			return runStartSession(cmd, session.BackendClaudeSDK, prompt, runnerImage, reaperImage, nameFlag, modelFlag)
 		},
 	}
-	cmd.Flags().StringVar(&runnerImage, "runner-image", defaultRunnerImage, "runner container image")
+	cmd.Flags().StringVar(&runnerImage, "runner-image", client.DefaultRunnerImage, "runner container image")
 	cmd.Flags().StringVar(&reaperImage, "reaper-image", k8s.DefaultReaperImage, "idle-reaper container image")
 	cmd.Flags().StringVar(&nameFlag, "name", "", "custom display name for the session (overrides the auto title)")
 	cmd.Flags().StringVar(&modelFlag, "model", "", "model id/alias for the session default (e.g. opus, sonnet, haiku); empty uses the account default. Switch in-session with /model")
@@ -47,9 +40,9 @@ func newClaudeRemoteCmd() *cobra.Command {
 
 // newOpencodeCmd starts a new remote opencode-server session and hands the
 // terminal to the local `opencode attach` TUI. (Resuming an existing session is
-// `sandbox attach`, or picking it from the dashboard.) Unlike
-// `claude`, opencode owns its own input loop, so there is no initial-prompt
-// argument: the prompt is typed into the opencode TUI itself.
+// `sandbox attach`, or picking it from the dashboard.) Unlike `claude`, opencode
+// owns its own input loop, so there is no initial-prompt argument: the prompt is
+// typed into the opencode TUI itself.
 func newOpencodeCmd() *cobra.Command {
 	var (
 		runnerImage string
@@ -65,119 +58,67 @@ func newOpencodeCmd() *cobra.Command {
 			return runStartSession(cmd, session.BackendOpenCode, "", runnerImage, reaperImage, nameFlag, "")
 		},
 	}
-	cmd.Flags().StringVar(&runnerImage, "runner-image", defaultRunnerImage, "runner container image")
+	cmd.Flags().StringVar(&runnerImage, "runner-image", client.DefaultRunnerImage, "runner container image")
 	cmd.Flags().StringVar(&reaperImage, "reaper-image", k8s.DefaultReaperImage, "idle-reaper container image")
 	cmd.Flags().StringVar(&nameFlag, "name", "", "custom display name for the session (overrides the auto title)")
 	return cmd
 }
 
-// provisionSession runs the create-side of a new remote session that is shared
-// by `sandbox claude`/`opencode` (runStartSession) and the dashboard's `n`
-// (new-session) action (newDashboardCreator): resolve the cwd, mint a session
-// id, prepare the per-session SSH key, build the Spec, create the Sandbox/PVC,
-// and record the session in the local index. It does NOT start the pod or
-// connect — callers do that, since the start/connect/attach flow differs.
-func provisionSession(ctx context.Context, backend *k8s.Backend, backendName, runnerImage, model string) (session.ID, session.Ref, string, error) {
+// resolveProjectPath returns the absolute, symlink-resolved current working
+// directory — the project path mirrored into the session pod so the SDK's
+// transcript keys stay host-compatible.
+func resolveProjectPath() (string, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
-		return "", session.Ref{}, "", fmt.Errorf("get cwd: %w", err)
+		return "", fmt.Errorf("get cwd: %w", err)
 	}
-	projectPath, err := filepath.EvalSymlinks(cwd)
-	if err != nil {
-		projectPath = cwd
+	if p, err := filepath.EvalSymlinks(cwd); err == nil {
+		return p, nil
 	}
-
-	if backendName == "" {
-		backendName = session.BackendClaudeSDK
-	}
-	if runnerImage == "" {
-		runnerImage = defaultRunnerImage
-	}
-
-	sid, err := newSessionID(backendName, projectPath)
-	if err != nil {
-		return "", session.Ref{}, "", err
-	}
-
-	// Prepare the per-session SSH key for Mutagen before creating the pod,
-	// since its public half is baked into the session Secret. (connect
-	// re-derives the private key path for the sync transport.)
-	_, authKey, err := ensureSSHKey(string(sid))
-	if err != nil {
-		return "", session.Ref{}, "", fmt.Errorf("prepare ssh key: %w", err)
-	}
-
-	spec := session.Spec{
-		ID:           sid,
-		ProjectPath:  projectPath,
-		Backend:      backendName,
-		RunnerImage:  runnerImage,
-		SSHPublicKey: authKey,
-		Model:        model,
-	}
-
-	ref, err := backend.CreateSession(ctx, spec)
-	if err != nil {
-		return "", session.Ref{}, "", fmt.Errorf("create session: %w", err)
-	}
-
-	// Record the session locally so `status --all` and reconnects can find it
-	// even when it is gone from the cluster.
-	if idx, ierr := newIndex(); ierr == nil {
-		now := time.Now()
-		_ = idx.Save(string(sid), index.Entry{
-			SandboxSessionID: string(sid),
-			Backend:          backendName,
-			ProjectPath:      projectPath,
-			Namespace:        namespaceFlag,
-			SandboxName:      string(sid),
-			CreatedAt:        now,
-			LastActivity:     now,
-		})
-	}
-
-	return sid, ref, projectPath, nil
+	return cwd, nil
 }
 
 // runStartSession creates a new remote session for the given backend in the
-// current working directory, starts its pod, and launches the command center
-// attached straight to it. It is the shared body of the `claude` and `opencode`
-// commands; the only per-backend differences are the backend id and whether an
-// initial prompt is supplied (opencode owns its own input loop, so it passes
-// "" and the dashboard routes it to the external opencode TUI rather than the
-// Go transcript).
+// current working directory and launches the command center attached straight to
+// it. It is the shared body of the `claude` and `opencode` commands; the only
+// per-backend differences are the backend id and whether an initial prompt is
+// supplied (opencode owns its own input loop, so it passes "" and the dashboard
+// routes it to the external opencode TUI rather than the Go transcript).
+//
+// Creation and connection go through the public client package — the same path
+// an external Go program uses — so the CLI dogfoods the library rather than
+// keeping a parallel session engine.
 func runStartSession(cmd *cobra.Command, backendName, prompt, runnerImage, reaperImage, name, model string) error {
-	backend, err := newBackend()
+	c, backend, err := newClientAndBackend()
 	if err != nil {
 		return err
 	}
 
 	ctx := cmd.Context()
-
-	// ref is intentionally discarded: the pod-ready wait (and thus the only former
-	// use of ref here, backend.Start) now lives in the dashboard connect path, which
-	// re-derives the Ref from the session id. We only need sid + projectPath below.
-	sid, _, projectPath, err := provisionSession(ctx, backend, backendName, runnerImage, model)
+	projectPath, err := resolveProjectPath()
 	if err != nil {
 		return err
 	}
+
+	// Create-but-don't-start: the pod-ready wait happens inside the dashboard's
+	// connect path so the animated connect splash (pod phase + elapsed timer) is
+	// on screen during schedule + image-pull instead of a frozen terminal.
+	sess, err := c.Create(ctx, client.CreateOptions{
+		Backend:     backendName,
+		ProjectPath: projectPath,
+		RunnerImage: runnerImage,
+		Model:       model,
+	})
+	if err != nil {
+		return err
+	}
+	sid := sess.ID()
 
 	// A --name override is persisted through the same path as the TUI rename and
 	// the `rename` command, so a custom name wins over the runner auto title.
 	applyCreateName(indexTitleStore{}, sid, name)
 
-	// Do NOT block on pod readiness here — that wait now happens inside the
-	// dashboard's connect path (sessionConnector.establish), so the animated
-	// connect splash (pod phase + elapsed timer) is already on screen during the
-	// schedule + image-pull instead of a frozen terminal before the TUI draws
-	// (Phase 2). The provisioned Sandbox is created with replicas=1, so the pod is
-	// already starting by the time RunAttached's initial attach reaches the wait.
-
-	// Launch the command center attached straight to this session. The
-	// dashboard's Connector owns the port-forward + client + reconnect, and
-	// also starts the idle reaper and file sync; the dashboard list loads
-	// underneath so esc detaches to it.
-	sess := dashboard.SessionFromState(session.State{
+	dashSess := dashboard.SessionFromState(session.State{
 		ID:          sid,
 		Backend:     backendName,
 		ProjectPath: projectPath,
@@ -186,11 +127,11 @@ func runStartSession(cmd *cobra.Command, backendName, prompt, runnerImage, reape
 	return afterTUI(func() error {
 		return dashboard.RunAttached(
 			backend,
-			newDashboardConnector(backend, reaperImage),
-			newDashboardCreator(backend, runnerImage, reaperImage),
-			sess,
+			newDashboardConnector(c, reaperImage),
+			newDashboardCreator(c, runnerImage, reaperImage),
+			dashSess,
 			prompt,
-			dashboard.RunOptions{DestroyHook: newLocalDestroyHook(), PreDestroyHook: newPreDestroySyncStop(), TitleStore: indexTitleStore{}, SnapshotStore: indexSnapshotStore{}, EventCache: indexEventCache{}, ObserverConnector: newDashboardObserverConnector(backend, reaperImage), SyncProber: dashboardSyncProber(), SyncReaper: dashboardSyncReaper(), IdleTimeout: defaultReaperIdleTimeout},
+			dashboard.RunOptions{DestroyHook: newLocalDestroyHook(c), PreDestroyHook: newPreDestroySyncStop(c), TitleStore: indexTitleStore{}, SnapshotStore: indexSnapshotStore{}, EventCache: indexEventCache{}, ObserverConnector: newDashboardObserverConnector(c, reaperImage), SyncProber: dashboardSyncProber(), SyncReaper: dashboardSyncReaper(), IdleTimeout: defaultReaperIdleTimeout},
 		)
 	})
 }

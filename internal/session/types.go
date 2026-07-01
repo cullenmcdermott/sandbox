@@ -55,6 +55,13 @@ type Spec struct {
 	// RunnerImage is the container image for the runner pod.
 	RunnerImage string `json:"runnerImage"`
 
+	// ImagePullPolicy overrides the runner pod's imagePullPolicy. One of
+	// "Always", "IfNotPresent", "Never". Empty selects a default: IfNotPresent
+	// for a digest-pinned RunnerImage (immutable, safe to cache), else Always (so
+	// a moving tag like :latest always reflects upstream). Set it explicitly for
+	// side-loaded/offline images or a rate-limited/private registry.
+	ImagePullPolicy string `json:"imagePullPolicy,omitempty"`
+
 	// Model is an optional model id/alias (e.g. "opus", "sonnet",
 	// "claude-opus-4-8") the runner passes to the Claude Agent SDK as the
 	// session default. Empty means the account default. Per-turn overrides

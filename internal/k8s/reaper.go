@@ -25,7 +25,9 @@ const (
 	// get pods/secrets in agent-sessions.
 	ReaperServiceAccount = "sandbox-reaper"
 	// DefaultReaperImage is the image running the `sandbox reap` subcommand.
-	// Public GHCR package built by Depot CI; pulled with imagePullPolicy: Always.
+	// Public GHCR package built by Depot CI. Its pull policy is resolved from the
+	// image ref (Always for this moving :latest tag; IfNotPresent for a
+	// digest-pinned override) unless ReaperOptions.ImagePullPolicy is set.
 	DefaultReaperImage = "ghcr.io/cullenmcdermott/sandbox-reaper:latest"
 )
 
@@ -33,6 +35,10 @@ const (
 type ReaperOptions struct {
 	// Image is the reaper container image (the sandbox binary).
 	Image string
+	// ImagePullPolicy overrides the reaper pod's imagePullPolicy (Always /
+	// IfNotPresent / Never). Empty selects a default: IfNotPresent for a
+	// digest-pinned Image, else Always. Mirrors session.Spec.ImagePullPolicy.
+	ImagePullPolicy string
 	// SessionNamespace is where the Sandbox/pod/secret live (agent-sessions).
 	SessionNamespace string
 	// IdleTimeout is how long a session must be idle before suspend.
@@ -150,7 +156,7 @@ func buildReaperJob(name, sid string, opts ReaperOptions) *batchv1.Job {
 					Containers: []corev1.Container{{
 						Name:            "reaper",
 						Image:           opts.Image,
-						ImagePullPolicy: corev1.PullAlways,
+						ImagePullPolicy: resolveImagePullPolicy(opts.ImagePullPolicy, opts.Image),
 						Args: []string{
 							"reap",
 							"--namespace", opts.SessionNamespace,

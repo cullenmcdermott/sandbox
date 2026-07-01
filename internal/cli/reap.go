@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/cullenmcdermott/sandbox/client"
 	"github.com/cullenmcdermott/sandbox/internal/k8s"
 	"github.com/cullenmcdermott/sandbox/internal/runner"
 	"github.com/cullenmcdermott/sandbox/internal/session"
@@ -21,8 +22,9 @@ var errReaped = errors.New("reaper finished")
 
 // defaultReaperIdleTimeout is the reaper's default idle window before a session
 // is suspended. The dashboard reads it to render the warm-session "suspends in"
-// hint so the indicator matches the reaper's actual behavior.
-const defaultReaperIdleTimeout = 15 * time.Minute
+// hint so the indicator matches the reaper's actual behavior. Sourced from the
+// client package so the CLI, the library, and the reaper all agree.
+const defaultReaperIdleTimeout = client.DefaultIdleTimeout
 
 // newReapCmd is the hidden in-cluster reaper. It watches a single session and
 // suspends it once it has been idle (turn-done AND detached) for --idle-timeout.
@@ -53,28 +55,6 @@ func newReapCmd() *cobra.Command {
 	cmd.Flags().DurationVar(&idleTimeout, "idle-timeout", defaultReaperIdleTimeout, "idle duration before suspend")
 	cmd.Flags().DurationVar(&pollInterval, "poll", 30*time.Second, "poll interval")
 	return cmd
-}
-
-// ensureReaperForSession starts (or confirms) the per-session idle reaper. A
-// failure is non-fatal — the session works without auto-suspend — so it only
-// warns. Called on session create and on reconnect (attach/resume).
-func ensureReaperForSession(ctx context.Context, backend *k8s.Backend, ref session.Ref, image string) {
-	opts := k8s.ReaperOptions{Image: image}
-	// Test/override hooks: shorten the idle window and poll for end-to-end
-	// validation without waiting the 15m default. Unset => EnsureReaper defaults.
-	if v := os.Getenv("SANDBOX_REAPER_IDLE_TIMEOUT"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			opts.IdleTimeout = d
-		}
-	}
-	if v := os.Getenv("SANDBOX_REAPER_POLL"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			opts.PollInterval = d
-		}
-	}
-	if err := backend.EnsureReaper(ctx, ref, opts); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: idle reaper for %s not started: %v\n", ref.ID, err)
-	}
 }
 
 func runReaper(ctx context.Context, backend *k8s.Backend, ref session.Ref, idleTimeout, poll time.Duration) error {

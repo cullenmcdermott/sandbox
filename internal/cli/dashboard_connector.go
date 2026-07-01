@@ -4,182 +4,173 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/cullenmcdermott/sandbox/internal/k8s"
+	"github.com/cullenmcdermott/sandbox/client"
 	"github.com/cullenmcdermott/sandbox/internal/session"
 	"github.com/cullenmcdermott/sandbox/internal/tui/dashboard"
 )
 
-// newDashboardConnector returns a dashboard.Connector that adapts the CLI's
-// sessionConnector into the interface the dashboard package expects. This is
-// the sole bridge between internal/cli and internal/tui/dashboard: the
-// dashboard never imports cli; cli passes in this adapter at startup.
-//
-// Each call to the returned Connector creates a fresh sessionConnector scoped
-// to the given session, performs resume-if-suspended + port-forward + health,
-// and returns the resulting RunnerClient plus a reconnect callback.
-func newDashboardConnector(backend *k8s.Backend, reaperImage string) dashboard.Connector {
-	if reaperImage == "" {
-		reaperImage = k8s.DefaultReaperImage
-	}
-	return func(ctx context.Context, ref session.Ref, projectPath string, onStage func(dashboard.ConnectStage, string)) (dashboard.ConnectResult, error) {
-		sc := &sessionConnector{
-			backend:     backend,
-			ref:         ref,
-			projectPath: projectPath,
-			reaperImage: reaperImage,
-		}
+// This file is the sole bridge between the public client package and the
+// dashboard: it adapts client.Session connects into the Connector/Creator
+// function types the dashboard expects, so the dashboard never imports cli or
+// client, and the CLI/TUI drive sessions through the exact same public API an
+// external Go program would.
 
-		conn, err := sc.connect(ctx, onStage)
+// stageSink adapts a dashboard onStage callback into the client's OnPhase
+// callback, mapping client.Stage to dashboard.ConnectStage. Returns nil when
+// onStage is nil so the client treats it as "no progress reporting".
+func stageSink(onStage func(dashboard.ConnectStage, string)) func(client.Stage, string) {
+	if onStage == nil {
+		return nil
+	}
+	return func(st client.Stage, detail string) { onStage(mapStage(st), detail) }
+}
+
+// mapStage maps a client connect stage to the dashboard's connect stage. The two
+// enums are intentionally 1:1.
+func mapStage(st client.Stage) dashboard.ConnectStage {
+	switch st {
+	case client.StageResume:
+		return dashboard.StageResume
+	case client.StageForward:
+		return dashboard.StageForward
+	case client.StageRunner:
+		return dashboard.StageRunner
+	case client.StageSync:
+		return dashboard.StageSync
+	case client.StageOpencode:
+		return dashboard.StageOpencode
+	case client.StageAttach:
+		return dashboard.StageAttach
+	default: // StageCheck and anything else
+		return dashboard.StageCheck
+	}
+}
+
+// mapOpencode adapts client opencode creds to the dashboard's type.
+func mapOpencode(oc *client.OpencodeCreds) *dashboard.OpencodeCreds {
+	if oc == nil {
+		return nil
+	}
+	return &dashboard.OpencodeCreds{Username: oc.Username, Password: oc.Password, URL: oc.URL}
+}
+
+// newDashboardConnector returns a dashboard.Connector that drives a client.Session
+// connect (resume-if-suspended + wait-ready + port-forward + health + file sync +
+// idle reaper) and adapts the result into dashboard types. Each call scopes a
+// fresh Session to the given ref; the reconnect callback reuses it so the
+// port-forward state carries across stream drops.
+func newDashboardConnector(c *client.Client, reaperImage string) dashboard.Connector {
+	return func(ctx context.Context, ref session.Ref, projectPath string, onStage func(dashboard.ConnectStage, string)) (dashboard.ConnectResult, error) {
+		sess := c.Open(ref.ID)
+		opt := client.ConnectOptions{ProjectPath: projectPath, ReaperImage: reaperImage, OnPhase: stageSink(onStage)}
+
+		conn, err := sess.Connect(ctx, opt)
 		if err != nil {
 			return dashboard.ConnectResult{}, fmt.Errorf("connect %s: %w", ref.ID, err)
 		}
 
-		// The reconnect callback closes over the same sessionConnector so it
-		// re-uses the port-forward state when the stream drops. onStage is the
-		// transcript's own per-reconnect stage sink (FU1) — a fresh callback each
-		// attempt, NOT the connecting screen's closed channel — so threading it
-		// through lets the header show live "Resuming pod…" progress.
 		reconnect := func(ctx context.Context, onStage func(dashboard.ConnectStage, string)) (dashboard.RunnerClient, error) {
-			c, rerr := sc.connect(ctx, onStage)
+			ropt := opt
+			ropt.OnPhase = stageSink(onStage)
+			c2, rerr := sess.Connect(ctx, ropt)
 			if rerr != nil {
 				return nil, rerr
 			}
-			return c.client, nil
-		}
-
-		var oc *dashboard.OpencodeCreds
-		if conn.opencode != nil {
-			oc = &dashboard.OpencodeCreds{
-				Username: conn.opencode.username,
-				Password: conn.opencode.password,
-				URL:      conn.opencode.url,
-			}
+			return c2.Runner, nil
 		}
 
 		return dashboard.ConnectResult{
-			Client:        conn.client,
+			Client:        conn.Runner,
 			Reconnect:     reconnect,
-			Endpoint:      conn.endpoint,
-			OpencodeCreds: oc,
-			Warning:       conn.warning,
+			Endpoint:      conn.Endpoint,
+			OpencodeCreds: mapOpencode(conn.Opencode),
+			Warning:       conn.Warning,
 		}, nil
 	}
 }
 
 // newDashboardObserverConnector returns a dashboard.Connector wired to the
 // lightweight observer connect (port-forward + runner health only, no file-sync
-// setup). The dashboard uses it for background passive status streams so each
-// per-session stream stops paying for mutagen sync create + flush just to
-// observe events (RV8). The returned reconnect callback reuses the same
-// lightweight path.
-func newDashboardObserverConnector(backend *k8s.Backend, reaperImage string) dashboard.Connector {
-	if reaperImage == "" {
-		reaperImage = k8s.DefaultReaperImage
-	}
+// setup or reaper), used for background passive status streams.
+func newDashboardObserverConnector(c *client.Client, reaperImage string) dashboard.Connector {
+	_ = reaperImage // observer streams never ensure the reaper
 	return func(ctx context.Context, ref session.Ref, projectPath string, onStage func(dashboard.ConnectStage, string)) (dashboard.ConnectResult, error) {
-		sc := &sessionConnector{
-			backend:     backend,
-			ref:         ref,
-			projectPath: projectPath,
-			reaperImage: reaperImage,
-		}
+		sess := c.Open(ref.ID)
+		opt := client.ConnectOptions{ProjectPath: projectPath, Observer: true, OnPhase: stageSink(onStage)}
 
-		conn, err := sc.connectObserver(ctx, onStage)
+		conn, err := sess.Connect(ctx, opt)
 		if err != nil {
 			return dashboard.ConnectResult{}, fmt.Errorf("observe %s: %w", ref.ID, err)
 		}
 
 		reconnect := func(ctx context.Context, onStage func(dashboard.ConnectStage, string)) (dashboard.RunnerClient, error) {
-			c, rerr := sc.connectObserver(ctx, onStage)
+			ropt := opt
+			ropt.OnPhase = stageSink(onStage)
+			c2, rerr := sess.Connect(ctx, ropt)
 			if rerr != nil {
 				return nil, rerr
 			}
-			return c.client, nil
+			return c2.Runner, nil
 		}
 
 		return dashboard.ConnectResult{
-			Client:    conn.client,
+			Client:    conn.Runner,
 			Reconnect: reconnect,
-			Endpoint:  conn.endpoint,
+			Endpoint:  conn.Endpoint,
 		}, nil
 	}
 }
 
 // newDashboardCreator returns a dashboard.Creator that provisions a brand-new
 // session for the current working directory and connects to it — the `n` (new
-// session) action. It mirrors `sandbox claude` without a prompt: ID generation,
-// SSH-key prep, Sandbox/PVC creation, pod start, and the port-forward +
-// health-check that the connector performs on attach. runnerImage and
-// reaperImage are threaded through so the dashboard `n` / bare-`sandbox` path
-// honors --runner-image / --reaper-image (empty => the respective defaults).
-func newDashboardCreator(backend *k8s.Backend, runnerImage, reaperImage string) dashboard.Creator {
-	if reaperImage == "" {
-		reaperImage = k8s.DefaultReaperImage
-	}
+// session) action. It mirrors `sandbox claude` without a prompt, driven entirely
+// through the public client API.
+func newDashboardCreator(c *client.Client, runnerImage, reaperImage string) dashboard.Creator {
 	return func(ctx context.Context, backendName string, onStage func(dashboard.ConnectStage, string)) (dashboard.CreateResult, error) {
 		if backendName == "" {
-			backendName = session.BackendClaudeSDK
+			backendName = client.BackendClaudeSDK
 		}
-
-		// Dashboard-created sessions use the account default model; the in-session
-		// /model command can switch it per turn afterwards.
-		sid, ref, projectPath, err := provisionSession(ctx, backend, backendName, runnerImage, "")
+		projectPath, err := resolveProjectPath()
 		if err != nil {
 			return dashboard.CreateResult{}, err
 		}
 
-		// Pod readiness is awaited inside sc.connect (sessionConnector.establish),
-		// which reports the live pod phase under StageResume — so the new-session
-		// connect splash animates through scheduling → pulling image → starting
-		// rather than this path blocking on backend.Start before any progress shows
-		// (Phase 2). The Sandbox was just provisioned with replicas=1, so the pod is
-		// already starting.
-		sc := &sessionConnector{
-			backend:     backend,
-			ref:         ref,
-			projectPath: projectPath,
-			reaperImage: reaperImage,
-		}
-		conn, err := sc.connect(ctx, onStage)
+		// Dashboard-created sessions use the account default model; the in-session
+		// /model command can switch it per turn afterwards.
+		sess, err := c.Create(ctx, client.CreateOptions{Backend: backendName, ProjectPath: projectPath, RunnerImage: runnerImage})
 		if err != nil {
-			sc.closeHandles()
+			return dashboard.CreateResult{}, err
+		}
+
+		opt := client.ConnectOptions{ReaperImage: reaperImage, OnPhase: stageSink(onStage)}
+		conn, err := sess.Connect(ctx, opt)
+		if err != nil {
+			sess.Close()
 			return dashboard.CreateResult{}, fmt.Errorf("connect: %w", err)
 		}
 
-		st, err := backend.Status(ctx, ref)
+		st, err := c.Status(ctx, sess.ID())
 		if err != nil {
-			st = session.State{
-				ID:          sid,
-				Backend:     backendName,
-				ProjectPath: projectPath,
-				Status:      session.StatusRunning,
-			}
+			st = session.State{ID: sess.ID(), Backend: backendName, ProjectPath: projectPath, Status: session.StatusRunning}
 		}
 
 		reconnect := func(ctx context.Context, onStage func(dashboard.ConnectStage, string)) (dashboard.RunnerClient, error) {
-			c, rerr := sc.connect(ctx, onStage)
+			ropt := opt
+			ropt.OnPhase = stageSink(onStage)
+			c2, rerr := sess.Connect(ctx, ropt)
 			if rerr != nil {
 				return nil, rerr
 			}
-			return c.client, nil
-		}
-
-		var oc *dashboard.OpencodeCreds
-		if conn.opencode != nil {
-			oc = &dashboard.OpencodeCreds{
-				Username: conn.opencode.username,
-				Password: conn.opencode.password,
-				URL:      conn.opencode.url,
-			}
+			return c2.Runner, nil
 		}
 
 		return dashboard.CreateResult{
-			Client:        conn.client,
-			Reconnect:     reconnect,
 			State:         st,
-			Endpoint:      conn.endpoint,
-			OpencodeCreds: oc,
-			Warning:       conn.warning,
+			Client:        conn.Runner,
+			Reconnect:     reconnect,
+			Endpoint:      conn.Endpoint,
+			OpencodeCreds: mapOpencode(conn.Opencode),
+			Warning:       conn.Warning,
 		}, nil
 	}
 }
