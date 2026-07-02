@@ -93,6 +93,17 @@ has one reconnect loop used by `claude` and `attach`:
   re-attach SSE from `after=<lastSeq>` (replaying anything missed).
 - The TUI shows a "reconnecting…" banner and renders `session.terminating`.
 
+**Resume runs the same binary it suspended with.** Once a session's pod first
+goes Ready, the backend stamps the kubelet-resolved digest of the running
+runner image onto the Sandbox (`sandbox.cullen.dev/pinned-runner-image`).
+Resume rewrites the pod template's image from that annotation (relaxing an
+auto-resolved `PullAlways` to `IfNotPresent` — the digest is immutable) before
+scaling 0→1, so a moving tag (`:latest`) advancing while the session was
+suspended cannot swap the runner under the session's persisted
+`events.db`/`session.json`. Covers every suspend path (CLI and reaper); when no
+digest could be captured (e.g. a locally-loaded dev image), resume falls back
+to the tag as before.
+
 For **abrupt** node loss there is no warning; recovery waits on RWO ceph volume
 force-detach (~minutes). The TUI surfaces guidance to the user in that case.
 

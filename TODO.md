@@ -357,19 +357,29 @@ and on-disk PVC state is the steady state, not an edge case.
   `default: return false`; it's now explicitly documented as the skew safety net.
   Bump the schema field whenever an event/payload/SSE change could silently
   misbehave across versions.
-- [ ] **`events.db` schema version is write-only; no migration (HIGH).** `SCHEMA_VERSION`
-  is stamped to `user_version` on every open but never read-compared, and there is no
-  migration fn — the "bump + migrate on shape changes" comment describes a mechanism
-  that was never built. `session.json` has no version field at all. Read-compare-migrate
-  on open; stamp a version into `session.json`. `runner/src/events.ts:31,91`.
-- [ ] **`:latest` + `PullAlways` swaps the binary under old PVC state on resume (HIGH).**
-  `resolveImagePullPolicy` gives any non-digest ref `PullAlways`; resume only touches
-  `.spec.replicas` (never rewrites the image), so resuming a weeks-old suspended session
-  pulls the current `:latest` and runs a newer runner against the old `events.db`/
-  `session.json` — reinterpreting old rows under new-shape assumptions, or feeding
-  `after=0` replay of stale-shaped events to a new CLI. Consider digest-pinning the
-  default runner image so resume is reproducible. `internal/k8s/backend.go:164`,
-  `client/client.go:77`.
+- [x] **`events.db` schema version is write-only; no migration (HIGH).** FIXED
+  2026-07-02: `openEventLog` now read-compare-migrates `user_version` on every
+  open — a db stamped NEWER than `SCHEMA_VERSION` is refused (boot crashes into
+  a visible CrashLoopBackOff instead of misreading rows), an older one walks the
+  `MIGRATIONS` registry step-by-step in transactions (empty today; v1 is the
+  first shape), and a pre-versioning db (events table + `user_version` 0) is
+  treated as v1. `session.json` now carries a `state_version` stamped on every
+  save; a newer file loads best-effort with a loud warning and unknown fields
+  are preserved across the load/save round-trip (`reviveSessionState`). Tests:
+  `runner/test/schema-version.test.ts`, `runner/test/state-version.test.ts`.
+- [x] **`:latest` + `PullAlways` swaps the binary under old PVC state on resume (HIGH).**
+  FIXED 2026-07-02, cluster-side (no registry client/creds, and unlike a
+  digest-pinned `DefaultRunnerImage` constant it can't go stale): once the pod
+  first goes Ready, `pinRunnerImageDigest` stamps the kubelet-resolved digest
+  of the RUNNING image (spec repo + `containerStatuses[].imageID` digest) as
+  the `sandbox.cullen.dev/pinned-runner-image` annotation; `Resume` rewrites
+  the pod template image from it (relaxing auto-`PullAlways` → `IfNotPresent`)
+  in the same Update as replicas 0→1, so it covers CLI- and reaper-suspended
+  sessions alike. Re-stamps if the running digest ever drifts (mid-session
+  reschedule); skips (falls back to the tag) when the imageID has no registry
+  digest, e.g. locally-loaded dev images. As a bonus, resume-by-digest also
+  sidesteps the stale traefik tag→manifest cache (the "Ops" item below).
+  Tests: `internal/k8s/backend_pin_test.go`. Docs: `session-lifecycle.md`.
 
 ### 🔴 The pod↔laptop sync boundary is porous both ways
 
