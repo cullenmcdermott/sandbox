@@ -53,6 +53,9 @@ export interface IdleStatus {
 // --- Session state (session.json, snake_case per spec 8.3) ----------------
 
 export interface SessionState {
+  /** session.json shape version (see STATE_VERSION in session.ts). Absent in
+   * files written before versioning, which are treated as version 1. */
+  state_version?: number;
   sandbox_session_id: string;
   backend: string;
   claude_session_id: string;

@@ -38,8 +38,18 @@ export function loadConfig(): RunnerConfig {
 
 // --- session.json ---------------------------------------------------------
 
+/** Current session.json shape version, stamped on every save. Additive fields
+ * do NOT need a bump — the per-field defaulting in reviveSessionState is the
+ * migration for those. Bump it (and add explicit handling in
+ * reviveSessionState) when a field changes meaning or shape. A file stamped
+ * newer than this loads best-effort with a loud warning: unknown fields are
+ * preserved across the load/save round-trip, but known fields are interpreted
+ * under this runner's (older) semantics. */
+export const STATE_VERSION = 1;
+
 function emptyState(cfg: RunnerConfig): SessionState {
   return {
+    state_version: STATE_VERSION,
     sandbox_session_id: cfg.sessionId,
     backend: cfg.backend,
     project_path: cfg.projectPath,
@@ -64,25 +74,50 @@ export function reconcileLoadedStatus(status: SessionState['status'] | undefined
   return status === 'busy' ? 'idle' : (status ?? 'idle');
 }
 
+/**
+ * Normalize a parsed session.json into live state. Exported for tests (the
+ * production path constant points at /session).
+ *
+ * Version handling mirrors the event log's read-compare-migrate: a file with
+ * state_version <= STATE_VERSION migrates via the per-field defaulting below;
+ * a NEWER file (written by a newer runner — `:latest` skew) loads best-effort
+ * with a loud warning rather than refusing, because every field here degrades
+ * safely (worst case a stale resume id, which the turn paths already fail-soft
+ * on). Unknown fields are spread through untouched so they survive this
+ * runner's saves and are intact when a matching-version runner returns.
+ */
+export function reviveSessionState(parsed: Partial<SessionState>, cfg: RunnerConfig): SessionState {
+  const onDisk = parsed.state_version ?? 1;
+  if (onDisk > STATE_VERSION) {
+    console.error(
+      `session.json state_version ${onDisk} is newer than this runner supports (${STATE_VERSION}); ` +
+        'loading best-effort (unknown fields preserved). Use a runner image at least as new as the one that last wrote this session.',
+    );
+  }
+  return {
+    ...parsed,
+    state_version: STATE_VERSION,
+    sandbox_session_id: parsed.sandbox_session_id ?? cfg.sessionId,
+    backend: parsed.backend ?? cfg.backend,
+    project_path: parsed.project_path ?? cfg.projectPath,
+    status: reconcileLoadedStatus(parsed.status),
+    claude_session_id: parsed.claude_session_id ?? '',
+    opencode_session_id: parsed.opencode_session_id ?? '',
+    last_turn_id: parsed.last_turn_id ?? '',
+    last_activity: parsed.last_activity ?? new Date().toISOString(),
+    ...(parsed.model ? { model: parsed.model } : {}),
+    ...(parsed.title_generated ? { title_generated: true } : {}),
+  };
+}
+
 /** Load session.json, or seed it from env if absent. */
 export function loadSessionState(cfg: RunnerConfig): SessionState {
   if (existsSync(SESSION_JSON_PATH)) {
     const raw = readFileSync(SESSION_JSON_PATH, 'utf8');
     const parsed = JSON.parse(raw) as Partial<SessionState>;
-    const loaded: SessionState = {
-      sandbox_session_id: parsed.sandbox_session_id ?? cfg.sessionId,
-      backend: parsed.backend ?? cfg.backend,
-      project_path: parsed.project_path ?? cfg.projectPath,
-      status: reconcileLoadedStatus(parsed.status),
-      claude_session_id: parsed.claude_session_id ?? '',
-      opencode_session_id: parsed.opencode_session_id ?? '',
-      last_turn_id: parsed.last_turn_id ?? '',
-      last_activity: parsed.last_activity ?? new Date().toISOString(),
-      ...(parsed.model ? { model: parsed.model } : {}),
-      ...(parsed.title_generated ? { title_generated: true } : {}),
-    };
-    // Persist the correction so disk matches the live (idle) reality.
-    if (parsed.status !== loaded.status) {
+    const loaded = reviveSessionState(parsed, cfg);
+    // Persist corrections (busy→idle, version restamp) so disk matches reality.
+    if (parsed.status !== loaded.status || parsed.state_version !== loaded.state_version) {
       saveSessionState(loaded);
     }
     return loaded;
@@ -92,11 +127,13 @@ export function loadSessionState(cfg: RunnerConfig): SessionState {
   return state;
 }
 
-/** Persist session.json atomically (write+rename). */
+/** Persist session.json atomically (write+rename). Always stamps the current
+ * STATE_VERSION: the file's contents conform to this runner's shape as of this
+ * write (plus any preserved unknown fields, best-effort). */
 export function saveSessionState(state: SessionState): void {
   mkdirSync(dirname(SESSION_JSON_PATH), { recursive: true });
   const tmp = `${SESSION_JSON_PATH}.tmp`;
-  writeFileSync(tmp, JSON.stringify(state, null, 2) + '\n', 'utf8');
+  writeFileSync(tmp, JSON.stringify({ ...state, state_version: STATE_VERSION }, null, 2) + '\n', 'utf8');
   // Rename is atomic on POSIX.
   renameSync(tmp, SESSION_JSON_PATH);
 }
