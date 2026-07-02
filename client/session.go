@@ -220,7 +220,10 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 		return nil, fmt.Errorf("runner health: %w", err)
 	}
 
-	var syncWarning string
+	// Protocol-version handshake: warn (never refuse) on CLI/runner skew. OSS
+	// users build and push their own runner images, so a mismatched pair is the
+	// steady state, not an edge case — see protocolVersionWarning.
+	syncWarning := protocolVersionWarning(rc)
 	if full {
 		stage(StageSync)
 		reaperImage := opt.ReaperImage
@@ -252,9 +255,9 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 
 		privPath, _, kerr := s.c.ensureSSHKey(string(s.ref.ID))
 		if kerr != nil {
-			syncWarning = fmt.Sprintf("file sync unavailable (ssh key): %v", kerr)
+			syncWarning = appendWarning(syncWarning, fmt.Sprintf("file sync unavailable (ssh key): %v", kerr))
 		} else if created, serr := s.c.startMutagen(ctx, string(s.ref.ID), s.projectPath, privPath, handles[1].LocalPort()); serr != nil {
-			syncWarning = fmt.Sprintf("file sync unavailable: %v", serr)
+			syncWarning = appendWarning(syncWarning, fmt.Sprintf("file sync unavailable: %v", serr))
 		} else if created {
 			// First-ever sync: `mutagen sync create` returns before the transport
 			// is proven or files have staged, so block on a bounded flush. A broken
@@ -266,9 +269,9 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 			cancelFlush()
 			switch {
 			case ferr != nil && timedOut:
-				syncWarning = "initial file sync still in progress (continuing in the background)"
+				syncWarning = appendWarning(syncWarning, "initial file sync still in progress (continuing in the background)")
 			case ferr != nil:
-				syncWarning = fmt.Sprintf("file sync error: %v", ferr)
+				syncWarning = appendWarning(syncWarning, fmt.Sprintf("file sync error: %v", ferr))
 			}
 		} else {
 			// Reconnect to an already-synced session: the mutagen session persists
@@ -285,11 +288,7 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 		// Make sure the idle reaper is watching (a prior one may have completed
 		// when the session was suspended).
 		if w := s.c.ensureReaper(ctx, s.ref, reaperImage, reaperPullPolicy, idleTimeout); w != "" {
-			if syncWarning != "" {
-				syncWarning += "; " + w
-			} else {
-				syncWarning = w
-			}
+			syncWarning = appendWarning(syncWarning, w)
 		}
 	}
 
@@ -319,6 +318,36 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 	}
 	stage(StageAttach)
 	return conn, nil
+}
+
+// appendWarning joins a new advisory onto an existing Connection.Warning,
+// separating multiple warnings with "; " rather than clobbering an earlier one
+// (e.g. a protocol-version mismatch noticed at health time must survive a
+// later file-sync warning).
+func appendWarning(existing, addition string) string {
+	if existing == "" {
+		return addition
+	}
+	if addition == "" {
+		return existing
+	}
+	return existing + "; " + addition
+}
+
+// protocolVersionWarning compares the runner's protocol version (as reported
+// by the Health call that must already have succeeded) against this CLI's
+// session.ProtocolVersion and returns a human-readable advisory if they
+// differ, or "" if they match. Deliberately advisory, not fatal: OSS users
+// build and push their own runner images, so CLI/runner skew is the steady
+// state, not an edge case (an unknown/renamed event type is dropped
+// gracefully by the TUI's reducers — see
+// internal/tui/dashboard/session.go's ApplyRunnerEvent default case — rather
+// than crashing), and a hard refusal here would brick a perfectly-working
+// pair that differs only in a patch that didn't change the wire contract. The
+// wording lives in runner.ProtocolMismatchWarning so this and the headless
+// internal/cli commands (turn, trace) report identically.
+func protocolVersionWarning(rc *runner.Client) string {
+	return runner.ProtocolMismatchWarning(rc.ProtocolVersion())
 }
 
 // flushWithProgress runs the bounded initial sync flush while polling mutagen for

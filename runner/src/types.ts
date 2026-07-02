@@ -25,7 +25,7 @@ export type {
   TodoUpdatedPayload,
   ErrorPayload,
 } from './events.gen.js';
-export { ALL_EVENT_TYPES } from './events.gen.js';
+export { ALL_EVENT_TYPES, PROTOCOL_VERSION } from './events.gen.js';
 
 /** A single normalized event in the session event log. */
 export interface Event {
@@ -144,6 +144,9 @@ export interface StatusResponse {
   activeTurnId: string;
   lastActivity: string;
   model?: string;
+  /** The runner's PROTOCOL_VERSION (see events.gen.ts), so a status poll also
+   * surfaces CLI/runner skew, not just /healthz. */
+  protocolVersion: number;
 }
 
 /** Audit row appended to audit.jsonl (spec 8.5). */

@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"time"
 
 	"github.com/cullenmcdermott/sandbox/internal/runner"
@@ -21,10 +23,21 @@ type healthChecker interface {
 	Health(ctx context.Context) error
 }
 
+// protocolVersioner is implemented by *runner.Client (both call sites happen to
+// hand waitHealthy one, directly or boxed in the client.RunnerClient interface
+// returned by client.DialRunner). Checked via type assertion rather than folded
+// into healthChecker so the minimal interface stays satisfiable by any future
+// RunnerClient implementation without also implementing the handshake.
+type protocolVersioner interface {
+	ProtocolVersion() int
+}
+
 // waitHealthy polls the runner /healthz until it responds OK or ctx is done. A
 // freshly resumed pod (or new port-forward) may need a moment. Used by the
 // headless `turn` and `trace` commands; the dashboard connect path's health wait
-// lives in the public client package.
+// (and its Connection.Warning-based surfacing) lives in the public client
+// package. On success, warns to stderr (never refuses) on a CLI/runner
+// protocol-version mismatch — see runner.ProtocolMismatchWarning.
 func waitHealthy(ctx context.Context, client healthChecker) error {
 	deadline := time.Now().Add(30 * time.Second)
 	var lastErr error
@@ -33,6 +46,11 @@ func waitHealthy(ctx context.Context, client healthChecker) error {
 		err := client.Health(hctx)
 		cancel()
 		if err == nil {
+			if pv, ok := client.(protocolVersioner); ok {
+				if w := runner.ProtocolMismatchWarning(pv.ProtocolVersion()); w != "" {
+					fmt.Fprintln(os.Stderr, "warning:", w)
+				}
+			}
 			return nil
 		}
 		lastErr = err

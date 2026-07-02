@@ -672,8 +672,15 @@ func ApplyRunnerEvent(sess *Session, ev session.Event) bool {
 		return false
 
 	default:
-		// All other events (message deltas, tool events, etc.) do not change
-		// the six-state status.
+		// All other known events (message deltas, tool events, etc.) do not
+		// change the six-state status — AND this is also the safety net for
+		// protocol/version skew: a session.EventType this build doesn't know
+		// about (a newer runner emitting a type this CLI predates, or a stale
+		// CLI against a runner that dropped one) lands here too and is a
+		// deliberate, explicit no-op rather than a panic or a silently-wrong
+		// state transition. See the protocol-version handshake
+		// (session.ProtocolVersion, internal/runner.Client.Health) for the
+		// CLI-side warning this complements.
 		return false
 	}
 	if sess.DashStatus != prev {

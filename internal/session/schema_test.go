@@ -27,7 +27,8 @@ type schemaPayload struct {
 }
 
 type schemaFile struct {
-	TypeVocabulary map[string]struct {
+	ProtocolVersion int `json:"protocolVersion"`
+	TypeVocabulary  map[string]struct {
 		Go string `json:"go"`
 		TS string `json:"ts"`
 	} `json:"typeVocabulary"`
@@ -163,6 +164,21 @@ type unsupportedTypeError struct {
 func (e *unsupportedTypeError) Error() string {
 	return "field " + e.field + ": unsupported Go type " + e.typ +
 		" (add it to the schema type vocabulary and goCategory)"
+}
+
+// TestProtocolVersionMatchesSchema is the drift gate for the CLI<->runner
+// protocol version const: schema/events.json's protocolVersion is the source
+// of truth, generated into ProtocolVersion (eventtypes.gen.go) and the TS
+// PROTOCOL_VERSION (runner/src/events.gen.ts, checked by the `just gen` diff
+// gate). A one-sided bump of either side fails here.
+func TestProtocolVersionMatchesSchema(t *testing.T) {
+	s := loadSchema(t)
+	if s.ProtocolVersion <= 0 {
+		t.Fatalf("schema protocolVersion must be a positive integer, got %d", s.ProtocolVersion)
+	}
+	if ProtocolVersion != s.ProtocolVersion {
+		t.Errorf("ProtocolVersion (eventtypes.gen.go) = %d != schema protocolVersion = %d (run `just gen` after editing schema/events.json)", ProtocolVersion, s.ProtocolVersion)
+	}
 }
 
 func TestEventTypesMatchSchema(t *testing.T) {

@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/cullenmcdermott/sandbox/internal/session"
@@ -36,6 +37,13 @@ type Client struct {
 	baseURL string // e.g. "http://127.0.0.1:8787"
 	token   string // bearer token
 	http    *http.Client
+
+	// remoteProtocolVersion caches the last protocolVersion Health() observed
+	// on GET /healthz (0 until the first successful Health call, or if the
+	// runner predates the field entirely). Accessed via atomics because Health
+	// can be polled from a goroutine (e.g. waitHealthy) while ProtocolVersion is
+	// read from the caller. See ProtocolVersion and session.ProtocolVersion.
+	remoteProtocolVersion int32
 }
 
 // New creates a runner client targeting the given base URL with the given
@@ -50,7 +58,19 @@ func New(baseURL, token string) *Client {
 	}
 }
 
-// Health checks /healthz.
+// healthResponse mirrors the runner's GET /healthz body (runner/src/server.ts
+// healthzBody). protocolVersion is absent on a pre-handshake runner image, in
+// which case it decodes to the zero value (0) — treated as "unknown/old" by
+// ProtocolVersion's callers.
+type healthResponse struct {
+	Status          string `json:"status"`
+	ProtocolVersion int    `json:"protocolVersion"`
+}
+
+// Health checks /healthz and records the runner's reported protocol version
+// (see ProtocolVersion) for mismatch detection by the caller. A decode
+// failure of the (already 200-OK) body does not fail Health itself — the
+// runner is up, it just didn't (or couldn't) report a version.
 func (c *Client) Health(ctx context.Context) error {
 	resp, err := c.do(ctx, http.MethodGet, "/healthz", nil)
 	if err != nil {
@@ -60,7 +80,39 @@ func (c *Client) Health(ctx context.Context) error {
 	if resp.StatusCode != http.StatusOK {
 		return statusError(resp, "runner health")
 	}
+	var h healthResponse
+	if err := json.NewDecoder(resp.Body).Decode(&h); err == nil {
+		atomic.StoreInt32(&c.remoteProtocolVersion, int32(h.ProtocolVersion))
+	}
 	return nil
+}
+
+// ProtocolVersion returns the runner's protocolVersion as last reported by a
+// successful Health call, or 0 if Health has not succeeded yet or the runner
+// predates the protocolVersion field (an old runner image — OSS users build
+// and push their own, so CLI/runner skew is the steady state, not an edge
+// case). Compare against session.ProtocolVersion to detect skew; callers warn
+// rather than refuse (see client/session.go Connect and
+// internal/cli/connect.go waitHealthy).
+func (c *Client) ProtocolVersion() int {
+	return int(atomic.LoadInt32(&c.remoteProtocolVersion))
+}
+
+// ProtocolMismatchWarning returns a human-readable advisory if remoteVersion
+// (as reported by a runner's Health/ProtocolVersion) differs from this CLI's
+// session.ProtocolVersion, or "" if they match. Centralized here (rather than
+// duplicated per caller) so client.Session.Connect and the headless
+// internal/cli commands (turn, trace — via waitHealthy) report identical
+// wording. Deliberately advisory, not fatal: OSS users build and push their
+// own runner images, so a skewed pair is the steady state, not an edge case.
+func ProtocolMismatchWarning(remoteVersion int) string {
+	if remoteVersion == session.ProtocolVersion {
+		return ""
+	}
+	if remoteVersion == 0 {
+		return fmt.Sprintf("runner did not report a protocol version (old runner image, pre-dates the handshake); this CLI speaks protocol v%d — behavior may be subtly wrong if the wire contract has since changed", session.ProtocolVersion)
+	}
+	return fmt.Sprintf("CLI/runner protocol version mismatch: runner reports v%d, this CLI speaks v%d — behavior may be subtly wrong (rebuild/pull a matching runner image)", remoteVersion, session.ProtocolVersion)
 }
 
 // StartTurn POSTs a new turn to the runner.

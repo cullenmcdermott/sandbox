@@ -9,7 +9,7 @@
 import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { IdleStatus, SessionState, StatusResponse } from './types.js';
-import { SESSION_JSON_PATH } from './types.js';
+import { PROTOCOL_VERSION, SESSION_JSON_PATH } from './types.js';
 import { appendEvent, sseClientCount, setClientsChangedHandler } from './events.js';
 
 /** Runner env configuration (set by the pod spec). */
@@ -112,6 +112,7 @@ export function toStatusResponse(state: SessionState, activeTurnId = ''): Status
     activeTurnId,
     lastActivity: state.last_activity,
     ...(state.model ? { model: state.model } : {}),
+    protocolVersion: PROTOCOL_VERSION,
   };
 }
 
