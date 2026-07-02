@@ -68,6 +68,18 @@ type Spec struct {
 	// (TurnInput.Model, the in-session /model command) take precedence.
 	Model string `json:"model,omitempty"`
 
+	// AnthropicAuth selects the Anthropic credential the claude-sdk runner pod
+	// authenticates with. Exactly one credential env is populated per pod:
+	//   ""/"oauth" — subscription OAuth token (CLAUDE_CODE_OAUTH_TOKEN, from the
+	//                anthropic-credentials Secret key "api-key"); the default.
+	//   "api-key"  — Console API key (ANTHROPIC_API_KEY, from the
+	//                anthropic-credentials Secret key "console-api-key").
+	// These spellings and Secret key names are a consumer contract — do not
+	// rename them. Claude Code prefers x-api-key over OAuth and rejects the
+	// OAuth token when ANTHROPIC_API_KEY is also set, so the selection is
+	// explicit and never populates both. Ignored by non-claude backends.
+	AnthropicAuth string `json:"anthropicAuth,omitempty"`
+
 	// Namespace is the Kubernetes namespace for the Sandbox/PVC. Defaults to
 	// "agent-sessions".
 	Namespace string `json:"namespace"`

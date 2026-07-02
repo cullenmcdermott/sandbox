@@ -111,6 +111,18 @@ func TestCreateRejectsInvalidImagePullPolicy(t *testing.T) {
 	}
 }
 
+// TestValidateAnthropicAuth: Create rejects a mis-spelled auth selector rather
+// than silently coercing it to the default OAuth path. (Valid spellings clearing
+// the gate is covered by the validateAnthropicAuth unit test in client_test.go —
+// routing a valid value through Create here would proceed to the nil backend.)
+func TestCreateRejectsInvalidAnthropicAuth(t *testing.T) {
+	c := &client.Client{}
+	_, err := c.Create(context.Background(), client.CreateOptions{ProjectPath: "/p", AnthropicAuth: "apikey"})
+	if !errors.Is(err, client.ErrInvalidAnthropicAuth) {
+		t.Fatalf("Create with bad anthropic auth: got %v, want ErrInvalidAnthropicAuth", err)
+	}
+}
+
 // New must reject an invalid reaper pull-policy override at construction (fail
 // fast) rather than at first Connect.
 func TestNewRejectsInvalidReaperImagePullPolicy(t *testing.T) {

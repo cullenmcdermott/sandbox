@@ -244,6 +244,11 @@ type CreateOptions struct {
 	ImagePullPolicy string
 	// Model is an optional session-default model id/alias.
 	Model string
+	// AnthropicAuth selects the Anthropic credential for a claude-sdk session:
+	// ""/"oauth" uses the subscription OAuth token; "api-key" uses the Console
+	// API key. Any other value is rejected with ErrInvalidAnthropicAuth. Ignored
+	// by non-claude backends.
+	AnthropicAuth string
 	// StorageClass is the PVC storage class (empty uses the cluster default).
 	StorageClass string
 	// StorageGiB is the PVC size in GiB (0 uses the backend default, 50).
@@ -266,6 +271,9 @@ func (c *Client) Create(ctx context.Context, opt CreateOptions) (*Session, error
 		return nil, ErrProjectPathRequired
 	}
 	if err := validateImagePullPolicy(opt.ImagePullPolicy); err != nil {
+		return nil, err
+	}
+	if err := validateAnthropicAuth(opt.AnthropicAuth); err != nil {
 		return nil, err
 	}
 	runnerImage := opt.RunnerImage
@@ -297,6 +305,7 @@ func (c *Client) Create(ctx context.Context, opt CreateOptions) (*Session, error
 		ImagePullPolicy: opt.ImagePullPolicy,
 		SSHPublicKey:    authKey,
 		Model:           opt.Model,
+		AnthropicAuth:   opt.AnthropicAuth,
 		StorageClass:    opt.StorageClass,
 		StorageGiB:      opt.StorageGiB,
 	}
@@ -428,6 +437,18 @@ func validateImagePullPolicy(p string) error {
 		return nil
 	default:
 		return fmt.Errorf("%w: %q (must be \"Always\", \"IfNotPresent\", or \"Never\")", ErrInvalidImagePullPolicy, p)
+	}
+}
+
+// validateAnthropicAuth rejects a non-empty AnthropicAuth that isn't one of the
+// exact spellings "oauth" or "api-key" — otherwise a typo like "apikey" would
+// silently fall through to the default OAuth path (the opposite of intent).
+func validateAnthropicAuth(a string) error {
+	switch a {
+	case "", "oauth", "api-key":
+		return nil
+	default:
+		return fmt.Errorf("%w: %q (must be \"oauth\" or \"api-key\")", ErrInvalidAnthropicAuth, a)
 	}
 }
 

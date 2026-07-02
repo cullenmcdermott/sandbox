@@ -1,9 +1,26 @@
 package client
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
+
+// TestValidateAnthropicAuth: the valid selectors ("", "oauth", "api-key") clear
+// the gate; anything else (including a case/spacing typo) is rejected with
+// ErrInvalidAnthropicAuth rather than silently coercing to the default OAuth path.
+func TestValidateAnthropicAuth(t *testing.T) {
+	for _, ok := range []string{"", "oauth", "api-key"} {
+		if err := validateAnthropicAuth(ok); err != nil {
+			t.Errorf("validateAnthropicAuth(%q): unexpected error %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"apikey", "OAuth", "api_key", "console", "api-key "} {
+		if err := validateAnthropicAuth(bad); !errors.Is(err, ErrInvalidAnthropicAuth) {
+			t.Errorf("validateAnthropicAuth(%q): got %v, want ErrInvalidAnthropicAuth", bad, err)
+		}
+	}
+}
 
 // TestSanitizeLabel checks that sanitizeLabel produces values safe to embed in a
 // Kubernetes resource name: uppercase is lowercased, [a-z0-9-] passes through,

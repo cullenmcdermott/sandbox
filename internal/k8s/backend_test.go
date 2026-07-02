@@ -275,6 +275,49 @@ func TestCreateSessionSecretAndEnv(t *testing.T) {
 	}
 }
 
+// TestBuildEnvAnthropicAuth: the claude-sdk pod gets exactly one Anthropic
+// credential env, selected by spec.AnthropicAuth. Default and "oauth" wire
+// CLAUDE_CODE_OAUTH_TOKEN (from key api-key) and leave ANTHROPIC_API_KEY unset;
+// "api-key" wires ANTHROPIC_API_KEY (from key console-api-key) and leaves
+// CLAUDE_CODE_OAUTH_TOKEN unset. Never both — Claude Code would reject the OAuth
+// token if a real x-api-key were also present.
+func TestBuildEnvAnthropicAuth(t *testing.T) {
+	cases := []struct {
+		name       string
+		auth       string
+		wantEnv    string // env var that MUST be present
+		wantKey    string // Secret key it must reference
+		notWantEnv string // env var that MUST be absent
+	}{
+		{"default", "", "CLAUDE_CODE_OAUTH_TOKEN", anthropicSecretKey, "ANTHROPIC_API_KEY"},
+		{"oauth", "oauth", "CLAUDE_CODE_OAUTH_TOKEN", anthropicSecretKey, "ANTHROPIC_API_KEY"},
+		{"api-key", "api-key", "ANTHROPIC_API_KEY", anthropicAPISecretKey, "CLAUDE_CODE_OAUTH_TOKEN"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := buildEnv(session.Spec{Backend: "claude-sdk", AnthropicAuth: tc.auth}, "s")
+
+			got := envVar(env, tc.wantEnv)
+			if got == nil || got.ValueFrom == nil || got.ValueFrom.SecretKeyRef == nil {
+				t.Fatalf("%s should reference a secret key", tc.wantEnv)
+			}
+			ref := got.ValueFrom.SecretKeyRef
+			if ref.Name != anthropicSecretName {
+				t.Errorf("%s secret name: got %q, want %q", tc.wantEnv, ref.Name, anthropicSecretName)
+			}
+			if ref.Key != tc.wantKey {
+				t.Errorf("%s secret key: got %q, want %q", tc.wantEnv, ref.Key, tc.wantKey)
+			}
+			if ref.Optional == nil || !*ref.Optional {
+				t.Errorf("%s should reference the secret optionally", tc.wantEnv)
+			}
+			if envVar(env, tc.notWantEnv) != nil {
+				t.Errorf("%s must be absent when AnthropicAuth=%q (exactly one credential per pod)", tc.notWantEnv, tc.auth)
+			}
+		})
+	}
+}
+
 func envVar(env []corev1.EnvVar, name string) *corev1.EnvVar {
 	for i := range env {
 		if env[i].Name == name {

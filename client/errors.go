@@ -39,4 +39,10 @@ var (
 	// ConnectOptions.ReaperImagePullPolicy) is a non-empty value other than the
 	// exact spellings "Always", "IfNotPresent", or "Never".
 	ErrInvalidImagePullPolicy = errors.New("sandbox: invalid image pull policy")
+
+	// ErrInvalidAnthropicAuth is returned by Create when CreateOptions.AnthropicAuth
+	// is a non-empty value other than the exact spellings "oauth" or "api-key".
+	// A typo like "apikey" errors here rather than silently falling through to the
+	// default OAuth path.
+	ErrInvalidAnthropicAuth = errors.New("sandbox: invalid anthropic auth")
 )

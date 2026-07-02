@@ -95,6 +95,11 @@ const (
 	// referenced optionally so pods still start before it exists.
 	anthropicSecretName = "anthropic-credentials"
 	anthropicSecretKey  = "api-key"
+	// anthropicAPISecretKey is the key in the same anthropic-credentials Secret
+	// holding a platform.anthropic.com Console API key, surfaced to the runner as
+	// ANTHROPIC_API_KEY when spec.AnthropicAuth == "api-key". Selected per session;
+	// never populated alongside CLAUDE_CODE_OAUTH_TOKEN (see buildEnv).
+	anthropicAPISecretKey = "console-api-key"
 
 	// opencodeSecretName is the cluster Secret supplying provider API keys to
 	// opencode-server session pods. Keys are optional and referenced optionally
@@ -1104,9 +1109,11 @@ func runnerVolumeMounts(spec session.Spec) []corev1.VolumeMount {
 
 // buildEnv builds the runner container's env, branching on the backend. Common
 // vars are set for all sessions; backend-specific credentials/config are added
-// only for the matching backend. In particular ANTHROPIC_API_KEY is set ONLY
-// for opencode (Claude Code would reject the subscription OAuth token if a real
-// x-api-key were also present — see CLAUDE_CODE_OAUTH_TOKEN below).
+// only for the matching backend. For the claude backend exactly one Anthropic
+// credential is populated per pod (OAuth token vs Console API key), selected by
+// spec.AnthropicAuth — never both, since Claude Code would reject the OAuth
+// token if a real x-api-key were also present (see the claude-sdk branch below).
+// For opencode, ANTHROPIC_API_KEY is a provider key set independently.
 func buildEnv(spec session.Spec, name string) []corev1.EnvVar {
 	env := []corev1.EnvVar{
 		{Name: "CLAUDE_CONFIG_DIR", Value: "/session/state/claude"},
@@ -1145,10 +1152,32 @@ func buildEnv(spec session.Spec, name string) []corev1.EnvVar {
 		return append(env, opencodeEnv(name)...)
 	}
 
-	// Default (claude-sdk): Claude Code OAuth token (subscription auth) from a
-	// cluster-provisioned Secret. Optional so pods still start before it is
-	// created. Note: do NOT also set ANTHROPIC_API_KEY — Claude Code prefers it
-	// and would reject the OAuth token as an invalid x-api-key.
+	// Default (claude-sdk): exactly ONE Anthropic credential env is populated per
+	// pod, selected by spec.AnthropicAuth. Claude Code prefers x-api-key over the
+	// subscription OAuth token and rejects the OAuth token as an invalid x-api-key
+	// when ANTHROPIC_API_KEY is also set — so this is a strict either/or, never
+	// both. Both source the same cluster Secret (different keys) and are marked
+	// Optional so pods still start before the Secret is provisioned.
+	//
+	//   "api-key"   → ANTHROPIC_API_KEY from anthropic-credentials/console-api-key
+	//   ""/"oauth"  → CLAUDE_CODE_OAUTH_TOKEN from anthropic-credentials/api-key
+	//                 (the backward-compatible default)
+	//
+	// The choice lives in the Sandbox pod template written at CreateSession;
+	// Resume only flips replicas, so the selected auth path persists for the
+	// session's lifetime across suspend/resume.
+	if spec.AnthropicAuth == "api-key" {
+		return append(env, corev1.EnvVar{
+			Name: "ANTHROPIC_API_KEY",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: anthropicSecretName},
+					Key:                  anthropicAPISecretKey,
+					Optional:             boolPtr(true),
+				},
+			},
+		})
+	}
 	return append(env, corev1.EnvVar{
 		Name: "CLAUDE_CODE_OAUTH_TOKEN",
 		ValueFrom: &corev1.EnvVarSource{
