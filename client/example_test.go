@@ -7,7 +7,12 @@ import (
 	"fmt"
 	"testing"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
+	agentsfake "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned/fake"
+
 	"github.com/cullenmcdermott/sandbox/client"
+	"github.com/cullenmcdermott/sandbox/internal/k8s"
 )
 
 // Example exercises the full public surface the way an external Go program would:
@@ -120,6 +125,63 @@ func TestCreateRejectsInvalidAnthropicAuth(t *testing.T) {
 	_, err := c.Create(context.Background(), client.CreateOptions{ProjectPath: "/p", AnthropicAuth: "apikey"})
 	if !errors.Is(err, client.ErrInvalidAnthropicAuth) {
 		t.Fatalf("Create with bad anthropic auth: got %v, want ErrInvalidAnthropicAuth", err)
+	}
+}
+
+// TestCreateFailsClosedOnAnthropicAccount: Create rejects a named account with
+// no resolved credential bytes (fail-closed — never fall back to the shared
+// Secret) and credential bytes with no account id, before any cluster call.
+func TestCreateFailsClosedOnAnthropicAccount(t *testing.T) {
+	c := &client.Client{}
+	_, err := c.Create(context.Background(), client.CreateOptions{
+		ProjectPath:        "/p",
+		AnthropicAccountID: "acct-work",
+	})
+	if !errors.Is(err, client.ErrAnthropicCredentialMissing) {
+		t.Fatalf("account without credential: got %v, want ErrAnthropicCredentialMissing", err)
+	}
+	_, err = c.Create(context.Background(), client.CreateOptions{
+		ProjectPath:         "/p",
+		AnthropicCredential: []byte("sk-ant-oat-SECRET"),
+	})
+	if !errors.Is(err, client.ErrAnthropicAccountRequired) {
+		t.Fatalf("credential without account: got %v, want ErrAnthropicAccountRequired", err)
+	}
+}
+
+// TestCreatePlumbsAnthropicAccount: CreateOptions.AnthropicAccountID /
+// AnthropicCredential flow through to the Spec and land in the per-session
+// Secret (credential key + account label). Runs against a fake k8s backend so no
+// live cluster is needed.
+func TestCreatePlumbsAnthropicAccount(t *testing.T) {
+	agents := agentsfake.NewSimpleClientset()
+	core := fake.NewSimpleClientset()
+	backend := k8s.NewForClients(agents, core, "agent-sessions")
+
+	c, err := client.New(client.WithBackend(backend), client.WithStateDir(t.TempDir()))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	const cred = "sk-ant-oat-PLUMBED"
+	sess, err := c.Create(context.Background(), client.CreateOptions{
+		ProjectPath:         "/work/repo",
+		AnthropicAuth:       "oauth",
+		AnthropicAccountID:  "acct-work",
+		AnthropicCredential: []byte(cred),
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	secret, err := core.CoreV1().Secrets("agent-sessions").Get(context.Background(), string(sess.ID())+"-runner", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get secret: %v", err)
+	}
+	if string(secret.Data["anthropic-credential"]) != cred {
+		t.Errorf("credential did not plumb through: got %q, want %q", secret.Data["anthropic-credential"], cred)
+	}
+	if secret.Labels["sandbox.cullen.dev/anthropic-account"] != "acct-work" {
+		t.Errorf("account label did not plumb through: got %q", secret.Labels["sandbox.cullen.dev/anthropic-account"])
 	}
 }
 

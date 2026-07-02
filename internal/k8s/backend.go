@@ -41,6 +41,17 @@ const (
 	labelSessionID = "sandbox.cullen.dev/session-id"
 	labelAppName   = "app.kubernetes.io/name"
 
+	// labelAnthropicAccount records the stored Anthropic account id whose
+	// credential a per-session Secret holds a copy of. `auth logout`/rotation
+	// list the sessions to re-provision with one label-selector query. The value
+	// is spec.AnthropicAccountID (DNS-safe, guaranteed by the cred store).
+	//
+	// NOTE: the plan text spells this `sandbox.dev/anthropic-account`; we use the
+	// `sandbox.cullen.dev/` domain to match this file's existing label/annotation
+	// convention (labelSessionID, annotationPinnedRunnerImage) rather than
+	// introducing a second prefix.
+	labelAnthropicAccount = "sandbox.cullen.dev/anthropic-account"
+
 	// annotationPinnedRunnerImage records the digest-pinned ref of the runner
 	// image the session's pod actually ran (kubelet-resolved), stamped once the
 	// pod is Ready. Resume rewrites the pod template's image from it before
@@ -82,6 +93,14 @@ const (
 	// secretKeySSHAuthorizedKey is the key in the per-session Secret holding
 	// the OpenSSH public key authorized for Mutagen's SSH transport.
 	secretKeySSHAuthorizedKey = "ssh-authorized-key"
+
+	// secretKeyAnthropicCredential is the key in the per-session Secret holding
+	// the resolved Anthropic credential (OAuth token or Console API key) for an
+	// account-backed claude-sdk session. Written only when spec.AnthropicCredential
+	// is non-empty; the claude buildEnv branch references it (not Optional — we
+	// wrote it) via CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY per
+	// spec.AnthropicAuth. Absent for the shared-Secret fallback path.
+	secretKeyAnthropicCredential = "anthropic-credential"
 
 	// sshAuthorizedKeyMountPath is where the per-session Secret's SSH public
 	// key is projected into the pod; the entrypoint installs it as the sync
@@ -246,12 +265,21 @@ func (b *Backend) CreateSession(ctx context.Context, spec session.Spec) (_ sessi
 	// (holding a live runner bearer token) and PVC that List/Status/Destroy
 	// can never see, since they only ever enumerate Sandboxes. Rollback is
 	// best-effort and idempotent (deleteSessionResources treats NotFound as
-	// success), so it's safe to run unconditionally rather than tracking
-	// exactly which of the three resources were newly created here. It runs
-	// on an independent, short-lived context because by the time a failure
-	// surfaces the caller's ctx may already be cancelled or past its deadline.
+	// success). It runs on an independent, short-lived context because by the
+	// time a failure surfaces the caller's ctx may already be cancelled or
+	// past its deadline.
+	//
+	// EXCEPT when the session pre-existed (the Secret create returned
+	// AlreadyExists): then the Secret/PVC/Sandbox belong to a PRIOR
+	// CreateSession call and hold live session state — most importantly the
+	// PVC's workspace data. A failure later in a re-create (e.g. the credential
+	// sync erroring) must return the error WITHOUT deleting them: destroying a
+	// pre-existing session as collateral damage of a failed re-create is
+	// strictly worse than any partial state the failure leaves behind.
+	// Fresh-create rollback semantics are unchanged.
+	secretPreexisted := false
 	defer func() {
-		if err == nil {
+		if err == nil || secretPreexisted {
 			return
 		}
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), createRollbackTimeout)
@@ -290,9 +318,30 @@ func (b *Backend) CreateSession(ctx context.Context, spec session.Spec) (_ sessi
 			secretKeySSHAuthorizedKey: []byte(spec.SSHPublicKey),
 		},
 	}
+	// Account-backed claude sessions carry their resolved credential in the
+	// per-session Secret (the shared anthropic-credentials Secret is the
+	// no-account fallback). The account id also labels the Secret so
+	// logout/rotation can enumerate every session holding a copy.
+	if len(spec.AnthropicCredential) > 0 {
+		secret.Data[secretKeyAnthropicCredential] = spec.AnthropicCredential
+		secret.Labels[labelAnthropicAccount] = spec.AnthropicAccountID
+	}
 	if _, err := b.core.CoreV1().Secrets(spec.Namespace).Create(ctx, secret, metav1.CreateOptions{}); err != nil {
 		if !k8serrors.IsAlreadyExists(err) {
 			return session.Ref{}, fmt.Errorf("k8s: create Secret %s: %w", secret.Name, err)
+		}
+		// Idempotent re-create: the Secret already exists (runner-token etc. are
+		// reused as-is), and from here on the session's resources belong to a
+		// prior CreateSession call — the rollback defer must not delete them.
+		secretPreexisted = true
+		// A re-create must not keep a stale account state: with a credential in
+		// the spec, patch its key + account label onto the existing Secret
+		// (re-creating with a DIFFERENT account must win); with none, strip any
+		// old key + label (otherwise logout/rotation label enumeration would
+		// false-positive on a session that no longer uses the account, and a
+		// stale credential copy would linger). Other keys are left untouched.
+		if err := b.syncSessionCredential(ctx, spec); err != nil {
+			return session.Ref{}, err
 		}
 	}
 
@@ -331,6 +380,63 @@ func (b *Backend) CreateSession(ctx context.Context, spec session.Spec) (_ sessi
 	}
 
 	return session.Ref{ID: spec.ID}, nil
+}
+
+// syncSessionCredential reconciles the per-session Secret's anthropic-credential
+// key and account label with the spec, leaving every other key (runner-token,
+// opencode-password, ssh-authorized-key) untouched. Used by CreateSession when
+// the Secret already exists: with an account credential in the spec it patches
+// the key + label (re-creating a session id with a different account must not
+// keep the old credential); with none it strips any stale key + label, so
+// logout/rotation label enumeration never false-positives on a session that no
+// longer uses an account and no stale credential copy lingers. A no-op Update is
+// skipped when the Secret already matches. Get+Update under RetryOnConflict
+// matches the existing setReplicas/pin idiom. The returned error never carries
+// credential bytes.
+func (b *Backend) syncSessionCredential(ctx context.Context, spec session.Spec) error {
+	name := sessionSecretName(string(spec.ID))
+	secrets := b.core.CoreV1().Secrets(spec.Namespace)
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		secret, getErr := secrets.Get(ctx, name, metav1.GetOptions{})
+		if getErr != nil {
+			return getErr
+		}
+		changed := false
+		if len(spec.AnthropicCredential) > 0 {
+			if string(secret.Data[secretKeyAnthropicCredential]) != string(spec.AnthropicCredential) {
+				if secret.Data == nil {
+					secret.Data = map[string][]byte{}
+				}
+				secret.Data[secretKeyAnthropicCredential] = spec.AnthropicCredential
+				changed = true
+			}
+			if secret.Labels[labelAnthropicAccount] != spec.AnthropicAccountID {
+				if secret.Labels == nil {
+					secret.Labels = map[string]string{}
+				}
+				secret.Labels[labelAnthropicAccount] = spec.AnthropicAccountID
+				changed = true
+			}
+		} else {
+			if _, ok := secret.Data[secretKeyAnthropicCredential]; ok {
+				delete(secret.Data, secretKeyAnthropicCredential)
+				changed = true
+			}
+			if _, ok := secret.Labels[labelAnthropicAccount]; ok {
+				delete(secret.Labels, labelAnthropicAccount)
+				changed = true
+			}
+		}
+		if !changed {
+			return nil
+		}
+		_, updateErr := secrets.Update(ctx, secret, metav1.UpdateOptions{})
+		return updateErr
+	})
+	if err != nil {
+		return fmt.Errorf("k8s: sync anthropic credential on Secret %s: %w", name, err)
+	}
+	return nil
 }
 
 // Start waits for the session pod to be running and ready.
@@ -1153,37 +1259,52 @@ func buildEnv(spec session.Spec, name string) []corev1.EnvVar {
 	}
 
 	// Default (claude-sdk): exactly ONE Anthropic credential env is populated per
-	// pod, selected by spec.AnthropicAuth. Claude Code prefers x-api-key over the
-	// subscription OAuth token and rejects the OAuth token as an invalid x-api-key
-	// when ANTHROPIC_API_KEY is also set — so this is a strict either/or, never
-	// both. Both source the same cluster Secret (different keys) and are marked
-	// Optional so pods still start before the Secret is provisioned.
+	// pod. The env var (the credential TYPE) is always selected by
+	// spec.AnthropicAuth — "api-key" → ANTHROPIC_API_KEY, ""/"oauth" →
+	// CLAUDE_CODE_OAUTH_TOKEN. Claude Code prefers x-api-key over the subscription
+	// OAuth token and rejects the OAuth token as an invalid x-api-key when
+	// ANTHROPIC_API_KEY is also set — so this is a strict either/or, never both.
 	//
-	//   "api-key"   → ANTHROPIC_API_KEY from anthropic-credentials/console-api-key
-	//   ""/"oauth"  → CLAUDE_CODE_OAUTH_TOKEN from anthropic-credentials/api-key
-	//                 (the backward-compatible default)
+	// The credential SOURCE branches on spec.AnthropicAccountID (the fail-closed
+	// signal — an account was selected, so its bytes were written to the
+	// per-session Secret; NOT len(credential), which the pod template can't see):
+	//
+	//   AnthropicAccountID != "" → the per-session Secret sessionSecretName(name),
+	//     key "anthropic-credential", NOT Optional — CreateSession wrote that key,
+	//     so a missing key means a provisioning bug that should fail the pod
+	//     loudly rather than start it unauthenticated.
+	//   AnthropicAccountID == "" → the shared anthropic-credentials Secret
+	//     (key api-key / console-api-key), Optional so pods still start before the
+	//     out-of-band Secret is provisioned. The backward-compatible fallback.
 	//
 	// The choice lives in the Sandbox pod template written at CreateSession;
-	// Resume only flips replicas, so the selected auth path persists for the
-	// session's lifetime across suspend/resume.
+	// Resume only flips replicas, so the selected auth path + source persist for
+	// the session's lifetime across suspend/resume.
+	envName := "CLAUDE_CODE_OAUTH_TOKEN"
 	if spec.AnthropicAuth == "api-key" {
+		envName = "ANTHROPIC_API_KEY"
+	}
+	if spec.AnthropicAccountID != "" {
 		return append(env, corev1.EnvVar{
-			Name: "ANTHROPIC_API_KEY",
+			Name: envName,
 			ValueFrom: &corev1.EnvVarSource{
 				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: anthropicSecretName},
-					Key:                  anthropicAPISecretKey,
-					Optional:             boolPtr(true),
+					LocalObjectReference: corev1.LocalObjectReference{Name: sessionSecretName(name)},
+					Key:                  secretKeyAnthropicCredential,
 				},
 			},
 		})
 	}
+	sharedKey := anthropicSecretKey
+	if spec.AnthropicAuth == "api-key" {
+		sharedKey = anthropicAPISecretKey
+	}
 	return append(env, corev1.EnvVar{
-		Name: "CLAUDE_CODE_OAUTH_TOKEN",
+		Name: envName,
 		ValueFrom: &corev1.EnvVarSource{
 			SecretKeyRef: &corev1.SecretKeySelector{
 				LocalObjectReference: corev1.LocalObjectReference{Name: anthropicSecretName},
-				Key:                  anthropicSecretKey,
+				Key:                  sharedKey,
 				Optional:             boolPtr(true),
 			},
 		},

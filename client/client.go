@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/rest"
 
 	"github.com/cullenmcdermott/sandbox/internal/index"
@@ -244,11 +245,38 @@ type CreateOptions struct {
 	ImagePullPolicy string
 	// Model is an optional session-default model id/alias.
 	Model string
-	// AnthropicAuth selects the Anthropic credential for a claude-sdk session:
-	// ""/"oauth" uses the subscription OAuth token; "api-key" uses the Console
-	// API key. Any other value is rejected with ErrInvalidAnthropicAuth. Ignored
-	// by non-claude backends.
+	// AnthropicAuth selects the Anthropic credential TYPE for a claude-sdk
+	// session: ""/"oauth" uses the subscription OAuth token; "api-key" uses the
+	// Console API key. Any other value is rejected with ErrInvalidAnthropicAuth.
+	// It alone drives which env var the pod's credential lands under
+	// (CLAUDE_CODE_OAUTH_TOKEN vs ANTHROPIC_API_KEY) — including on the
+	// account path — so a caller setting AnthropicAccountID MUST set this to
+	// match the account's type (see AnthropicAccountID). Ignored by non-claude
+	// backends.
 	AnthropicAuth string
+	// AnthropicAccountID names the stored Anthropic account this session runs on
+	// (see internal/cred). When set, AnthropicCredential MUST hold the resolved
+	// bytes for that account — the caller (CLI/TUI) resolves account → bytes
+	// before calling Create; the client layer only carries and writes them.
+	// Setting the id without bytes fails closed with ErrAnthropicCredentialMissing
+	// rather than falling back to the shared cluster Secret. The caller MUST also
+	// set AnthropicAuth to match the account's type ("oauth" for subscription
+	// accounts, "api-key" for console) — env-var selection is driven solely by
+	// AnthropicAuth and the account's type is not visible at this layer, so the
+	// correlation cannot be validated here: forgetting it lands the right bytes
+	// under the wrong env var with no error. internal/cred's
+	// AuthForType(account.Type) is the canonical way to derive it. Must be a
+	// valid Kubernetes label value (the id labels the per-session Secret;
+	// guaranteed by the cred store) — else ErrInvalidAnthropicAccountID. Empty
+	// selects the shared-Secret fallback (backward-compatible). Ignored by
+	// non-claude backends.
+	AnthropicAccountID string
+	// AnthropicCredential is the resolved secret bytes (OAuth token or Console
+	// API key) for AnthropicAccountID. Never serialized; provisioned into the
+	// per-session Secret and surfaced to the pod as a SecretKeyRef env var only.
+	// Bytes without an AnthropicAccountID are rejected with
+	// ErrAnthropicAccountRequired. Ignored by non-claude backends.
+	AnthropicCredential []byte
 	// StorageClass is the PVC storage class (empty uses the cluster default).
 	StorageClass string
 	// StorageGiB is the PVC size in GiB (0 uses the backend default, 50).
@@ -276,6 +304,13 @@ func (c *Client) Create(ctx context.Context, opt CreateOptions) (*Session, error
 	if err := validateAnthropicAuth(opt.AnthropicAuth); err != nil {
 		return nil, err
 	}
+	// Fail closed on account/credential mismatch (a design-review requirement):
+	// a named account with no resolved bytes must NOT silently fall back to the
+	// shared cluster Secret, and bytes with no account id would provision an
+	// unlabeled, unenumerable Secret. Both are rejected before any cluster call.
+	if err := validateAnthropicAccount(opt.AnthropicAccountID, opt.AnthropicCredential); err != nil {
+		return nil, err
+	}
 	runnerImage := opt.RunnerImage
 	if runnerImage == "" {
 		runnerImage = c.runnerImage
@@ -298,16 +333,18 @@ func (c *Client) Create(ctx context.Context, opt CreateOptions) (*Session, error
 	}
 
 	spec := session.Spec{
-		ID:              sid,
-		ProjectPath:     opt.ProjectPath,
-		Backend:         backendName,
-		RunnerImage:     runnerImage,
-		ImagePullPolicy: opt.ImagePullPolicy,
-		SSHPublicKey:    authKey,
-		Model:           opt.Model,
-		AnthropicAuth:   opt.AnthropicAuth,
-		StorageClass:    opt.StorageClass,
-		StorageGiB:      opt.StorageGiB,
+		ID:                  sid,
+		ProjectPath:         opt.ProjectPath,
+		Backend:             backendName,
+		RunnerImage:         runnerImage,
+		ImagePullPolicy:     opt.ImagePullPolicy,
+		SSHPublicKey:        authKey,
+		Model:               opt.Model,
+		AnthropicAuth:       opt.AnthropicAuth,
+		AnthropicAccountID:  opt.AnthropicAccountID,
+		AnthropicCredential: opt.AnthropicCredential,
+		StorageClass:        opt.StorageClass,
+		StorageGiB:          opt.StorageGiB,
 	}
 
 	ref, err := c.backend.CreateSession(ctx, spec)
@@ -450,6 +487,31 @@ func validateAnthropicAuth(a string) error {
 	default:
 		return fmt.Errorf("%w: %q (must be \"oauth\" or \"api-key\")", ErrInvalidAnthropicAuth, a)
 	}
+}
+
+// validateAnthropicAccount enforces the fail-closed account/credential contract:
+// a named account requires resolved credential bytes (else the session would
+// silently launch on the shared Secret with the wrong or no account), and
+// credential bytes require a naming account (else the per-session Secret would
+// be unlabeled and unenumerable for rotation/logout). The account id must also
+// be a valid Kubernetes label value — it labels the per-session Secret — so an
+// invalid id fails fast here with a clear sentinel instead of surfacing as an
+// apiserver Invalid error mid-create (which would trip the backend's failure
+// handling). The empty/empty case is the shared-Secret fallback and is allowed.
+// It never inspects or echoes the credential bytes.
+func validateAnthropicAccount(accountID string, credential []byte) error {
+	switch {
+	case accountID != "" && len(credential) == 0:
+		return ErrAnthropicCredentialMissing
+	case accountID == "" && len(credential) > 0:
+		return ErrAnthropicAccountRequired
+	}
+	if accountID != "" {
+		if errs := validation.IsValidLabelValue(accountID); len(errs) > 0 {
+			return fmt.Errorf("%w: %q (%s)", ErrInvalidAnthropicAccountID, accountID, strings.Join(errs, "; "))
+		}
+	}
+	return nil
 }
 
 // sanitizeLabel lowercases and replaces any non-[a-z0-9-] rune with '-' so the
