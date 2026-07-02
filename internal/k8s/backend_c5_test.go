@@ -3,6 +3,7 @@ package k8s
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -78,5 +79,94 @@ func TestDestroyDoesNotOrphanSecretOnError(t *testing.T) {
 	// And the Sandbox should still have been deleted.
 	if _, err := agents.AgentsV1alpha1().Sandboxes("agent-sessions").Get(ctx, "test-orphan", metav1.GetOptions{}); err == nil {
 		t.Error("Sandbox was not deleted")
+	}
+}
+
+// TestCreateSessionRollsBackSecretOnPVCFailure verifies the HIGH fix: if the
+// PVC create fails after the per-session Secret (holding the runner bearer
+// token) was already created, CreateSession must delete that Secret rather
+// than leaving it orphaned — List/Status/Destroy only ever enumerate
+// Sandboxes, so an orphaned Secret would otherwise be permanently invisible.
+func TestCreateSessionRollsBackSecretOnPVCFailure(t *testing.T) {
+	ctx := context.Background()
+	agents := agentsfake.NewSimpleClientset()
+	core := fake.NewSimpleClientset()
+	b := NewForClients(agents, core, "agent-sessions")
+
+	core.PrependReactor("create", "persistentvolumeclaims", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, fmt.Errorf("simulated PVC create failure")
+	})
+
+	spec := session.Spec{ID: "test-rollback-pvc", ProjectPath: "/tmp", Backend: "claude-sdk", RunnerImage: "test:latest"}
+	if _, err := b.CreateSession(ctx, spec); err == nil {
+		t.Fatal("CreateSession should surface the PVC create error")
+	}
+
+	if _, err := core.CoreV1().Secrets("agent-sessions").Get(ctx, sessionSecretName("test-rollback-pvc"), metav1.GetOptions{}); err == nil {
+		t.Error("Secret was orphaned after a PVC create failure (rollback did not run)")
+	}
+	if _, err := core.CoreV1().PersistentVolumeClaims("agent-sessions").Get(ctx, "test-rollback-pvc", metav1.GetOptions{}); err == nil {
+		t.Error("PVC should not exist after a failed create")
+	}
+	if _, err := agents.AgentsV1alpha1().Sandboxes("agent-sessions").Get(ctx, "test-rollback-pvc", metav1.GetOptions{}); err == nil {
+		t.Error("Sandbox should never have been created")
+	}
+}
+
+// TestCreateSessionRollsBackSecretAndPVCOnSandboxFailure verifies the HIGH
+// fix: if the Sandbox create fails after the Secret and PVC already
+// succeeded, both must be rolled back — otherwise the orphaned Secret (live
+// bearer token) and up-to-50Gi PVC are permanently invisible to
+// status/destroy, which only look at Sandboxes.
+func TestCreateSessionRollsBackSecretAndPVCOnSandboxFailure(t *testing.T) {
+	ctx := context.Background()
+	agents := agentsfake.NewSimpleClientset()
+	core := fake.NewSimpleClientset()
+	b := NewForClients(agents, core, "agent-sessions")
+
+	agents.PrependReactor("create", "sandboxes", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, fmt.Errorf("simulated Sandbox create failure")
+	})
+
+	spec := session.Spec{ID: "test-rollback-sandbox", ProjectPath: "/tmp", Backend: "claude-sdk", RunnerImage: "test:latest"}
+	if _, err := b.CreateSession(ctx, spec); err == nil {
+		t.Fatal("CreateSession should surface the Sandbox create error")
+	}
+
+	if _, err := core.CoreV1().Secrets("agent-sessions").Get(ctx, sessionSecretName("test-rollback-sandbox"), metav1.GetOptions{}); err == nil {
+		t.Error("Secret was orphaned after a Sandbox create failure (rollback did not run)")
+	}
+	if _, err := core.CoreV1().PersistentVolumeClaims("agent-sessions").Get(ctx, "test-rollback-sandbox", metav1.GetOptions{}); err == nil {
+		t.Error("PVC was orphaned after a Sandbox create failure (rollback did not run)")
+	}
+}
+
+// TestCreateSessionRollbackErrorSurfacesBothFailures verifies that when the
+// best-effort rollback itself fails, that failure is appended to (not
+// swallowed by, not masking) the original create error, so callers/logs still
+// see why CreateSession failed in the first place.
+func TestCreateSessionRollbackErrorSurfacesBothFailures(t *testing.T) {
+	ctx := context.Background()
+	agents := agentsfake.NewSimpleClientset()
+	core := fake.NewSimpleClientset()
+	b := NewForClients(agents, core, "agent-sessions")
+
+	agents.PrependReactor("create", "sandboxes", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, fmt.Errorf("simulated Sandbox create failure")
+	})
+	core.PrependReactor("delete", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, fmt.Errorf("simulated Secret delete failure during rollback")
+	})
+
+	spec := session.Spec{ID: "test-rollback-error", ProjectPath: "/tmp", Backend: "claude-sdk", RunnerImage: "test:latest"}
+	_, err := b.CreateSession(ctx, spec)
+	if err == nil {
+		t.Fatal("CreateSession should surface an error")
+	}
+	if !strings.Contains(err.Error(), "Sandbox create failure") {
+		t.Errorf("original create error was masked: %v", err)
+	}
+	if !strings.Contains(err.Error(), "Secret delete failure during rollback") {
+		t.Errorf("rollback failure was not surfaced: %v", err)
 	}
 }

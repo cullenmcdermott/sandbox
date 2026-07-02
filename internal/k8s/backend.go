@@ -183,9 +183,23 @@ func NewForClients(agents agentsclient.Interface, core kubernetes.Interface, nam
 	return b
 }
 
-// CreateSession creates a Sandbox and PVC. It does not wait for the pod to
-// be ready; call Start for that.
-func (b *Backend) CreateSession(ctx context.Context, spec session.Spec) (session.Ref, error) {
+// createRollbackTimeout bounds the best-effort cleanup CreateSession performs
+// when a later create step fails partway through. It runs on a context
+// independent of the caller's (context.WithoutCancel) because the caller's
+// ctx may already be cancelled/expired by the time the failure is observed —
+// the cleanup must still get a chance to run.
+const createRollbackTimeout = 30 * time.Second
+
+// CreateSession creates a Secret, PVC and Sandbox for the session. It does not
+// wait for the pod to be ready; call Start for that.
+//
+// If a later step fails, everything created earlier in this call is rolled
+// back (best effort) before returning the original error, so a partial
+// failure never leaves an orphaned Secret (holding a live runner bearer
+// token) or PVC that List/Status/Destroy — which only ever look at
+// Sandboxes — can't see. Rollback failures are appended to the returned error
+// rather than swallowed or allowed to mask the original cause.
+func (b *Backend) CreateSession(ctx context.Context, spec session.Spec) (_ session.Ref, err error) {
 	// Every other backend method — Status, Suspend, Resume, Destroy, List and
 	// the watch — is scoped to b.namespace. Creating a session's Secret/PVC/
 	// Sandbox in any other namespace would orphan them (Destroy could never find
@@ -208,6 +222,27 @@ func (b *Backend) CreateSession(ctx context.Context, spec session.Spec) (session
 	}
 
 	name := string(spec.ID)
+
+	// If any create step below fails, roll back everything created earlier in
+	// this call: without this, a partial failure (e.g. the Sandbox create
+	// failing after the Secret and PVC succeeded) leaves an orphaned Secret
+	// (holding a live runner bearer token) and PVC that List/Status/Destroy
+	// can never see, since they only ever enumerate Sandboxes. Rollback is
+	// best-effort and idempotent (deleteSessionResources treats NotFound as
+	// success), so it's safe to run unconditionally rather than tracking
+	// exactly which of the three resources were newly created here. It runs
+	// on an independent, short-lived context because by the time a failure
+	// surfaces the caller's ctx may already be cancelled or past its deadline.
+	defer func() {
+		if err == nil {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), createRollbackTimeout)
+		defer cancel()
+		if cleanupErr := b.deleteSessionResources(cleanupCtx, name); cleanupErr != nil {
+			err = fmt.Errorf("%w (rollback also failed, resources may be orphaned: %v)", err, cleanupErr)
+		}
+	}()
 
 	// Create the per-session Secret holding the runner bearer token. The token
 	// is generated once and reused on subsequent CreateSession calls for the
@@ -392,6 +427,21 @@ func (b *Backend) Resume(ctx context.Context, ref session.Ref) error {
 // as success so Destroy is idempotent (C5).
 func (b *Backend) Destroy(ctx context.Context, ref session.Ref) error {
 	name := string(ref.ID)
+	if err := b.deleteSessionResources(ctx, name); err != nil {
+		return fmt.Errorf("k8s: destroy %s: %w", name, err)
+	}
+	return nil
+}
+
+// deleteSessionResources deletes the Sandbox, PVC and per-session Secret for a
+// given session name. All three deletions are attempted even if one fails —
+// a transient error on the Sandbox or PVC must not orphan the remaining
+// resources, most importantly the per-session Secret, which holds the runner
+// bearer token. NotFound is treated as success so this is idempotent whether
+// called from Destroy (tearing down a live session) or from CreateSession's
+// rollback (cleaning up a partially created one). Returns nil if every
+// resource was deleted (or already absent), otherwise the joined errors.
+func (b *Backend) deleteSessionResources(ctx context.Context, name string) error {
 	var errs []error
 	if err := b.agents.AgentsV1alpha1().Sandboxes(b.namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
 		errs = append(errs, fmt.Errorf("delete Sandbox %s: %w", name, err))
@@ -403,7 +453,7 @@ func (b *Backend) Destroy(ctx context.Context, ref session.Ref) error {
 		errs = append(errs, fmt.Errorf("delete Secret %s: %w", sessionSecretName(name), err))
 	}
 	if len(errs) > 0 {
-		return fmt.Errorf("k8s: destroy %s: %w", name, errors.Join(errs...))
+		return errors.Join(errs...)
 	}
 	return nil
 }
