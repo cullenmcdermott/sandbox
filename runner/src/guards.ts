@@ -44,3 +44,21 @@ export const BLOCKED_BASH_PATTERNS: RegExp[] = [
 export function bashCommandBlocked(command: string): boolean {
   return BLOCKED_BASH_PATTERNS.some((re) => re.test(command));
 }
+
+/**
+ * Serialize BLOCKED_BASH_PATTERNS to a JS array-literal source string of
+ * `new RegExp(source, flags)` constructors. This is the single-source-of-truth
+ * hand-off to the GENERATED opencode guardrail plugin (opencode.ts): opencode
+ * runs its in-agent tools inside its own `opencode serve` process, so the same
+ * blocklist has to be embedded in a plugin file loaded by that process rather
+ * than imported from this module at runtime. Each pattern is reconstructed
+ * losslessly from `RegExp.source` + `RegExp.flags` (JSON-escaped), so flags are
+ * preserved too — today every pattern is flagless, but this stays correct if a
+ * future pattern adds e.g. the `i` flag.
+ */
+export function serializeBlockedPatterns(): string {
+  const lines = BLOCKED_BASH_PATTERNS.map(
+    (re) => `  new RegExp(${JSON.stringify(re.source)}, ${JSON.stringify(re.flags)}),`,
+  );
+  return `[\n${lines.join('\n')}\n]`;
+}

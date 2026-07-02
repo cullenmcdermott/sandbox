@@ -32,6 +32,7 @@
 import type { Event } from '@opencode-ai/sdk';
 
 import { appendEvent } from './events.js';
+import { appendAudit } from './audit.js';
 import { createOpencodeTurnMapper, opencodeTurnClient } from './opencode-turn.js';
 import { getRegistry } from './session.js';
 import type { EventType } from './types.js';
@@ -66,6 +67,10 @@ export interface ObserverDeps {
   setModel(model: string): void;
   /** Append a normalized event to the log/SSE channel. */
   emit(turnId: string | undefined, type: EventType, payload: Record<string, unknown>): void;
+  /** Audit a tool execution observed during an interactive cycle (bound to the
+   * cycle's turn id). Mirrors the headless seam's appendAudit so interactive
+   * opencode tool use is recorded too — the other half of the parity gap. */
+  audit(turnId: string, tool: string, input: unknown): void;
 }
 
 /** Extract the opencode sessionID an event pertains to, across the few event
@@ -152,7 +157,11 @@ export function createObserverHandler(deps: ObserverDeps) {
           deps.emit(turnId, 'turn.started', {});
           activeTurnId = turnId;
           const cycleTurnId = turnId;
-          mapper = createOpencodeTurnMapper(oc, (t, p) => deps.emit(cycleTurnId, t, p));
+          mapper = createOpencodeTurnMapper(
+            oc,
+            (t, p) => deps.emit(cycleTurnId, t, p),
+            (tool, input) => deps.audit(cycleTurnId, tool, input),
+          );
 
           // Emit the model once so the Go side resolves a context-window limit for
           // ctx% (session.go: session.started → sess.Model + CtxLimit). opencode's
@@ -194,6 +203,14 @@ function registryDeps(): ObserverDeps {
     setStatus: (s) => getRegistry().setStatus(s),
     setModel: (m) => getRegistry().setModel(m),
     emit: (turnId, type, payload) => appendEvent(getRegistry().state.sandbox_session_id, turnId, type, payload),
+    audit: (turnId, tool, input) =>
+      appendAudit({
+        time: new Date().toISOString(),
+        session_id: getRegistry().state.sandbox_session_id,
+        turn_id: turnId,
+        tool,
+        input,
+      }),
   };
 }
 

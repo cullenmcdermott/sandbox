@@ -35,6 +35,7 @@ import type { Event, Part, AssistantMessage } from '@opencode-ai/sdk';
 
 import type { Agent } from './agent.js';
 import { appendEvent } from './events.js';
+import { appendAudit } from './audit.js';
 import { getRegistry, type RunnerConfig } from './session.js';
 import type { EventType } from './types.js';
 
@@ -44,6 +45,16 @@ type OpencodeClient = ReturnType<typeof createOpencodeClient>;
 
 /** Emit a normalized event. Injected so the mapper is testable without the log. */
 export type Emit = (type: EventType, payload: Record<string, unknown>) => void;
+
+/**
+ * Audit a tool execution the mapper observes. Injected (and bound to the current
+ * session/turn by the caller, exactly like `emit`) so the pure mapper stays
+ * I/O-free and unit-testable — production wires it to appendAudit. This is the
+ * opencode analogue of the Claude PostToolUse audit hook (claude.ts): it fires
+ * for BOTH the headless /turns seam and the always-on interactive observer, since
+ * both drive tool events through createOpencodeTurnMapper.
+ */
+export type AuditTool = (tool: string, input: unknown) => void;
 
 /** Build a client for the in-pod opencode server with basic auth when secured. */
 export function opencodeTurnClient(env: NodeJS.ProcessEnv = process.env): OpencodeClient {
@@ -181,7 +192,7 @@ type Settled = 'completed' | 'failed' | undefined;
  * per-part bookkeeping so started/completed fire exactly once. No I/O — unit-tested
  * directly with synthetic events.
  */
-export function createOpencodeTurnMapper(ocSession: string, emit: Emit) {
+export function createOpencodeTurnMapper(ocSession: string, emit: Emit, audit?: AuditTool) {
   const textStarted = new Set<string>();
   const textCompleted = new Set<string>();
   const textOf = new Map<string, string>();
@@ -270,6 +281,12 @@ export function createOpencodeTurnMapper(ocSession: string, emit: Emit) {
         const st = part.state;
         if (st.status !== 'pending' && !toolStarted.has(part.id)) {
           toolStarted.add(part.id);
+          // Audit every observed tool execution (once per part, guarded by
+          // toolStarted) with its inputs, mirroring the Claude PostToolUse audit.
+          // Fires here (not on completion) so a tool the in-agent guardrail
+          // BLOCKS — which opencode surfaces as an errored part, never a
+          // "completed" one — is still recorded.
+          audit?.(part.tool, st.input);
           emit('tool.started', { tool: part.tool, input: st.input, toolUseId: part.callID });
         }
         // Fire the terminal event once: opencode may re-send a completed/error part.
@@ -502,6 +519,9 @@ async function runTurn(
   const emit: Emit = (type, payload) => {
     appendEvent(sessionId, turnId, type, payload);
   };
+  const audit: AuditTool = (tool, input) => {
+    appendAudit({ time: new Date().toISOString(), session_id: sessionId, turn_id: turnId, tool, input });
+  };
 
   emit('turn.started', { prompt });
 
@@ -517,7 +537,7 @@ async function runTurn(
 
   try {
     const ocSession = await ensureSession(client, abort.signal, reg, resume);
-    mapper = createOpencodeTurnMapper(ocSession, emit);
+    mapper = createOpencodeTurnMapper(ocSession, emit, audit);
 
     // Abort → ask opencode to stop AND close the stream so the loop ends even if
     // the abort produces no event. We do NOT emit turn.interrupted here: the

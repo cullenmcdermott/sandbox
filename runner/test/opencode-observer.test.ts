@@ -20,11 +20,12 @@ interface Calls {
   lastTurns: string[];
   models: string[];
   externalActivity: number;
+  audited: Array<{ turnId: string; tool: string; input: unknown }>;
 }
 
 function fakeDeps(overrides: Partial<ObserverDeps> = {}): { deps: ObserverDeps; calls: Calls } {
   let turnCounter = 0;
-  const calls: Calls = { emitted: [], statuses: [], lastTurns: [], models: [], externalActivity: 0 };
+  const calls: Calls = { emitted: [], statuses: [], lastTurns: [], models: [], externalActivity: 0, audited: [] };
   const deps: ObserverDeps = {
     sessionId: () => 'sandbox-1',
     ocSession: () => OC,
@@ -37,9 +38,27 @@ function fakeDeps(overrides: Partial<ObserverDeps> = {}): { deps: ObserverDeps; 
     setStatus: (s) => calls.statuses.push(s),
     setModel: (m) => calls.models.push(m),
     emit: (turnId, type, payload) => calls.emitted.push({ turnId, type, payload }),
+    audit: (turnId, tool, input) => calls.audited.push({ turnId, tool, input }),
     ...overrides,
   };
   return { deps, calls };
+}
+
+function toolPart(msgId: string, partId: string, status: 'running' | 'completed', extra: Record<string, unknown>): Event {
+  return {
+    type: 'message.part.updated',
+    properties: {
+      part: {
+        id: partId,
+        sessionID: OC,
+        messageID: msgId,
+        type: 'tool',
+        callID: 'call_1',
+        tool: 'bash',
+        state: { status, input: { command: 'ls -la' }, ...extra },
+      },
+    },
+  } as unknown as Event;
 }
 
 function asstMsg(msgId: string, opts: { sessionID?: string; model?: boolean } = {}): Event {
@@ -109,6 +128,19 @@ test('observer frames an interactive assistant cycle as a synthetic turn', () =>
   assert.deepEqual(calls.models, ['opencode/big-pickle']);
   assert.equal(calls.externalActivity, 1);
   assert.equal(h.cycleActive, false);
+});
+
+test('observer audits an interactive tool execution once, bound to the cycle turn', () => {
+  const { deps, calls } = fakeDeps();
+  const h = createObserverHandler(deps);
+
+  h.handle(asstMsg('m1')); // cycle start (turn-1)
+  h.handle(toolPart('m1', 't1', 'running', {}));
+  h.handle(toolPart('m1', 't1', 'completed', { output: 'ok' })); // opencode re-sends the part
+  h.handle(sessionIdle());
+
+  assert.equal(calls.audited.length, 1, 'exactly one audit row per tool execution');
+  assert.deepEqual(calls.audited[0], { turnId: 'turn-1', tool: 'bash', input: { command: 'ls -la' } });
 });
 
 test('observer emits a fresh turn per cycle (no single-turn latch leakage)', () => {
