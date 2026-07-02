@@ -174,9 +174,17 @@ via a passive observer connection to the agent's event stream. See
   No schema change. Codex remains TODO (same pattern, app-server thread
   notifications). Verified in events.db: a real interactive turn produced the full
   turn-1 sequence; `external_pane.go` statusRow now reads the live read-model.
-- [ ] OpenCode in-agent tool use is **neither audited nor gated** by the runner's
-  Bash blocklist (Claude is). Security-relevant. `runner/src/server.ts:225-247`,
-  `guards.ts`.
+- [x] OpenCode in-agent tool use is **neither audited nor gated** by the runner's
+  Bash blocklist (Claude is). FIXED 2026-07-01: **gating** via a guardrail plugin
+  generated at boot from `guards.ts` (`serializeBlockedPatterns` → lossless
+  `new RegExp(source, flags)` embed) and registered in the opencode config
+  `plugin` array (v1.17.7 file-plugin spec, verified against the pinned
+  `@opencode-ai/plugin` types + sst/opencode source); its `tool.execute.before`
+  throws on a blocked `bash` command. Fail-open with a loud log (defense-in-depth
+  only). **Audit** via an injectable `AuditTool` in `createOpencodeTurnMapper`
+  (headless `/turns`) + `ObserverDeps.audit` (interactive cycles) → `audit.jsonl`.
+  Tests in `runner/test/opencode-guardrail.test.ts` (incl. importing the emitted
+  plugin and asserting `kubectl get pods` throws) + mapper/observer audit tests.
 - [~] CLI `opencode` has no `--model` flag and no initial-prompt arg; `cancel` and
   the suspend active-turn warning are inert for opencode. `cancel` now WORKS
   (Phase 4): the observer sets `last_turn_id` and the interrupt route gained an
@@ -337,60 +345,76 @@ global palette" above.
 Because OSS users build + pass their own `--runner-image`, skew between CLI, runner,
 and on-disk PVC state is the steady state, not an edge case.
 
-- [ ] **No CLI↔runner protocol version handshake (HIGH).** `/healthz` returns only
-  `{status:ok}` and `StatusResponse` carries no version, so a skewed CLI/runner pair
-  fails *silently*: the Go client unmarshals an unknown event type into `session.Event`
-  and the TUI `switch ev.Type` has **no default case**, dropping it; renamed/removed
-  payload fields decode to zero values with no error. Add a version to `/healthz` (or a
-  header) and warn/refuse on mismatch. `runner/src/server.ts:79`,
-  `runner/src/types.ts:134`, `internal/tui/dashboard/session.go:553`.
-- [ ] **`events.db` schema version is write-only; no migration (HIGH).** `SCHEMA_VERSION`
-  is stamped to `user_version` on every open but never read-compared, and there is no
-  migration fn — the "bump + migrate on shape changes" comment describes a mechanism
-  that was never built. `session.json` has no version field at all. Read-compare-migrate
-  on open; stamp a version into `session.json`. `runner/src/events.ts:31,91`.
-- [ ] **`:latest` + `PullAlways` swaps the binary under old PVC state on resume (HIGH).**
-  `resolveImagePullPolicy` gives any non-digest ref `PullAlways`; resume only touches
-  `.spec.replicas` (never rewrites the image), so resuming a weeks-old suspended session
-  pulls the current `:latest` and runs a newer runner against the old `events.db`/
-  `session.json` — reinterpreting old rows under new-shape assumptions, or feeding
-  `after=0` replay of stale-shaped events to a new CLI. Consider digest-pinning the
-  default runner image so resume is reproducible. `internal/k8s/backend.go:164`,
-  `client/client.go:77`.
+- [x] **No CLI↔runner protocol version handshake (HIGH).** FIXED 2026-07-01, schema-
+  driven: `schema/events.json` gained top-level `protocolVersion: 1`; `just gen` now
+  emits `session.ProtocolVersion` (Go) + `PROTOCOL_VERSION` (TS) with a drift test
+  (`TestProtocolVersionMatchesSchema`). Runner reports it on `/healthz` +
+  `StatusResponse`; `runner.Client.Health` caches it (0 = pre-handshake image),
+  and both `client.Session.Connect` (→ `Connection.Warning`, via a new
+  `appendWarning` so it survives later sync warnings) and headless `waitHealthy`
+  (stderr) **warn, never refuse** via the shared `runner.ProtocolMismatchWarning`.
+  Correction to the review claim: the TUI `ApplyRunnerEvent` switch already HAD a
+  `default: return false`; it's now explicitly documented as the skew safety net.
+  Bump the schema field whenever an event/payload/SSE change could silently
+  misbehave across versions.
+- [x] **`events.db` schema version is write-only; no migration (HIGH).** FIXED
+  2026-07-02: `openEventLog` now read-compare-migrates `user_version` on every
+  open — a db stamped NEWER than `SCHEMA_VERSION` is refused (boot crashes into
+  a visible CrashLoopBackOff instead of misreading rows), an older one walks the
+  `MIGRATIONS` registry step-by-step in transactions (empty today; v1 is the
+  first shape), and a pre-versioning db (events table + `user_version` 0) is
+  treated as v1. `session.json` now carries a `state_version` stamped on every
+  save; a newer file loads best-effort with a loud warning and unknown fields
+  are preserved across the load/save round-trip (`reviveSessionState`). Tests:
+  `runner/test/schema-version.test.ts`, `runner/test/state-version.test.ts`.
+- [x] **`:latest` + `PullAlways` swaps the binary under old PVC state on resume (HIGH).**
+  FIXED 2026-07-02, cluster-side (no registry client/creds, and unlike a
+  digest-pinned `DefaultRunnerImage` constant it can't go stale): once the pod
+  first goes Ready, `pinRunnerImageDigest` stamps the kubelet-resolved digest
+  of the RUNNING image (spec repo + `containerStatuses[].imageID` digest) as
+  the `sandbox.cullen.dev/pinned-runner-image` annotation; `Resume` rewrites
+  the pod template image from it (relaxing auto-`PullAlways` → `IfNotPresent`)
+  in the same Update as replicas 0→1, so it covers CLI- and reaper-suspended
+  sessions alike. Re-stamps if the running digest ever drifts (mid-session
+  reschedule); skips (falls back to the tag) when the imageID has no registry
+  digest, e.g. locally-loaded dev images. As a bonus, resume-by-digest also
+  sidesteps the stale traefik tag→manifest cache (the "Ops" item below).
+  Tests: `internal/k8s/backend_pin_test.go`. Docs: `session-lifecycle.md`.
 
 ### 🔴 The pod↔laptop sync boundary is porous both ways
 
-- [ ] **Project sync ignores `.gitignore`; secrets flow laptop→pod (HIGH).** The ignore
-  list is a fixed 6-pattern allowlist (`.env`, `.env.*`, `*.pem`, `*.key`, `*.p12`,
-  `*.pfx`) + `--ignore-vcs` — nothing consults `.gitignore`, so `.npmrc` with a token,
-  `secrets/`, cloud-cred JSON, etc. sync into the pod every session start. The documented
-  escape hatch ("add more via mutagen.yml") **does not work** — `mutagen sync create`
-  never reads project files (verified against the binary, v0.18.1). Honor `.gitignore`
-  (mutagen `--ignore-syntax`, or generate `--ignore` args from it).
-  `internal/sync/sync.go:133,150-165`.
-- [ ] **Two-way sync propagates pod-authored auto-executing files back to the laptop
-  (HIGH, conditional).** `--mode=two-way-safe` syncs pod-root-written files to the laptop;
-  `.git` is excluded but `.envrc`, `.vscode/tasks.json`, `.idea/`, `Makefile` are not. A
-  compromised/prompt-injected agent writing `.envrc` reaches laptop code-exec **iff** the
-  dir is already `direnv allow`ed (or opened in the triggering tool) — a *conditional*
-  escalation, not unconditional, but a real trust-boundary hole. Extend the ignore list to
-  auto-executing file classes. `internal/sync/sync.go:147`.
-- [ ] **Egress allowlist is a lateral-movement boundary, not an exfil one — undocumented
-  (MED).** `0.0.0.0/0` except private ranges on :443 is *necessary* (agents need the
-  internet), but `architecture.md` presents the netpol as a security control without
-  stating a compromised agent can POST anything to any public host. Document the posture
-  honestly. `k8s/networkpolicy-egress-allow.yaml:50`.
+- [x] **Project sync ignores `.gitignore`; secrets flow laptop→pod (HIGH).** FIXED
+  2026-07-01: `createProjectSync` now translates the project root's `.gitignore`
+  verbatim into `--ignore` flags (`internal/sync/gitignore.go`; mutagen's syntax is
+  gitignore-modeled, `--ignore-syntax` only offers mutagen|docker so pass-through it
+  is). Layering is mutagen later-wins: build-tree defaults (overridable by a
+  `!vendor`-style negation) → `.gitignore` → security set LAST (non-overridable).
+  The false "mutagen.yml" escape-hatch comment is gone. Limits (documented in the
+  code + architecture.md): root `.gitignore` only — nested files + git's global
+  excludesFile are not consulted. Unreadable-but-present `.gitignore` fails the
+  create (fail-closed). Tests: `gitignore_test.go`,
+  `TestCreateProjectSyncIgnoreLayering`.
+- [x] **Two-way sync propagates pod-authored auto-executing files back to the laptop
+  (HIGH, conditional).** FIXED 2026-07-01: the non-overridable security ignore layer
+  now also excludes `.envrc`, `.direnv`, `.vscode`, `.idea` (host-auto-executing
+  classes). Makefile-class files deliberately NOT ignored — explicit user action
+  only, and agents legitimately edit them. `internal/sync/sync.go` securityIgnores.
+- [x] **Egress allowlist is a lateral-movement boundary, not an exfil one — undocumented
+  (MED).** DONE 2026-07-01: architecture.md "Security model" now states it plainly
+  (compromised agent can POST anything readable to any public :443 host; exfil
+  control = the file-sync ignore boundary) and gained a "File-sync boundary" bullet
+  describing the ignore layering.
 
 ### 🔴 Partial create leaks a live auth token invisibly
 
-- [ ] **`CreateSession` has no rollback; orphans a bearer-token Secret + PVC (HIGH).**
-  Creates Secret→PVC→Sandbox with no cleanup on partial failure; `NewID` mints a fresh
-  suffix per retry so the natural "run it again" makes a *different* id, and `List`
-  enumerates only Sandboxes — so an orphaned `<id>-runner` Secret (live token) + up-to-50Gi
-  PVC are permanently invisible to `status`/`destroy`. Derive the id before create so
-  retries are idempotent, add deferred cleanup on partial failure, or a `sandbox gc` that
-  reconciles orphaned Secrets/PVCs against live Sandboxes. `internal/k8s/backend.go:210-282`,
-  `client/client.go:401`, `internal/k8s/backend.go:497`.
+- [x] **`CreateSession` has no rollback; orphans a bearer-token Secret + PVC (HIGH).**
+  FIXED 2026-07-01: `CreateSession` now rolls back on partial failure via a deferred
+  best-effort `deleteSessionResources` (extracted from `Destroy`, shared; NotFound-
+  tolerant, so it also sweeps any earlier orphan at the same id) on an independent
+  30s `context.WithoutCancel` context; rollback failure is appended to (never masks)
+  the original error. Tests: `TestCreateSessionRollsBack*` in
+  `internal/k8s/backend_c5_test.go`. A `sandbox gc` reconciler + pre-derived retry
+  ids were judged unnecessary once rollback exists.
 
 ### 🟠 Scalability + reliability
 

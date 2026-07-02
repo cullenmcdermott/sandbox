@@ -10,7 +10,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { readBody } from './httputil.js';
 import { appendEvent, attachSseClient, lastSeq, sseTotalClientCount, MAX_SSE_CLIENTS } from './events.js';
 import { getRegistry, loadConfig, toStatusResponse } from './session.js';
-import { PORT, type PermissionRequestBody, type TurnRequestBody, type TurnResponse, type ExecRequestBody } from './types.js';
+import { PORT, PROTOCOL_VERSION, type PermissionRequestBody, type TurnRequestBody, type TurnResponse, type ExecRequestBody } from './types.js';
 import { selectAgent, type Agent } from './agent.js';
 import { opencodeTurnClient } from './opencode-turn.js';
 import { runExec } from './exec.js';
@@ -47,6 +47,14 @@ function ok(res: ServerResponse, body: unknown, status = 200): void {
   res.end(JSON.stringify(body));
 }
 
+/** GET /healthz response body. Unauthenticated, so a CLI can distinguish "no
+ * runner listening" from "runner listening but protocol-skewed" before it has
+ * a bearer token. Exported (pure, no I/O) so it's unit-testable without
+ * spinning up the http server. */
+export function healthzBody(): { status: 'ok'; protocolVersion: number } {
+  return { status: 'ok', protocolVersion: PROTOCOL_VERSION };
+}
+
 // --- Router ---------------------------------------------------------------
 
 export function startServer(): void {
@@ -77,7 +85,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, cfg: ReturnType
 
   // healthz: no auth.
   if (path === '/healthz' && method === 'GET') {
-    return ok(res, { status: 'ok' });
+    return ok(res, healthzBody());
   }
 
   if (!authOk(req)) return unauthorized(res);

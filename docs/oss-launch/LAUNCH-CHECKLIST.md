@@ -41,6 +41,11 @@ The `docs/oss-launch/` directory itself is internal working material — delete 
 - [ ] Pin the runner image to a digest (not `:latest`). The build workflow
   (`.depot/workflows/build-runner-image.yml`) now emits the pushed manifest
   digest (job output + step summary) so consumers can pin `image@sha256:…`.
+  Partially addressed 2026-07-02: **resume** is now digest-pinned automatically
+  (the backend stamps the kubelet-resolved digest at first Ready and rewrites
+  the pod template on resume — see `session-lifecycle.md`), so a suspended
+  session can never silently pick up a newer `:latest`. Remaining scope is only
+  pinning the *default create-time* ref itself.
 - [ ] `runAsNonRoot` + `fsGroup` + cap-drop for the runner pod (currently root).
 - [ ] Permission token rotation; stronger permission-id entropy.
 - [ ] SBOM / image scanning / provenance in the build workflow.

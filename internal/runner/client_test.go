@@ -29,6 +29,47 @@ func TestHealth(t *testing.T) {
 	}
 }
 
+// TestHealthProtocolVersion covers the CLI/runner protocol-version handshake
+// (internal/runner.Client.Health / ProtocolVersion): a runner that reports its
+// protocolVersion on /healthz must have that value observable afterward.
+func TestHealthProtocolVersion(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "protocolVersion": session.ProtocolVersion + 1})
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "test-token")
+	if got := c.ProtocolVersion(); got != 0 {
+		t.Fatalf("ProtocolVersion before any Health call = %d, want 0", got)
+	}
+	if err := c.Health(context.Background()); err != nil {
+		t.Fatalf("health: %v", err)
+	}
+	if got, want := c.ProtocolVersion(), session.ProtocolVersion+1; got != want {
+		t.Errorf("ProtocolVersion after Health = %d, want %d (mismatch not detected)", got, want)
+	}
+}
+
+// TestHealthProtocolVersionMissing covers an old runner image that predates
+// the protocolVersion field: it must decode to 0 (treated as "unknown/old" by
+// callers), not fail Health outright (the runner is genuinely up).
+func TestHealthProtocolVersionMissing(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "test-token")
+	if err := c.Health(context.Background()); err != nil {
+		t.Fatalf("health: %v", err)
+	}
+	if got := c.ProtocolVersion(); got != 0 {
+		t.Errorf("ProtocolVersion with no protocolVersion field = %d, want 0", got)
+	}
+}
+
 func TestHealthAuth(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth := r.Header.Get("Authorization")

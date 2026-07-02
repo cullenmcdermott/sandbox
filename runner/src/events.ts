@@ -28,8 +28,31 @@ interface SseClient {
 let db: Database.Database | null = null;
 const clients = new Set<SseClient>();
 
-/** Current event-log schema version (bump + migrate on shape changes). */
-const SCHEMA_VERSION = 1;
+/** Current event-log schema version, stamped into SQLite's `user_version` and
+ * read back on every open. Bump it — and register a step in MIGRATIONS — when
+ * the table shape changes. openEventLog refuses a database stamped NEWER than
+ * this (a rolled-back runner image must not reinterpret state it doesn't
+ * understand) and upgrades an older one step-by-step. */
+export const SCHEMA_VERSION = 1;
+
+/** The current (version-SCHEMA_VERSION) shape, applied to fresh databases. */
+const SCHEMA_SQL = `
+  CREATE TABLE IF NOT EXISTS events (
+    seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+    time       TEXT    NOT NULL,
+    session_id TEXT    NOT NULL,
+    turn_id    TEXT,
+    type       TEXT    NOT NULL,
+    payload    TEXT    NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_events_session_seq
+    ON events(session_id, seq);
+`;
+
+/** MIGRATIONS[n] upgrades a version-n database to version n+1. Each step runs
+ * in a transaction with the version stamp, so a crash mid-migration leaves the
+ * database at a well-defined version. Empty today: v1 is the first shape. */
+const MIGRATIONS: Record<number, (d: Database.Database) => void> = {};
 
 /** Max concurrent SSE clients per session; 0 disables the cap. A single bad or
  * buggy client can otherwise open unbounded streams and fan-out every event to
@@ -69,27 +92,70 @@ export function setClientsChangedHandler(fn: () => void): void {
   onClientsChanged = fn;
 }
 
-/** Open (or reopen) the SQLite event log and ensure the schema exists. */
+/** Open (or reopen) the SQLite event log and ensure the schema exists.
+ * Throws (crashing the boot into a visible CrashLoopBackOff) when the on-disk
+ * schema is newer than this runner supports — see migrateEventLog. */
 export function openEventLog(): void {
   mkdirSync(STATE_DIR, { recursive: true });
   mkdirSync(dirname(EVENTS_DB_PATH), { recursive: true });
   db = new Database(EVENTS_DB_PATH);
   db.pragma('journal_mode = WAL');
   db.pragma('synchronous = NORMAL');
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS events (
-      seq        INTEGER PRIMARY KEY AUTOINCREMENT,
-      time       TEXT    NOT NULL,
-      session_id TEXT    NOT NULL,
-      turn_id    TEXT,
-      type       TEXT    NOT NULL,
-      payload    TEXT    NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_events_session_seq
-      ON events(session_id, seq);
-  `);
-  db.pragma(`user_version = ${SCHEMA_VERSION}`);
+  try {
+    migrateEventLog(db);
+  } catch (err) {
+    // Don't leave a half-opened handle for getDb() to reuse.
+    db.close();
+    db = null;
+    throw err;
+  }
   pruneOldEvents();
+}
+
+/**
+ * Read-compare-migrate the event-log schema. With user-built runner images and
+ * `:latest` tags, version skew between the runner binary and PVC state is the
+ * steady state, not an edge case:
+ *
+ * - on-disk version > SCHEMA_VERSION: an older runner is reading state written
+ *   by a newer one — refuse, so it cannot silently misread (or corrupt) rows
+ *   under stale shape assumptions. The fix is a runner image at least as new
+ *   as the one that wrote the PVC.
+ * - on-disk version < SCHEMA_VERSION: walk MIGRATIONS one version at a time.
+ * - user_version 0 with an existing events table predates read-back
+ *   versioning; every such database has the v1 shape (v1 has been stamped
+ *   since the log's first release), so it is treated as version 1.
+ *
+ * Exported for tests (the production path constants point at /session).
+ */
+export function migrateEventLog(d: Database.Database): void {
+  const onDisk = d.pragma('user_version', { simple: true }) as number;
+  if (onDisk > SCHEMA_VERSION) {
+    throw new Error(
+      `events.db schema version ${onDisk} is newer than this runner supports (${SCHEMA_VERSION}); ` +
+        'refusing to open. Use a runner image at least as new as the one that last wrote this session.',
+    );
+  }
+  const hasEvents =
+    d.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'events'").get() !==
+    undefined;
+  if (!hasEvents) {
+    // Fresh database: create the current shape directly, no migration walk.
+    d.exec(SCHEMA_SQL);
+    d.pragma(`user_version = ${SCHEMA_VERSION}`);
+    return;
+  }
+  for (let v = Math.max(onDisk, 1); v < SCHEMA_VERSION; v++) {
+    const step = MIGRATIONS[v];
+    if (!step) {
+      throw new Error(`events.db: no migration from schema version ${v} to ${v + 1}`);
+    }
+    d.transaction(() => {
+      step(d);
+      d.pragma(`user_version = ${v + 1}`);
+    })();
+  }
+  d.pragma(`user_version = ${SCHEMA_VERSION}`);
 }
 
 // pruneOldEvents bounds the event log when RETENTION_MAX_EVENTS is set, keeping

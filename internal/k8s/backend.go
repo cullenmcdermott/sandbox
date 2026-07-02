@@ -41,6 +41,18 @@ const (
 	labelSessionID = "sandbox.cullen.dev/session-id"
 	labelAppName   = "app.kubernetes.io/name"
 
+	// annotationPinnedRunnerImage records the digest-pinned ref of the runner
+	// image the session's pod actually ran (kubelet-resolved), stamped once the
+	// pod is Ready. Resume rewrites the pod template's image from it before
+	// scaling 0→1, so a suspended session always resumes on the same runner
+	// binary it was suspended with — a moving tag (:latest) + PullAlways would
+	// otherwise swap the runner under the session's persisted events.db /
+	// session.json state (2026-07-01 review HIGH).
+	annotationPinnedRunnerImage = "sandbox.cullen.dev/pinned-runner-image"
+
+	// runnerContainerName is the runner container in the session pod spec.
+	runnerContainerName = "runner"
+
 	// portRunner is the runner HTTP API port inside the pod.
 	portRunner = 8787
 	// portSSH is the sshd port for Mutagen.
@@ -183,9 +195,23 @@ func NewForClients(agents agentsclient.Interface, core kubernetes.Interface, nam
 	return b
 }
 
-// CreateSession creates a Sandbox and PVC. It does not wait for the pod to
-// be ready; call Start for that.
-func (b *Backend) CreateSession(ctx context.Context, spec session.Spec) (session.Ref, error) {
+// createRollbackTimeout bounds the best-effort cleanup CreateSession performs
+// when a later create step fails partway through. It runs on a context
+// independent of the caller's (context.WithoutCancel) because the caller's
+// ctx may already be cancelled/expired by the time the failure is observed —
+// the cleanup must still get a chance to run.
+const createRollbackTimeout = 30 * time.Second
+
+// CreateSession creates a Secret, PVC and Sandbox for the session. It does not
+// wait for the pod to be ready; call Start for that.
+//
+// If a later step fails, everything created earlier in this call is rolled
+// back (best effort) before returning the original error, so a partial
+// failure never leaves an orphaned Secret (holding a live runner bearer
+// token) or PVC that List/Status/Destroy — which only ever look at
+// Sandboxes — can't see. Rollback failures are appended to the returned error
+// rather than swallowed or allowed to mask the original cause.
+func (b *Backend) CreateSession(ctx context.Context, spec session.Spec) (_ session.Ref, err error) {
 	// Every other backend method — Status, Suspend, Resume, Destroy, List and
 	// the watch — is scoped to b.namespace. Creating a session's Secret/PVC/
 	// Sandbox in any other namespace would orphan them (Destroy could never find
@@ -208,6 +234,27 @@ func (b *Backend) CreateSession(ctx context.Context, spec session.Spec) (session
 	}
 
 	name := string(spec.ID)
+
+	// If any create step below fails, roll back everything created earlier in
+	// this call: without this, a partial failure (e.g. the Sandbox create
+	// failing after the Secret and PVC succeeded) leaves an orphaned Secret
+	// (holding a live runner bearer token) and PVC that List/Status/Destroy
+	// can never see, since they only ever enumerate Sandboxes. Rollback is
+	// best-effort and idempotent (deleteSessionResources treats NotFound as
+	// success), so it's safe to run unconditionally rather than tracking
+	// exactly which of the three resources were newly created here. It runs
+	// on an independent, short-lived context because by the time a failure
+	// surfaces the caller's ctx may already be cancelled or past its deadline.
+	defer func() {
+		if err == nil {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), createRollbackTimeout)
+		defer cancel()
+		if cleanupErr := b.deleteSessionResources(cleanupCtx, name); cleanupErr != nil {
+			err = fmt.Errorf("%w (rollback also failed, resources may be orphaned: %v)", err, cleanupErr)
+		}
+	}()
 
 	// Create the per-session Secret holding the runner bearer token. The token
 	// is generated once and reused on subsequent CreateSession calls for the
@@ -283,7 +330,7 @@ func (b *Backend) CreateSession(ctx context.Context, spec session.Spec) (session
 
 // Start waits for the session pod to be running and ready.
 func (b *Backend) Start(ctx context.Context, ref session.Ref) error {
-	return b.waitForPodReady(ctx, ref, nil)
+	return b.StartWithProgress(ctx, ref, nil)
 }
 
 // StartWithProgress is Start with a callback invoked as the pod moves through its
@@ -293,7 +340,13 @@ func (b *Backend) Start(ctx context.Context, ref session.Ref) error {
 // only when the phase string changes (never with ""), and may be nil — in which
 // case this is exactly Start.
 func (b *Backend) StartWithProgress(ctx context.Context, ref session.Ref, onPhase func(detail string)) error {
-	return b.waitForPodReady(ctx, ref, onPhase)
+	if err := b.waitForPodReady(ctx, ref, onPhase); err != nil {
+		return err
+	}
+	// Best-effort: a failed pin must not fail the start — the session is up;
+	// it only means a later resume falls back to the (moving) tag ref.
+	_ = b.pinRunnerImageDigest(ctx, ref)
+	return nil
 }
 
 // Exec runs a command in the session pod's runner container, streaming the
@@ -313,7 +366,7 @@ func (b *Backend) Exec(ctx context.Context, ref session.Ref, command []string, s
 		Resource("pods").Name(pod.Name).Namespace(pod.Namespace).
 		SubResource("exec").
 		VersionedParams(&corev1.PodExecOptions{
-			Container: "runner",
+			Container: runnerContainerName,
 			Command:   command,
 			Stdin:     stdin != nil,
 			Stdout:    true,
@@ -377,11 +430,152 @@ func (b *Backend) Suspend(ctx context.Context, ref session.Ref) error {
 }
 
 // Resume sets replicas back to 1 and waits for the pod to be ready.
+//
+// Before scaling up it rewrites the pod template's runner image from the
+// pinned-digest annotation (stamped at first ready — see pinRunnerImageDigest),
+// so the resumed pod runs the exact binary the session was suspended with
+// rather than whatever a moving tag (:latest, PullAlways) resolves to weeks
+// later — which would reinterpret the session's persisted events.db /
+// session.json under new-shape assumptions. Image + replicas go in one Update:
+// at replicas 0 there is no pod, so the template change cannot churn a live one.
 func (b *Backend) Resume(ctx context.Context, ref session.Ref) error {
-	if err := b.setReplicas(ctx, ref, 1); err != nil {
+	sandboxes := b.agents.AgentsV1alpha1().Sandboxes(b.namespace)
+	one := int32(1)
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		sb, getErr := sandboxes.Get(ctx, string(ref.ID), metav1.GetOptions{})
+		if getErr != nil {
+			return getErr
+		}
+		applyPinnedRunnerImage(sb)
+		sb.Spec.Replicas = &one
+		_, updateErr := sandboxes.Update(ctx, sb, metav1.UpdateOptions{})
+		return updateErr
+	})
+	if err != nil {
+		return fmt.Errorf("k8s: update Sandbox %s for resume: %w", ref.ID, err)
+	}
+	if err := b.waitForPodReady(ctx, ref, nil); err != nil {
 		return err
 	}
-	return b.waitForPodReady(ctx, ref, nil)
+	// Re-pin best-effort: a no-op when the annotation already matches (the
+	// common case, since the template now carries the pinned digest ref).
+	_ = b.pinRunnerImageDigest(ctx, ref)
+	return nil
+}
+
+// applyPinnedRunnerImage rewrites the Sandbox pod template's runner container
+// image to the digest-pinned ref recorded by pinRunnerImageDigest, if any. It
+// also relaxes an auto-resolved PullAlways to IfNotPresent — the digest is
+// immutable, so re-pulling is wasted work and would break resume when the
+// registry is unreachable (an explicit IfNotPresent/Never override is left
+// untouched). No-op when the annotation is absent or already applied.
+func applyPinnedRunnerImage(sb *agentv1alpha1.Sandbox) {
+	pinned := sb.Annotations[annotationPinnedRunnerImage]
+	if pinned == "" {
+		return
+	}
+	for i := range sb.Spec.PodTemplate.Spec.Containers {
+		c := &sb.Spec.PodTemplate.Spec.Containers[i]
+		if c.Name != runnerContainerName {
+			continue
+		}
+		if c.Image != pinned {
+			c.Image = pinned
+			if c.ImagePullPolicy == corev1.PullAlways {
+				c.ImagePullPolicy = corev1.PullIfNotPresent
+			}
+		}
+		return
+	}
+}
+
+// pinRunnerImageDigest stamps annotationPinnedRunnerImage with the digest-pinned
+// ref of the runner image the session's pod is ACTUALLY running, derived from
+// the kubelet-resolved containerStatuses imageID (no registry client or
+// credentials needed). Called after waitForPodReady succeeds, so the running
+// pod — not a hope about the tag — defines the session's binary. Re-stamps if
+// the running digest ever differs (e.g. a mid-session reschedule pulled a newer
+// tag): the state on the PVC was last written by the binary that is running
+// NOW, so that is what resume must reproduce.
+func (b *Backend) pinRunnerImageDigest(ctx context.Context, ref session.Ref) error {
+	sandboxes := b.agents.AgentsV1alpha1().Sandboxes(b.namespace)
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		sb, err := sandboxes.Get(ctx, string(ref.ID), metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		pod, err := b.getPodForSandbox(ctx, sb)
+		if err != nil {
+			return err
+		}
+		if pod == nil || pod.DeletionTimestamp != nil {
+			return nil
+		}
+		pinned := pinnedRunnerImageRef(sb, pod)
+		if pinned == "" || sb.Annotations[annotationPinnedRunnerImage] == pinned {
+			return nil
+		}
+		if sb.Annotations == nil {
+			sb.Annotations = map[string]string{}
+		}
+		sb.Annotations[annotationPinnedRunnerImage] = pinned
+		_, err = sandboxes.Update(ctx, sb, metav1.UpdateOptions{})
+		return err
+	})
+}
+
+// pinnedRunnerImageRef derives the digest-pinned image ref for the runner
+// container: the spec image's repo + the digest from the pod's kubelet-reported
+// imageID. Returns "" when the digest cannot be determined (container not
+// started, or an imageID with no registry digest — e.g. a locally-loaded dev
+// image), in which case there is nothing safe to pin.
+func pinnedRunnerImageRef(sb *agentv1alpha1.Sandbox, pod *corev1.Pod) string {
+	var specImage string
+	for _, c := range sb.Spec.PodTemplate.Spec.Containers {
+		if c.Name == runnerContainerName {
+			specImage = c.Image
+			break
+		}
+	}
+	if specImage == "" {
+		return ""
+	}
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name != runnerContainerName {
+			continue
+		}
+		if digest := imageIDDigest(cs.ImageID); digest != "" {
+			return imageRepo(specImage) + "@" + digest
+		}
+	}
+	return ""
+}
+
+// imageRepo strips any tag or digest from an image ref, preserving a registry
+// host:port (a colon only counts as a tag separator after the last slash).
+func imageRepo(ref string) string {
+	if i := strings.Index(ref, "@"); i >= 0 {
+		ref = ref[:i]
+	}
+	if colon := strings.LastIndex(ref, ":"); colon > strings.LastIndex(ref, "/") {
+		ref = ref[:colon]
+	}
+	return ref
+}
+
+// imageIDDigest extracts the "sha256:…" digest from a kubelet-reported imageID
+// ("repo@sha256:…" on containerd, "docker-pullable://repo@sha256:…" on older
+// docker runtimes). Returns "" when the imageID carries no digest.
+func imageIDDigest(imageID string) string {
+	i := strings.LastIndex(imageID, "@")
+	if i < 0 {
+		return ""
+	}
+	digest := imageID[i+1:]
+	if !strings.HasPrefix(digest, "sha256:") {
+		return ""
+	}
+	return digest
 }
 
 // Destroy deletes the Sandbox, PVC and per-session Secret. Irreversible.
@@ -392,6 +586,21 @@ func (b *Backend) Resume(ctx context.Context, ref session.Ref) error {
 // as success so Destroy is idempotent (C5).
 func (b *Backend) Destroy(ctx context.Context, ref session.Ref) error {
 	name := string(ref.ID)
+	if err := b.deleteSessionResources(ctx, name); err != nil {
+		return fmt.Errorf("k8s: destroy %s: %w", name, err)
+	}
+	return nil
+}
+
+// deleteSessionResources deletes the Sandbox, PVC and per-session Secret for a
+// given session name. All three deletions are attempted even if one fails —
+// a transient error on the Sandbox or PVC must not orphan the remaining
+// resources, most importantly the per-session Secret, which holds the runner
+// bearer token. NotFound is treated as success so this is idempotent whether
+// called from Destroy (tearing down a live session) or from CreateSession's
+// rollback (cleaning up a partially created one). Returns nil if every
+// resource was deleted (or already absent), otherwise the joined errors.
+func (b *Backend) deleteSessionResources(ctx context.Context, name string) error {
 	var errs []error
 	if err := b.agents.AgentsV1alpha1().Sandboxes(b.namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
 		errs = append(errs, fmt.Errorf("delete Sandbox %s: %w", name, err))
@@ -403,7 +612,7 @@ func (b *Backend) Destroy(ctx context.Context, ref session.Ref) error {
 		errs = append(errs, fmt.Errorf("delete Secret %s: %w", sessionSecretName(name), err))
 	}
 	if len(errs) > 0 {
-		return fmt.Errorf("k8s: destroy %s: %w", name, errors.Join(errs...))
+		return errors.Join(errs...)
 	}
 	return nil
 }
@@ -759,7 +968,7 @@ func buildSandbox(spec session.Spec) *agentv1alpha1.Sandbox {
 					},
 					Containers: []corev1.Container{
 						{
-							Name:            "runner",
+							Name:            runnerContainerName,
 							Image:           spec.RunnerImage,
 							ImagePullPolicy: resolveImagePullPolicy(spec.ImagePullPolicy, spec.RunnerImage),
 							Ports: []corev1.ContainerPort{

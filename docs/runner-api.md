@@ -228,9 +228,15 @@ experimental call fails, no event is emitted.
 ## Persistence
 
 - `/session/state/sandbox/session.json` — session state (mutable, updated on
-  each turn).
+  each turn). Stamped with a `state_version` shape version on every save; a
+  file written by a NEWER runner loads best-effort with a loud warning
+  (unknown fields are preserved across the round-trip).
 - `/session/state/sandbox/events.db` — SQLite append-only event log. One
-  writer (the runner). Used for replay via `after=<seq>`.
+  writer (the runner). Used for replay via `after=<seq>`. The schema version
+  lives in SQLite's `user_version` and is read-compare-migrated on every open:
+  an older database is upgraded step-by-step, and a database written by a
+  NEWER runner is refused (the boot crashes into a visible CrashLoopBackOff)
+  so a stale runner image cannot reinterpret state it does not understand.
 - `/session/state/sandbox/audit.jsonl` — audit entries from PostToolUse hooks.
 
 Inspect a running session's event log as a timeline with `sandbox trace <id>`

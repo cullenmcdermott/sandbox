@@ -22,7 +22,12 @@ import (
 
 // schema mirrors the shape of schema/events.json.
 type schema struct {
-	TypeVocabulary map[string]struct {
+	// ProtocolVersion is the CLI<->runner wire protocol version — the one
+	// top-level field outside the "payloads only" scope (see the schema file's
+	// $protocolVersionComment). Generated as session.ProtocolVersion (Go) and
+	// PROTOCOL_VERSION (TS).
+	ProtocolVersion int `json:"protocolVersion"`
+	TypeVocabulary  map[string]struct {
 		Go string `json:"go"`
 		TS string `json:"ts"`
 	} `json:"typeVocabulary"`
@@ -146,6 +151,9 @@ func repoRoot() (string, error) {
 }
 
 func (s schema) validate() error {
+	if s.ProtocolVersion <= 0 {
+		return fmt.Errorf("schema protocolVersion must be a positive integer (got %d)", s.ProtocolVersion)
+	}
 	if len(s.EventTypes) == 0 {
 		return fmt.Errorf("schema has no eventTypes")
 	}
@@ -237,6 +245,14 @@ func (s schema) genGo() ([]byte, error) {
 	var b bytes.Buffer
 	b.WriteString(genHeader)
 	b.WriteString("\npackage session\n\n")
+	b.WriteString("// ProtocolVersion is the CLI<->runner wire protocol version. Bump\n")
+	b.WriteString("// schema/events.json's protocolVersion whenever a change to the event\n")
+	b.WriteString("// model, HTTP contract, or SSE framing could silently misbehave against an\n")
+	b.WriteString("// older/newer counterpart. The runner reports it on GET /healthz (and\n")
+	b.WriteString("// /sessions/:id/status); internal/runner.Client.Health records it, and\n")
+	b.WriteString("// callers compare it against this const to warn (not refuse) on skew — see\n")
+	b.WriteString("// client/session.go Connect and internal/cli/connect.go waitHealthy.\n")
+	fmt.Fprintf(&b, "const ProtocolVersion = %d\n\n", s.ProtocolVersion)
 	b.WriteString("// EventType consts. EventType itself is declared in event.go.\n")
 	b.WriteString("const (\n")
 	for _, et := range s.EventTypes {
@@ -261,6 +277,16 @@ func (s schema) genGo() ([]byte, error) {
 func (s schema) genTS() []byte {
 	var b bytes.Buffer
 	b.WriteString(genHeader)
+	b.WriteString("\n/**\n")
+	b.WriteString(" * The CLI<->runner wire protocol version. Bump schema/events.json's\n")
+	b.WriteString(" * protocolVersion whenever a change to the event model, HTTP contract, or\n")
+	b.WriteString(" * SSE framing could silently misbehave against an older/newer counterpart.\n")
+	b.WriteString(" * Served on GET /healthz (and /sessions/:id/status) so the CLI can detect\n")
+	b.WriteString(" * skew — see internal/runner.Client.Health and its callers (they warn, not\n")
+	b.WriteString(" * refuse, since OSS users routinely pair a self-built runner against a\n")
+	b.WriteString(" * different CLI version).\n")
+	b.WriteString(" */\n")
+	fmt.Fprintf(&b, "export const PROTOCOL_VERSION = %d;\n", s.ProtocolVersion)
 	b.WriteString("\n/** Canonical event type enum. */\n")
 	b.WriteString("export type EventType =\n")
 	for i, et := range s.EventTypes {

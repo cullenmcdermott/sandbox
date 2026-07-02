@@ -3,6 +3,15 @@
 
 package session
 
+// ProtocolVersion is the CLI<->runner wire protocol version. Bump
+// schema/events.json's protocolVersion whenever a change to the event
+// model, HTTP contract, or SSE framing could silently misbehave against an
+// older/newer counterpart. The runner reports it on GET /healthz (and
+// /sessions/:id/status); internal/runner.Client.Health records it, and
+// callers compare it against this const to warn (not refuse) on skew — see
+// client/session.go Connect and internal/cli/connect.go waitHealthy.
+const ProtocolVersion = 1
+
 // EventType consts. EventType itself is declared in event.go.
 const (
 	EventSessionStarted       EventType = "session.started"

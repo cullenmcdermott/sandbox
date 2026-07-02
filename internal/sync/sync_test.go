@@ -3,6 +3,8 @@ package sync
 import (
 	"context"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -79,10 +81,11 @@ func TestCreateAll(t *testing.T) {
 
 	// SSHHost is an ssh config alias (resolved via the per-session Include
 	// block), NOT a host:port — exercise the documented/real shape.
+	// ProjectPath is a temp dir so the test never reads a real .gitignore.
 	const sshHost = "sandbox-test-session"
 	spec := Spec{
 		SessionID:    "test-session",
-		ProjectPath:  "/Users/cullen/git/homelab",
+		ProjectPath:  t.TempDir(),
 		RemotePath:   "/session/workspace/Users/cullen/git/homelab",
 		HomeDir:      "/Users/cullen",
 		SSHHost:      sshHost,
@@ -160,13 +163,81 @@ func endpoints(t *testing.T, call []string) (alpha, beta string) {
 	return call[len(call)-2], call[len(call)-1]
 }
 
+// The project sync's ignore flags must layer in precedence order (mutagen:
+// later wins): build-tree defaults, then the project .gitignore verbatim,
+// then the security/auto-exec set LAST so no .gitignore negation can
+// re-enable syncing a secret or host-auto-executing file.
+func TestCreateProjectSyncIgnoreLayering(t *testing.T) {
+	dir := t.TempDir()
+	gitignore := "# comment\nsecrets/\n!vendor\n*.tfstate\n"
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(gitignore), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &fakeRunner{}
+	m := New(r)
+	spec := Spec{
+		SessionID:    "test-session",
+		ProjectPath:  dir,
+		RemotePath:   "/session/workspace/proj",
+		HomeDir:      "/Users/cullen",
+		SSHHost:      "sandbox-test-session",
+		RemoteClaude: "/session/state/claude",
+	}
+	if _, err := m.CreateAll(context.Background(), spec); err != nil {
+		t.Fatalf("createAll: %v", err)
+	}
+
+	call := r.calls[0] // project sync is created first
+	idx := func(flag string) int {
+		for i, a := range call {
+			if a == flag {
+				return i
+			}
+		}
+		t.Fatalf("flag %q missing from project sync args: %v", flag, call)
+		return -1
+	}
+
+	// All three layers present, in order.
+	buildTree := idx("--ignore=node_modules")
+	fromGitignore := idx("--ignore=secrets/")
+	negation := idx("--ignore=!vendor")
+	security := idx("--ignore=.env")
+	autoExec := idx("--ignore=.envrc")
+	if buildTree >= fromGitignore || fromGitignore >= security {
+		t.Errorf("ignore layers out of order: buildTree=%d gitignore=%d security=%d in %v",
+			buildTree, fromGitignore, security, call)
+	}
+	if negation > security {
+		t.Errorf("gitignore negation (%d) must precede security ignores (%d) so it cannot override them", negation, security)
+	}
+	if autoExec < security {
+		t.Errorf("auto-exec ignores should sit in the security layer: autoExec=%d security=%d", autoExec, security)
+	}
+	idx("--ignore=*.tfstate") // gitignore pattern passed through verbatim
+
+	// Comment lines never become flags.
+	for _, a := range call {
+		if strings.Contains(a, "comment") {
+			t.Errorf("comment leaked into args: %q", a)
+		}
+	}
+
+	// Endpoints stay the trailing positional args.
+	alpha, beta := endpoints(t, call)
+	if alpha != dir || beta != spec.SSHHost+":"+spec.RemotePath {
+		t.Errorf("endpoints displaced by ignore flags: alpha=%q beta=%q", alpha, beta)
+	}
+}
+
 func TestCreateAllIdempotent(t *testing.T) {
 	r := &errorRunner{msg: "session already exists"}
 	m := New(r)
 
 	spec := Spec{
 		SessionID:    "test-session",
-		ProjectPath:  "/tmp",
+		ProjectPath:  t.TempDir(),
 		RemotePath:   "/session/workspace/tmp",
 		HomeDir:      "/Users/cullen",
 		SSHHost:      "127.0.0.1:22000",
@@ -191,7 +262,7 @@ func TestCreateAllRealError(t *testing.T) {
 
 	spec := Spec{
 		SessionID:    "test-session",
-		ProjectPath:  "/tmp",
+		ProjectPath:  t.TempDir(),
 		RemotePath:   "/session/workspace/tmp",
 		HomeDir:      "/Users/cullen",
 		SSHHost:      "127.0.0.1:22000",

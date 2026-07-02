@@ -1,5 +1,7 @@
 {
   "$comment": "SOURCE OF TRUTH for the normalized session event model. Go event-type consts (internal/session/eventtypes.gen.go) and the entire TS event model (runner/src/events.gen.ts) are generated from this file by cmd/gen-eventschema. Go payload structs (internal/session/event.go) are hand-written but validated against this schema by internal/session/schema_test.go. Edit this file, then run `just gen`; never hand-edit a *.gen.* file. Scope is event payloads only: HTTP request/response bodies and IdleStatus stay hand-written in both languages (see docs/architecture.md).",
+  "$protocolVersionComment": "protocolVersion is the CLI<->runner wire protocol version, generated as session.ProtocolVersion (Go) and PROTOCOL_VERSION (TS) — the one exception to the 'payloads only' scope note above, since it needs the same single-source-of-truth + codegen treatment as the event model it versions. The runner reports it on GET /healthz (and /sessions/:id/status); the CLI's runner client (internal/runner/client.go Health) records it and callers warn — but do not refuse — on a mismatch, since OSS users routinely pair a self-built runner image against a different CLI version. Bump it when an event type, payload shape, or SSE framing change could silently misbehave against an older/newer counterpart (new fields renamed/removed, event types repurposed) rather than failing cleanly.",
+  "protocolVersion": 1,
   "typeVocabulary": {
     "string": {"go": "string", "ts": "string"},
     "int": {"go": "int", "ts": "number"},

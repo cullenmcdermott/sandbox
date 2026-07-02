@@ -248,6 +248,28 @@ test('assistant tool part maps to tool.started then tool.completed', () => {
   assert.equal(events[1].payload.output, 'file1\nfile2');
 });
 
+test('the injected audit callback fires once per tool execution with tool + input', () => {
+  const { emit } = capture();
+  const audited: Array<{ tool: string; input: unknown }> = [];
+  const m = createOpencodeTurnMapper(SID, emit, (tool, input) => audited.push({ tool, input }));
+  m.handle(messageUpdated('assistant', ASSISTANT));
+  m.handle(toolPart('t1', 'running', {}));
+  m.handle(toolPart('t1', 'completed', { output: 'done' })); // re-sent/terminal part
+  assert.equal(audited.length, 1, 'audited once, guarded by toolStarted');
+  assert.deepEqual(audited[0], { tool: 'bash', input: { cmd: 'ls' } });
+});
+
+test('a tool the guardrail blocks (errored, never running) is still audited', () => {
+  const { emit } = capture();
+  const audited: Array<{ tool: string; input: unknown }> = [];
+  const m = createOpencodeTurnMapper(SID, emit, (tool, input) => audited.push({ tool, input }));
+  m.handle(messageUpdated('assistant', ASSISTANT));
+  // opencode surfaces a blocked tool as an errored part with no prior running state.
+  m.handle(toolPart('t1', 'error', { error: 'blocked by sandbox runner guardrail' }));
+  assert.equal(audited.length, 1);
+  assert.equal(audited[0].tool, 'bash');
+});
+
 test('a re-sent terminal tool part fires tool.completed only once', () => {
   const { emit, events } = capture();
   const m = createOpencodeTurnMapper(SID, emit);

@@ -25,7 +25,7 @@ export type {
   TodoUpdatedPayload,
   ErrorPayload,
 } from './events.gen.js';
-export { ALL_EVENT_TYPES } from './events.gen.js';
+export { ALL_EVENT_TYPES, PROTOCOL_VERSION } from './events.gen.js';
 
 /** A single normalized event in the session event log. */
 export interface Event {
@@ -53,6 +53,9 @@ export interface IdleStatus {
 // --- Session state (session.json, snake_case per spec 8.3) ----------------
 
 export interface SessionState {
+  /** session.json shape version (see STATE_VERSION in session.ts). Absent in
+   * files written before versioning, which are treated as version 1. */
+  state_version?: number;
   sandbox_session_id: string;
   backend: string;
   claude_session_id: string;
@@ -144,6 +147,9 @@ export interface StatusResponse {
   activeTurnId: string;
   lastActivity: string;
   model?: string;
+  /** The runner's PROTOCOL_VERSION (see events.gen.ts), so a status poll also
+   * surfaces CLI/runner skew, not just /healthz. */
+  protocolVersion: number;
 }
 
 /** Audit row appended to audit.jsonl (spec 8.5). */
