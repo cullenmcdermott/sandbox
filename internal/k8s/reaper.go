@@ -153,10 +153,25 @@ func buildReaperJob(name, sid string, opts ReaperOptions) *batchv1.Job {
 				Spec: corev1.PodSpec{
 					ServiceAccountName: ReaperServiceAccount,
 					RestartPolicy:      corev1.RestartPolicyNever,
+					// Satisfy the restricted PodSecurity Standard so the Job admits
+					// into namespaces enforcing it. The reaper image already runs as
+					// a non-root numeric UID; this only declares it.
+					SecurityContext: &corev1.PodSecurityContext{
+						RunAsNonRoot: boolPtr(true),
+						SeccompProfile: &corev1.SeccompProfile{
+							Type: corev1.SeccompProfileTypeRuntimeDefault,
+						},
+					},
 					Containers: []corev1.Container{{
 						Name:            "reaper",
 						Image:           opts.Image,
 						ImagePullPolicy: resolveImagePullPolicy(opts.ImagePullPolicy, opts.Image),
+						SecurityContext: &corev1.SecurityContext{
+							AllowPrivilegeEscalation: boolPtr(false),
+							Capabilities: &corev1.Capabilities{
+								Drop: []corev1.Capability{"ALL"},
+							},
+						},
 						Args: []string{
 							"reap",
 							"--namespace", opts.SessionNamespace,
