@@ -15,17 +15,19 @@ import (
 )
 
 // newAuthCmd builds `sandbox auth`, which inspects the credentials the CLI uses
-// to authenticate each supported agent (and the cluster connection). `status`
-// is the only subcommand today; `login`/`sync`/`logout` (the write side — a
-// local Keychain-backed store that seeds + reconciles the per-session cluster
-// Secret) land with the Codex backend work (docs/codex-integration-plan.md).
+// to authenticate each supported agent (and the cluster connection) and manages
+// the local multi-account Anthropic store. `status` is the read-side red/green
+// readout; `login`/`list`/`logout`/`default` are the write side — a local
+// Keychain-backed (file-fallback) store of Anthropic accounts that
+// `sandbox claude --account` and the TUI account picker draw from.
 func newAuthCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "auth",
-		Short: "Inspect agent credentials and cluster connectivity",
+		Short: "Inspect agent credentials and manage Anthropic accounts",
 		Long: "Validate the auth configured for each supported agent (Claude / Codex /\n" +
-			"OpenCode) and the cluster connection, with a red/green readout. Checks are\n" +
-			"cheap and offline; no secrets are printed.",
+			"OpenCode) and the cluster connection, with a red/green readout, and manage the\n" +
+			"local multi-account Anthropic store (login / list / logout / default). Status\n" +
+			"checks are cheap and offline; no secrets are ever printed.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error { return runAuthStatus(cmd) },
 	}
@@ -35,6 +37,10 @@ func newAuthCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE:  func(cmd *cobra.Command, _ []string) error { return runAuthStatus(cmd) },
 	})
+	cmd.AddCommand(newAuthLoginCmd())
+	cmd.AddCommand(newAuthListCmd())
+	cmd.AddCommand(newAuthLogoutCmd())
+	cmd.AddCommand(newAuthDefaultCmd())
 	return cmd
 }
 

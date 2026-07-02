@@ -535,6 +535,34 @@ func (b *Backend) OpencodePassword(ctx context.Context, ref session.Ref) (string
 // duplicating the constant.
 func OpencodeUsername() string { return opencodeServerUsername }
 
+// SessionsForAccount lists the ids of sessions whose per-session Secret still
+// carries a copy of the given Anthropic account's credential — enumerated by
+// the labelAnthropicAccount=<accountID> label the credential provisioning
+// stamps on each copy. Used by `sandbox auth logout` to report which live
+// sessions still hold a copy after a local account removal: local removal does
+// not scrub those per-session copies (running pods hold the env var regardless)
+// nor revoke the credential at Anthropic. Read-only; returns an empty slice
+// when nothing matches.
+func (b *Backend) SessionsForAccount(ctx context.Context, accountID string) ([]string, error) {
+	selector := fmt.Sprintf("%s=%s", labelAnthropicAccount, accountID)
+	list, err := b.core.CoreV1().Secrets(b.namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	if err != nil {
+		return nil, fmt.Errorf("k8s: list secrets for account %s: %w", accountID, err)
+	}
+	ids := make([]string, 0, len(list.Items))
+	for i := range list.Items {
+		sec := &list.Items[i]
+		// Prefer the session-id label; fall back to stripping the Secret's
+		// "-runner" suffix if it is somehow absent.
+		id := sec.Labels[labelSessionID]
+		if id == "" {
+			id = strings.TrimSuffix(sec.Name, "-runner")
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
 // Suspend sets replicas to 0, terminating the pod but preserving the PVC.
 func (b *Backend) Suspend(ctx context.Context, ref session.Ref) error {
 	return b.setReplicas(ctx, ref, 0)
