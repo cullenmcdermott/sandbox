@@ -50,6 +50,12 @@ func commandGroups(m *TranscriptModel) []cmdGroup {
 				m.assistantBuf.Reset()
 				m.streaming = false
 				m.pendingTools = nil
+				// The tool/subagent indexes point into m.blocks — clearing the
+				// blocks without them would route later tool events into cards
+				// that no longer exist (or resurrect stale block indexes).
+				m.flatTools = nil
+				m.subagents = nil
+				m.childIndex = nil
 				m.unreadIndex = 0        // re-clamp after shrink (B16)
 				m.droppedPartialIdx = -1 // stale index would mis-target after rebuild (RV9)
 				m.syncBody()

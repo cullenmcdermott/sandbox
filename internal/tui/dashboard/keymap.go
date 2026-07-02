@@ -34,9 +34,10 @@ type KeyMap struct {
 	Destroy key.Binding
 
 	// Global
-	Help    key.Binding
-	Quit    key.Binding
-	Command key.Binding
+	Help     key.Binding
+	Quit     key.Binding
+	Command  key.Binding
+	Switcher key.Binding
 
 	// Session organization
 	GroupToggle key.Binding
@@ -66,6 +67,7 @@ func DefaultKeyMap() KeyMap {
 		Help:            key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 		Quit:            key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 		Command:         key.NewBinding(key.WithKeys(":"), key.WithHelp(":", "command"), key.WithDisabled()),
+		Switcher:        key.NewBinding(key.WithKeys("ctrl+k"), key.WithHelp("^k", "quick switch")),
 		GroupToggle:     key.NewBinding(key.WithKeys("g"), key.WithHelp("g", "group view")),
 		Rename:          key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "rename")),
 		Archive:         key.NewBinding(key.WithKeys("A"), key.WithHelp("A", "archive")),
@@ -90,6 +92,6 @@ func (km KeyMap) FullHelp() [][]key.Binding {
 		{km.Up, km.Down, km.Top, km.Bottom, km.Attach},
 		{km.Filter, km.SortCycle, km.SortFlip, km.AttentionToggle},
 		{km.New, km.Suspend, km.Resume, km.Approve, km.Deny, km.Destroy},
-		{km.Help, km.Quit},
+		{km.Help, km.Switcher, km.Quit},
 	}
 }

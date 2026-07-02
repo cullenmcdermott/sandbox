@@ -555,7 +555,7 @@ func (m *TranscriptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.maybeCache(ev)
 		cmds := []tea.Cmd{m.maybeStartWorking(), cmd}
 		if m.events != nil {
-			cmds = append(cmds, m.waitForEvent)
+			cmds = append(cmds, m.waitForEvent())
 		}
 		return m, tea.Batch(cmds...)
 	case tEventBatchMsg:
@@ -572,7 +572,7 @@ func (m *TranscriptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		cmds = append(cmds, m.maybeStartWorking())
 		if m.events != nil {
-			cmds = append(cmds, m.waitForEvent)
+			cmds = append(cmds, m.waitForEvent())
 		}
 		return m, tea.Batch(cmds...)
 	case editorResultMsg:
@@ -657,7 +657,7 @@ func (m *TranscriptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.reconnectGaveUp = true
 			m.turnActive = false
 			m.working = false
-			m.appendBlock(blockError, "✗ session no longer exists — press q to return to the dashboard")
+			m.appendBlock(blockError, "✗ session no longer exists — press esc to return to the dashboard")
 			return m, nil
 		}
 		m.reconnectAttempts++
@@ -686,7 +686,7 @@ func (m *TranscriptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.reconnectStage = msg.stage
 		m.reconnectDetail = msg.detail
 		m.reconnectStageKnown = true
-		return m, m.waitForReconnectStage
+		return m, m.waitForReconnectStage()
 
 	case turnErrMsg:
 		// The turn never started server-side (StartTurn POST failed), so no
@@ -1632,11 +1632,8 @@ func (m *TranscriptModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// ctrl+c collapses/uncollapses all tool/subagent cards.
-	if key == "ctrl+c" {
-		m.toggleSubagents()
-		return m, nil
-	}
+	// (ctrl+c never reaches here: the App intercepts it as a global quit before
+	// delegating. space-on-empty-prompt above covers card collapse.)
 
 	if m.search.open {
 		cmd, _ := m.searchKey(msg)
@@ -1821,9 +1818,13 @@ func (m *TranscriptModel) interruptTurn() tea.Cmd {
 	if !m.turnActive {
 		return nil
 	}
+	// Capture into locals: the closure runs off the Update goroutine, and
+	// m.client is swapped by tReconnectedMsg (same pattern as resolvePermission).
+	client := m.client
+	sref := m.ref
 	ref := session.TurnRef{Session: m.ref.ID, Turn: m.activeTurnID}
 	return func() tea.Msg {
-		if err := m.client.InterruptTurn(context.Background(), m.ref, ref); err != nil {
+		if err := client.InterruptTurn(context.Background(), sref, ref); err != nil {
 			return interruptFailedMsg{err: err}
 		}
 		return nil
@@ -2059,8 +2060,10 @@ func (m *TranscriptModel) seedSize(w, h int) {
 // ingest applies a single event to this model from an external (background)
 // source — the dashboard's passive stream feeding a warm, non-foreground model.
 // It reuses handleEvent (which dedupes on lastSeq) and discards the returned
-// Cmd, since a background model is never the active tea screen. Safe to call on
-// a model whose own SSE stream has not been started.
+// Cmd, since a background model is never the active tea screen. Cmd-producing
+// side effects (the queued-prompt flush) are gated on foreground inside
+// handleEvent, so nothing is lost by the discard. Safe to call on a model whose
+// own SSE stream has not been started.
 func (m *TranscriptModel) ingest(ev session.Event) {
 	_ = m.handleEvent(ev)
 	// Workstream C: the warm/background feed must mirror events to the cache too.
@@ -2080,7 +2083,15 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		m.replaying = false
 		return nil
 	}
-	if ev.Seq > m.lastSeq {
+	// Seq dedup: drop any persisted event at or below the cursor. After a
+	// detach the dashboard's passive stream resumes from ITS (stale) cursor and
+	// re-feeds events this retained model already rendered; without this guard
+	// those replays duplicate transcript blocks. Locally-synthesized events
+	// (seq 0) always pass.
+	if ev.Seq != 0 {
+		if ev.Seq <= m.lastSeq {
+			return nil
+		}
 		m.lastSeq = ev.Seq
 	}
 	if m.replaying {
@@ -2182,7 +2193,13 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		}
 		m.status = StatusNeedsInput
 		m.turnActive = false
-		if m.queuedPrompt != "" {
+		// Flush the queued prompt only while foreground (m.events != nil, i.e.
+		// this model owns the live stream). A parked/background model is fed via
+		// ingest(), which discards the returned Cmd — flushing there would mutate
+		// state (user block, turnActive) while the startTurnCmd is thrown away:
+		// phantom busy, prompt never sent. Keeping it queued preserves it for the
+		// next re-attach.
+		if m.queuedPrompt != "" && m.events != nil {
 			q := m.queuedPrompt
 			m.queuedPrompt = ""
 			cmd = m.submitText(q) // capture so the queued turn's POST actually runs
@@ -2196,7 +2213,9 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		// A queued prompt here means the interrupt was a steer (queueSteer keeps
 		// queuedPrompt set): now that the turn is torn down, submit it as the next
 		// turn — sequenced after the interrupt so it can't 409 against the old one.
-		if m.queuedPrompt != "" {
+		// Foreground-only for the same reason as turn.completed above: a background
+		// ingest() discards the Cmd, so flushing there would lose the prompt.
+		if m.queuedPrompt != "" && m.events != nil {
 			q := m.queuedPrompt
 			m.queuedPrompt = ""
 			cmd = m.submitText(q)
@@ -2524,7 +2543,7 @@ func (m *TranscriptModel) startEventStream() tea.Cmd {
 	}
 	m.events = events
 	m.streamCancel = cancel
-	return m.waitForEvent
+	return m.waitForEvent()
 }
 
 // cancelStream tears down the transcript's live SSE stream. The App must call
@@ -2544,33 +2563,41 @@ func (m *TranscriptModel) cancelStream() {
 // between batches rather than spinning the drain forever.
 const eventBatchMax = 512
 
-// waitForEvent blocks for the next event, then non-blockingly drains any
-// already-buffered events into one batch. Coalescing a burst of stream deltas
-// into a single Update+View is what keeps a fast turn from re-rendering per
-// delta and starving keystrokes (T1 lag). If the channel closes mid-drain the
-// batch is delivered as-is; the next waitForEvent's blocking receive then
-// surfaces tStreamEndedMsg.
-func (m *TranscriptModel) waitForEvent() tea.Msg {
-	if m.events == nil {
+// waitForEvent returns a Cmd that blocks for the next event, then
+// non-blockingly drains any already-buffered events into one batch. Coalescing
+// a burst of stream deltas into a single Update+View is what keeps a fast turn
+// from re-rendering per delta and starving keystrokes (T1 lag). If the channel
+// closes mid-drain the batch is delivered as-is; the next waitForEvent's
+// blocking receive then surfaces tStreamEndedMsg.
+//
+// The channel is captured HERE, on the Update goroutine: the returned closure
+// runs concurrently with later Updates that nil/replace m.events
+// (cancelStream / startEventStream), so reading the field inside the closure
+// would be a data race.
+func (m *TranscriptModel) waitForEvent() tea.Cmd {
+	ch := m.events
+	if ch == nil {
 		return nil
 	}
-	ev, ok := <-m.events
-	if !ok {
-		return tStreamEndedMsg{}
-	}
-	batch := []session.Event{ev}
-	for len(batch) < eventBatchMax {
-		select {
-		case ev, ok := <-m.events:
-			if !ok {
+	return func() tea.Msg {
+		ev, ok := <-ch
+		if !ok {
+			return tStreamEndedMsg{}
+		}
+		batch := []session.Event{ev}
+		for len(batch) < eventBatchMax {
+			select {
+			case ev, ok := <-ch:
+				if !ok {
+					return tEventBatchMsg(batch)
+				}
+				batch = append(batch, ev)
+			default:
 				return tEventBatchMsg(batch)
 			}
-			batch = append(batch, ev)
-		default:
-			return tEventBatchMsg(batch)
 		}
+		return tEventBatchMsg(batch)
 	}
-	return tEventBatchMsg(batch)
 }
 
 // reconnectVerboseAttempts is how many failed reconnects emit a transcript line
@@ -2614,49 +2641,57 @@ func (m *TranscriptModel) startReconnect() tea.Cmd {
 	m.reconnectStage = 0
 	m.reconnectDetail = ""
 	m.reconnectStageKnown = false
-	return tea.Batch(m.doReconnect, m.waitForReconnectStage)
+	return tea.Batch(m.doReconnect(), m.waitForReconnectStage())
 }
 
-// waitForReconnectStage drains one stage update from the current reconnect's
-// channel, mirroring waitForEvent. It re-subscribes (via the Update handler)
-// until doReconnect closes the channel.
-func (m *TranscriptModel) waitForReconnectStage() tea.Msg {
+// waitForReconnectStage returns a Cmd that drains one stage update from the
+// current reconnect's channel, mirroring waitForEvent. It re-subscribes (via
+// the Update handler) until doReconnect closes the channel. The channel is
+// captured on the Update goroutine (see waitForEvent for why).
+func (m *TranscriptModel) waitForReconnectStage() tea.Cmd {
 	ch := m.reconnectStages
-	if ch == nil {
-		return reconnectStageMsg{done: true}
-	}
-	msg, ok := <-ch
-	if !ok {
-		return reconnectStageMsg{done: true}
-	}
-	return msg
-}
-
-func (m *TranscriptModel) doReconnect() tea.Msg {
-	if m.reconnect == nil {
-		return tReconnectFailedMsg{err: fmt.Errorf("no reconnect available")}
-	}
-	ch := m.reconnectStages
-	onStage := func(s ConnectStage, detail string) {
+	return func() tea.Msg {
 		if ch == nil {
-			return
+			return reconnectStageMsg{done: true}
 		}
-		// Non-blocking: never stall the reconnect on a slow/absent UI drainer.
-		select {
-		case ch <- reconnectStageMsg{stage: s, detail: detail}:
-		default:
+		msg, ok := <-ch
+		if !ok {
+			return reconnectStageMsg{done: true}
 		}
+		return msg
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), reconnectAttemptTimeout)
-	defer cancel()
-	client, err := m.reconnect(ctx, onStage)
-	if ch != nil {
-		close(ch) // unblock the stage waiter; this attempt is done
+}
+
+// doReconnect returns a Cmd running one reconnect attempt. m.reconnect and the
+// stage channel are captured on the Update goroutine (see waitForEvent).
+func (m *TranscriptModel) doReconnect() tea.Cmd {
+	reconnect := m.reconnect
+	ch := m.reconnectStages
+	return func() tea.Msg {
+		if reconnect == nil {
+			return tReconnectFailedMsg{err: fmt.Errorf("no reconnect available")}
+		}
+		onStage := func(s ConnectStage, detail string) {
+			if ch == nil {
+				return
+			}
+			// Non-blocking: never stall the reconnect on a slow/absent UI drainer.
+			select {
+			case ch <- reconnectStageMsg{stage: s, detail: detail}:
+			default:
+			}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), reconnectAttemptTimeout)
+		defer cancel()
+		client, err := reconnect(ctx, onStage)
+		if ch != nil {
+			close(ch) // unblock the stage waiter; this attempt is done
+		}
+		if err != nil {
+			return tReconnectFailedMsg{err: err}
+		}
+		return tReconnectedMsg{client: client}
 	}
-	if err != nil {
-		return tReconnectFailedMsg{err: err}
-	}
-	return tReconnectedMsg{client: client}
 }
 
 // startTurnCmd posts a new turn and surfaces a synchronous start failure; the

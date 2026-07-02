@@ -87,21 +87,21 @@ async function handle(req: IncomingMessage, res: ServerResponse, cfg: ReturnType
 
   // All /sessions* routes address the single configured session.
   if (path === '/sessions' && method === 'GET') {
-    return ok(res, [toStatusResponse(reg.state)]);
+    return ok(res, [toStatusResponse(reg.state, reg.activeTurnId())]);
   }
 
   // /sessions/:id
   const sessMatch = /^\/sessions\/([^/]+)$/.exec(path);
   if (sessMatch && method === 'GET') {
     if (sessMatch[1] !== sid) return notFound(res, 'session not found');
-    return ok(res, toStatusResponse(reg.state));
+    return ok(res, toStatusResponse(reg.state, reg.activeTurnId()));
   }
 
   // /sessions/:id/status
   const statusMatch = /^\/sessions\/([^/]+)\/status$/.exec(path);
   if (statusMatch && method === 'GET') {
     if (statusMatch[1] !== sid) return notFound(res, 'session not found');
-    return ok(res, toStatusResponse(reg.state));
+    return ok(res, toStatusResponse(reg.state, reg.activeTurnId()));
   }
 
   // /sessions/:id/idle — idle state for the reaper (turn-done AND detached).
@@ -198,8 +198,10 @@ async function handle(req: IncomingMessage, res: ServerResponse, cfg: ReturnType
       // only mirrored by the passive observer (which sets last_turn_id). So
       // `sandbox cancel` lands here with no matching runner turn; abort the
       // opencode session directly instead of 404ing (Phase 4). The observer's next
-      // session.idle then emits turn.completed.
-      if (cfg.backend === 'opencode-server' && reg.state.opencode_session_id) {
+      // session.idle then emits turn.completed. Only while a turn is actually
+      // live (status busy): aborting an idle opencode session would emit a
+      // spurious turn.interrupted for a turn that already finished.
+      if (cfg.backend === 'opencode-server' && reg.state.opencode_session_id && reg.state.status === 'busy') {
         const ocId = reg.state.opencode_session_id;
         void opencodeTurnClient().session.abort({ path: { id: ocId } }).catch(() => {});
         const interruptedTurn = turnId || reg.state.last_turn_id;

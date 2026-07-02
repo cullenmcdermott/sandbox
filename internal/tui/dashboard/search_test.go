@@ -75,11 +75,20 @@ func TestSearchCtrlNextPrevNavigates(t *testing.T) {
 		t.Fatalf("test setup: ctrl+n key stringifies as %q, want \"ctrl+n\"", got)
 	}
 
+	// The FIRST next-jump for a query lands on the CURRENT (first) match —
+	// advancing immediately would skip match 1 entirely.
+	if _, consumed := m.searchKey(ctrlN); !consumed {
+		t.Fatal("ctrl+n should be consumed by the search overlay")
+	}
+	if m.search.matchIndex != 0 {
+		t.Fatalf("first ctrl+n matchIndex = %d, want 0 (first jump lands on the first match)", m.search.matchIndex)
+	}
+	// Subsequent next-jumps advance: 0 -> 1.
 	if _, consumed := m.searchKey(ctrlN); !consumed {
 		t.Fatal("ctrl+n should be consumed by the search overlay")
 	}
 	if m.search.matchIndex != 1 {
-		t.Fatalf("after ctrl+n matchIndex = %d, want 1", m.search.matchIndex)
+		t.Fatalf("after second ctrl+n matchIndex = %d, want 1", m.search.matchIndex)
 	}
 	// ctrl+p must reach prevSearchMatch (was dead code): 1 -> 0.
 	if _, consumed := m.searchKey(ctrlP); !consumed {

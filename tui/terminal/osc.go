@@ -28,9 +28,10 @@ const (
 	ProgressError
 )
 
-// OSCProgress returns the OSC 9;4 control string for the given state, or "" for
-// ProgressNone-with-nothing-to-clear callers that prefer to skip emission. The
-// returned string is zero-width.
+// OSCProgress returns the OSC 9;4 control string for the given state.
+// ProgressNone (and any unrecognized state) yields the "remove" sequence, so
+// emitting it clears a previously-set indicator; callers that want to skip
+// emission entirely must do so themselves. The returned string is zero-width.
 //
 // OSC 9;4 form: ESC ] 9 ; 4 ; <state> ; <pct> ST
 //

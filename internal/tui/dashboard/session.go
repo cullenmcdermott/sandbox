@@ -632,11 +632,19 @@ func ApplyRunnerEvent(sess *Session, ev session.Event) bool {
 		// status — it only refreshes the metrics the row/detail surface.
 		var p session.UsagePayload
 		_ = json.Unmarshal(ev.Payload, &p) // malformed payload → zero value → no-op
-		sess.InputTokens = p.InputTokens
-		sess.OutputTokens = p.OutputTokens
-		sess.CacheReadTokens = p.CacheReadTokens
-		sess.CacheWriteTokens = p.CacheWriteTokens
-		sess.TotalCostUSD = p.TotalCostUSD
+		// >0 guards mirror the transcript's usage handler: partial usage events
+		// (e.g. an output-only update) must not clobber known counters with zeros.
+		if p.InputTokens > 0 {
+			sess.InputTokens = p.InputTokens
+			sess.CacheReadTokens = p.CacheReadTokens
+			sess.CacheWriteTokens = p.CacheWriteTokens
+		}
+		if p.OutputTokens > 0 {
+			sess.OutputTokens = p.OutputTokens
+		}
+		if p.TotalCostUSD > 0 {
+			sess.TotalCostUSD = p.TotalCostUSD
+		}
 		return false
 
 	case session.EventToolStarted:

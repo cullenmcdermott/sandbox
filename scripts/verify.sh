@@ -21,12 +21,12 @@ grn()  { printf '\033[32m%s\033[0m\n' "$*"; }
 fail() { red "GATE FAILED: $*"; exit 1; }
 
 # ---- 1. Anti-cheat scan -----------------------------------------------------
-# Scope: Go source under internal/ and cmd/. TODO/FIXME are intentionally NOT
-# forbidden — this repo uses TODO.md as its backlog and documents missing runner
-# endpoints with inline TODO pointers. We forbid the things that fake completion.
-# Generated files (*.gen.go) are never scanned (machine-authored).
+# Scope: Go source under internal/, cmd/, and the public client/ package. TODO/
+# FIXME are intentionally NOT forbidden — this repo uses TODO.md as its backlog and
+# documents missing runner endpoints with inline TODO pointers. We forbid the
+# things that fake completion. Generated files (*.gen.go) are never scanned.
 
-SCAN_PATHS=(internal cmd)
+SCAN_PATHS=(internal cmd client)
 
 # (a) Stubs/panics in NON-test source.
 FORBID_SRC='panic\(|not implemented|unimplemented|return nil // stub'

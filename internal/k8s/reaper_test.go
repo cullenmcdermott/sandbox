@@ -147,6 +147,47 @@ func TestEnsureReaperReplacesWhenFinished(t *testing.T) {
 	}
 }
 
+// The reaper Job must admit into namespaces enforcing the restricted
+// PodSecurity Standard: runAsNonRoot + RuntimeDefault seccomp at the pod level,
+// no privilege escalation + all capabilities dropped at the container level.
+func TestBuildReaperJobSatisfiesRestrictedPodSecurity(t *testing.T) {
+	job := buildReaperJob("reap-x", "x", ReaperOptions{Image: DefaultReaperImage})
+
+	pod := job.Spec.Template.Spec
+	if pod.SecurityContext == nil {
+		t.Fatal("pod SecurityContext is nil")
+	}
+	if pod.SecurityContext.RunAsNonRoot == nil || !*pod.SecurityContext.RunAsNonRoot {
+		t.Error("pod RunAsNonRoot not set to true")
+	}
+	if pod.SecurityContext.SeccompProfile == nil || pod.SecurityContext.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		t.Errorf("pod SeccompProfile = %v, want RuntimeDefault", pod.SecurityContext.SeccompProfile)
+	}
+
+	sc := pod.Containers[0].SecurityContext
+	if sc == nil {
+		t.Fatal("container SecurityContext is nil")
+	}
+	if sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation {
+		t.Error("container AllowPrivilegeEscalation not set to false")
+	}
+	if sc.Capabilities == nil || len(sc.Capabilities.Drop) != 1 || sc.Capabilities.Drop[0] != "ALL" {
+		t.Errorf("container Capabilities.Drop = %v, want [ALL]", sc.Capabilities)
+	}
+}
+
+// An explicit ImagePullPolicy override must beat the tagged-ref-implies-Always
+// default — required for side-loaded images that can never be pulled.
+func TestBuildReaperJobHonorsImagePullPolicyOverride(t *testing.T) {
+	job := buildReaperJob("reap-x", "x", ReaperOptions{
+		Image:           "ghcr.io/cullenmcdermott/sandbox-reaper:latest",
+		ImagePullPolicy: "Never",
+	})
+	if got := job.Spec.Template.Spec.Containers[0].ImagePullPolicy; got != corev1.PullNever {
+		t.Errorf("ImagePullPolicy = %q, want %q", got, corev1.PullNever)
+	}
+}
+
 func TestJobFinished(t *testing.T) {
 	cases := []struct {
 		name string

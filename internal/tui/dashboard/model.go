@@ -232,7 +232,11 @@ func (m *Model) probeIdleCmd(id session.ID) tea.Cmd {
 	}
 	ref := session.Ref{ID: id}
 	return func() tea.Msg {
-		st, err := client.Idle(context.Background(), ref)
+		// Bounded like approveCmd: a wedged port-forward must not pin this
+		// goroutine (and its probe slot) forever.
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		st, err := client.Idle(ctx, ref)
 		if err != nil {
 			return idleStatusMsg{id: id} // zero idleSince = not counting
 		}
@@ -905,6 +909,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if _, exists := m.liveSSECancels[msg.id]; exists {
 			return m, nil
 		}
+		// The foreground session's stream is owned by its transcript (the attach
+		// path cancels the background one deliberately — B2's one-client intent);
+		// detach explicitly restarts the passive stream, so don't race it here.
+		if msg.id == m.attachedID {
+			return m, nil
+		}
 		return m, m.reconnectLiveSSECmd(sess, msg.attempt)
 
 	case liveSSEReconnectFailedMsg:
@@ -1316,6 +1326,15 @@ func (m *Model) handleRunnerEvent(msg RunnerEventMsg) (tea.Model, tea.Cmd) {
 				default:
 					// Turn was already complete; fall back to cluster-derived state.
 					m.sessions[i].DashStatus = DeriveStatus(m.sessions[i].State)
+					// An idle/needs-input session whose pod is still Running lost
+					// its stream to a transient blip too — without a reconnect the
+					// row would stay permanently deaf (no status/permission updates)
+					// until a pod event happened to restart it. Same backoff loop as
+					// the busy path; degradeUnreachable leaves non-busy sessions at
+					// their cluster-derived status if it never heals.
+					if m.sessions[i].State.Status == session.StatusRunning {
+						retryCmd = liveSSEReconnectTick(msg.ID, 0, liveSSEReconnectDelay(0))
+					}
 				}
 				m.sessions[i].PendingPermissionID = ""
 				m.sessions[i].PendingPermissionTool = ""
@@ -1675,9 +1694,12 @@ func (m *Model) sortSessions() {
 }
 
 func (m *Model) clampCursor() {
-	visible := m.visibleSessions()
-	if m.cursor >= len(visible) {
-		m.cursor = max(0, len(visible)-1)
+	// Clamp against display rows (headers included in group view) — the cursor
+	// indexes rows, not sessions, so clamping against visibleSessions would cut
+	// off the tail of a grouped list.
+	rows := m.visibleRows()
+	if m.cursor >= len(rows) {
+		m.cursor = max(0, len(rows)-1)
 	}
 }
 
@@ -1690,14 +1712,13 @@ func (m *Model) visibleSessions() []Session {
 	return sortByAttention(FilterSessions(m.sessions, q), m.attentionFirst)
 }
 
-// selectedSession returns the currently highlighted session, or nil.
+// selectedSession returns the currently highlighted session, or nil. It
+// delegates to the header-aware row accessor: the cursor indexes display rows
+// (which include repo headers in group view), so indexing visibleSessions
+// directly would describe/act on the wrong session whenever a header sits
+// above the cursor.
 func (m *Model) selectedSession() *Session {
-	visible := m.visibleSessions()
-	if len(visible) == 0 || m.cursor >= len(visible) {
-		return nil
-	}
-	s := visible[m.cursor]
-	return &s
+	return m.selectedRowSession()
 }
 
 // sessionByID returns the Session with the given ID from the dashboard's session
@@ -1819,6 +1840,13 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Quick-switcher (⌃K): fuzzy jump to any session. The overlay's own key
+	// handling (switcherKey) takes over once open, including ctrl+k to close.
+	if key.Matches(msg, m.keys.Switcher) {
+		m.openSwitcher()
+		return m, nil
+	}
+
 	// Quit
 	if key.Matches(msg, m.keys.Quit) {
 		m.Cancel()
@@ -1848,9 +1876,9 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if ks == "G" {
 		m.ggPending = false
-		visible := m.visibleSessions()
-		if len(visible) > 0 {
-			m.cursor = len(visible) - 1
+		rows := m.visibleRows() // rows, not sessions: group headers count
+		if len(rows) > 0 {
+			m.cursor = len(rows) - 1
 		}
 		return m, nil
 	}
@@ -1934,10 +1962,14 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// Suspend — scale the selected session's pod to zero (recoverable).
+	// The SSE stream is NOT cancelled here: if the suspend action fails, an
+	// eager cancel would leave a still-running session deaf. On success the
+	// cluster watch delivers the Suspended state and applyPodEvent's suspend
+	// branch cancels the stream (and the pod closing the connection ends it
+	// anyway via handleRunnerEvent's StreamEnded path).
 	if key.Matches(msg, m.keys.Suspend) {
 		sel := m.selectedRowSession()
 		if sel != nil && sel.DashStatus != StatusSuspended {
-			m.cancelLiveSSE(sel.ID())
 			for i := range m.sessions {
 				if m.sessions[i].ID() == sel.ID() {
 					m.sessions[i].PendingAction = "suspend"

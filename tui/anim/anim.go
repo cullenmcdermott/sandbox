@@ -12,7 +12,7 @@ var defaultFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 
 // Spinner is a pre-rendered gradient spinner. Frames are colored strings built
 // once at construction/rebuild time; rendering is a single slice index with no
-// per-frame allocation (P4, chat-rendering-architecture §2.5).
+// per-frame allocation.
 type Spinner struct {
 	frames []string
 	idx    int

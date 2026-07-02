@@ -71,7 +71,7 @@ func TestWaitForEventCoalescesBatch(t *testing.T) {
 	}
 	m.events = ch
 
-	msg := m.waitForEvent()
+	msg := m.waitForEvent()() // build the Cmd, then run its body synchronously
 	batch, ok := msg.(tEventBatchMsg)
 	if !ok {
 		t.Fatalf("waitForEvent returned %T, want tEventBatchMsg", msg)

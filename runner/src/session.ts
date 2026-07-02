@@ -101,7 +101,7 @@ export function saveSessionState(state: SessionState): void {
   renameSync(tmp, SESSION_JSON_PATH);
 }
 
-export function toStatusResponse(state: SessionState): StatusResponse {
+export function toStatusResponse(state: SessionState, activeTurnId = ''): StatusResponse {
   return {
     id: state.sandbox_session_id,
     backend: state.backend,
@@ -109,6 +109,7 @@ export function toStatusResponse(state: SessionState): StatusResponse {
     status: state.status,
     claudeSession: state.claude_session_id,
     lastTurnId: state.last_turn_id,
+    activeTurnId,
     lastActivity: state.last_activity,
     ...(state.model ? { model: state.model } : {}),
   };
@@ -268,6 +269,21 @@ class SessionRegistry {
     this.state.opencode_session_id = '';
     this.state.last_activity = new Date().toISOString();
     saveSessionState(this.state);
+  }
+
+  /**
+   * The id of the turn currently running, or '' when idle. Registered runner
+   * turns win; for interactive opencode turns (which never register — they run
+   * inside `opencode serve` and are only mirrored by the observer, via
+   * setStatus('busy') + setLastTurn) fall back to last_turn_id while busy.
+   * last_turn_id alone is NOT this signal: it persists after a turn finishes
+   * to seed nextTurnId.
+   */
+  activeTurnId(): string {
+    const first = this.activeTurns.keys().next();
+    if (!first.done) return first.value;
+    if (this.state.status === 'busy') return this.state.last_turn_id;
+    return '';
   }
 
   setLastTurn(turnId: string): void {

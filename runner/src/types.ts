@@ -138,6 +138,10 @@ export interface StatusResponse {
   status: string;
   claudeSession: string;
   lastTurnId: string;
+  /** The currently running turn id, or '' when idle. Unlike lastTurnId (which
+   * persists after a turn finishes to seed nextTurnId), this is live registry
+   * state — the signal for "is there a turn to interrupt". */
+  activeTurnId: string;
   lastActivity: string;
   model?: string;
 }

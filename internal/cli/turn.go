@@ -34,19 +34,19 @@ func newTurnCmd() *cobra.Command {
 			ctx, cancel := context.WithTimeout(cmd.Context(), timeout)
 			defer cancel()
 
-			backend, err := newBackend()
+			c, err := newClient()
 			if err != nil {
 				return err
 			}
 			ref := session.Ref{ID: session.ID(args[0])}
 
-			client, cleanup, err := runnerClientFor(ctx, backend, ref)
+			rc, cleanup, err := c.DialRunner(ctx, ref)
 			if err != nil {
 				return err
 			}
 			defer cleanup()
 
-			if err := waitHealthy(ctx, client); err != nil {
+			if err := waitHealthy(ctx, rc); err != nil {
 				return fmt.Errorf("runner health: %w", err)
 			}
 
@@ -57,12 +57,12 @@ func newTurnCmd() *cobra.Command {
 			// can't be missed in the gap between StartTurn and subscribing.
 			// afterSeq=0 replays from the start; we filter to the started turn
 			// below, so replayed events from earlier turns are ignored.
-			events, err := client.Events(ctx, ref, 0)
+			events, err := rc.Events(ctx, ref, 0)
 			if err != nil {
 				return fmt.Errorf("open event stream: %w", err)
 			}
 
-			turn, err := client.StartTurn(ctx, ref, session.TurnInput{
+			turn, err := rc.StartTurn(ctx, ref, session.TurnInput{
 				Prompt: prompt,
 				Mode:   mode,
 				Model:  model,

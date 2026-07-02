@@ -35,15 +35,22 @@ func (m *Model) toggleGroupView() {
 }
 
 // toggleRepoGroup expands or collapses the group for the repo at the cursor.
+// The cursor indexes display rows (headers included), so it resolves the repo
+// from the row itself: a header row toggles its own group, a session row
+// toggles the group it belongs to.
 func (m *Model) toggleRepoGroup() {
 	if !m.groupView.open {
 		return
 	}
-	visible := m.visibleSessions()
-	if m.cursor >= len(visible) {
+	rows := m.visibleRows()
+	if m.cursor < 0 || m.cursor >= len(rows) {
 		return
 	}
-	repo := repoKey(visible[m.cursor])
+	row := rows[m.cursor]
+	repo := row.repo
+	if row.session != nil {
+		repo = repoKey(*row.session)
+	}
 	m.groupView.repos[repo] = !m.groupView.repos[repo]
 }
 
@@ -104,13 +111,17 @@ func (m *Model) openRename() {
 	m.renameBuf = sel.DisplayTitle()
 }
 
-// commitRename applies the rename buffer to the selected session.
+// commitRename applies the rename buffer to the selected session (via the
+// header-aware accessor, so group view renames the highlighted session, not
+// the one at the raw cursor index).
 func (m *Model) commitRename() {
 	if !m.renaming {
 		return
 	}
-	visible := m.visibleSessions()
-	if m.cursor >= len(visible) {
+	sel := m.selectedRowSession()
+	if sel == nil {
+		m.renaming = false
+		m.renameBuf = ""
 		return
 	}
 	title := strings.TrimSpace(m.renameBuf)
@@ -124,7 +135,7 @@ func (m *Model) commitRename() {
 		return
 	}
 	for i := range m.sessions {
-		if m.sessions[i].ID() == visible[m.cursor].ID() {
+		if m.sessions[i].ID() == sel.ID() {
 			m.sessions[i].RenamedTitle = title
 			// Persist so the rename survives restart / reattach (T5). nil store
 			// (unit tests) keeps it in-memory only.

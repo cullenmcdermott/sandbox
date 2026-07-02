@@ -55,6 +55,13 @@ type Spec struct {
 	// RunnerImage is the container image for the runner pod.
 	RunnerImage string `json:"runnerImage"`
 
+	// ImagePullPolicy overrides the runner pod's imagePullPolicy. One of
+	// "Always", "IfNotPresent", "Never". Empty selects a default: IfNotPresent
+	// for a digest-pinned RunnerImage (immutable, safe to cache), else Always (so
+	// a moving tag like :latest always reflects upstream). Set it explicitly for
+	// side-loaded/offline images or a rate-limited/private registry.
+	ImagePullPolicy string `json:"imagePullPolicy,omitempty"`
+
 	// Model is an optional model id/alias (e.g. "opus", "sonnet",
 	// "claude-opus-4-8") the runner passes to the Claude Agent SDK as the
 	// session default. Empty means the account default. Per-turn overrides
@@ -100,14 +107,21 @@ type State struct {
 	// ClaudeSession is populated from the runner's session.json (the upstream
 	// Claude SDK session id) but is not yet read anywhere in the Go CLI; it is
 	// carried for future resume/inspection features.
-	ClaudeSession string    `json:"claudeSession,omitempty"`
-	LastTurnID    TurnID    `json:"lastTurnId,omitempty"`
-	LastActivity  time.Time `json:"lastActivity,omitempty"`
-	CreatedAt     time.Time `json:"createdAt,omitempty"`
-	PodName       string    `json:"podName,omitempty"`
-	PodReady      bool      `json:"podReady,omitempty"`
-	SandboxName   string    `json:"sandboxName,omitempty"`
-	RunnerToken   string    `json:"-"`
+	ClaudeSession string `json:"claudeSession,omitempty"`
+	// LastTurnID is the most recently started turn, which persists after the
+	// turn finishes (the runner uses it to seed the next turn id). It does NOT
+	// mean a turn is running — that is ActiveTurnID.
+	LastTurnID TurnID `json:"lastTurnId,omitempty"`
+	// ActiveTurnID is the currently running turn, empty when the session is
+	// idle. Only populated from the runner's live registry (GET /status); the
+	// k8s backend cannot know it.
+	ActiveTurnID TurnID    `json:"activeTurnId,omitempty"`
+	LastActivity time.Time `json:"lastActivity,omitempty"`
+	CreatedAt    time.Time `json:"createdAt,omitempty"`
+	PodName      string    `json:"podName,omitempty"`
+	PodReady     bool      `json:"podReady,omitempty"`
+	SandboxName  string    `json:"sandboxName,omitempty"`
+	RunnerToken  string    `json:"-"`
 }
 
 // TurnInput is the user input that starts a turn.

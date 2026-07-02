@@ -21,7 +21,6 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/remotecommand"
 	"k8s.io/client-go/util/retry"
 
@@ -119,19 +118,18 @@ type Backend struct {
 	forwardOnceFn func(ctx context.Context, pod *corev1.Pod, localPort, remotePort int, ready chan struct{}) error
 }
 
-// New creates a Backend. It loads kubeconfig from the standard locations
-// (in-cluster first, then ~/.kube/config or KUBECONFIG).
-func New(namespace string) (*Backend, error) {
-	config, err := rest.InClusterConfig()
+// New creates a Backend. With no options it loads kubeconfig from the standard
+// locations (in-cluster first, then ~/.kube/config or KUBECONFIG). Options
+// (WithKubeconfig/WithContext/WithRESTConfig) let a programmatic caller target a
+// specific cluster without relying on the ambient environment.
+func New(namespace string, opts ...Option) (*Backend, error) {
+	var nc newConfig
+	for _, opt := range opts {
+		opt(&nc)
+	}
+	config, err := nc.resolve()
 	if err != nil {
-		loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
-		cfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
-			loadingRules, &clientcmd.ConfigOverrides{},
-		).ClientConfig()
-		if err != nil {
-			return nil, fmt.Errorf("k8s: load kubeconfig: %w", err)
-		}
-		config = cfg
+		return nil, err
 	}
 
 	agents, err := agentsclient.NewForConfig(config)
@@ -155,6 +153,23 @@ func New(namespace string) (*Backend, error) {
 	b.runForwardFn = b.runForward
 	b.forwardOnceFn = b.forwardOnce
 	return b, nil
+}
+
+// resolveImagePullPolicy picks the imagePullPolicy for an image ref. An explicit
+// override (Always/IfNotPresent/Never) wins; otherwise a digest-pinned ref
+// (repo@sha256:...) uses IfNotPresent — the digest is immutable, so re-pulling on
+// every pod start is wasted work and breaks offline/rate-limited/private
+// registries — and any other ref (a moving tag like :latest) uses Always so it
+// always reflects upstream.
+func resolveImagePullPolicy(override, imageRef string) corev1.PullPolicy {
+	switch corev1.PullPolicy(override) {
+	case corev1.PullAlways, corev1.PullIfNotPresent, corev1.PullNever:
+		return corev1.PullPolicy(override)
+	}
+	if strings.Contains(imageRef, "@sha256:") {
+		return corev1.PullIfNotPresent
+	}
+	return corev1.PullAlways
 }
 
 // NewForClients creates a Backend from pre-built clientsets (for testing).
@@ -746,7 +761,7 @@ func buildSandbox(spec session.Spec) *agentv1alpha1.Sandbox {
 						{
 							Name:            "runner",
 							Image:           spec.RunnerImage,
-							ImagePullPolicy: corev1.PullAlways,
+							ImagePullPolicy: resolveImagePullPolicy(spec.ImagePullPolicy, spec.RunnerImage),
 							Ports: []corev1.ContainerPort{
 								{Name: "http", ContainerPort: portRunner},
 								{Name: "ssh", ContainerPort: portSSH},

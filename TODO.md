@@ -181,8 +181,11 @@ via a passive observer connection to the agent's event stream. See
   the suspend active-turn warning are inert for opencode. `cancel` now WORKS
   (Phase 4): the observer sets `last_turn_id` and the interrupt route gained an
   opencode-abort fallback (`server.ts`) — live-verified (`sandbox cancel` emits
-  `turn.interrupted`, was a 404 no-op). `--model`/initial-prompt arg + the suspend
-  warning's monotonic-`last_turn_id` false-positive still TODO. `claude_remote.go:23-71`.
+  `turn.interrupted`, was a 404 no-op). The suspend warning's (and CancelTurn's)
+  monotonic-`last_turn_id` false-positive was FIXED 2026-07-01: `/status` now
+  exposes a live `activeTurnId` (registry-derived, opencode busy fallback) and
+  cancel/suspend key off it. `--model`/initial-prompt arg still TODO.
+  `claude_remote.go:23-71`.
 - [ ] Verify detach (Ctrl+]) + surrounding chrome behave identically for every
   backend's external pane.
 - [x] **opencode in-turn missing-session recovery (claude parity).** SUBSUMED by the
@@ -271,6 +274,52 @@ the CLI credential manager below.
   refresh+approvals are delegated to the client; metrics/auth-status are client
   requests (`rateLimits/read`, `usage/read`, `getAuthStatus`, `account/read`).
   Still TODO live: ws endpoint addressing + a 2nd-client thread-observe check.
+
+## Deferred from the 2026-07-01 review sweep (client package + TUI)
+
+API-design decisions deliberately NOT auto-fixed (maintainer call), from the
+three-agent review of `feat/public-client-package` (client/branch, public `tui/`,
+dashboard). All the verified *bugs* from that sweep were fixed on the branch.
+
+- [ ] **client: no external test seam.** `WithBackend` takes the concrete
+  `internal/k8s.Backend`, which importers can't name — so the option is unusable
+  outside the module and there's no way to inject a fake for `Create`/`Connect`
+  orchestration tests (which have zero unit coverage). Consider a narrow public
+  backend interface. `client/client.go:141`.
+- [ ] **tui/theme: closed registry + missing exported tokens.** No `Register(Theme)`
+  despite the package doc promising pluggable themes; `Theme` fields
+  `Denied/Info/Success/Warning(+Subtle)` have no exported active vars (only Busy
+  made it), so apps can't reach those tones directly. `tui/theme/theme.go:63,107-144`.
+- [ ] **tui/kit: unsynchronized global palette.** `SetComponentColors` writes a
+  plain map read on every render; `theme.ApplyTheme` off the render goroutine is a
+  concurrent-map panic; two tea.Programs share one palette. Atomic-pointer swap of
+  an immutable palette, or document single-goroutine ownership.
+  `tui/kit/style.go:21`, `tui/kit/components.go:32`.
+- [ ] **tui/list: `Item.Finished()` is dead API** — never called, every implementer
+  must write it, doc points at a spec that doesn't ship. Drop it (breaking OK
+  pre-OSS). `tui/list/list.go:12`.
+- [ ] **dashboard: consolidate the two row models.** `visibleSessions()` vs
+  `visibleRows()` both interpret `m.cursor`; the group-view mis-selection class
+  (fixed 2026-07-01) exists because of the split. One row abstraction with a
+  `sessionAt(cursor)` accessor for render+nav+actions; also `groupedSessions()`
+  ignores the active filter/attention sort. `internal/tui/dashboard/groups.go:57`.
+- [ ] **dashboard: `applySeed` re-seed drops live fields** (seenSeq, usage tokens,
+  Model, Branch, RecentTools) — unread badges + ctx%/cost reset on a manual `r`
+  retry. `internal/tui/dashboard/model.go:1452-1483`.
+- [ ] **dashboard: `partition()` computed 3× per frame** (topBar, clusterStrip,
+  progressState). Compute once per render. `internal/tui/dashboard/zones.go:319`,
+  `model.go:2572`.
+- [ ] **client: `Destroy` stops sync *after* the cluster destroy** (pre-existing;
+  the TUI's PreDestroyHook covers the interactive path, library callers race EOF
+  errors). `client/client.go` Destroy.
+- [ ] **client: `DialRunner` forwards the unused SSH port** (pre-existing; minor
+  waste per one-shot call). `client/client.go` DialRunner.
+- [ ] **kit.FormatTokens caps at "1000M"** — no unit above M; fine until a billion
+  tokens is a real number. `tui/kit/style.go`.
+- [ ] **WithStateDir ssh-dir layout**: the per-session SSH include lives in a
+  *sibling* `ssh/` dir of the state root (doc now says so honestly). If a cleaner
+  contained layout is wanted pre-OSS, it's a breaking change needing an include-path
+  migration. `client/sync.go` sshConfig.
 
 ## Open caveats (carry-forward)
 
