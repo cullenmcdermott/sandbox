@@ -107,14 +107,21 @@ type State struct {
 	// ClaudeSession is populated from the runner's session.json (the upstream
 	// Claude SDK session id) but is not yet read anywhere in the Go CLI; it is
 	// carried for future resume/inspection features.
-	ClaudeSession string    `json:"claudeSession,omitempty"`
-	LastTurnID    TurnID    `json:"lastTurnId,omitempty"`
-	LastActivity  time.Time `json:"lastActivity,omitempty"`
-	CreatedAt     time.Time `json:"createdAt,omitempty"`
-	PodName       string    `json:"podName,omitempty"`
-	PodReady      bool      `json:"podReady,omitempty"`
-	SandboxName   string    `json:"sandboxName,omitempty"`
-	RunnerToken   string    `json:"-"`
+	ClaudeSession string `json:"claudeSession,omitempty"`
+	// LastTurnID is the most recently started turn, which persists after the
+	// turn finishes (the runner uses it to seed the next turn id). It does NOT
+	// mean a turn is running — that is ActiveTurnID.
+	LastTurnID TurnID `json:"lastTurnId,omitempty"`
+	// ActiveTurnID is the currently running turn, empty when the session is
+	// idle. Only populated from the runner's live registry (GET /status); the
+	// k8s backend cannot know it.
+	ActiveTurnID TurnID    `json:"activeTurnId,omitempty"`
+	LastActivity time.Time `json:"lastActivity,omitempty"`
+	CreatedAt    time.Time `json:"createdAt,omitempty"`
+	PodName      string    `json:"podName,omitempty"`
+	PodReady     bool      `json:"podReady,omitempty"`
+	SandboxName  string    `json:"sandboxName,omitempty"`
+	RunnerToken  string    `json:"-"`
 }
 
 // TurnInput is the user input that starts a turn.

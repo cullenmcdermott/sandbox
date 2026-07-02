@@ -35,12 +35,18 @@ Returns the runner's `session.json` state:
   "status": "idle",
   "claudeSession": "sdk-session-id",
   "lastTurnId": "turn-12",
+  "activeTurnId": "",
   "lastActivity": "2026-06-18T22:30:00Z",
   "model": "claude-sonnet-4-5-20250929"
 }
 ```
 `model` is **optional**: it is omitted until the runner has seen the model id in
 the SDK's init message (i.e. before the first turn it is absent).
+
+`lastTurnId` vs `activeTurnId`: `lastTurnId` is the most recently *started* turn
+and persists after it finishes (it seeds the next turn id). `activeTurnId` is
+the turn currently running — `""` when the session is idle — and is the signal
+clients must use to decide whether there is a turn to interrupt.
 
 ### `GET /sessions/:id/idle`
 Returns the session's idle state, consumed by the per-session reaper to decide
