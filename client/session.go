@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -75,11 +76,17 @@ type ConnectOptions struct {
 	ProjectPath string
 	// ReaperImage overrides the idle-reaper image (empty => client default).
 	ReaperImage string
+	// ReaperImagePullPolicy overrides the idle-reaper imagePullPolicy (empty =>
+	// client default). Case-sensitive; must be exactly "Always", "IfNotPresent",
+	// or "Never".
+	ReaperImagePullPolicy string
 	// IdleTimeout overrides the reaper idle window (0 => client default).
 	IdleTimeout time.Duration
 	// Observer requests a lightweight, read-only connection: port-forward +
 	// runner health only, skipping file-sync setup, the idle-reaper ensure, and
-	// the opencode readiness wait. Used for background status streams.
+	// the opencode readiness wait. It never mutates the cluster: connecting to a
+	// suspended session fails with ErrSessionSuspended instead of resuming it.
+	// Used for background status streams.
 	Observer bool
 	// OnPhase receives coarse connect progress (nil => ignored).
 	OnPhase func(Stage, string)
@@ -126,6 +133,9 @@ func (s *Session) Runner() RunnerClient {
 // reaper, and (for opencode sessions) wait for `opencode serve`. Safe to call
 // repeatedly; prior port-forwards are closed.
 func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection, error) {
+	if err := validateImagePullPolicy(opt.ReaperImagePullPolicy); err != nil {
+		return nil, err
+	}
 	s.closeHandles()
 	onPhase := opt.OnPhase
 	if onPhase == nil {
@@ -149,6 +159,12 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 	case session.StatusGone:
 		return nil, fmt.Errorf("session %s: %w", s.ref.ID, session.ErrSessionGone)
 	case session.StatusSuspended:
+		// Observer connects are read-only: resuming (a cluster mutation that
+		// defeats the idle reaper) is a full-Connect decision. There is nothing
+		// to observe on a suspended session anyway — its pod is gone.
+		if opt.Observer {
+			return nil, fmt.Errorf("session %s: %w", s.ref.ID, ErrSessionSuspended)
+		}
 		stage(StageResume)
 		if err := s.c.backend.Resume(ctx, s.ref); err != nil {
 			return nil, fmt.Errorf("resume: %w", err)
@@ -189,12 +205,18 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", handles[0].LocalPort())
 	token, err := s.c.backend.RunnerToken(ctx, s.ref)
 	if err != nil {
+		// Tear down the forward on every post-forward failure: leaving it (and
+		// the runner client) in place would leak the SPDY goroutines and make
+		// Runner() hand back a client over an unproven transport after a failed
+		// Connect.
+		s.closeHandles()
 		return nil, err
 	}
 	rc := runner.New(endpoint, token)
 	s.setRunner(rc)
 	stage(StageRunner)
 	if err := waitHealthy(ctx, rc); err != nil {
+		s.closeHandles()
 		return nil, fmt.Errorf("runner health: %w", err)
 	}
 
@@ -205,9 +227,27 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 		if reaperImage == "" {
 			reaperImage = s.c.reaperImage
 		}
+		reaperPullPolicy := opt.ReaperImagePullPolicy
+		if reaperPullPolicy == "" {
+			reaperPullPolicy = s.c.reaperPullPolicy
+		}
+		// Reaper idle-window precedence: per-Connect option, then the client
+		// default (WithIdleTimeout), then the SANDBOX_REAPER_IDLE_TIMEOUT test
+		// hook, then the built-in default. The env hook must NOT override an
+		// explicit programmatic choice.
 		idleTimeout := opt.IdleTimeout
 		if idleTimeout == 0 {
 			idleTimeout = s.c.idleTimeout
+		}
+		if idleTimeout == 0 {
+			if v := os.Getenv("SANDBOX_REAPER_IDLE_TIMEOUT"); v != "" {
+				if d, derr := time.ParseDuration(v); derr == nil {
+					idleTimeout = d
+				}
+			}
+		}
+		if idleTimeout == 0 {
+			idleTimeout = DefaultIdleTimeout
 		}
 
 		privPath, _, kerr := s.c.ensureSSHKey(string(s.ref.ID))
@@ -244,7 +284,13 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 
 		// Make sure the idle reaper is watching (a prior one may have completed
 		// when the session was suspended).
-		s.c.ensureReaper(ctx, s.ref, reaperImage, idleTimeout)
+		if w := s.c.ensureReaper(ctx, s.ref, reaperImage, reaperPullPolicy, idleTimeout); w != "" {
+			if syncWarning != "" {
+				syncWarning += "; " + w
+			} else {
+				syncWarning = w
+			}
+		}
 	}
 
 	conn := &Connection{
@@ -360,10 +406,10 @@ func (s *Session) CancelTurn(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if st.LastTurnID == "" {
+	if st.ActiveTurnID == "" {
 		return ErrNoActiveTurn
 	}
-	return rc.InterruptTurn(ctx, s.ref, TurnRef{Session: s.ref.ID, Turn: st.LastTurnID})
+	return rc.InterruptTurn(ctx, s.ref, TurnRef{Session: s.ref.ID, Turn: st.ActiveTurnID})
 }
 
 // ResolvePermission answers a pending permission request.

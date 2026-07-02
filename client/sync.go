@@ -128,8 +128,9 @@ func (c *Client) ensureSSHKey(id string) (privPath, authorizedKey string, err er
 	return privPath, auth, nil
 }
 
-// sshConfig returns the per-session SSH alias manager, writing into the state
-// dir's ssh/config (included from ~/.ssh/config).
+// sshConfig returns the per-session SSH alias manager. The include file lives
+// in an "ssh" dir that is a sibling of the state dir (see WithStateDir), and is
+// Include'd from ~/.ssh/config.
 func (c *Client) sshConfig() (*syncpkg.SSHConfig, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -175,24 +176,25 @@ func (c *Client) startMutagen(ctx context.Context, id, projectPath, privPath str
 }
 
 // ensureReaper starts (or confirms) the per-session idle reaper. A failure is
-// non-fatal — the session works without auto-suspend — so it only warns.
-func (c *Client) ensureReaper(ctx context.Context, ref Ref, image string, idleTimeout time.Duration) {
-	opts := k8s.ReaperOptions{Image: image, IdleTimeout: idleTimeout}
-	// Test/override hooks: shorten the idle window and poll for end-to-end
-	// validation without waiting the default. Unset => EnsureReaper defaults.
-	if v := os.Getenv("SANDBOX_REAPER_IDLE_TIMEOUT"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			opts.IdleTimeout = d
-		}
-	}
+// non-fatal — the session works without auto-suspend — so it returns a warning
+// string for the caller to surface (Connection.Warning), empty on success.
+// Writing to stderr here would be invisible to library callers and corrupt an
+// active TUI. (The idle window is resolved by Connect; see the precedence note
+// there.)
+func (c *Client) ensureReaper(ctx context.Context, ref Ref, image, pullPolicy string, idleTimeout time.Duration) string {
+	opts := k8s.ReaperOptions{Image: image, ImagePullPolicy: pullPolicy, IdleTimeout: idleTimeout}
+	// Test hook: shorten the reaper poll for end-to-end validation without
+	// waiting the default. There is no programmatic knob for it. Unset =>
+	// EnsureReaper default.
 	if v := os.Getenv("SANDBOX_REAPER_POLL"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			opts.PollInterval = d
 		}
 	}
 	if err := c.backend.EnsureReaper(ctx, ref, opts); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: idle reaper for %s not started: %v\n", ref.ID, err)
+		return fmt.Sprintf("idle reaper not started (session won't auto-suspend): %v", err)
 	}
+	return ""
 }
 
 // waitHealthy polls the runner /healthz until it responds OK or ctx is done. A

@@ -86,3 +86,36 @@ func TestNewIDFormat(t *testing.T) {
 		t.Errorf("project-path hash differs across calls: %q vs %q", seg1[len(seg1)-2], seg2[len(seg2)-2])
 	}
 }
+
+// NewID promises a valid Kubernetes DNS label for ANY backend input: no leading
+// or trailing dash, non-empty, <= 63 chars, [a-z0-9-] only.
+func TestNewIDAlwaysValidDNSLabel(t *testing.T) {
+	backends := []string{
+		"",                       // sanitizes to nothing -> "session" fallback
+		"---",                    // all dashes -> "session" fallback
+		"日本語",                    // every rune replaced -> trimmed away
+		"-leading-and-trailing-", // dashes at the edges
+		strings.Repeat("verylongbackendname", 10), // must truncate to fit 63
+		"UPPER.case_Backend",
+	}
+	for _, b := range backends {
+		id, err := NewID(b, "/work/repo")
+		if err != nil {
+			t.Fatalf("NewID(%q): %v", b, err)
+		}
+		s := string(id)
+		if s == "" || len(s) > 63 {
+			t.Errorf("NewID(%q) = %q: length %d, want 1..63", b, s, len(s))
+		}
+		if strings.HasPrefix(s, "-") || strings.HasSuffix(s, "-") {
+			t.Errorf("NewID(%q) = %q: leading/trailing dash", b, s)
+		}
+		for i := 0; i < len(s); i++ {
+			c := s[i]
+			valid := (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-'
+			if !valid {
+				t.Errorf("NewID(%q) = %q: disallowed byte %q at %d", b, s, c, i)
+			}
+		}
+	}
+}

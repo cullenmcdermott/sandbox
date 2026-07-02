@@ -20,6 +20,11 @@ var (
 	// flight to interrupt.
 	ErrNoActiveTurn = errors.New("sandbox: no active turn")
 
+	// ErrSessionSuspended is returned by an Observer Connect against a suspended
+	// session: observer connects are read-only and never resume (the pod is gone,
+	// so there is nothing to observe). Resume the session or use a full Connect.
+	ErrSessionSuspended = errors.New("sandbox: session is suspended")
+
 	// ErrProjectPathRequired is returned by Create when CreateOptions.ProjectPath
 	// is empty. The project path is the absolute workspace path mirrored into the
 	// pod; the library does not assume a current working directory.
@@ -29,8 +34,9 @@ var (
 	// when called before a successful Connect.
 	ErrNotConnected = errors.New("sandbox: session not connected (call Connect first)")
 
-	// ErrInvalidImagePullPolicy is returned by Create when CreateOptions.ImagePullPolicy
-	// is a non-empty value other than the exact spellings "Always", "IfNotPresent",
-	// or "Never".
+	// ErrInvalidImagePullPolicy is returned when an image pull-policy override
+	// (CreateOptions.ImagePullPolicy, WithReaperImagePullPolicy, or
+	// ConnectOptions.ReaperImagePullPolicy) is a non-empty value other than the
+	// exact spellings "Always", "IfNotPresent", or "Never".
 	ErrInvalidImagePullPolicy = errors.New("sandbox: invalid image pull policy")
 )

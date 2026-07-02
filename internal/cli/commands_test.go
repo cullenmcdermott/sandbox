@@ -68,7 +68,7 @@ func (f *fakeTurnClient) InterruptTurn(_ context.Context, _ session.Ref, turn se
 func TestCancelActiveTurnInterruptsLiveTurn(t *testing.T) {
 	ref := session.Ref{ID: "s1"}
 	client := &fakeTurnClient{
-		state: session.State{ID: "s1", LastTurnID: "turn-42"},
+		state: session.State{ID: "s1", LastTurnID: "turn-42", ActiveTurnID: "turn-42"},
 	}
 
 	if err := cancelActiveTurn(context.Background(), client, ref); err != nil {
@@ -88,7 +88,10 @@ func TestCancelActiveTurnInterruptsLiveTurn(t *testing.T) {
 // TestCancelActiveTurnNoActiveTurn: when the runner reports no active turn,
 // cancel errors and does NOT call InterruptTurn.
 func TestCancelActiveTurnNoActiveTurn(t *testing.T) {
-	client := &fakeTurnClient{state: session.State{ID: "s1", LastTurnID: ""}}
+	// LastTurnID persists after a turn finishes; only an empty ActiveTurnID
+	// means "nothing running". Set LastTurnID to prove cancel keys off the
+	// right field.
+	client := &fakeTurnClient{state: session.State{ID: "s1", LastTurnID: "turn-42", ActiveTurnID: ""}}
 
 	err := cancelActiveTurn(context.Background(), client, session.Ref{ID: "s1"})
 	if err == nil {

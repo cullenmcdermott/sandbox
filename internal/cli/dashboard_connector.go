@@ -66,6 +66,7 @@ func newDashboardConnector(c *client.Client, reaperImage string) dashboard.Conne
 
 		conn, err := sess.Connect(ctx, opt)
 		if err != nil {
+			sess.Close()
 			return dashboard.ConnectResult{}, fmt.Errorf("connect %s: %w", ref.ID, err)
 		}
 
@@ -100,6 +101,7 @@ func newDashboardObserverConnector(c *client.Client, reaperImage string) dashboa
 
 		conn, err := sess.Connect(ctx, opt)
 		if err != nil {
+			sess.Close()
 			return dashboard.ConnectResult{}, fmt.Errorf("observe %s: %w", ref.ID, err)
 		}
 

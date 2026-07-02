@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"time"
 
 	"k8s.io/client-go/rest"
@@ -84,15 +85,16 @@ const (
 
 // options collects New's configuration before it builds a Client.
 type options struct {
-	namespace      string
-	kubeconfigPath string
-	contextName    string
-	restConfig     *rest.Config
-	stateDir       string
-	runnerImage    string
-	reaperImage    string
-	idleTimeout    time.Duration
-	backend        *k8s.Backend
+	namespace        string
+	kubeconfigPath   string
+	contextName      string
+	restConfig       *rest.Config
+	stateDir         string
+	runnerImage      string
+	reaperImage      string
+	reaperPullPolicy string
+	idleTimeout      time.Duration
+	backend          *k8s.Backend
 }
 
 // Option configures a Client built by New.
@@ -112,7 +114,14 @@ func WithContext(name string) Option { return func(o *options) { o.contextName =
 func WithRESTConfig(rc *rest.Config) Option { return func(o *options) { o.restConfig = rc } }
 
 // WithStateDir overrides the local state directory (session index + per-session
-// SSH keys + SSH include config). Defaults to ~/.local/share/sandbox/remote-sessions.
+// SSH keys). Defaults to ~/.local/share/sandbox/remote-sessions.
+//
+// Note the per-session SSH alias config is written to an "ssh" directory that
+// is a SIBLING of the state dir (dir(stateDir)/ssh/config — for the default,
+// ~/.local/share/sandbox/ssh/config) and an Include line for it is added to
+// ~/.ssh/config on the first Connect. Point WithStateDir at a dedicated
+// subdirectory (e.g. <appdir>/remote-sessions) so the ssh dir lands inside
+// your app's directory rather than beside it.
 func WithStateDir(dir string) Option { return func(o *options) { o.stateDir = dir } }
 
 // WithRunnerImage sets the default runner image for Create (overridable per call).
@@ -120,6 +129,16 @@ func WithRunnerImage(img string) Option { return func(o *options) { o.runnerImag
 
 // WithReaperImage sets the default idle-reaper image (overridable per Connect).
 func WithReaperImage(img string) Option { return func(o *options) { o.reaperImage = img } }
+
+// WithReaperImagePullPolicy sets the default imagePullPolicy for the idle-reaper
+// Job's container (overridable per Connect). Case-sensitive; must be exactly
+// "Always", "IfNotPresent", or "Never". Empty derives the policy from the image
+// ref (IfNotPresent for digest-pinned, else Always). Needed for side-loaded
+// reaper images, where a tagged ref would otherwise resolve to Always and the
+// kubelet's pull could never succeed.
+func WithReaperImagePullPolicy(p string) Option {
+	return func(o *options) { o.reaperPullPolicy = p }
+}
 
 // WithIdleTimeout sets the default idle window before the reaper suspends a
 // session (overridable per Connect).
@@ -132,12 +151,13 @@ func WithBackend(b *k8s.Backend) Option { return func(o *options) { o.backend = 
 // Client is the entry point: it owns the Kubernetes backend, the local session
 // index, and default image/idle settings, and mints Sessions.
 type Client struct {
-	backend     *k8s.Backend
-	index       *index.Index
-	stateDir    string
-	runnerImage string
-	reaperImage string
-	idleTimeout time.Duration
+	backend          *k8s.Backend
+	index            *index.Index
+	stateDir         string
+	runnerImage      string
+	reaperImage      string
+	reaperPullPolicy string
+	idleTimeout      time.Duration
 }
 
 // New builds a Client. With no options it loads kubeconfig from the standard
@@ -147,6 +167,11 @@ func New(opts ...Option) (*Client, error) {
 	var o options
 	for _, opt := range opts {
 		opt(&o)
+	}
+
+	// Fail fast at construction rather than at first Connect.
+	if err := validateImagePullPolicy(o.reaperPullPolicy); err != nil {
+		return nil, err
 	}
 
 	backend := o.backend
@@ -185,18 +210,17 @@ func New(opts ...Option) (*Client, error) {
 	if reaperImage == "" {
 		reaperImage = k8s.DefaultReaperImage
 	}
-	idle := o.idleTimeout
-	if idle == 0 {
-		idle = DefaultIdleTimeout
-	}
-
+	// idleTimeout stays 0 when WithIdleTimeout was not used: Connect needs to
+	// distinguish "explicitly configured" (beats the SANDBOX_REAPER_IDLE_TIMEOUT
+	// test hook) from "defaulted" (the hook applies).
 	return &Client{
-		backend:     backend,
-		index:       index.New(stateDir),
-		stateDir:    stateDir,
-		runnerImage: runnerImage,
-		reaperImage: reaperImage,
-		idleTimeout: idle,
+		backend:          backend,
+		index:            index.New(stateDir),
+		stateDir:         stateDir,
+		runnerImage:      runnerImage,
+		reaperImage:      reaperImage,
+		reaperPullPolicy: o.reaperPullPolicy,
+		idleTimeout:      o.idleTimeout,
 	}, nil
 }
 
@@ -371,7 +395,9 @@ func (c *Client) DialRunner(ctx context.Context, ref Ref) (RunnerClient, func(),
 // NewID mints a fresh, unique session id for a project: the backend name, a short
 // hash of the project path (so sessions are grouped by project at a glance), and
 // a random suffix that guarantees uniqueness. The result is a valid Kubernetes
-// DNS label.
+// DNS label for any backend/projectPath input: the backend part is sanitized,
+// trimmed, defaulted ("session") when it sanitizes away entirely, and truncated
+// so the id stays within the 63-character label limit.
 func NewID(backend, projectPath string) (ID, error) {
 	sum := sha256.Sum256([]byte(projectPath))
 	pathHash := hex.EncodeToString(sum[:])[:6]
@@ -380,7 +406,17 @@ func NewID(backend, projectPath string) (ID, error) {
 	if _, err := rand.Read(rnd); err != nil {
 		return "", fmt.Errorf("generate session id: %w", err)
 	}
-	return ID(sanitizeLabel(backend) + "-" + pathHash + "-" + hex.EncodeToString(rnd)), nil
+
+	// A DNS label is at most 63 chars and must start/end alphanumeric. The
+	// fixed suffix ("-" + 6 hash + "-" + 8 random) leaves 47 for the backend.
+	prefix := strings.Trim(sanitizeLabel(backend), "-")
+	if len(prefix) > 47 {
+		prefix = strings.TrimRight(prefix[:47], "-")
+	}
+	if prefix == "" {
+		prefix = "session"
+	}
+	return ID(prefix + "-" + pathHash + "-" + hex.EncodeToString(rnd)), nil
 }
 
 // validateImagePullPolicy rejects a non-empty override that isn't one of the

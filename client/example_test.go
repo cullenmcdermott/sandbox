@@ -110,3 +110,12 @@ func TestCreateRejectsInvalidImagePullPolicy(t *testing.T) {
 		t.Fatalf("Create with empty path: got %v, want ErrProjectPathRequired", err)
 	}
 }
+
+// New must reject an invalid reaper pull-policy override at construction (fail
+// fast) rather than at first Connect.
+func TestNewRejectsInvalidReaperImagePullPolicy(t *testing.T) {
+	_, err := client.New(client.WithReaperImagePullPolicy("never"))
+	if !errors.Is(err, client.ErrInvalidImagePullPolicy) {
+		t.Fatalf("New with bad reaper pull policy: got %v, want ErrInvalidImagePullPolicy", err)
+	}
+}

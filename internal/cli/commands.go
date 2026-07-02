@@ -31,10 +31,10 @@ func cancelActiveTurn(ctx context.Context, client turnStateClient, ref session.R
 	if err != nil {
 		return err
 	}
-	if st.LastTurnID == "" {
+	if st.ActiveTurnID == "" {
 		return fmt.Errorf("no active turn in session %s", ref.ID)
 	}
-	return client.InterruptTurn(ctx, ref, session.TurnRef{Session: ref.ID, Turn: st.LastTurnID})
+	return client.InterruptTurn(ctx, ref, session.TurnRef{Session: ref.ID, Turn: st.ActiveTurnID})
 }
 
 func newAttachCmd() *cobra.Command {
@@ -97,8 +97,8 @@ func newSuspendCmd() *cobra.Command {
 			if rc, cleanup, err := c.DialRunner(ctx, ref); err == nil {
 				st, sErr := rc.SessionState(ctx, ref)
 				cleanup()
-				if sErr == nil && st.LastTurnID != "" {
-					fmt.Fprintf(cmd.ErrOrStderr(), "warning: session %q has an active turn (%s); it will be interrupted by the SIGTERM flush\n", args[0], st.LastTurnID)
+				if sErr == nil && st.ActiveTurnID != "" {
+					fmt.Fprintf(cmd.ErrOrStderr(), "warning: session %q has an active turn (%s); it will be interrupted by the SIGTERM flush\n", args[0], st.ActiveTurnID)
 				}
 			}
 			// Suspend pauses file sync as part of the lifecycle (the pod's SSH
@@ -291,20 +291,27 @@ func newSyncCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			id := session.ID(args[0])
-			c, err := newClient()
-			if err != nil {
-				return err
-			}
+			id := string(session.ID(args[0]))
+			// Deliberately NOT via newClient(): these are purely local mutagen
+			// operations, and needing a loadable kubeconfig here would block
+			// exactly the user who wants to clean up syncs for a cluster that is
+			// already gone. Only `sync gc` needs cluster access.
+			mgr := syncManager()
 			switch {
 			case pause:
-				return c.SyncPause(ctx, id)
+				return mgr.PauseAll(ctx, id)
 			case resume:
-				return c.SyncResume(ctx, id)
+				return mgr.ResumeAll(ctx, id)
 			case terminate:
-				return c.SyncTerminate(ctx, id)
+				if err := mgr.TerminateAll(ctx, id); err != nil {
+					return err
+				}
+				if cfg, err := localSSHConfig(); err == nil {
+					_ = cfg.Remove(id)
+				}
+				return nil
 			default:
-				out, err := c.SyncStatus(ctx, id)
+				out, err := mgr.Status(ctx, id)
 				if err != nil {
 					return err
 				}

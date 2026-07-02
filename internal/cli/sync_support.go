@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/cullenmcdermott/sandbox/client"
@@ -23,9 +25,28 @@ func newIndex() (*index.Index, error) {
 }
 
 // syncManager returns a Mutagen sync Manager backed by the mutagen CLI, for the
-// dashboard's read-only health probe and the orphan GC sweep.
+// dashboard's read-only health probe, the orphan GC sweep, and the local-only
+// `sandbox sync` operations.
 func syncManager() *syncpkg.Manager {
 	return syncpkg.New(syncpkg.NewExecRunner(""))
+}
+
+// localSSHConfig returns the per-session SSH alias manager at the default state
+// root — the same include file the client package writes (a sibling "ssh" dir
+// of the state root, Include'd from ~/.ssh/config) — without needing a
+// cluster-connected client. Used by `sandbox sync --terminate`, which must work
+// when the kubeconfig is gone.
+func localSSHConfig() (*syncpkg.SSHConfig, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	root, err := index.DefaultRoot()
+	if err != nil {
+		return nil, err
+	}
+	include := filepath.Join(filepath.Dir(root), "ssh", "config")
+	return syncpkg.NewSSHConfig(include, filepath.Join(home, ".ssh", "config")), nil
 }
 
 // dashboardSyncProber builds the dashboard's per-session sync-health probe,
