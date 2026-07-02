@@ -201,7 +201,20 @@ that diverges. Scope is event payloads only — HTTP request/response bodies and
   session cannot reach the API server, in-cluster services, or `169.254.169.254`
   (see the example manifests in this repo, `k8s/networkpolicy-default-deny.yaml`
   + `k8s/networkpolicy-egress-allow.yaml`; the maintainer's real cluster wiring
-  is a separate private deployment).
+  is a separate private deployment). Be clear about what this is: a
+  **lateral-movement boundary, not an exfiltration one**. Agents need the public
+  internet to work, so a compromised or prompt-injected agent can POST anything
+  it can read to any public host on 443. Exfil control is limited to what never
+  reaches the pod — the file-sync ignore boundary below.
+- **File-sync boundary (laptop↔pod):** the project sync's ignores layer in
+  mutagen later-wins precedence order: large build trees (overridable), the
+  project root's **`.gitignore`** translated verbatim to `--ignore` flags (what
+  you keep out of git stays off the pod), then a **non-overridable** final
+  layer — secret patterns (`.env`, `.env.*`, `*.pem`, `*.key`, `*.p12`,
+  `*.pfx`) plus files that auto-execute on the host if the pod agent writes
+  them and two-way sync carries them back (`.envrc`, `.direnv`, `.vscode`,
+  `.idea`). Nested `.gitignore` files and git's global excludesFile are not
+  consulted. See `internal/sync/sync.go` + `internal/sync/gitignore.go`.
 - **Pod hardening:** `seccompProfile: RuntimeDefault`; namespace is PodSecurity
   Admission `baseline` enforce / `restricted` warn. The container `securityContext`
   drops **all** capabilities, then re-adds only the default runtime set sshd's
@@ -210,9 +223,16 @@ that diverges. Scope is event payloads only — HTTP request/response bodies and
   `allowPrivilegeEscalation: false` (BR1). The runner still runs as **root**
   (sshd + single-uid workspace ownership); moving to non-root + `fsGroup` is a
   tracked follow-up (M20).
-- **Tool guardrails:** the runner's PreToolUse hook blocks host/cluster/credential
-  Bash patterns (defense-in-depth, not a boundary), and PostToolUse writes an
-  audit log.
+- **Tool guardrails:** both backends gate + audit in-agent Bash use from one
+  blocklist (`runner/src/guards.ts`; defense-in-depth, not a boundary). Claude
+  enforces it via the PreToolUse(Bash) hook, with a PostToolUse audit log.
+  opencode — whose tools run inside the un-proxied `opencode serve` process — is
+  gated by a guardrail plugin the runner generates at boot from the same
+  patterns and registers in the opencode config's `plugin` array; its
+  `tool.execute.before` hook throws to block a match. Every opencode tool
+  execution (headless `/turns` and interactive `attach` cycles) is audited to
+  `audit.jsonl` through the shared turn mapper. Both mechanisms fail open (a
+  plugin-install failure logs loudly but never blocks `opencode serve`).
 
 ## Unvalidated paths
 
