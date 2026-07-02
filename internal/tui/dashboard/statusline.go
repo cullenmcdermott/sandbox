@@ -378,21 +378,21 @@ func (m *TranscriptModel) activeModelWindow() (util float64, reset time.Time, la
 // renderStatusLine renders the 4-row CC-clone status line, themed via the
 // Phase-0a tokens. Always visible (idle and during a turn).
 func (m *TranscriptModel) renderStatusLine() string {
-	muted := lipgloss.NewStyle().Foreground(theme.TextMuted) // connective text
-	label := lipgloss.NewStyle().Foreground(theme.TextSecondary)
+	muted := styleSLMuted // connective text
+	label := styleSLLabel
 	sep := muted.Render(" ─ ")
 
 	// Row 1: model ─ cwd ─ branch* ─ used/limit pct ●bar · $cost.
 	segs := []string{
-		lipgloss.NewStyle().Foreground(theme.TextBright).Bold(true).Render(shortModelName(m.model)),
-		lipgloss.NewStyle().Foreground(theme.TextBody).Render(m.statusCwd()),
+		styleSLBright.Render(shortModelName(m.model)),
+		styleSLBody.Render(m.statusCwd()),
 	}
 	if m.branch != "" {
 		b := m.branch
 		if m.dirty {
 			b += "*"
 		}
-		branch := lipgloss.NewStyle().Foreground(theme.Peach).Render(b)
+		branch := styleSLBranch.Render(b)
 		if m.ahead > 0 || m.behind > 0 {
 			branch += muted.Render(fmt.Sprintf(" ↑%d↓%d", m.ahead, m.behind))
 		}
@@ -414,7 +414,7 @@ func (m *TranscriptModel) renderStatusLine() string {
 	pct := int(frac*100 + 0.5)
 	warn := ""
 	if pct >= 80 {
-		warn = lipgloss.NewStyle().Foreground(theme.Coral).Bold(true).Render("! ")
+		warn = styleSLWarn.Render("! ")
 	}
 	// Stage 1: while a turn runs on a truecolor terminal (and motion is allowed),
 	// the gauge fill becomes a live gradient that shimmers per work-tick frame and
@@ -431,7 +431,7 @@ func (m *TranscriptModel) renderStatusLine() string {
 	case m.caps.TrueColor && !m.caps.ReduceMotion && m.status == StatusBusy:
 		bar = shimmerBlockBar(frac, 10, m.workFrame, pct >= 80)
 	}
-	ctx := lipgloss.NewStyle().Foreground(theme.TextBody).Render(fmt.Sprintf("%s/%s ", fmtTokenLimit(used), fmtTokenLimit(limit))) +
+	ctx := styleSLBody.Render(fmt.Sprintf("%s/%s ", fmtTokenLimit(used), fmtTokenLimit(limit))) +
 		warn +
 		lipgloss.NewStyle().Foreground(rampColor(frac)).Render(fmt.Sprintf("%d%% ", pct)) +
 		bar
@@ -439,7 +439,7 @@ func (m *TranscriptModel) renderStatusLine() string {
 
 	row1 := strings.Join(segs, sep)
 	if m.costUSD > 0 {
-		row1 += muted.Render(" · ") + lipgloss.NewStyle().Foreground(theme.Guac).Render(fmt.Sprintf("$%.4f", m.costUSD))
+		row1 += muted.Render(" · ") + styleSLCost.Render(fmt.Sprintf("$%.4f", m.costUSD))
 	}
 	// Mode moves onto row 1 as a compact trailing tag (was the separate row 4).
 	row1 += muted.Render(" · ") + m.mode.modeTag()
@@ -462,7 +462,7 @@ func (m *TranscriptModel) renderStatusLine() string {
 	// available; otherwise BLANK — we never fabricate values and never show a
 	// placeholder (A2.5: rate-limit detail only-when-present). The block stays a
 	// fixed two rows regardless, so the body height never reflows.
-	body := lipgloss.NewStyle().Foreground(theme.TextBody)
+	body := styleSLBody
 	row2 := ""
 	switch {
 	case m.rlSeen && m.rlAvailable:

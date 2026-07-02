@@ -196,6 +196,20 @@ func (l *List) TotalHeight() int {
 	return total
 }
 
+// Metrics returns TotalHeight and Offset in a single pass over the items —
+// callers that need both every frame (a scrollbar) pay one walk, not two.
+func (l *List) Metrics() (total, offset int) {
+	l.normalize()
+	for i := range l.items {
+		h := l.heightAt(i)
+		if i < l.offsetIdx {
+			offset += h
+		}
+		total += h
+	}
+	return total, offset + l.offsetLine
+}
+
 func (l *List) Offset() int {
 	l.normalize()
 	offset := 0

@@ -142,6 +142,11 @@ type Session struct {
 	// used for the detail pane "allow X?" prompt.
 	PendingPermissionTool string
 
+	// PendingPermissionArg is the pending permission's headline argument (Bash
+	// command, file path, URL, …) so the detail pane and permission queue show
+	// what is being approved, not just the tool name.
+	PendingPermissionArg string
+
 	// statusChangedAt is when DashStatus last changed, used to fade the row's
 	// glyph in over a short window (the fresh-data charm touch). Zero means no
 	// fade (e.g. initial seed).
@@ -495,10 +500,19 @@ func ParseStatus(label string) (SessionStatus, bool) {
 // The cluster-derived State and titles are left untouched — they come from the
 // seed. Callers must gate this on the cluster status (see applySeed): a stale
 // running-status must not override a suspended/failed pod.
+// clearPendingPermission resets the pending-permission read-model fields (on
+// resolution or turn end).
+func (s *Session) clearPendingPermission() {
+	s.PendingPermissionID = ""
+	s.PendingPermissionTool = ""
+	s.PendingPermissionArg = ""
+}
+
 func (s *Session) applySnapshot(snap SessionSnapshot) {
 	s.DashStatus = snap.DashStatus
 	s.PendingPermissionID = snap.PendingPermissionID
 	s.PendingPermissionTool = snap.PendingPermissionTool
+	s.PendingPermissionArg = snap.PendingPermissionArg
 	if snap.Model != "" {
 		s.Model = snap.Model
 		s.CtxLimit = models.Limit(snap.Model).ContextLimit
@@ -596,8 +610,7 @@ func ApplyRunnerEvent(sess *Session, ev session.Event) bool {
 	case session.EventTurnStarted:
 		sess.DashStatus = StatusBusy
 		// Clear any stale permission state from a previous turn.
-		sess.PendingPermissionID = ""
-		sess.PendingPermissionTool = ""
+		sess.clearPendingPermission()
 
 	case session.EventPermissionRequested:
 		var p session.PermissionPayload
@@ -605,27 +618,24 @@ func ApplyRunnerEvent(sess *Session, ev session.Event) bool {
 		sess.DashStatus = StatusWaiting
 		sess.PendingPermissionID = p.PermissionID
 		sess.PendingPermissionTool = p.Tool
+		sess.PendingPermissionArg = toolArg(p.Tool, p.Input)
 
 	case session.EventPermissionResolved:
 		// Turn is still active; revert to busy (the turn continues).
 		sess.DashStatus = StatusBusy
-		sess.PendingPermissionID = ""
-		sess.PendingPermissionTool = ""
+		sess.clearPendingPermission()
 
 	case session.EventTurnCompleted:
 		sess.DashStatus = StatusNeedsInput
-		sess.PendingPermissionID = ""
-		sess.PendingPermissionTool = ""
+		sess.clearPendingPermission()
 
 	case session.EventTurnInterrupted:
 		sess.DashStatus = StatusNeedsInput
-		sess.PendingPermissionID = ""
-		sess.PendingPermissionTool = ""
+		sess.clearPendingPermission()
 
 	case session.EventTurnFailed:
 		sess.DashStatus = StatusFailed
-		sess.PendingPermissionID = ""
-		sess.PendingPermissionTool = ""
+		sess.clearPendingPermission()
 
 	case session.EventUsageUpdated:
 		// Live token/cost accounting (Phase 3). Does not change the six-state

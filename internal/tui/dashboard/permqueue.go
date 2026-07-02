@@ -70,6 +70,11 @@ func (m *Model) renderPermQueue(w int) string {
 			note := ""
 			if s.PendingPermissionTool != "" {
 				note = "wants: " + s.PendingPermissionTool
+				// Show what is being approved (command/path/url), not just the
+				// tool name — batch-approving blind defeats the queue's purpose.
+				if s.PendingPermissionArg != "" {
+					note += "  " + truncate(s.PendingPermissionArg, max(8, boxW-len(note)-6))
+				}
 			} else {
 				note = ClientLabel(s.State.Backend) + " · " + filepathBaseLocal(s.State.ProjectPath)
 				if g := BackendGlyph(s.State.Backend); g != "" {

@@ -142,7 +142,7 @@ func blockSearchText(b tblock) string {
 		}
 	case blockShell:
 		return b.text
-	case blockError, blockInfo:
+	case blockError, blockInfo, blockWarn:
 		return b.text
 	}
 	return ""

@@ -89,9 +89,9 @@ func (km KeyMap) ShortHelp() []key.Binding {
 // per column). Implements help.KeyMap.
 func (km KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{km.Up, km.Down, km.Top, km.Bottom, km.Attach},
-		{km.Filter, km.SortCycle, km.SortFlip, km.AttentionToggle},
+		{km.Up, km.Down, km.Top, km.Bottom, km.Attach, km.Detach},
+		{km.Filter, km.SortCycle, km.SortFlip, km.AttentionToggle, km.GroupToggle},
 		{km.New, km.Suspend, km.Resume, km.Approve, km.Deny, km.Destroy},
-		{km.Help, km.Switcher, km.Quit},
+		{km.Rename, km.Archive, km.Help, km.Switcher, km.Quit},
 	}
 }

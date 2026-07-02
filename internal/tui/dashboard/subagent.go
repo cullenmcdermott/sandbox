@@ -213,11 +213,13 @@ func (m *TranscriptModel) renderChildTool(branch string, c *toolCard, width int)
 		icon = "✗"
 		iconStyle = lipgloss.NewStyle().Foreground(theme.Coral)
 	}
+	// A2.4 (Calm), same treatment as the flat tool card: name TextSecondary
+	// (not bold Malibu), arg TextMuted — only the status icon keeps its color.
 	line := lipgloss.NewStyle().Foreground(theme.TextDim).Render("   "+branch+" ") +
 		iconStyle.Render(icon) + " " +
-		lipgloss.NewStyle().Foreground(theme.Malibu).Bold(true).Render(c.tool)
+		lipgloss.NewStyle().Foreground(theme.TextSecondary).Render(c.tool)
 	if c.arg != "" {
-		line += "  " + lipgloss.NewStyle().Foreground(theme.TextBody).Render(truncate(c.arg, max(8, width/2)))
+		line += "  " + lipgloss.NewStyle().Foreground(theme.TextMuted).Render(truncate(c.arg, max(8, width/2)))
 	}
 	switch {
 	case c.summary != "":

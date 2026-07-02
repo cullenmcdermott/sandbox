@@ -309,6 +309,14 @@ func padTo(s string, w int) string {
 // follow-up command and whether the key was consumed by the palette.
 func (m *TranscriptModel) paletteKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 	switch msg.String() {
+	case "esc":
+		// Dismiss the palette like search/help dismiss — clearing the `/` query
+		// closes it (paletteOpen keys off the input prefix). Backspacing the
+		// slash away character by character was the only exit before.
+		m.input.Reset()
+		m.cmdSel = 0
+		m.layout()
+		return nil, true
 	case "up":
 		if m.cmdSel > 0 {
 			m.cmdSel--

@@ -45,6 +45,7 @@ const (
 	blockTool
 	blockToolErr
 	blockInfo
+	blockWarn // a warning notice (pod reschedule, degradation) — Warning tone, between info and error
 	blockError
 	blockToolCard  // a structured tool call (see toolCard)
 	blockShell     // a one-shot `!` shell result (pre-styled multi-line text)
@@ -69,6 +70,7 @@ const (
 type toolCard struct {
 	tool    string
 	arg     string
+	rawJSON string // accumulated tool.delta input fragments (parsed into arg, never shown raw)
 	status  toolStatus
 	summary string
 }
@@ -86,6 +88,7 @@ type tblock struct {
 type transcriptPermission struct {
 	id        string
 	tool      string
+	arg       string    // headline argument (Bash command, file path, URL, …) so approval is never blind
 	adds      int       // line additions (for the +N stat)
 	dels      int       // line deletions (for the −N stat)
 	diffLines []string  // "+"/"−"-prefixed lines, revealed by [↵] view diff
@@ -1050,6 +1053,8 @@ func (m *TranscriptModel) renderBlockRaw(b tblock) string {
 		return styleTError.Render(b.text)
 	case blockInfo:
 		return styleTInfo.Render(b.text)
+	case blockWarn:
+		return lipgloss.NewStyle().Foreground(theme.Warning).Render(b.text)
 	case blockShell, blockFooter:
 		// Pre-styled block; render verbatim.
 		return b.text
@@ -1066,7 +1071,9 @@ func (m *TranscriptModel) renderBlockRaw(b tblock) string {
 		// (chat-rendering §4.4). Shown in a compact single-line summary when
 		// short, or multi-line for longer reasoning.
 		lines := strings.Count(b.text, "\n") + 1
-		label := lipgloss.NewStyle().Foreground(theme.TextMuted).Bold(true).Render("💭 Thought")
+		// "∴" keeps the geometric glyph vocabulary (◐◆❯○▌◇…) — emoji here broke
+		// the set and renders double-width in some terminals.
+		label := lipgloss.NewStyle().Foreground(theme.TextMuted).Bold(true).Render("∴ Thought")
 		if lines <= 1 {
 			return label + lipgloss.NewStyle().Foreground(theme.TextMuted).Render(": "+b.text)
 		}
@@ -1086,10 +1093,10 @@ func (m *TranscriptModel) appendBlock(kind tblockKind, text string) {
 // the present-tense ActiveForm is preferred when set.
 func renderTodos(todos []session.TodoItem) string {
 	if len(todos) == 0 {
-		return "📋 todo list cleared"
+		return "▤ todo list cleared"
 	}
 	var b strings.Builder
-	b.WriteString("📋 todo list")
+	b.WriteString("▤ todo list")
 	for _, t := range todos {
 		var glyph string
 		switch t.Status {
@@ -1400,6 +1407,18 @@ func (m *TranscriptModel) renderInput() string {
 	if m.vimEnabled {
 		badge = m.modeBadge()
 	}
+	// A queued prompt was previously invisible: submit-during-turn made the text
+	// vanish with no cue that it would send later (and silently changed what esc
+	// does). Surface it as a chip, with the steer affordance spelled out.
+	if m.queuedPrompt != "" {
+		chip := lipgloss.NewStyle().Foreground(theme.Gold).
+			Render("↳ queued: "+truncate(m.queuedPrompt, max(8, m.width/3))) +
+			styleSLMuted.Render(" · esc sends now")
+		if badge != "" {
+			badge += " "
+		}
+		badge += chip
+	}
 	gap := m.width - lipgloss.Width(badge) - lipgloss.Width(right)
 	if gap < 1 {
 		gap = 1
@@ -1414,15 +1433,30 @@ func (m *TranscriptModel) renderInput() string {
 func (m *TranscriptModel) buildPermissionBox(width int) string {
 	p := m.pending
 
-	head := lipgloss.NewStyle().Foreground(theme.OnGold).Bold(true).Render(theme.GlyphWaiting + " " + p.tool)
+	// The tool name sits on a gold badge (OnGold text needs the Gold background
+	// to be visible at all — bare OnGold is near-invisible on a dark surface).
+	head := lipgloss.NewStyle().Foreground(theme.OnGold).Background(theme.Gold).Bold(true).Padding(0, 1).
+		Render(theme.GlyphWaiting + " " + p.tool)
 	if p.adds > 0 || p.dels > 0 {
 		add := lipgloss.NewStyle().Foreground(theme.Guac).Render("+" + formatInt(p.adds))
 		del := lipgloss.NewStyle().Foreground(theme.Coral).Render("−" + formatInt(p.dels))
-		head += "   " + add + " " + del
+		head += "  " + add + " " + del
 	}
-	hint := kit.KbdRow([2]string{"a", "approve"}, [2]string{"d", "deny"}, [2]string{"↵", "view diff"})
+	// [↵] only does something when there is a diff to reveal; advertising it for
+	// Bash/WebFetch/… was a dead affordance.
+	keys := [][2]string{{"a", "approve"}, {"d", "deny"}}
+	if len(p.diffLines) > 0 {
+		keys = append(keys, [2]string{"↵", "view diff"})
+	}
+	hint := kit.KbdRow(keys...)
 
-	lines := []string{head, hint}
+	lines := []string{head}
+	// What the agent is actually asking to do: the Bash command, file path, URL,
+	// pattern, … — so an approval is never blind.
+	if p.arg != "" {
+		lines = append(lines, lipgloss.NewStyle().Foreground(theme.TextSecondary).Render(truncate(p.arg, max(4, width-6))))
+	}
+	lines = append(lines, hint)
 	if m.showDiff && len(p.diffLines) > 0 {
 		const maxDiff = 16
 		shown := condenseDiff(p.diffLines, maxDiff)
@@ -1471,7 +1505,9 @@ func (m *TranscriptModel) renderPlanCard(width int) string {
 	}
 	inner := boxW - 4 // account for border + horizontal padding
 
-	lines := []string{lipgloss.NewStyle().Foreground(theme.OnGold).Bold(true).Render("◈ Plan ready for review"), ""}
+	// Gold badge header — OnGold text is only legible on the Gold background.
+	lines := []string{lipgloss.NewStyle().Foreground(theme.OnGold).Background(theme.Gold).Bold(true).Padding(0, 1).
+		Render("◈ Plan ready for review"), ""}
 
 	body := strings.TrimSpace(m.pending.plan)
 	if body == "" {
@@ -1931,15 +1967,15 @@ func (m *TranscriptModel) workingStatus() string {
 	if anim.ReduceMotion() {
 		ell = "…"
 	}
-	working := lipgloss.NewStyle().Foreground(theme.Busy).Render("working" + ell)
+	working := styleSLBusy.Render("working" + ell)
 	out := spin + " " + working + "  " +
-		lipgloss.NewStyle().Foreground(theme.TextSecondary).Render(fmtElapsed(time.Since(m.turnStart)))
+		styleSLLabel.Render(fmtElapsed(time.Since(m.turnStart)))
 	if m.inTok > 0 || m.outTok > 0 {
-		out += lipgloss.NewStyle().Foreground(theme.TextMuted).
+		out += styleSLMuted.
 			Render(fmt.Sprintf("  ↑%s ↓%s", kit.FormatTokens(m.inTok), kit.FormatTokens(m.outTok)))
 	}
 	if m.costUSD > 0 {
-		out += lipgloss.NewStyle().Foreground(theme.Guac).Render("  " + kit.FormatCost(m.costUSD))
+		out += styleSLCost.Render("  " + kit.FormatCost(m.costUSD))
 	}
 	return out
 }
@@ -1949,7 +1985,12 @@ func (m *TranscriptModel) workingStatus() string {
 // "◇ Opus 4.8 · via anthropic · 12s · ↑3.1k ↓820 · $0.04". Empty when there is
 // nothing meaningful to summarize.
 func (m *TranscriptModel) turnFooter() string {
-	parts := []string{"◇ " + shortModelName(m.model)}
+	var parts []string
+	// Skip the model segment entirely before session.started delivers it — a
+	// literal "◇ —" placeholder reads as a glitch.
+	if m.model != "" {
+		parts = append(parts, shortModelName(m.model))
+	}
 	if m.agent != "" {
 		parts = append(parts, "via "+MarkedClientLabel(m.agent))
 	}
@@ -1962,10 +2003,10 @@ func (m *TranscriptModel) turnFooter() string {
 	if m.costUSD > 0 {
 		parts = append(parts, kit.FormatCost(m.costUSD))
 	}
-	if len(parts) <= 1 && m.model == "" {
+	if len(parts) == 0 {
 		return ""
 	}
-	return lipgloss.NewStyle().Foreground(theme.TextMuted).Render(strings.Join(parts, " · "))
+	return lipgloss.NewStyle().Foreground(theme.TextMuted).Render("◇ " + strings.Join(parts, " · "))
 }
 
 // fmtElapsed renders a duration as a compact clock (e.g. "12s", "1m03s").
@@ -2341,7 +2382,7 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 			m.pending = &transcriptPermission{id: p.PermissionID, tool: p.Tool, isPlan: true, plan: pl.Plan, since: time.Now()}
 		} else {
 			adds, dels, diffLines := permissionDiffStat(p.Tool, p.Input)
-			m.pending = &transcriptPermission{id: p.PermissionID, tool: p.Tool, adds: adds, dels: dels, diffLines: diffLines, since: time.Now()}
+			m.pending = &transcriptPermission{id: p.PermissionID, tool: p.Tool, arg: toolArg(p.Tool, p.Input), adds: adds, dels: dels, diffLines: diffLines, since: time.Now()}
 		}
 		m.status = StatusWaiting
 		m.layout()
@@ -2363,7 +2404,7 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		if p.Reason != "" {
 			warn = "⚠ " + p.Reason + " — saving state, will reconnect"
 		}
-		m.appendBlock(blockInfo, warn)
+		m.appendBlock(blockWarn, warn)
 		// Do NOT reconnect immediately (RV17): the runner is still alive for its
 		// grace window and the Sandbox still has the dying pod (replicas=1), so an
 		// instant reconnect would port-forward to the terminating pod and flap
@@ -2439,7 +2480,16 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 			idx := m.pendingTools[len(m.pendingTools)-1]
 			if idx >= 0 && idx < len(m.blocks) && m.blocks[idx].tool != nil {
 				c := m.blocks[idx].tool
-				c.arg = collapseSpaces(c.arg + p.PartialJSON)
+				// Accumulate the fragments but never show raw JSON: parse the
+				// buffer (closing an open string value with `"}` — the common
+				// mid-stream shape) and preview the extracted argument. Frames
+				// that don't parse keep the last good preview.
+				c.rawJSON += p.PartialJSON
+				if arg := toolArg(c.tool, json.RawMessage(c.rawJSON)); arg != "" {
+					c.arg = collapseSpaces(arg)
+				} else if arg := toolArg(c.tool, json.RawMessage(c.rawJSON+`"}`)); arg != "" {
+					c.arg = collapseSpaces(arg)
+				}
 				m.syncBody()
 			}
 		}

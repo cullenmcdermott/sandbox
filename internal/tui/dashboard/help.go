@@ -161,10 +161,14 @@ func commandCategories() []helpCategory {
 func chatHelpCategories() []helpCategory {
 	cats := commandCategories()
 	cats = append(cats, helpCategory{name: "Keys", entries: []helpEntry{
-		{"enter", "send message"},
+		{"enter", "send message (queues it while a turn runs)"},
+		{"shift+enter", "insert a newline"},
 		{"/", "open the command palette"},
 		{"!cmd", "run a one-shot shell command"},
 		{"shift+tab", "cycle permission mode"},
+		{"ctrl+f", "search the transcript"},
+		{"ctrl+o", "edit the prompt in $EDITOR"},
+		{"ctrl+g", "jump to the next session needing attention"},
 		{"?", "toggle this help"},
 		{"↑/↓ pgup/pgdn", "scroll the transcript"},
 		{"esc", "interrupt the turn / close an overlay (detaches when idle)"},

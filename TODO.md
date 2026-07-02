@@ -321,6 +321,135 @@ dashboard). All the verified *bugs* from that sweep were fixed on the branch.
   contained layout is wanted pre-OSS, it's a breaking change needing an include-path
   migration. `client/sync.go` sshConfig.
 
+## Whole-system design review — 2026-07-01 (deep multi-domain)
+
+Second review pass on 2026-07-01: 7 domains (CLI↔runner seam, event/API contract,
+scalability, security reviewed directly; k8s lifecycle, file-sync/storage,
+abstraction seams via subagents). Every HIGH + load-bearing MEDIUM re-verified
+against source at the cited `file:line`. Deduped against `docs/review-2026-06-24.md`
++ the hardening backlog — these are **new**. Two items were already tracked and are
+cross-referenced (not re-listed): `WithBackend` internal type → "client: no external
+test seam" above; tui/kit/theme global palette state → "tui/kit: unsynchronized
+global palette" above.
+
+### 🔴 No version story anywhere (one root gap, three manifestations)
+
+Because OSS users build + pass their own `--runner-image`, skew between CLI, runner,
+and on-disk PVC state is the steady state, not an edge case.
+
+- [ ] **No CLI↔runner protocol version handshake (HIGH).** `/healthz` returns only
+  `{status:ok}` and `StatusResponse` carries no version, so a skewed CLI/runner pair
+  fails *silently*: the Go client unmarshals an unknown event type into `session.Event`
+  and the TUI `switch ev.Type` has **no default case**, dropping it; renamed/removed
+  payload fields decode to zero values with no error. Add a version to `/healthz` (or a
+  header) and warn/refuse on mismatch. `runner/src/server.ts:79`,
+  `runner/src/types.ts:134`, `internal/tui/dashboard/session.go:553`.
+- [ ] **`events.db` schema version is write-only; no migration (HIGH).** `SCHEMA_VERSION`
+  is stamped to `user_version` on every open but never read-compared, and there is no
+  migration fn — the "bump + migrate on shape changes" comment describes a mechanism
+  that was never built. `session.json` has no version field at all. Read-compare-migrate
+  on open; stamp a version into `session.json`. `runner/src/events.ts:31,91`.
+- [ ] **`:latest` + `PullAlways` swaps the binary under old PVC state on resume (HIGH).**
+  `resolveImagePullPolicy` gives any non-digest ref `PullAlways`; resume only touches
+  `.spec.replicas` (never rewrites the image), so resuming a weeks-old suspended session
+  pulls the current `:latest` and runs a newer runner against the old `events.db`/
+  `session.json` — reinterpreting old rows under new-shape assumptions, or feeding
+  `after=0` replay of stale-shaped events to a new CLI. Consider digest-pinning the
+  default runner image so resume is reproducible. `internal/k8s/backend.go:164`,
+  `client/client.go:77`.
+
+### 🔴 The pod↔laptop sync boundary is porous both ways
+
+- [ ] **Project sync ignores `.gitignore`; secrets flow laptop→pod (HIGH).** The ignore
+  list is a fixed 6-pattern allowlist (`.env`, `.env.*`, `*.pem`, `*.key`, `*.p12`,
+  `*.pfx`) + `--ignore-vcs` — nothing consults `.gitignore`, so `.npmrc` with a token,
+  `secrets/`, cloud-cred JSON, etc. sync into the pod every session start. The documented
+  escape hatch ("add more via mutagen.yml") **does not work** — `mutagen sync create`
+  never reads project files (verified against the binary, v0.18.1). Honor `.gitignore`
+  (mutagen `--ignore-syntax`, or generate `--ignore` args from it).
+  `internal/sync/sync.go:133,150-165`.
+- [ ] **Two-way sync propagates pod-authored auto-executing files back to the laptop
+  (HIGH, conditional).** `--mode=two-way-safe` syncs pod-root-written files to the laptop;
+  `.git` is excluded but `.envrc`, `.vscode/tasks.json`, `.idea/`, `Makefile` are not. A
+  compromised/prompt-injected agent writing `.envrc` reaches laptop code-exec **iff** the
+  dir is already `direnv allow`ed (or opened in the triggering tool) — a *conditional*
+  escalation, not unconditional, but a real trust-boundary hole. Extend the ignore list to
+  auto-executing file classes. `internal/sync/sync.go:147`.
+- [ ] **Egress allowlist is a lateral-movement boundary, not an exfil one — undocumented
+  (MED).** `0.0.0.0/0` except private ranges on :443 is *necessary* (agents need the
+  internet), but `architecture.md` presents the netpol as a security control without
+  stating a compromised agent can POST anything to any public host. Document the posture
+  honestly. `k8s/networkpolicy-egress-allow.yaml:50`.
+
+### 🔴 Partial create leaks a live auth token invisibly
+
+- [ ] **`CreateSession` has no rollback; orphans a bearer-token Secret + PVC (HIGH).**
+  Creates Secret→PVC→Sandbox with no cleanup on partial failure; `NewID` mints a fresh
+  suffix per retry so the natural "run it again" makes a *different* id, and `List`
+  enumerates only Sandboxes — so an orphaned `<id>-runner` Secret (live token) + up-to-50Gi
+  PVC are permanently invisible to `status`/`destroy`. Derive the id before create so
+  retries are idempotent, add deferred cleanup on partial failure, or a `sandbox gc` that
+  reconciles orphaned Secrets/PVCs against live Sandboxes. `internal/k8s/backend.go:210-282`,
+  `client/client.go:401`, `internal/k8s/backend.go:497`.
+
+### 🟠 Scalability + reliability
+
+- [ ] **O(sessions) laptop cost with no steady-state cap (MED-HIGH).** `connectSem` (cap 4)
+  throttles the connect *burst* only — its own comment says it does not limit open streams.
+  Steady state: N warm sessions = N SPDY port-forwards through one kube-apiserver + N SSE
+  streams + ~2N goroutines + N 30s heartbeat timers, no LRU eviction. First breakage is
+  API-server port-forward pressure (~30 sessions). Cap concurrently-*established* observer
+  forwards and evict the coldest. `internal/tui/dashboard/model.go:1166`.
+- [ ] **SSE consumer backpressure → forced disconnect/replay loop (MED).** Events channel is
+  buffered at 64; if the TUI stalls during a heavy turn the scanner blocks on send, the 90s
+  watchdog sees no reads and force-closes the body → reconnect-with-replay. A slow consumer
+  manufactures reconnects. `internal/runner/client.go:234,250`.
+- [ ] **Port-forward retries a dead pod forever (MED).** On `resolvePodForForward` error the
+  loop keeps the *stale* pod and retries with no terminal state — after `sandbox destroy`
+  from another shell, an observer forward hammers the vanished pod at ≤10s cadence
+  indefinitely; no "gone forever" vs "rescheduling" distinction surfaced to the handle owner.
+  `internal/k8s/portforward.go:148`.
+- [ ] **Dead-node pods read as Running for minutes (MED).** Both status paths trust
+  k8s-reported conditions with no staleness cross-check (`LastTransitionTime` vs now, or an
+  independent runner probe) — standard node-eviction lag, so a node-crashed session looks
+  healthy with a silently-stalled SSE stream and no "unreachable" status distinct from
+  "running". `internal/k8s/backend.go:431`, `internal/k8s/watch.go:203`.
+
+### 🟠 Abstraction + contract
+
+- [ ] **The "normalized" turn/state model is Claude-SDK-shaped (MED).** `TurnInput.Mode` is
+  documented as the literal SDK permission-mode enum (opencode discards it, `_mode`; Codex
+  will too); `Connection.Opencode` is a backend-specific field in the library's central
+  return type (the Codex plan already calls for generalizing it — a pre-announced breaking
+  change to a public struct with no versioning promise); `State.ClaudeSession` has no slot
+  for opencode's resume id so it's unconditionally `""` for every opencode session. Model
+  execution-policy/state abstractly, not as SDK unions. `internal/session/types.go:132,107`,
+  `client/session.go:62`.
+- [ ] **`destroy` gives no active-turn warning though reversible `suspend` does (LOW-MED).**
+  `suspend` dials the runner and warns on `ActiveTurnID`; the irreversible `destroy`'s
+  `confirmDestroy` prints only a generic prompt — the more destructive command tells you
+  less about interrupting live work. `internal/cli/commands.go:168` (vs `:97`).
+
+### 🟢 Lower / contained
+
+- [ ] **Transcript sync merges pod-agent history into local `~/.claude` unscoped (LOW-MED).**
+  By design (subPath bind so the cwd/transcript-dir encoding matches), but pod-run agent
+  conversations become locally `--resume`-able alongside the user's own sessions with no tag
+  or audit trail back to the sandbox session. `internal/k8s/backend.go:873`,
+  `internal/sync/sync.go:62`.
+- [ ] **Concurrent sessions on the same project share one local sync endpoint, no dedup
+  (LOW-MED).** Mutagen session name keys on SessionID only, not ProjectPath, and nothing
+  checks for a collision — two agents on the same repo silently cross-feed edits (and, on a
+  same-file race, surface as perpetual conflicts). `internal/sync/sync.go:130`.
+- [ ] **Mutagen conflicts are invisible in the TUI (LOW-MED).** `classify()` collapses
+  `len(Conflicts)>0` into the same `SyncStalled` glyph as a transport error, discarding which
+  file/side; the detail pane shows a bare "⚠ stalled" with no resolution hint (`mutagen sync
+  list <name>`). `internal/sync/status.go:154`, `internal/tui/dashboard/model.go:2431`.
+- [ ] **`sandbox shell` has no `client/` equivalent — dogfooding gap (LOW).** Interactive
+  pod-exec is implemented directly against `internal/k8s` with no public-library path; an
+  external consumer can't replicate a shipped CLI command, so nothing validates whether the
+  façade *could* support it. `internal/cli/shell.go`.
+
 ## Open caveats (carry-forward)
 
 - [ ] Resumable-transcripts migration: pre-existing sessions' old
@@ -331,3 +460,51 @@ dashboard). All the verified *bugs* from that sweep were fixed on the branch.
   dropped runner-side; black-line/opacity fixes unverified in a live attach.
 - [ ] `~/.claude/todos` + `~/.claude/tasks` sync is ancillary (not required for
   resume) — keep but low priority.
+
+## Claude-pane visual/UX pass — 2026-07-01 (deferred items)
+
+Fixed on this pass: permission box shows the tool arg + gold badge header +
+contextual ↵ hint (was blind approvals + invisible OnGold header), queued-prompt
+chip on the hint row (was invisible state that silently changed esc semantics),
+perm queue + dashboard detail show the pending arg, palette esc-to-close, chat
+help drift (ctrl+f/o/g, shift+enter), `?` overlay drift (detach/group/rename/
+archive), tool.delta raw-JSON leak (parsed live preview), status-line style
+memoization, single-pass list.Metrics(), ∴/▤ glyphs for thought/todo emoji,
+subagent child cards match the flat calm style, blockWarn tone for pod
+reschedule, footer "◇ —" placeholder. Deferred:
+
+- [ ] **No expansion for flat tool-card output (MED — acknowledged "slice 5i").** Agent
+  Bash output collapses to "N lines" with no way to view it; user `!cmd` shows full
+  output. Also: post-approval diffs vanish from scrollback (only the permission box
+  ever renders the diff). `internal/tui/dashboard/transcript.go:1258`.
+- [ ] **Multi-line reasoning unrecoverable (MED).** `∴ Thought (N lines): <first line
+  truncated to 40>…` — full thinking text is never viewable; needs expand or a
+  wrapped multi-line render. `internal/tui/dashboard/transcript.go:1073`.
+- [ ] **No prompt history (MED).** No up-arrow recall of previously sent prompts in the
+  composer. `internal/tui/dashboard/transcript.go:1762` (scrollKey owns ↑/↓).
+- [ ] **`q`/`g` overloads on the dashboard (LOW-MED).** `q` opens the perm queue when
+  any session waits (footer still says quit); lone `g` toggles group view, `gg` = top.
+  Surprising vs the advertised bindings. `internal/tui/dashboard/model.go:1817,1866`.
+- [ ] **Permission scope is always "once" (LOW-MED).** No allow-for-session option in
+  the inline box or queue even though the event contract has `allow-session`.
+  `internal/tui/dashboard/transcript.go:2042`, `internal/session/event.go:59`.
+- [ ] **ctrl+g/ctrl+k dead in the external pane; no next-attention key on the dashboard
+  screen (LOW).** Cross-session nav is inconsistent by screen. `internal/tui/dashboard/app.go:711`.
+- [ ] **Fresh Claude session renders a blank body (LOW).** No welcome/first-hint block,
+  unlike the dashboard's firstRunView. `internal/tui/dashboard/transcript_list.go:290`.
+- [ ] **ctx% fallback inconsistency (LOW).** Chat status line assumes 200k when the
+  model limit is unknown; dashboard hides the gauge instead.
+  `internal/tui/dashboard/statusline.go:402`, `internal/tui/dashboard/session.go:197`.
+- [ ] **Reconcile is O(n) per tool/subagent event (perf, LOW until transcripts get very
+  long).** `reconcileItems` rebuilds the item slice + survivor map per non-delta event;
+  fine at hundreds of blocks. `internal/tui/dashboard/transcript_list.go:180`.
+- [ ] **Resize is uncoalesced (perf, LOW).** Width change drops the whole list cache and
+  rebuilds a pooled renderer; a drag-resize repeats this per WindowSizeMsg. `tui/list/list.go:74`.
+- [ ] **Glamour pads wrapped lines with per-space SGR runs (bytes, LOW).** Every
+  assistant line carries ~width styled single-space cells in the frame string;
+  bubbletea's renderer absorbs it, but it inflates parse work. Upstream glamour style.
+- [ ] **Failed sessions aren't floated by attention-first sort (LOW).** Only
+  Waiting/NeedsInput partition to top. `internal/tui/dashboard/attention.go:16`.
+- [ ] **TestAppExternalPaneEscIsForwardedNotDetached fails in-sandbox (test env).**
+  PTY spawn blocked; passes with sandbox disabled — add to the in-sandbox caveat list.
+  `internal/tui/dashboard/actions_test.go:403`.

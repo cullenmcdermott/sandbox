@@ -293,7 +293,8 @@ func (m *TranscriptModel) bodyView() string {
 	// A stateless scrollbar on the right edge when the content overflows the
 	// viewport (§D). The body width was reserved one column short in layout, so
 	// the bar (or a blank filler column) sits flush without shifting content.
-	bar := kit.Scrollbar(h, m.body.TotalHeight(), h, m.body.Offset())
+	total, offset := m.body.Metrics()
+	bar := kit.Scrollbar(h, total, h, offset)
 	// Normalize to an exact (m.width-1)×h rectangle so the scrollbar attaches
 	// flush and short content fills the height. fitModal is the cheap ANSI-aware
 	// pad/truncate; the equivalent lipgloss Style.Width().Height().Render() costs

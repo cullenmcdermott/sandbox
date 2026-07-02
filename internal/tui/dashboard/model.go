@@ -685,6 +685,7 @@ type SessionSnapshot struct {
 	DashStatus            SessionStatus
 	PendingPermissionID   string
 	PendingPermissionTool string
+	PendingPermissionArg  string
 	Model                 string
 	InputTokens           int
 	OutputTokens          int
@@ -1278,6 +1279,7 @@ func (m *Model) saveSnapshot(s *Session, force bool) {
 		DashStatus:            s.DashStatus,
 		PendingPermissionID:   s.PendingPermissionID,
 		PendingPermissionTool: s.PendingPermissionTool,
+		PendingPermissionArg:  s.PendingPermissionArg,
 		Model:                 s.Model,
 		InputTokens:           s.InputTokens,
 		OutputTokens:          s.OutputTokens,
@@ -1338,6 +1340,7 @@ func (m *Model) handleRunnerEvent(msg RunnerEventMsg) (tea.Model, tea.Cmd) {
 				}
 				m.sessions[i].PendingPermissionID = ""
 				m.sessions[i].PendingPermissionTool = ""
+				m.sessions[i].PendingPermissionArg = ""
 				// Persist the final state so a relaunch reflects it (and resumes
 				// from the last seq we saw) rather than replaying from zero.
 				m.saveSnapshot(&m.sessions[i], true)
@@ -1495,6 +1498,7 @@ func (m *Model) applySeed(states []session.State) (*Model, []tea.Cmd) {
 				s.statusChangedAt = prev.statusChangedAt
 				s.PendingPermissionID = prev.PendingPermissionID
 				s.PendingPermissionTool = prev.PendingPermissionTool
+				s.PendingPermissionArg = prev.PendingPermissionArg
 			}
 			// Carry the SSE resume cursor + save throttle across re-seeds so a
 			// later reconnect resumes from head, not 0 (which would replay).
@@ -1598,6 +1602,7 @@ func (m *Model) applyPodEvent(ev k8s.StateEvent) tea.Cmd {
 				m.sessions[i].DashStatus = clusterStatus
 				m.sessions[i].PendingPermissionID = ""
 				m.sessions[i].PendingPermissionTool = ""
+				m.sessions[i].PendingPermissionArg = ""
 				m.cancelLiveSSE(id)
 				m.dropRetained(id)
 			} else if ev.State.Status == session.StatusRunning && m.sessions[i].DashStatus == StatusSuspended {
@@ -2485,9 +2490,17 @@ func (m *Model) renderDetailLines(width, height int) []string {
 			Bold(true).
 			Render(theme.GlyphWaiting + " " + s.PendingPermissionTool)
 		lines = append(lines, toolLabel)
+		// What the tool wants to do (command/path/url), so approving from the
+		// dashboard isn't blind.
+		if s.PendingPermissionArg != "" {
+			arg := lipgloss.NewStyle().Foreground(theme.TextSecondary).
+				Render(truncate(s.PendingPermissionArg, max(4, width-4)))
+			lines = append(lines, "  "+arg)
+		}
 
-		// Unified key hint row (kit §Kbd, design-system §1.3 priority 1).
-		lines = append(lines, "  "+kit.KbdRow([2]string{"a", "approve"}, [2]string{"d", "deny"}, [2]string{"↵", "view diff"}))
+		// Unified key hint row (kit §Kbd, design-system §1.3 priority 1). On the
+		// dashboard ↵ attaches (the diff viewer lives in the transcript).
+		lines = append(lines, "  "+kit.KbdRow([2]string{"a", "approve"}, [2]string{"d", "deny"}, [2]string{"↵", "attach"}))
 	}
 
 	// ─ needs you ─ : action hints when the session is actionable — waiting,

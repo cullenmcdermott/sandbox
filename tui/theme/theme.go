@@ -140,6 +140,12 @@ var (
 	OnBrand color.Color
 	OnGold  color.Color
 
+	// Semantic tones: Warning sits between the muted info notices and the
+	// error Coral (pod reschedules, degradations).
+	Info    color.Color
+	Success color.Color
+	Warning color.Color
+
 	Busy color.Color
 )
 
@@ -182,6 +188,7 @@ func ApplyTheme(t Theme) {
 	TextBright, TextBody, TextSecondary, TextMuted, TextDim = t.TextBright, t.TextBody, t.TextSecondary, t.TextMuted, t.TextDim
 	Shadow = t.Shadow
 	Busy = t.Busy
+	Info, Success, Warning = t.Info, t.Success, t.Warning
 
 	StatusMuted = TextMuted
 	StatusDim = TextDim

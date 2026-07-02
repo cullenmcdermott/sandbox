@@ -60,8 +60,12 @@ func TestKeymapCategoriesNoDrift(t *testing.T) {
 	if !strings.Contains(all, "new") {
 		t.Errorf("enabled 'new' binding missing from help: %s", all)
 	}
-	// ...a disabled reserved binding (GroupToggle) does not.
-	if strings.Contains(all, "group view") {
+	// ...the live group-view binding is documented...
+	if !strings.Contains(all, "group view") {
+		t.Errorf("enabled 'group view' binding missing from help: %s", all)
+	}
+	// ...and a disabled reserved binding (Command ":") does not leak in.
+	if strings.Contains(all, "command") {
 		t.Errorf("disabled binding leaked into help: %s", all)
 	}
 }

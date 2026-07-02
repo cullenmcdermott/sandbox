@@ -36,6 +36,18 @@ var (
 	styleTTool      lipgloss.Style
 	styleTError     lipgloss.Style
 	styleTInfo      lipgloss.Style
+
+	// Status-line styles. renderStatusLine and workingStatus run on every
+	// keystroke plus each 150ms work-tick, so their fixed styles are memoized
+	// here rather than rebuilt per frame.
+	styleSLMuted  lipgloss.Style
+	styleSLLabel  lipgloss.Style
+	styleSLBody   lipgloss.Style
+	styleSLBright lipgloss.Style
+	styleSLBranch lipgloss.Style
+	styleSLWarn   lipgloss.Style
+	styleSLCost   lipgloss.Style
+	styleSLBusy   lipgloss.Style
 )
 
 // init wires the app's style rebuild to the shared theme so a theme swap
@@ -66,6 +78,15 @@ func rebuildStyles() {
 	styleTTool = lipgloss.NewStyle().Foreground(theme.Malibu)
 	styleTError = lipgloss.NewStyle().Foreground(theme.Coral)
 	styleTInfo = lipgloss.NewStyle().Foreground(theme.TextMuted)
+
+	styleSLMuted = lipgloss.NewStyle().Foreground(theme.TextMuted)
+	styleSLLabel = lipgloss.NewStyle().Foreground(theme.TextSecondary)
+	styleSLBody = lipgloss.NewStyle().Foreground(theme.TextBody)
+	styleSLBright = lipgloss.NewStyle().Foreground(theme.TextBright).Bold(true)
+	styleSLBranch = lipgloss.NewStyle().Foreground(theme.Peach)
+	styleSLWarn = lipgloss.NewStyle().Foreground(theme.Coral).Bold(true)
+	styleSLCost = lipgloss.NewStyle().Foreground(theme.Guac)
+	styleSLBusy = lipgloss.NewStyle().Foreground(theme.Busy)
 }
 
 // --- Per-status glyph styles (from the Status system in the handoff) -----
