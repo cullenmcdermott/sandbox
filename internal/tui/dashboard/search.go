@@ -1,11 +1,11 @@
 package dashboard
 
-// search.go — in-transcript search / jump / collapse + unread marker (slice
-// 5i / design S14, S12). ctrl+f opens a search overlay; enter / ctrl+n jump to
-// the next match and ctrl+p to the previous (n/N are reserved for typing into
-// the query, so navigation uses modified keys — NEW-1); ctrl+c collapses all
-// tool cards; an unread divider appears on reattach at the last seen turn
-// boundary.
+// search.go — in-transcript search / jump + unread marker (slice 5i / design
+// S14, S12). ctrl+f opens a search overlay; enter / ctrl+n jump to the next
+// match and ctrl+p to the previous (n/N are reserved for typing into the
+// query, so navigation uses modified keys — NEW-1); space on an empty prompt
+// collapses all tool/subagent cards (ctrl+c is the global quit); an unread
+// divider appears on reattach at the last seen turn boundary.
 
 import (
 	"fmt"
@@ -24,6 +24,7 @@ type searchModel struct {
 	query      string
 	matches    [][2]int // [blockIndex, runeOffset] pairs
 	matchIndex int      // current match
+	jumped     bool     // a jump happened for this query (first enter lands on match 1, not 2)
 }
 
 // openSearch initializes transcript search. It re-runs layout so the viewport
@@ -47,9 +48,17 @@ func (m *TranscriptModel) searchKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 		m.closeSearch()
 		return nil, true
 	case "enter", "ctrl+n":
+		// First jump for a query lands on the CURRENT (first) match; advancing
+		// immediately would skip it (matchIndex starts at 0 == first match).
+		if !m.search.jumped && len(m.search.matches) > 0 {
+			m.search.jumped = true
+			m.scrollToMatch()
+			return nil, true
+		}
 		m.nextSearchMatch()
 		return nil, true
 	case "ctrl+p":
+		m.search.jumped = true
 		m.prevSearchMatch()
 		return nil, true
 	case "backspace":
@@ -75,6 +84,7 @@ func (m *TranscriptModel) searchKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 func (m *TranscriptModel) updateSearchMatches() {
 	m.search.matches = nil
 	m.search.matchIndex = 0
+	m.search.jumped = false
 	q := m.search.query
 	if q == "" {
 		return

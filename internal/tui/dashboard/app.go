@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"image/color"
 	"strings"
@@ -79,6 +80,7 @@ type externalPaneFinishedMsg struct {
 // connectUpdateMsg is one item from the connect goroutine's progress channel.
 // Exactly one of stage/ready/failed is non-nil.
 type connectUpdateMsg struct {
+	gen    int              // connect-attempt generation; stale msgs are dropped
 	stage  *ConnectStage    // progress tick — connector entered a new stage
 	detail string           // optional live sub-status for the current stage ("" = none)
 	ready  *attachReadyMsg  // success (terminal)
@@ -177,6 +179,13 @@ type App struct {
 	// connectCancel cancels the in-flight connect goroutine (U1). Called on key
 	// press in ScreenConnecting.
 	connectCancel context.CancelFunc
+
+	// connectGen identifies the current connect attempt. It is bumped when an
+	// attempt starts and when one is cancelled, so trailing connectUpdateMsg
+	// values from a cancelled/replaced goroutine (a "context canceled" failure,
+	// a late ready that would attach a dead session, or a stage tick that would
+	// re-arm the drain on the wrong channel) are recognized as stale and dropped.
+	connectGen int
 
 	// connectErr holds the last connector error, shown in the detail pane.
 	connectErr error
@@ -385,6 +394,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.connectCancel = nil
 				a.connectCh = nil
 			}
+			// Anything still in flight from the cancelled goroutine is stale now.
+			a.connectGen++
 			a.connectingFor = nil
 			a.connectingPreview = nil
 			a.connectStartedAt = time.Time{}
@@ -564,7 +575,14 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, restoreCmd
 
 	case connectUpdateMsg:
-		// Progress from the in-flight connect goroutine (U1).
+		// Progress from the in-flight connect goroutine (U1). A stale generation
+		// means the attempt was cancelled or replaced: drop it silently so it
+		// can't surface "context canceled" as an error, flip screens mid-new-
+		// connect, attach a cancelled session, or re-arm the drain on the new
+		// attempt's channel (double reader).
+		if msg.gen != a.connectGen {
+			return a, nil
+		}
 		switch {
 		case msg.stage != nil:
 			a.connectStage = *msg.stage
@@ -578,6 +596,16 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case msg.failed != nil:
 			a.connectCancel = nil
 			a.connectCh = nil
+			if errors.Is(msg.failed.err, context.Canceled) {
+				// A cancellation is user intent, not a failure — stay quiet.
+				a.connectingFor = nil
+				a.connectingPreview = nil
+				a.connectStartedAt = time.Time{}
+				if a.screen == ScreenConnecting {
+					a.screen = ScreenDashboard
+				}
+				return a, nil
+			}
 			_, cmd := a.Update(*msg.failed) // reuse attachFailedMsg path
 			return a, cmd
 		}
@@ -690,9 +718,17 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return a, dashCmd
 			case "ctrl+k":
-				// Open the dashboard's quick-switcher from inside the chat modal.
+				// Quick-switch from inside the chat modal: park the transcript and
+				// return to the dashboard with the switcher overlay open. The
+				// switcher only renders (and receives keys) on the dashboard
+				// screen, so opening it while staying on ScreenTranscript used to
+				// leave an invisible open switcher stealing dashboard keys later.
+				a.parkTranscript(a.transcript)
+				restoreCmd := a.dashboard.startLiveSSECmd(a.dashboard.sessionByID(a.transcript.ref.ID))
+				a.transcript = nil
+				a.screen = ScreenDashboard
 				a.dashboard.openSwitcher()
-				return a, dashCmd
+				return a, tea.Batch(dashCmd, restoreCmd)
 			}
 		}
 		// Left-button press/drag on the modal's scrollbar column drives the scroll
@@ -739,14 +775,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, dashCmd
 
 	case ScreenConnecting:
-		// While connecting, any key press (other than ctrl+c handled above)
-		// cancels the connection attempt and returns to the dashboard.
-		if _, ok := msg.(tea.KeyPressMsg); ok {
-			a.connectingFor = nil
-			a.connectingPreview = nil
-			a.screen = ScreenDashboard
-			return a, dashCmd
-		}
+		// Key presses never reach here: the top-level KeyPressMsg case cancels
+		// the in-flight connect (and returns) while this screen is active.
 		return a, dashCmd
 
 	default: // ScreenDashboard
@@ -1067,6 +1097,8 @@ func (a *App) connectCmd(sess Session) tea.Cmd {
 	a.connectCancel = cancel
 	ch := make(chan connectUpdateMsg, 8)
 	a.connectCh = ch
+	a.connectGen++
+	gen := a.connectGen
 	a.connectStage = StageCheck
 	a.connectDetail = ""
 	a.connectStartedAt = nowFunc()
@@ -1074,13 +1106,13 @@ func (a *App) connectCmd(sess Session) tea.Cmd {
 		defer cancel()
 		onStage := func(s ConnectStage, detail string) {
 			select {
-			case ch <- connectUpdateMsg{stage: &s, detail: detail}:
+			case ch <- connectUpdateMsg{gen: gen, stage: &s, detail: detail}:
 			case <-ctx.Done():
 			}
 		}
 		res, err := connector(ctx, session.Ref{ID: sess.ID()}, sess.State.ProjectPath, onStage)
 		if err != nil {
-			ch <- connectUpdateMsg{failed: &attachFailedMsg{sess: session.Ref{ID: sess.ID()}, err: err}}
+			ch <- connectUpdateMsg{gen: gen, failed: &attachFailedMsg{sess: session.Ref{ID: sess.ID()}, err: err}}
 		} else {
 			ready := attachReadyMsg{
 				sess:          sess,
@@ -1090,7 +1122,7 @@ func (a *App) connectCmd(sess Session) tea.Cmd {
 				opencodeCreds: res.OpencodeCreds,
 				warning:       res.Warning,
 			}
-			ch <- connectUpdateMsg{ready: &ready}
+			ch <- connectUpdateMsg{gen: gen, ready: &ready}
 		}
 		close(ch)
 	}()
@@ -1110,6 +1142,8 @@ func (a *App) createCmd(backend string) tea.Cmd {
 	a.connectCancel = cancel
 	ch := make(chan connectUpdateMsg, 8)
 	a.connectCh = ch
+	a.connectGen++
+	gen := a.connectGen
 	// The Creator's connect path (establish) emits StageCheck first, then advances
 	// to StageResume while the freshly-provisioned pod schedules + pulls its image.
 	// Initialize at StageCheck so the stepper doesn't briefly regress Resume→Check
@@ -1123,13 +1157,13 @@ func (a *App) createCmd(backend string) tea.Cmd {
 		defer cancel()
 		onStage := func(s ConnectStage, detail string) {
 			select {
-			case ch <- connectUpdateMsg{stage: &s, detail: detail}:
+			case ch <- connectUpdateMsg{gen: gen, stage: &s, detail: detail}:
 			case <-ctx.Done():
 			}
 		}
 		res, err := creator(ctx, backend, onStage)
 		if err != nil {
-			ch <- connectUpdateMsg{failed: &attachFailedMsg{err: err}}
+			ch <- connectUpdateMsg{gen: gen, failed: &attachFailedMsg{err: err}}
 		} else {
 			ready := attachReadyMsg{
 				sess:          SessionFromState(res.State),
@@ -1139,7 +1173,7 @@ func (a *App) createCmd(backend string) tea.Cmd {
 				opencodeCreds: res.OpencodeCreds,
 				warning:       res.Warning, // RV23: surface new-session sync warnings
 			}
-			ch <- connectUpdateMsg{ready: &ready}
+			ch <- connectUpdateMsg{gen: gen, ready: &ready}
 		}
 		close(ch)
 	}()

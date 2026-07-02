@@ -39,7 +39,10 @@ func (m *Model) switcherFiltered() []Session {
 	}
 	var out []Session
 	for _, s := range visible {
-		title := strings.ToLower(s.Title)
+		// Match on both the display title (rename/auto-title — what the list
+		// shows) and the raw derived title, so a renamed session is findable
+		// by either name.
+		title := strings.ToLower(s.DisplayTitle() + " " + s.Title)
 		repo := strings.ToLower(filepathBaseLocal(s.State.ProjectPath))
 		backend := strings.ToLower(s.State.Backend)
 		if strings.Contains(title, q) || strings.Contains(repo, q) || strings.Contains(backend, q) {
@@ -88,11 +91,11 @@ func (m *Model) renderSwitcher(w int) string {
 			if selected {
 				row := lipgloss.NewStyle().Foreground(theme.Guac).Render(glyphChevron+" ") +
 					g + " " +
-					lipgloss.NewStyle().Foreground(theme.TextBright).Bold(true).Render(padRight(truncate(s.Title, 16), 16)) +
+					lipgloss.NewStyle().Foreground(theme.TextBright).Bold(true).Render(padRight(truncate(s.DisplayTitle(), 16), 16)) +
 					lipgloss.NewStyle().Foreground(theme.TextBody).Render(filepathBaseLocal(s.State.ProjectPath))
 				lines = append(lines, lipgloss.NewStyle().Background(theme.Raised2).Width(boxW).Render(row))
 			} else {
-				row := "  " + g + " " + padRight(truncate(s.Title, 18), 18) +
+				row := "  " + g + " " + padRight(truncate(s.DisplayTitle(), 18), 18) +
 					lipgloss.NewStyle().Foreground(theme.TextMuted).Render(filepathBaseLocal(s.State.ProjectPath))
 				lines = append(lines, row)
 			}

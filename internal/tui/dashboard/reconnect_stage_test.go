@@ -19,7 +19,7 @@ func TestDoReconnectStreamsStages(t *testing.T) {
 	m := NewTranscript(&fakeRunnerClient{}, transcriptSession(), reconnect)
 	m.reconnectStages = make(chan reconnectStageMsg, 8)
 
-	msg := m.doReconnect() // runs synchronously as a Cmd body
+	msg := m.doReconnect()() // build the Cmd, then run its body synchronously
 	if !invoked {
 		t.Fatal("reconnect callback was not invoked")
 	}

@@ -96,7 +96,7 @@ func (m *Model) notifyIfBackgroundAttention(attached session.ID) tea.Cmd {
 		if s.DashStatus == StatusWaiting && s.PendingPermissionTool != "" {
 			note = "wants: " + s.PendingPermissionTool
 		}
-		toast := toastMsg{id: id, title: s.Title, note: note, status: s.DashStatus}
+		toast := toastMsg{id: id, title: s.DisplayTitle(), note: note, status: s.DashStatus}
 		cmd = func() tea.Msg { return toast }
 	}
 	return cmd
@@ -202,6 +202,9 @@ func (m *Model) jumpToNextNeedingAttention() *Session {
 	for offset := 1; offset <= len(visible); offset++ {
 		idx := (start + offset) % len(visible)
 		s := visible[idx]
+		if s.ID() == m.attachedID {
+			continue // already viewing it — jumping here would be a no-op detach/attach
+		}
 		if s.DashStatus == StatusWaiting || s.DashStatus == StatusNeedsInput {
 			m.cursor = idx
 			return &s

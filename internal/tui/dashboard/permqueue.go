@@ -66,7 +66,7 @@ func (m *Model) renderPermQueue(w int) string {
 		for i, s := range items {
 			sel := i == m.permQueue.sel
 			glyph := lipgloss.NewStyle().Foreground(theme.Gold).Render(theme.GlyphWaiting)
-			header := glyph + " " + lipgloss.NewStyle().Foreground(theme.TextBright).Bold(true).Render(s.Title)
+			header := glyph + " " + lipgloss.NewStyle().Foreground(theme.TextBright).Bold(true).Render(s.DisplayTitle())
 			note := ""
 			if s.PendingPermissionTool != "" {
 				note = "wants: " + s.PendingPermissionTool

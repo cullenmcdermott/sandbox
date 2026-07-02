@@ -121,6 +121,11 @@ func TestEscSteerInterruptsThenSubmitsAfterInterruptEvent(t *testing.T) {
 	m.width, m.height = 80, 24
 	m.turnActive = true
 	m.queuedPrompt = "steer me"
+	// Foreground marker: a production foreground transcript always owns a live
+	// event stream. The queued-prompt flush is gated on it — a parked/background
+	// model (fed via ingest, which discards Cmds) must keep the prompt queued
+	// for re-attach instead of losing it.
+	m.events = make(chan session.Event)
 
 	// esc with a queued prompt STEERS (not a bare interrupt): it fires the
 	// interrupt now but RETAINS the queued prompt, deferring the new turn until
