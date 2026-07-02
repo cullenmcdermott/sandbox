@@ -15,7 +15,7 @@ import (
 // GradientCapable reports whether the terminal can render a multi-stop gradient
 // legibly — true only for 256-color and truecolor profiles. On 16-color / ascii
 // terminals (or NO_COLOR) a blended ramp turns muddy, so callers fall back to a
-// solid brand color instead (§A.3). Detected once at startup.
+// solid brand color instead. Detected once at startup.
 var GradientCapable = func() bool {
 	p := colorprofile.Detect(os.Stderr, os.Environ())
 	return p == colorprofile.TrueColor || p == colorprofile.ANSI256
@@ -26,11 +26,11 @@ var GradientCapable = func() bool {
 // GradientText renders s with a per-grapheme-cluster perceptual gradient across
 // the given color stops (the branded Charple→Dolly wordmark flourish), carrying
 // bold through the gradient. Grapheme-correct via kit so emoji/wide glyphs keep
-// their width (§B.1).
+// their width.
 func GradientText(s string, bold bool, stops ...color.Color) string {
 	base := lipgloss.NewStyle().Bold(bold)
 	// Solid-color fallback when a gradient would degrade poorly (16-color/ascii
-	// terminal or NO_COLOR) — a clean brand color beats a muddy blend (§A.3).
+	// terminal or NO_COLOR) — a clean brand color beats a muddy blend.
 	if len(stops) < 2 || !GradientCapable {
 		if len(stops) > 0 {
 			base = base.Foreground(stops[0])
@@ -46,7 +46,7 @@ var spinnerColors []color.Color
 
 // dashSpinner is the package-level pre-rendered gradient spinner. Initialized
 // once with default braille frames; rebuilt by rebuildSpinner so it tracks the
-// current theme colors (P4, chat-rendering-architecture §2.5).
+// current theme colors.
 var dashSpinner = anim.NewSpinner()
 
 // spinnerFrames is the busy-glyph frame source for dashSpinner — quarter-block
@@ -78,9 +78,9 @@ const FadeDuration = 220 * time.Millisecond
 
 // FadeColor blends from a dim tone toward target over FadeDuration since the
 // given change time, so a freshly-changed glyph fades in rather than popping.
-// Migrated onto the motion engine (§C.1): the eased fraction comes from a
-// Transition (ease-out, collapsing to the end state under reduce-motion) and the
-// blend from anim.LerpColor, so every time-based color shares one primitive.
+// It rides the motion engine: the eased fraction comes from a Transition
+// (ease-out, collapsing to the end state under reduce-motion) and the blend
+// from anim.LerpColor, so every time-based color shares one primitive.
 func FadeColor(target color.Color, since time.Time) color.Color {
 	if since.IsZero() {
 		return target

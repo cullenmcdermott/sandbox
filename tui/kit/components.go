@@ -1,19 +1,20 @@
 package kit
 
-// components.go — the Tier-4 design-system component kit (design-system-and-
-// states.md §1): stateless, theme-aware render helpers — data in, styled string
-// out. No Bubble Tea dependency and no internal state, so each is trivially
-// unit-testable. Components name a semantic Role, never a raw color.
+// components.go — the design-system component kit: stateless, theme-aware
+// render helpers — data in, styled string out. No Bubble Tea dependency and no
+// internal state, so each is trivially unit-testable. Components name a
+// semantic Role, never a raw color.
 
 import (
 	"image/color"
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
-// Role is the kit's semantic accent selector — it maps to the theme roles in
-// chat-styling-and-motion.md §A.1. Components name a Role, never a raw color.
+// Role is the kit's semantic accent selector — it maps to the theme's semantic
+// accent roles. Components name a Role, never a raw color.
 type Role int
 
 const (
@@ -43,7 +44,10 @@ var (
 // the current value, so callers set only what they have.
 type ComponentColors struct {
 	KbdKey, KbdLabel, KbdSep, KVKey, KVVal, ErrDetail, ButtonBlur color.Color
-	Roles                                                         map[Role]color.Color
+	// Rule colors SectionHeader/Section's flat `─` rule; ScrollThumb colors the
+	// Scrollbar thumb glyph.
+	Rule, ScrollThumb color.Color
+	Roles             map[Role]color.Color
 }
 
 // SetComponentColors swaps the component palette to follow the active theme.
@@ -68,6 +72,12 @@ func SetComponentColors(c ComponentColors) {
 	}
 	if c.ButtonBlur != nil {
 		btnBlurColor = c.ButtonBlur
+	}
+	if c.Rule != nil {
+		ruleColor = c.Rule
+	}
+	if c.ScrollThumb != nil {
+		thumbColor = c.ScrollThumb
 	}
 	for r, col := range c.Roles {
 		if col != nil {
@@ -141,7 +151,7 @@ type CardOpts struct {
 
 	// The following are optional extensions that let bespoke bordered surfaces
 	// (permission box, plan card, confirm dialog) share the kit-owned frame
-	// without losing their content styling (D2). When zero/nil they don't change
+	// without losing their content styling. When zero/nil they don't change
 	// the default Title/Body behaviour, so the canonical Card tests are unaffected.
 
 	// Content, when set, is used verbatim as the card's inner content (Title and
@@ -235,8 +245,10 @@ func ErrorBlock(title, detail, action string) string {
 	return strings.Join(lines, "\n")
 }
 
-// truncateCell trims s to at most max display columns, appending … when cut, so
-// width math stays grapheme/wide-char correct (never len-based).
+// truncateCell trims s to at most max display columns, appending … when cut.
+// ANSI-aware via ansi.Truncate: escape sequences cost zero columns and are never
+// cut mid-sequence, and width math stays grapheme/wide-char correct (never
+// len-based).
 func truncateCell(s string, max int) string {
 	if max <= 0 {
 		return ""
@@ -247,16 +259,5 @@ func truncateCell(s string, max int) string {
 	if max == 1 {
 		return "…"
 	}
-	var b strings.Builder
-	w := 0
-	for _, c := range graphemeClusters(s) {
-		cw := lipgloss.Width(c)
-		if w+cw > max-1 {
-			break
-		}
-		b.WriteString(c)
-		w += cw
-	}
-	b.WriteString("…")
-	return b.String()
+	return ansi.Truncate(s, max, "…")
 }

@@ -48,7 +48,7 @@ type Theme struct {
 	// Drop-shadow tone for floating surfaces (slice 4 modal).
 	Shadow color.Color
 
-	// Extended semantic roles (chat-styling-and-motion §A.1). Busy is the
+	// Extended semantic roles. Busy is the
 	// streaming/working accent, distinct from the brand gradient; Denied is a
 	// refusal/blocked tone distinct from the error Coral. Info/Success/Warning
 	// each pair a foreground accent with a near-background *Subtle fill used
@@ -135,7 +135,7 @@ var (
 	StatusMuted color.Color
 	StatusDim   color.Color
 
-	// Extended semantic roles (§A.1). OnBrand/OnGold are derived per theme from
+	// Extended semantic roles. OnBrand/OnGold are derived per theme from
 	// kit.OnColor so they flip near-white (dark) ↔ near-black (light).
 	OnBrand color.Color
 	OnGold  color.Color
@@ -146,16 +146,21 @@ var (
 // activeTheme is the name of the currently applied theme.
 var activeTheme = themes[0].Name
 
-// changeHooks are run after every ApplyTheme so consuming apps re-derive their
-// own styles from the freshly-swapped palette.
+// changeHooks are run in registration order after every ApplyTheme so consuming
+// apps re-derive their own styles from the freshly-swapped palette. Unsubscribed
+// entries are nil (order is preserved; slots are not reused).
 var changeHooks []func()
 
 // OnChange registers fn to run on every subsequent theme swap, and runs it once
 // immediately so the caller's derived styles are built from the current palette.
-// Apps register their style-rebuild function here.
-func OnChange(fn func()) {
+// Apps register their style-rebuild function here. It returns an unsubscribe
+// func that removes the hook; calling it more than once is harmless. The return
+// value may be ignored by hooks that live for the whole process.
+func OnChange(fn func()) func() {
 	changeHooks = append(changeHooks, fn)
+	idx := len(changeHooks) - 1
 	fn()
+	return func() { changeHooks[idx] = nil }
 }
 
 // Active returns the name of the currently applied theme.
@@ -191,13 +196,15 @@ func ApplyTheme(t Theme) {
 	// Wire the kit component palette to the active theme so KV, ErrorBlock,
 	// Badge, Button, etc. follow the theme (D6).
 	kit.SetComponentColors(kit.ComponentColors{
-		KbdKey:     t.Charple,
-		KbdLabel:   t.TextSecondary,
-		KbdSep:     t.TextMuted,
-		KVKey:      t.TextSecondary,
-		KVVal:      t.TextBody,
-		ErrDetail:  t.TextSecondary,
-		ButtonBlur: t.TextSecondary,
+		KbdKey:      t.Charple,
+		KbdLabel:    t.TextSecondary,
+		KbdSep:      t.TextMuted,
+		KVKey:       t.TextSecondary,
+		KVVal:       t.TextBody,
+		ErrDetail:   t.TextSecondary,
+		ButtonBlur:  t.TextSecondary,
+		Rule:        t.TextMuted,
+		ScrollThumb: t.Hazy,
 		Roles: map[kit.Role]color.Color{
 			kit.RoleBrand:   t.Charple,
 			kit.RoleBusy:    t.Busy,
@@ -212,7 +219,9 @@ func ApplyTheme(t Theme) {
 
 	rebuildSpinner()
 	for _, h := range changeHooks {
-		h()
+		if h != nil {
+			h()
+		}
 	}
 }
 

@@ -1,9 +1,8 @@
 package kit
 
-// style.go — the styling primitives for Tier 3 (chat-styling-and-motion.md
-// §A/§B/§D). These signatures are the immutable contract pinned by the Tier-3
-// canonical tests; the bodies here are placeholders awaiting the S0/S1/S4
-// feature increments, so the canonical tests start red (TDD).
+// style.go — the kit's styling primitives: ANSI-16 remapping onto the active
+// palette, perceptual per-grapheme gradients, titled/section rules, a stateless
+// scrollbar, and token/cost formatting.
 
 import (
 	"image/color"
@@ -30,7 +29,7 @@ func SetANSITable(t [16]color.RGBA) { ansiTable = t }
 
 // OnColor returns a legible foreground to place on background bg — a near-white
 // for dark backgrounds, a near-black for light ones, chosen by relative
-// luminance. This is the mechanism behind the OnBrand/OnGold roles (§A.1).
+// luminance. This is the mechanism behind the OnBrand/OnGold theme roles.
 func OnColor(bg color.Color) color.Color {
 	if relLuminance(bg) < 0.5 {
 		return color.RGBA{R: 0xF5, G: 0xF5, B: 0xF5, A: 0xFF} // near-white on dark
@@ -47,7 +46,7 @@ func relLuminance(c color.Color) float64 {
 
 // RemapANSI rewrites basic SGR color codes (30-37/40-47/90-97/100-107) in s to
 // the active ANSI-16 table as truecolor, leaving extended 38/48 (256 and
-// truecolor) sequences and all non-color codes byte-for-byte untouched (§A.2).
+// truecolor) sequences and all non-color codes byte-for-byte untouched.
 func RemapANSI(s string) string {
 	var b strings.Builder
 	for i := 0; i < len(s); {
@@ -147,11 +146,12 @@ func trueColorParams(c color.RGBA, isBg bool) string {
 
 // GradientClusters renders s under a perceptual gradient across stops, blended
 // per grapheme cluster so emoji and wide/combined glyphs keep their full display
-// width (§B.1). Each cluster is rendered with base plus its ramp color, so a
-// caller can carry bold/italic through the gradient. With fewer than two stops,
-// or for empty input, it returns base.Render(s) (no gradient).
+// width. Each cluster is rendered with base plus its ramp color, so a
+// caller can carry bold/italic through the gradient. With fewer than two stops
+// (nil stops don't count), or for empty input, it returns base.Render(s) (no
+// gradient).
 func GradientClusters(base lipgloss.Style, s string, stops ...color.Color) string {
-	if s == "" || len(stops) == 0 {
+	if s == "" || len(stops) < 2 {
 		return base.Render(s)
 	}
 	clusters := graphemeClusters(s)
@@ -159,11 +159,21 @@ func GradientClusters(base lipgloss.Style, s string, stops ...color.Color) strin
 		return base.Render(s)
 	}
 	ramp := lipgloss.Blend1D(len(clusters), stops...)
+	if len(ramp) == 0 {
+		// Blend1D yields an empty ramp when every stop is nil.
+		return base.Render(s)
+	}
 	var b strings.Builder
 	for i, cl := range clusters {
 		c := ramp[0]
 		if i < len(ramp) {
 			c = ramp[i]
+		}
+		if c == nil {
+			// A short ramp (steps <= stops) is the stops slice verbatim and may
+			// carry a caller's nil stop through; render those clusters plain.
+			b.WriteString(base.Render(cl))
+			continue
 		}
 		b.WriteString(base.Foreground(c).Render(cl))
 	}
@@ -171,10 +181,10 @@ func GradientClusters(base lipgloss.Style, s string, stops ...color.Color) strin
 }
 
 // GradientLine renders s under a perceptual per-grapheme gradient across stops
-// with no extra styling (§B.1). With fewer than two stops, or for empty input,
+// with no extra styling. With fewer than two stops, or for empty input,
 // it returns the text unstyled.
 func GradientLine(s string, stops ...color.Color) string {
-	if s == "" || len(stops) == 0 {
+	if s == "" || len(stops) < 2 {
 		return s
 	}
 	return GradientClusters(lipgloss.NewStyle(), s, stops...)
@@ -192,7 +202,7 @@ func graphemeClusters(s string) []string {
 }
 
 // TitledRule renders title, a space, then a gradient-filled rule of `╱` out to
-// width w (§B.2). It no-ops to the bare title when w can't fit the title plus at
+// width w. It no-ops to the bare title when w can't fit the title plus at
 // least one rule glyph.
 func TitledRule(title string, w int, from, to color.Color) string {
 	tw := lipgloss.Width(title)
@@ -208,7 +218,7 @@ func TitledRule(title string, w int, from, to color.Color) string {
 var ruleColor color.Color = color.RGBA{R: 0x6b, G: 0x6b, B: 0x6b, A: 0xff}
 
 // SectionHeader renders title, a flat `─` rule, and optional right-aligned info,
-// occupying exactly width w (§B.2). The info ends flush against the right edge;
+// occupying exactly width w. The info ends flush against the right edge;
 // the rule expands to absorb the slack between title and info. When w cannot fit
 // the title plus a single rule glyph it no-ops to the bare title.
 func SectionHeader(title string, w int, info ...string) string {
@@ -245,7 +255,7 @@ var thumbColor color.Color = color.RGBA{R: 0xb0, G: 0x6e, B: 0xd7, A: 0xff}
 
 // Scrollbar renders a stateless vertical scrollbar of the given height for a
 // content of contentSize lines shown in a viewport of viewportSize lines at the
-// given top offset (§D). The thumb's size tracks the visible fraction (at least
+// given top offset. The thumb's size tracks the visible fraction (at least
 // one row) and its position tracks the offset; the track is blank. It returns
 // the empty string when the content fits the viewport (no thumb).
 func Scrollbar(height, contentSize, viewportSize, offset int) string {
@@ -286,18 +296,23 @@ func Scrollbar(height, contentSize, viewportSize, offset int) string {
 	return strings.Join(rows, "\n")
 }
 
-// FormatTokens renders a token count with k/M units, trimming a trailing ".0"
-// (§D): counts under 1000 are plain, thousands use "k", millions use "M".
+// FormatTokens renders a token count with k/M units, trimming a trailing ".0":
+// counts under 1000 are plain, thousands use "k", millions use "M". Values whose
+// one-decimal k rendering would round up to 1000 (n >= 999,950) promote to "M"
+// instead of showing "1000k".
 func FormatTokens(n int) string {
-	switch {
-	case n < 1000:
+	if n < 1000 {
 		return strconv.Itoa(n)
-	case n < 1_000_000:
-		return trimDotZero(float64(n)/1000) + "k"
-	default:
-		return trimDotZero(float64(n)/1_000_000) + "M"
 	}
+	if k := roundTenth(float64(n) / 1000); k < 1000 {
+		return trimDotZero(k) + "k"
+	}
+	return trimDotZero(roundTenth(float64(n)/1_000_000)) + "M"
 }
+
+// roundTenth rounds v to one decimal place — the precision trimDotZero prints —
+// so unit promotion decisions match what would actually be rendered.
+func roundTenth(v float64) float64 { return math.Round(v*10) / 10 }
 
 // trimDotZero formats v with one decimal place, then drops a trailing ".0".
 func trimDotZero(v float64) string {
@@ -305,7 +320,7 @@ func trimDotZero(v float64) string {
 }
 
 // FormatCost renders a USD cost with a "$" prefix, comma-grouped dollars, and
-// two decimal places of cents (§D).
+// two decimal places of cents.
 func FormatCost(usd float64) string {
 	neg := usd < 0
 	if neg {

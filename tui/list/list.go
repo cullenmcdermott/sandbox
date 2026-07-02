@@ -9,7 +9,7 @@ import "strings"
 type Item interface {
 	Render(width int) string // full styled block; may be multi-line
 	Version() uint64         // monotonic; changes when output would change
-	Finished() bool          // advisory: true once output is terminal (reserved; see §4)
+	Finished() bool          // advisory: true once output is terminal (reserved for future freezing)
 }
 
 // Versioned is an embeddable counter satisfying Item.Version().
@@ -61,8 +61,12 @@ type entry struct {
 }
 
 func New(items ...Item) *List {
+	// Copy the variadic slice (like SetItems) so a caller passing a slice via
+	// `New(s...)` can keep mutating s without aliasing the list's internal state.
+	copied := make([]Item, len(items))
+	copy(copied, items)
 	return &List{
-		items: items,
+		items: copied,
 		cache: make(map[Item]*entry),
 	}
 }
@@ -106,6 +110,8 @@ func (l *List) SetItems(items ...Item) {
 	if oldIdx != l.offsetIdx {
 		l.offsetLine = 0
 	}
+	// A surviving offsetIdx whose new item renders shorter than offsetLine is
+	// handled lazily by normalize() on the next Render/Offset/AtBottom read.
 	// When following, re-pin to the new bottom so freshly reconciled content
 	// (new blocks, a grown streaming tail) stays in view.
 	if l.follow {
@@ -132,7 +138,35 @@ func (l *List) HeightAt(idx int) int {
 	return l.heightAt(idx)
 }
 
+// normalize clamps the scroll anchor against the current item heights. An item
+// can re-render shorter than when the anchor was set (a streaming block
+// collapsing, or SetItems swapping shorter content behind a surviving index),
+// leaving offsetLine pointing past the anchor item's last line — Render would
+// then skip the item entirely, Offset() could exceed TotalHeight(), and
+// AtBottom() could flip true spuriously. Every anchor read goes through here.
+func (l *List) normalize() {
+	if len(l.items) == 0 {
+		l.offsetIdx, l.offsetLine = 0, 0
+		return
+	}
+	if l.offsetIdx > len(l.items)-1 {
+		l.offsetIdx = len(l.items) - 1
+		l.offsetLine = 0
+	}
+	if l.offsetLine < 0 {
+		l.offsetLine = 0
+	}
+	// offsetLine == heightAt(offsetIdx) is a valid anchor ("item fully hidden,
+	// first visible line is the next item") — lastOffsetItem produces it — so
+	// only clamp when the line offset exceeds the item's current height. Clamp
+	// to the last line so the shrunk anchor's tail stays visible.
+	if h := l.heightAt(l.offsetIdx); l.offsetLine > h {
+		l.offsetLine = max(h-1, 0)
+	}
+}
+
 func (l *List) Render() string {
+	l.normalize()
 	if len(l.items) == 0 {
 		return ""
 	}
@@ -163,6 +197,7 @@ func (l *List) TotalHeight() int {
 }
 
 func (l *List) Offset() int {
+	l.normalize()
 	offset := 0
 	for i := 0; i < l.offsetIdx; i++ {
 		offset += l.heightAt(i)
@@ -171,6 +206,7 @@ func (l *List) Offset() int {
 }
 
 func (l *List) AtBottom() bool {
+	l.normalize()
 	if len(l.items) == 0 {
 		return true
 	}
@@ -194,6 +230,7 @@ func (l *List) ScrollBy(lines int) {
 	if len(l.items) == 0 || lines == 0 {
 		return
 	}
+	l.normalize()
 	if lines > 0 {
 		if l.AtBottom() {
 			l.follow = true // already at the bottom → following
