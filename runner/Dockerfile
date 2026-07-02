@@ -30,15 +30,22 @@ RUN npm prune --omit=dev
 FROM node:24-slim AS runtime
 
 # sshd for Mutagen sync transport (spec 9.2); sqlite3 for events.db ops;
-# git is commonly needed by the agent workspace.
+# git is commonly needed by the agent workspace. wget/netcat/dnsutils give the
+# agent workspace a basic fetch/diagnostic surface and let integrators run
+# network-isolation verification probes inside this image (no local "tools"
+# rebuild needed downstream).
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       openssh-server \
       sqlite3 \
       git \
       ca-certificates \
+      wget \
+      netcat-openbsd \
+      dnsutils \
  && rm -rf /var/lib/apt/lists/* \
- && mkdir -p /run/sshd
+ && mkdir -p /run/sshd \
+ && command -v wget && command -v nc && command -v nslookup
 
 # sshd config: key auth only. Mutagen logs in as root via the per-session key
 # (prohibit-password = pubkey only, never a password). Single uid avoids

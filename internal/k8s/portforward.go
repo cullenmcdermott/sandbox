@@ -243,8 +243,8 @@ func (b *Backend) resolvePodForForward(ctx context.Context, old *corev1.Pod) (*c
 // restURLForPodPortForward builds the port-forward URL for a pod. It uses the
 // REST client's request builder rather than string concatenation so the host's
 // base path is joined correctly — e.g. a kubeconfig server URL with a trailing
-// slash (as the Omni proxy emits) would otherwise yield a double-slash path the
-// API server 404s.
+// slash (as some API-server proxies emit) would otherwise yield a double-slash
+// path the API server 404s.
 func (b *Backend) restURLForPodPortForward(pod *corev1.Pod) *url.URL {
 	return b.core.CoreV1().RESTClient().Post().
 		Resource("pods").

@@ -5,15 +5,12 @@ The `docs/oss-launch/` directory itself is internal working material — delete 
 (or promote pieces you want public) before the public commit.
 
 ## Blocking before publish
-- [ ] **Decide the image story (deferred).** Defaults point at the private
-  `registry.cullen.rocks` (`internal/cli/claude_remote.go` `defaultRunnerImage`,
-  `internal/k8s/reaper.go` `DefaultReaperImage`), so an external user gets
-  ImagePullBackOff out of the box. Either (a) publish the runner image
-  (`runner/Dockerfile`) and a reaper image (`Dockerfile.reaper` — nothing builds
-  it today) to a registry outsiders can pull and flip the defaults, or (b) keep
-  the private defaults and rely on the README's "build & pass `--runner-image` /
-  `--reaper-image`" guidance (already documented). README + `k8s/README.md` +
-  SECURITY.md describe the bring-your-own-image path.
+- [x] **Decide the image story.** Done: defaults point at GHCR
+  (`client.DefaultRunnerImage` = `ghcr.io/cullenmcdermott/sandbox-claude-runner:latest`,
+  `internal/k8s/reaper.go` `DefaultReaperImage` =
+  `ghcr.io/cullenmcdermott/sandbox-reaper:latest`), both packages are public
+  (anonymous pull verified 2026-07-01), and `--runner-image` / `--reaper-image`
+  remain for bring-your-own-image users (README + `k8s/README.md` + SECURITY.md).
 - [ ] **Create the public GitHub repo** and push the initial commit. Note the
   whole tree is currently uncommitted WIP (no HEAD) — review the staged set
   before the first commit. `internal/tui/model.go` is already `git rm --cached`'d;
@@ -33,17 +30,17 @@ The `docs/oss-launch/` directory itself is internal working material — delete 
   `TODO.md`.
 - [ ] **Fill the placeholders** in `SECURITY.md` (disclosure channel — currently
   "GitHub Security Advisories") and `CODE_OF_CONDUCT.md` (enforcement contact).
-- [ ] **Verify GHCR package visibility** if you point defaults at GHCR: the
-  `sandbox-claude-runner` package is currently private (403 to anonymous pulls)
-  and `sandbox-reaper` does not exist. Set visibility to public + link to the
-  repo, or document an imagePullSecret.
+- [x] **Verify GHCR package visibility.** Both `sandbox-claude-runner` and
+  `sandbox-reaper` are public — anonymous manifest pull returns 200 (verified
+  2026-07-01). No imagePullSecret needed for the defaults.
 
 ## Post-launch hardening (tracked in HARDENING-BACKLOG.md — not blocking)
 - [x] Readiness/liveness probes on the pod spec (`internal/k8s/backend.go`; covered
   by `internal/k8s/backend_test.go` `TestCreateSessionProbes`).
 - [ ] `/metrics` endpoint + structured logging in the runner.
-- [ ] Pin the runner image to a digest (not `:latest`) in
-  `.github/workflows/build-runner-image.yml`.
+- [ ] Pin the runner image to a digest (not `:latest`). The build workflow
+  (`.depot/workflows/build-runner-image.yml`) now emits the pushed manifest
+  digest (job output + step summary) so consumers can pin `image@sha256:…`.
 - [ ] `runAsNonRoot` + `fsGroup` + cap-drop for the runner pod (currently root).
 - [ ] Permission token rotation; stronger permission-id entropy.
 - [ ] SBOM / image scanning / provenance in the build workflow.

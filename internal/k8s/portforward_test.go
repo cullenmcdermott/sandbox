@@ -20,11 +20,11 @@ import (
 )
 
 // restURLForPodPortForward must build a well-formed portforward URL even when
-// the REST config Host ends in a trailing slash (as the Omni proxy emits), with
-// no "//" in the path. Guards the documented Omni-proxy fix.
+// the REST config Host ends in a trailing slash (as some API-server proxies
+// emit), with no "//" in the path.
 func TestRestURLForPodPortForwardTrailingSlashHost(t *testing.T) {
 	for _, host := range []string{
-		"https://api.example.com/",  // trailing slash (Omni proxy)
+		"https://api.example.com/",  // trailing slash (proxied API server)
 		"https://api.example.com",   // no trailing slash
 		"https://api.example.com//", // doubled trailing slash
 	} {

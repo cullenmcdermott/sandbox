@@ -32,6 +32,10 @@ jobs:
   build:
     name: Build and Push
     runs-on: depot-ubuntu-24.04
+    # Surface the pushed manifest digest so consumers can digest-pin
+    # (image@sha256:…) instead of trusting tag stability.
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@v6
 
@@ -45,6 +49,7 @@ jobs:
           password: ${{ secrets.GHCR_TOKEN }}
 
       - name: Build and push (multi-arch)
+        id: build
         uses: depot/build-push-action@v1
         with:
           context: runner
@@ -54,3 +59,17 @@ jobs:
           tags: |
             ${{ env.IMAGE }}:latest
             ${{ env.IMAGE }}:${{ github.sha }}
+
+      - name: Emit pushed manifest digest
+        if: github.ref == 'refs/heads/main'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          {
+            echo "### Runner image published"
+            echo ""
+            echo "- ref: \`${IMAGE}:${GITHUB_SHA}\`"
+            echo "- manifest digest: \`${DIGEST}\`"
+            echo "- digest-pinned: \`${IMAGE}@${DIGEST}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Pushed ${IMAGE}@${DIGEST}"

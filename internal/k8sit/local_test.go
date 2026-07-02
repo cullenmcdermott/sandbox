@@ -83,8 +83,8 @@ func (bc backendCase) expectRealReply(t *testing.T, rc *rest.Config) bool {
 //   - rawConfig.CurrentContext == "kind-sandbox-local", and
 //   - rest.Config.Host is loopback (127.0.0.1 / ::1 / localhost).
 //
-// This guards against an accidental run against a remote cluster (e.g.
-// omni-prod) even if KUBECONFIG is mis-set. It returns the validated
+// This guards against an accidental run against a remote production cluster
+// even if KUBECONFIG is mis-set. It returns the validated
 // *rest.Config so callers can build a clientset against the same target.
 func localRestConfig(t *testing.T) *rest.Config {
 	t.Helper()
