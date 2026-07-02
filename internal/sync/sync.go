@@ -123,14 +123,58 @@ func (m *Manager) CreateAll(ctx context.Context, spec Spec) (created bool, err e
 	return created, nil
 }
 
+// buildTreeIgnores excludes large build/dependency trees that belong on each
+// side independently. Listed FIRST among the ignore layers so a project's own
+// .gitignore negation (e.g. `!vendor`) can override them — mutagen gives
+// later patterns precedence.
+var buildTreeIgnores = []string{
+	"--ignore=node_modules",
+	"--ignore=vendor",
+	"--ignore=.venv",
+	"--ignore=venv",
+	"--ignore=__pycache__",
+	"--ignore=.cache",
+	"--ignore=dist",
+	"--ignore=build",
+	"--ignore=target",
+}
+
+// securityIgnores is the non-overridable boundary layer, appended AFTER the
+// .gitignore-derived patterns so later-wins precedence means no project
+// .gitignore negation can re-enable syncing them.
+var securityIgnores = []string{
+	// Secrets and credentials — never sync to the pod (C1).
+	"--ignore=.env",
+	"--ignore=.env.*",
+	"--ignore=*.pem",
+	"--ignore=*.key",
+	"--ignore=*.p12",
+	"--ignore=*.pfx",
+	// Files that execute on the HOST without an explicit user action if the
+	// pod agent writes them and two-way sync carries them back: direnv runs
+	// .envrc/.direnv on cd (once allowed), VS Code tasks.json can auto-run on
+	// folder open, .idea holds JetBrains run configurations. Makefile-class
+	// files are deliberately NOT ignored — they run only on explicit user
+	// action, and agents legitimately edit them.
+	"--ignore=.envrc",
+	"--ignore=.direnv",
+	"--ignore=.vscode",
+	"--ignore=.idea",
+}
+
 // createProjectSync creates the two-way-safe project sync for a session.
 // Idempotent: an already-existing session ("session already exists") is left as-is
 // and reported as created=false; only a fresh create reports created=true.
+//
+// Ignore layering (mutagen resolves later patterns with higher precedence):
+// build trees, then the project root's .gitignore (see gitignoreIgnoreFlags),
+// then the non-overridable security/auto-exec set.
 func (m *Manager) createProjectSync(ctx context.Context, spec Spec, label string) (created bool, err error) {
 	projectName := "sandbox-" + spec.SessionID + "-project"
-	// Ignore patterns prevent secrets, credentials, and large build trees from
-	// being pushed to the pod (C1). These are defense-in-depth defaults; users
-	// can add more via mutagen.yml in the project root.
+	gitignoreFlags, err := gitignoreIgnoreFlags(spec.ProjectPath)
+	if err != nil {
+		return false, err
+	}
 	args := []string{
 		"sync", "create",
 		"--name=" + projectName,
@@ -146,25 +190,11 @@ func (m *Manager) createProjectSync(ctx context.Context, spec Spec, label string
 		// side and silently overwrite the pod's edit.)
 		"--mode=two-way-safe",
 		"--ignore-vcs",
-		// Secrets and credentials — never sync to the pod.
-		"--ignore=.env",
-		"--ignore=.env.*",
-		"--ignore=*.pem",
-		"--ignore=*.key",
-		"--ignore=*.p12",
-		"--ignore=*.pfx",
-		// Large build/dependency trees that belong on each side independently.
-		"--ignore=node_modules",
-		"--ignore=vendor",
-		"--ignore=.venv",
-		"--ignore=venv",
-		"--ignore=__pycache__",
-		"--ignore=.cache",
-		"--ignore=dist",
-		"--ignore=build",
-		"--ignore=target",
-		spec.ProjectPath, spec.SSHHost + ":" + spec.RemotePath,
 	}
+	args = append(args, buildTreeIgnores...)
+	args = append(args, gitignoreFlags...)
+	args = append(args, securityIgnores...)
+	args = append(args, spec.ProjectPath, spec.SSHHost+":"+spec.RemotePath)
 	if _, err := m.r.Output(ctx, nil, args...); err != nil {
 		// C8: use a more specific substring to avoid swallowing unrelated failures.
 		// Mutagen emits "session already exists" for idempotent re-creates → not an
