@@ -13,7 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
-	"github.com/cullenmcdermott/sandbox/internal/cred"
+	"github.com/cullenmcdermott/sandbox/client/cred"
 )
 
 // setupTokenFunc runs the host `claude setup-token` subprocess and returns its

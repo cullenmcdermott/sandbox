@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cullenmcdermott/sandbox/internal/cred"
+	"github.com/cullenmcdermott/sandbox/client/cred"
 )
 
 // fakePrompt returns a secretPromptFunc that yields the given values in order.

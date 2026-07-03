@@ -34,8 +34,6 @@ type (
 	PermissionDecision = session.PermissionDecision
 	ExecResult         = session.ExecResult
 	IdleStatus         = session.IdleStatus
-	PortSpec           = session.PortSpec
-	ForwardHandle      = session.ForwardHandle
 )
 
 // RunnerClient is the live connection to a session's in-pod runner: start and
@@ -255,7 +253,7 @@ type CreateOptions struct {
 	// backends.
 	AnthropicAuth string
 	// AnthropicAccountID names the stored Anthropic account this session runs on
-	// (see internal/cred). When set, AnthropicCredential MUST hold the resolved
+	// (see client/cred). When set, AnthropicCredential MUST hold the resolved
 	// bytes for that account — the caller (CLI/TUI) resolves account → bytes
 	// before calling Create; the client layer only carries and writes them.
 	// Setting the id without bytes fails closed with ErrAnthropicCredentialMissing
@@ -264,7 +262,7 @@ type CreateOptions struct {
 	// accounts, "api-key" for console) — env-var selection is driven solely by
 	// AnthropicAuth and the account's type is not visible at this layer, so the
 	// correlation cannot be validated here: forgetting it lands the right bytes
-	// under the wrong env var with no error. internal/cred's
+	// under the wrong env var with no error. client/cred's
 	// AuthForType(account.Type) is the canonical way to derive it. Must be a
 	// valid Kubernetes label value (the id labels the per-session Secret;
 	// guaranteed by the cred store) — else ErrInvalidAnthropicAccountID. Empty
@@ -272,11 +270,12 @@ type CreateOptions struct {
 	// non-claude backends.
 	AnthropicAccountID string
 	// AnthropicCredential is the resolved secret bytes (OAuth token or Console
-	// API key) for AnthropicAccountID. Never serialized; provisioned into the
-	// per-session Secret and surfaced to the pod as a SecretKeyRef env var only.
-	// Bytes without an AnthropicAccountID are rejected with
+	// API key) for AnthropicAccountID. Never serialized (json:"-" keeps a
+	// consumer's debug json.Marshal of the options from leaking it); provisioned
+	// into the per-session Secret and surfaced to the pod as a SecretKeyRef env
+	// var only. Bytes without an AnthropicAccountID are rejected with
 	// ErrAnthropicAccountRequired. Ignored by non-claude backends.
-	AnthropicCredential []byte
+	AnthropicCredential []byte `json:"-"`
 	// StorageClass is the PVC storage class (empty uses the cluster default).
 	StorageClass string
 	// StorageGiB is the PVC size in GiB (0 uses the backend default, 50).

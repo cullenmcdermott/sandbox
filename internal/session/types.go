@@ -84,7 +84,7 @@ type Spec struct {
 	AnthropicAuth string `json:"anthropicAuth,omitempty"`
 
 	// AnthropicAccountID identifies the stored Anthropic account a claude-sdk
-	// session is provisioned with (see internal/cred). It is plain metadata:
+	// session is provisioned with (see client/cred). It is plain metadata:
 	// serialized so status/the picker can show which account a session runs on
 	// and so rotation/logout can enumerate affected sessions. A non-empty value
 	// is ALSO the fail-closed branch signal in the k8s backend — when set, the
@@ -94,7 +94,7 @@ type Spec struct {
 	// AnthropicAuth to the account's type ("oauth" for subscription accounts,
 	// "api-key" for console) — env-var selection is driven solely by
 	// AnthropicAuth, and the account's type is not visible at this layer, so the
-	// correlation cannot be validated here; internal/cred's
+	// correlation cannot be validated here; client/cred's
 	// AuthForType(account.Type) is the canonical way to derive it. The id is
 	// used as a Kubernetes label value (sandbox.cullen.dev/anthropic-account) on
 	// that Secret, so it must be a valid label value / DNS-safe — the cred store

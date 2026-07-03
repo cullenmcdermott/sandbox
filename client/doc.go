@@ -11,6 +11,11 @@
 // The sandbox CLI and TUI consume this same package, so the public API is
 // exercised by the project's own use rather than living on a parallel path.
 //
+// The client/cred subpackage manages stored Anthropic accounts (claude.ai
+// subscription or Console API key); CreateOptions.UseAnthropicAccount and
+// SelectAnthropicAccount thread one into session creation, fail closed (see
+// account.go).
+//
 // Typical use:
 //
 //	c, err := client.New(client.WithContext("my-cluster"), client.WithNamespace("agent-sessions"))

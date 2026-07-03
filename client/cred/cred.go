@@ -1,5 +1,9 @@
-// Package cred reports and (incrementally) manages the credentials the sandbox
-// CLI uses to authenticate each supported agent backend.
+// Package cred is the public SDK surface for agent credentials: it reports and
+// manages the credentials used to authenticate each supported agent backend.
+// The sandbox CLI and TUI consume this same package, so the public API is
+// exercised by the project's own use; SDK consumers pair it with the parent
+// client package (CreateOptions.UseAnthropicAccount / SelectAnthropicAccount)
+// to run sessions on a stored account.
 //
 // The READ side (this file, providers.go) is a cheap, offline validation of
 // whether each agent's auth is configured and, for Claude/Codex, whether that

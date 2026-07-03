@@ -150,8 +150,9 @@ type Store interface {
 	// safety check (identical on all backends). The secret is written to the
 	// backend first, then the manifest.
 	Add(acct Account, secret []byte) error
-	// Secret returns the secret bytes for id, or ErrNotFound if absent. The
-	// bytes are returned to the caller and never logged.
+	// Secret returns the secret bytes for id: ErrNotFound if absent,
+	// ErrInvalidAccountID if id is not DNS-label-safe. The bytes are returned
+	// to the caller and never logged.
 	Secret(id string) ([]byte, error)
 	// Remove deletes id's metadata and secret. Removing the current default
 	// clears DefaultID. Removing an absent id is not an error (idempotent).
@@ -369,9 +370,11 @@ func (s *localStore) SetDefault(id string) error {
 	return s.saveManifest(m)
 }
 
-// DefaultRoot returns the production store root (~/.local/share/sandbox). The
-// manifest and file-backend secrets live directly under it.
-func DefaultRoot() (string, error) {
+// defaultRoot returns the production store root (~/.local/share/sandbox). The
+// manifest and file-backend secrets live directly under it. Unexported: the
+// path is an implementation detail; consumers use DefaultStore (or NewFileStore
+// with a root of their own choosing).
+func defaultRoot() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
@@ -386,12 +389,12 @@ func NewFileStore(root string) Store {
 	return &localStore{root: root, secrets: newFileBackend(root)}
 }
 
-// DefaultStore builds the platform-appropriate Store at DefaultRoot: the macOS
-// Keychain backend when /usr/bin/security is present, otherwise the file
-// backend. Stage 3/4 callers should use this to obtain the store the CLI and
-// TUI share.
+// DefaultStore builds the platform-appropriate Store at the default root
+// (~/.local/share/sandbox): the macOS Keychain backend when /usr/bin/security
+// is present, otherwise the file backend. This is the store the sandbox CLI
+// and TUI share — use it unless you need an isolated root (NewFileStore).
 func DefaultStore() (Store, error) {
-	root, err := DefaultRoot()
+	root, err := defaultRoot()
 	if err != nil {
 		return nil, err
 	}

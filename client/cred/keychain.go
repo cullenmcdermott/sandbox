@@ -110,15 +110,11 @@ func (k keychainBackend) delete(id string) error {
 	return nil
 }
 
-// NewKeychainStore returns a Store whose secrets live in the macOS Keychain and
-// whose manifest lives under root. Usable only where /usr/bin/security exists.
-func NewKeychainStore(root string) Store {
-	return newKeychainStore(root, realExec)
-}
-
-// newKeychainStore is the injectable constructor: tests supply a fake
-// execRunner to assert command construction (notably that the secret never
-// appears in args) without a real Keychain.
+// newKeychainStore is the injectable Keychain-store constructor: tests supply a
+// fake execRunner to assert command construction (notably that the secret never
+// appears in args) without a real Keychain. Unexported: on non-darwin every
+// operation would fail with raw exec errors, so consumers go through
+// DefaultStore, which selects it only where it can work.
 func newKeychainStore(root string, run execRunner) Store {
 	return &localStore{root: root, secrets: keychainBackend{service: keychainService, run: run}}
 }
@@ -128,7 +124,7 @@ func newKeychainStore(root string, run execRunner) Store {
 func storeForRoot(root string) Store {
 	if runtime.GOOS == "darwin" {
 		if _, err := os.Stat(securityBin); err == nil {
-			return NewKeychainStore(root)
+			return newKeychainStore(root, realExec)
 		}
 	}
 	return NewFileStore(root)
