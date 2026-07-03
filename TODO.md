@@ -269,7 +269,10 @@ the CLI credential manager below.
   pings (codex plan/rate-limit via app-server; provider key liveness); Claude
   reads env only (the real setup-token may live in a keychain — folds into the
   store below).
-- [ ] **CLI-owned credential manager — write side.** Build on `internal/cred`:
+- [ ] **CLI-owned credential manager — write side.** Anthropic part DONE on
+  `feat/anthropic-api-key-auth` (multi-account store + Keychain/file backends +
+  `auth login/list/logout/default`, promoted to the public SDK as `client/cred`).
+  Remaining scope below is codex/provider-key generalization. Build on `client/cred`:
   add the **macOS Keychain** store (optional Secure-Enclave-wrapped blob + Touch
   ID; file/env fallback on Linux), `sandbox auth {login,sync,logout}` (device-auth
   / setup-token / paste-key), and the create/connect **reconcile** that seeds the
@@ -532,3 +535,39 @@ reschedule, footer "◇ —" placeholder. Deferred:
 - [ ] **TestAppExternalPaneEscIsForwardedNotDetached fails in-sandbox (test env).**
   PTY spawn blocked; passes with sandbox disabled — add to the in-sandbox caveat list.
   `internal/tui/dashboard/actions_test.go:403`.
+- [ ] **TUI has no path to a FIRST Anthropic account (UX, LOW).** Zero stored
+  accounts skips the account picker entirely (plan-locked "current UX unchanged"),
+  so "＋ add account" is only reachable once one account exists via
+  `sandbox auth login`. Follow-up decision: a first-run hint, or always entering
+  the account stage with just cluster-default + add-account rows.
+  `internal/tui/dashboard/account_picker.go:123`.
+- [ ] **`client.WithBackend` is unusable outside the module (SDK, LOW).** The
+  public option takes `*internal/k8s.Backend`, a type an external consumer
+  cannot name (only an untyped nil compiles). Either drop it from the public
+  surface or accept an exported interface. Deliberately un-pinned in
+  `sdktest/surface_test.go`. `client/client.go:150`.
+- [ ] **Decide whether cred's read-side status report is really public SDK
+  (SDK, MED — cheap only until OSS).** `Report`, `DefaultProviders`, `Provider`,
+  `ClaudeProvider`/`CodexProvider`/`OpenCodeProvider`, `Status`, `Level`,
+  `Method`, `Env` moved public wholesale with the `internal/cred → client/cred`
+  promotion, but have exactly one consumer (`internal/cli/auth.go`), are
+  CLI-presentation machinery (`Level` is documented in render terms), and are
+  deliberately un-pinned in sdktest. Either move the read side back internal
+  (dissolves the `cred.Status` vs `client.Status` name collision), or harden it
+  and pin it. If it stays public: `Status.Level()` derives WARN from a
+  `strings.Contains(Detail, "EXPIRED")` substring contract with `expiryNote` —
+  replace with a structured field. `client/cred/cred.go:73`,
+  `client/cred/providers.go:102`.
+- [ ] **sdktest does not cover the public `tui/` packages (harness, LOW).**
+  `tui/kit`/`anim`/`list`/`theme`/`terminal` are documented as importable by
+  other projects but have no surface pins or consumer-compile check in
+  `sdktest/`. Add a `tui_surface_test.go` pinning the load-bearing exports.
+- [ ] **`client.RunnerClient` widening is not guarded (harness, LOW).**
+  Consumers implement it for test fakes (the dashboard does); adding a method
+  is a silent consumer break. Pin it in sdktest with a stub implementation like
+  `consumerStore` does for `cred.Store`. `client/client.go:47`.
+- [ ] **`just check` prints green even when gates were skipped (harness, LOW).**
+  lint/typecheck/runner-tests skip-with-warning when golangci-lint or
+  node_modules are absent, then `check` still ends "all gates passed" — local
+  green can overstate vs CI. Track skips and end with "passed (N gates skipped —
+  CI enforces them)". `justfile:24`.

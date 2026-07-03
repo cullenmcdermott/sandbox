@@ -121,8 +121,8 @@ sequenceDiagram
 
 | Secret | Keys | Owner | Notes |
 |---|---|---|---|
-| `<session-id>-runner` | `runner-token`, `ssh-authorized-key` | CLI (per session) | created on `claude`, deleted on `destroy` |
-| `anthropic-credentials` | `api-key` | operator (shared) | provisioned out-of-band; referenced **optionally** |
+| `<session-id>-runner` | `runner-token`, `opencode-password`, `ssh-authorized-key`, `anthropic-credential` (account sessions only) | CLI (per session) | created on `claude`, deleted on `destroy`; account-backed sessions get the extra key + a `sandbox.cullen.dev/anthropic-account=<id>` label so rotation/logout can enumerate copies |
+| `anthropic-credentials` | `api-key` (OAuth token), `console-api-key` | operator (shared) | provisioned out-of-band; referenced **optionally**; fallback when no account is chosen |
 
 **Local (`~/.local/share/sandbox/`):**
 
@@ -130,6 +130,9 @@ sequenceDiagram
 remote-sessions/<id>/session.json     local index entry
 remote-sessions/<id>/id_ed25519(.pub) per-session SSH keypair
 ssh/config                            per-session Host aliases (Include'd from ~/.ssh/config)
+anthropic-accounts.json               Anthropic account metadata + default id (never secret bytes)
+anthropic-secrets/                    per-account 0600 secret files (file backend only; macOS
+                                      uses the Keychain, service "sandbox-anthropic")
 ```
 
 ## Auth & secrets flow
@@ -139,14 +142,32 @@ ssh/config                            per-session Host aliases (Include'd from ~
   `secretKeyRef`. The same value is read back from the Secret for `claude`,
   `attach`, and `cancel`. The runner rejects every non-`/healthz` request without
   it.
-- **Model auth (claude-sdk backend).** A Claude Code OAuth token is read from the
-  shared `anthropic-credentials` Secret (key `api-key`) and injected as
-  `CLAUDE_CODE_OAUTH_TOKEN` (optional ref, so the pod still starts before it
-  exists; turns fail to authenticate until it does). It must be a subscription
-  OAuth token (`claude setup-token`), **not** a raw `ANTHROPIC_API_KEY` — Claude
-  Code would reject an x-api-key in this slot. `ANTHROPIC_API_KEY` is injected
-  only for the `opencode` backend, from the separate `opencode-credentials`
-  Secret (see `buildEnv` in `internal/k8s/backend.go`).
+- **Model auth (claude-sdk backend).** Two paths, branched on whether a stored
+  Anthropic account was chosen at create time (see `buildEnv` in
+  `internal/k8s/backend.go`):
+  - **Account-backed (per-session Secret).** `sandbox auth login` stores
+    accounts locally (metadata in `anthropic-accounts.json`, secret bytes in
+    the macOS Keychain or per-account 0600 files); the TUI account picker or
+    `sandbox claude --account <id|label>` selects one. The CLI resolves the
+    account to credential bytes and `CreateSession` writes them into the
+    per-session Secret under `anthropic-credential`, injected as
+    `CLAUDE_CODE_OAUTH_TOKEN` (subscription account, `AnthropicAuth: oauth`)
+    or `ANTHROPIC_API_KEY` (console account, `api-key`) — a **required** ref,
+    since we wrote it. The pod sees exactly one credential. This path fails
+    closed: an account id that can't be resolved to bytes aborts the create
+    rather than silently falling back to the shared Secret. To rotate, re-login
+    and update the labeled Secrets, then suspend/resume (env is resolved at
+    container start).
+  - **Shared-Secret fallback (no account chosen).** A Claude Code OAuth token is
+    read from the shared `anthropic-credentials` Secret (key `api-key`) and
+    injected as `CLAUDE_CODE_OAUTH_TOKEN` (optional ref, so the pod still starts
+    before it exists; turns fail to authenticate until it does). It must be a
+    subscription OAuth token (`claude setup-token`), **not** a raw
+    `ANTHROPIC_API_KEY` — Claude Code would reject an x-api-key in this slot,
+    unless the session was created with `AnthropicAuth: api-key`, which selects
+    the `console-api-key` key → `ANTHROPIC_API_KEY` instead. `ANTHROPIC_API_KEY`
+    is otherwise injected only for the `opencode` backend, from the separate
+    `opencode-credentials` Secret.
 - **Sync auth.** The CLI generates a per-session ed25519 keypair; the public key
   rides in the session Secret and is installed as the pod's `authorized_keys`,
   the private key stays local and is referenced by the ssh-config alias. Mutagen

@@ -1,7 +1,8 @@
 # Per-session Anthropic account selection
 
-Status: **plan** (branch `feat/anthropic-api-key-auth`, builds on the
-`Spec.AnthropicAuth` commit).
+Status: **implemented** (branch `feat/anthropic-api-key-auth`; all five stages
+landed — see §Sequencing). Kept as the design record. One deferred UX follow-up
+is tracked in `TODO.md` (no TUI path to a *first* account).
 
 ## Goal
 
