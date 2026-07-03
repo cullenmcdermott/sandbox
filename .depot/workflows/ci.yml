@@ -22,8 +22,9 @@ permissions:
 jobs:
   # Single gate that mirrors `just check` exactly, so local and CI cannot drift.
   # `just check` runs: gen (+generated-file diff gate) → fmt-check → lint
-  # (golangci-lint + eslint) → build → vet → test (Go + runner) → typecheck →
-  # verify (anti-cheat scan + race tests twice) → e2e.
+  # (golangci-lint + eslint) → build → vet → test (Go + runner) →
+  # sdk-conformance (public SDK exercised from the external sdktest module) →
+  # typecheck → verify (anti-cheat scan + race tests twice) → e2e.
   check:
     name: just check
     runs-on: depot-ubuntu-24.04
@@ -60,7 +61,7 @@ jobs:
           path: |
             /home/runner/.cache/go/pkg/mod
             /home/runner/.cache/golangci-lint
-          key: go-${{ hashFiles('go.sum') }}
+          key: go-${{ hashFiles('go.sum', 'sdktest/go.sum') }}
           restore-keys: |
             go-
 

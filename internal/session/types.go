@@ -68,6 +68,49 @@ type Spec struct {
 	// (TurnInput.Model, the in-session /model command) take precedence.
 	Model string `json:"model,omitempty"`
 
+	// AnthropicAuth selects the Anthropic credential the claude-sdk runner pod
+	// authenticates with. Exactly one credential env is populated per pod:
+	//   ""/"oauth" — subscription OAuth token (CLAUDE_CODE_OAUTH_TOKEN, from the
+	//                anthropic-credentials Secret key "api-key"); the default.
+	//   "api-key"  — Console API key (ANTHROPIC_API_KEY, from the
+	//                anthropic-credentials Secret key "console-api-key").
+	// These spellings and Secret key names are a consumer contract — do not
+	// rename them. Claude Code prefers x-api-key over OAuth and rejects the
+	// OAuth token when ANTHROPIC_API_KEY is also set, so the selection is
+	// explicit and never populates both. This field ALONE selects the env var —
+	// including for account-backed sessions — so a caller setting
+	// AnthropicAccountID MUST set it to match the account's type (see
+	// AnthropicAccountID). Ignored by non-claude backends.
+	AnthropicAuth string `json:"anthropicAuth,omitempty"`
+
+	// AnthropicAccountID identifies the stored Anthropic account a claude-sdk
+	// session is provisioned with (see client/cred). It is plain metadata:
+	// serialized so status/the picker can show which account a session runs on
+	// and so rotation/logout can enumerate affected sessions. A non-empty value
+	// is ALSO the fail-closed branch signal in the k8s backend — when set, the
+	// pod's credential comes from the per-session Secret (key
+	// "anthropic-credential") rather than the shared anthropic-credentials
+	// Secret; empty selects the shared-Secret fallback. The caller MUST also set
+	// AnthropicAuth to the account's type ("oauth" for subscription accounts,
+	// "api-key" for console) — env-var selection is driven solely by
+	// AnthropicAuth, and the account's type is not visible at this layer, so the
+	// correlation cannot be validated here; client/cred's
+	// AuthForType(account.Type) is the canonical way to derive it. The id is
+	// used as a Kubernetes label value (sandbox.cullen.dev/anthropic-account) on
+	// that Secret, so it must be a valid label value / DNS-safe — the cred store
+	// guarantees this. Ignored by non-claude backends.
+	AnthropicAccountID string `json:"anthropicAccountId,omitempty"`
+
+	// AnthropicCredential is the resolved secret bytes for AnthropicAccountID
+	// (an OAuth token or Console API key), written into the per-session Secret
+	// at CreateSession. It is NEVER serialized (json:"-") — like SSHPublicKey it
+	// is create-time-only material that must not land in the local session index
+	// or any wire payload; the pod receives it only as a SecretKeyRef env var,
+	// never an inline value. The CLI/TUI resolves account → bytes (reads the
+	// Keychain/file store); the client layer just carries and writes them.
+	// Ignored by non-claude backends.
+	AnthropicCredential []byte `json:"-"`
+
 	// Namespace is the Kubernetes namespace for the Sandbox/PVC. Defaults to
 	// "agent-sessions".
 	Namespace string `json:"namespace"`

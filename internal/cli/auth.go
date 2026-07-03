@@ -11,21 +11,23 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/spf13/cobra"
 
-	"github.com/cullenmcdermott/sandbox/internal/cred"
+	"github.com/cullenmcdermott/sandbox/client/cred"
 )
 
 // newAuthCmd builds `sandbox auth`, which inspects the credentials the CLI uses
-// to authenticate each supported agent (and the cluster connection). `status`
-// is the only subcommand today; `login`/`sync`/`logout` (the write side — a
-// local Keychain-backed store that seeds + reconciles the per-session cluster
-// Secret) land with the Codex backend work (docs/codex-integration-plan.md).
+// to authenticate each supported agent (and the cluster connection) and manages
+// the local multi-account Anthropic store. `status` is the read-side red/green
+// readout; `login`/`list`/`logout`/`default` are the write side — a local
+// Keychain-backed (file-fallback) store of Anthropic accounts that
+// `sandbox claude --account` and the TUI account picker draw from.
 func newAuthCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "auth",
-		Short: "Inspect agent credentials and cluster connectivity",
+		Short: "Inspect agent credentials and manage Anthropic accounts",
 		Long: "Validate the auth configured for each supported agent (Claude / Codex /\n" +
-			"OpenCode) and the cluster connection, with a red/green readout. Checks are\n" +
-			"cheap and offline; no secrets are printed.",
+			"OpenCode) and the cluster connection, with a red/green readout, and manage the\n" +
+			"local multi-account Anthropic store (login / list / logout / default). Status\n" +
+			"checks are cheap and offline; no secrets are ever printed.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error { return runAuthStatus(cmd) },
 	}
@@ -35,13 +37,29 @@ func newAuthCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE:  func(cmd *cobra.Command, _ []string) error { return runAuthStatus(cmd) },
 	})
+	cmd.AddCommand(newAuthLoginCmd())
+	cmd.AddCommand(newAuthListCmd())
+	cmd.AddCommand(newAuthLogoutCmd())
+	cmd.AddCommand(newAuthDefaultCmd())
 	return cmd
 }
 
 func runAuthStatus(cmd *cobra.Command) error {
 	home, _ := os.UserHomeDir()
 	agents := cred.Report(cmd.Context(), cred.DefaultProviders(os.Getenv, home)...)
-	renderAuthStatus(cmd.OutOrStdout(), probeCluster(cmd.Context()), agents)
+
+	// Stored Anthropic accounts are part of the readout (metadata only — the
+	// status invariant that no secret bytes are ever read holds: List/Default
+	// touch just the manifest). A store failure degrades to a warning line.
+	var accounts []cred.Account
+	var def string
+	store, storeErr := newCredStore()
+	if storeErr == nil {
+		accounts, storeErr = store.List()
+		def, _ = store.Default()
+	}
+
+	renderAuthStatus(cmd.OutOrStdout(), probeCluster(cmd.Context()), agents, accounts, def, storeErr)
 	return nil
 }
 
@@ -94,7 +112,9 @@ func dot(l cred.Level) string {
 }
 
 // renderAuthStatus writes the red/green readout. Pure (no network) for testing.
-func renderAuthStatus(w io.Writer, cs clusterStatus, agents []cred.Status) {
+// accounts/def/storeErr describe the local Anthropic account store (metadata
+// only): a non-nil storeErr renders a warning line instead of the list.
+func renderAuthStatus(w io.Writer, cs clusterStatus, agents []cred.Status, accounts []cred.Account, def string, storeErr error) {
 	fmt.Fprintf(w, "\n  auth status\n\n")
 
 	lvl, state, detail := cred.LevelBad, "unreachable", cs.detail
@@ -112,6 +132,22 @@ func renderAuthStatus(w io.Writer, cs clusterStatus, agents []cred.Status) {
 		for _, sub := range s.Sub {
 			label := strings.TrimPrefix(sub.Name, s.Name+"/")
 			fmt.Fprintf(w, "      %s %-12s %s\n", dot(sub.Level()), label, dimText.Render(sub.Detail))
+		}
+	}
+
+	fmt.Fprintf(w, "\n  anthropic accounts\n")
+	switch {
+	case storeErr != nil:
+		fmt.Fprintf(w, "  %s %s\n", dot(cred.LevelWarn), dimText.Render(truncate("account store unreadable: "+storeErr.Error(), 140)))
+	case len(accounts) == 0:
+		fmt.Fprintf(w, "    %s\n", dimText.Render("none stored — add one with `sandbox auth login`"))
+	default:
+		for _, a := range accounts {
+			marker := ""
+			if a.ID == def {
+				marker = "(default)"
+			}
+			fmt.Fprintf(w, "  %s %-18s %-14s %-8s %s\n", dot(cred.LevelOK), a.Label, string(a.Type), humanAge(a.CreatedAt), dimText.Render(marker))
 		}
 	}
 	fmt.Fprintln(w)

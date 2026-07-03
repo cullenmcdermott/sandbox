@@ -1,16 +1,27 @@
-// Package cred reports and (incrementally) manages the credentials the sandbox
-// CLI uses to authenticate each supported agent backend.
+// Package cred is the public SDK surface for agent credentials: it reports and
+// manages the credentials used to authenticate each supported agent backend.
+// The sandbox CLI and TUI consume this same package, so the public API is
+// exercised by the project's own use; SDK consumers pair it with the parent
+// client package (CreateOptions.UseAnthropicAccount / SelectAnthropicAccount)
+// to run sessions on a stored account.
 //
-// Today it provides the READ side: a cheap, offline validation of whether each
-// agent's auth is configured and, for Claude/Codex, whether that auth is an API
-// key or a subscription OAuth token. This powers `sandbox auth status` and a
-// red/green preflight surface. The WRITE side — a local Keychain-backed store
-// that seeds and reconciles the per-session cluster Secret, with renewal prompts
-// — layers on top of these same Provider abstractions later (see
-// docs/codex-integration-plan.md "Authentication").
+// The READ side (this file, providers.go) is a cheap, offline validation of
+// whether each agent's auth is configured and, for Claude/Codex, whether that
+// auth is an API key or a subscription OAuth token. This powers `sandbox auth
+// status` and a red/green preflight surface.
 //
-// Checks never read or emit token material — only derived facts (configured,
-// method, expiry).
+// The WRITE side (store.go, filestore.go, keychain.go, token.go) is a local
+// multi-account store for Anthropic credentials: a metadata manifest plus a
+// secret backend (macOS Keychain, or per-account 0600 files elsewhere), and the
+// pure token-parsing helpers the CLI and TUI share. See Store and
+// docs/anthropic-account-auth-plan.md.
+//
+// The store reads and writes token material by necessity, but the same logging
+// invariant holds throughout the package: secret bytes are never printed,
+// logged, or embedded in an error message. Secrets stay as []byte, never appear
+// in the manifest, and never reach argv (Keychain writes go via stdin). The
+// read-side checks additionally never read token material at all — only derived
+// facts (configured, method, expiry).
 package cred
 
 import (

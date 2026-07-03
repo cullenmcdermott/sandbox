@@ -1,7 +1,7 @@
 # justfile — the canonical command surface for this repo.
 #
 # `just check` is the full gate an agent runs before declaring work done; CI
-# (.github/workflows/ci.yml) calls the same targets so local and CI cannot drift.
+# (.depot/workflows/ci.yml) calls the same targets so local and CI cannot drift.
 #
 # Environment notes:
 #   - Inside the agent command-sandbox the Go toolchain wants writable caches.
@@ -9,9 +9,11 @@
 #     normal Nix/macOS dev shell use their own defaults):
 #         GOPATH=/tmp/gopath GOMODCACHE=/tmp/gomodcache GOFLAGS=-mod=mod \
 #         GOCACHE=$TMPDIR/go-build-cache
-#   - In-sandbox httptest caveat: `internal/runner` and `internal/models` bind
-#     localhost ports that the agent command-sandbox blocks. Run `just test` /
-#     `just verify` with the sandbox disabled (CI and normal dev are unrestricted).
+#   - In-sandbox httptest caveat: `client`, `internal/runner`, `internal/models`,
+#     and `internal/k8s` bind localhost ports the agent command-sandbox blocks
+#     (and `sdk-conformance` may need the network for `go mod tidy -diff`). Run
+#     `just test` / `just verify` / `just check` with the sandbox disabled
+#     (CI and normal dev are unrestricted).
 #   - Linters (golangci-lint, eslint) are not installed on the Nix host and must
 #     not be installed imperatively. Recipes skip them with a warning when absent;
 #     CI is the hard enforcement point.
@@ -20,8 +22,10 @@
 default:
     @just --list
 
-# The full gate: everything CI runs. Mirrors the CI job graph.
-check: gen fmt-check lint build vet test typecheck verify e2e
+# The full gate: everything CI runs. Mirrors the CI job graph. Ordered
+# cheapest-first within reason so failures surface fast (typecheck is seconds;
+# sdk-conformance compiles the whole SDK; verify/e2e are the heaviest).
+check: gen fmt-check lint build vet test typecheck sdk-conformance verify e2e
     @printf '\033[32m%s\033[0m\n' "just check: all gates passed"
 
 # Regenerate the event model from schema/events.json and fail on any drift
@@ -31,15 +35,16 @@ gen:
     @git diff --exit-code -- internal/session/eventtypes.gen.go runner/src/events.gen.ts \
         || { printf '\033[31m%s\033[0m\n' "generated files are stale — schema/events.json changed without regen, or a *.gen.* file was hand-edited. Commit the regenerated output."; exit 1; }
 
-# Format Go source in place. Scoped to cmd/ + internal/ (all our Go) so it never
-# touches the vendored Go inside runner/node_modules.
+# Format Go source in place. Scoped to our Go trees (cmd/, internal/, the public
+# client/ + tui/ SDK packages, sdktest/) so it never touches the vendored Go
+# inside runner/node_modules.
 fmt:
-    gofmt -w cmd internal
-    @command -v goimports >/dev/null 2>&1 && goimports -w cmd internal || echo "note: goimports absent, skipping (gofmt applied)"
+    gofmt -w cmd internal client tui sdktest
+    @command -v goimports >/dev/null 2>&1 && goimports -w cmd internal client tui sdktest || echo "note: goimports absent, skipping (gofmt applied)"
 
 # Fail if any Go file is not gofmt-clean (no writes). Same scope as `fmt`.
 fmt-check:
-    @unformatted="$(gofmt -l cmd internal || true)"; \
+    @unformatted="$(gofmt -l cmd internal client tui sdktest || true)"; \
     if [ -n "$unformatted" ]; then \
         printf '\033[31m%s\033[0m\n' "gofmt: these files need formatting (run 'just fmt'):"; \
         echo "$unformatted"; exit 1; \
@@ -82,6 +87,19 @@ typecheck:
     else \
         printf '\033[33m%s\033[0m\n' "warning: runner deps not installed — skipping typecheck. Run: cd runner && npm install --ignore-scripts"; \
     fi
+
+# SDK-conformance gate: compile + test the public SDK (client, client/cred) from
+# the SEPARATE sdktest module, exactly as an external consumer imports it. This
+# is what catches a breaking API change (or an internal/... type leaking into an
+# exported signature) the moment it lands — the main module cannot check either.
+# `go mod tidy -diff` is the drift gate: the child module tracks the parent's
+# deps via the replace directive, so a parent dep bump must be propagated with
+# `cd sdktest && go mod tidy` and committed. -diff fails WITHOUT writing, so the
+# gate never mutates the tree (mirrors the `gen` drift gate's spirit).
+sdk-conformance:
+    @cd sdktest && go mod tidy -diff \
+        || { printf '\033[31m%s\033[0m\n' "sdktest/go.mod|go.sum are stale (parent dep change not propagated) — run 'cd sdktest && go mod tidy' and commit the result."; exit 1; }
+    cd sdktest && go vet ./... && go test ./...
 
 # Durable anti-cheat + race-twice gate (scripts/verify.sh).
 verify:

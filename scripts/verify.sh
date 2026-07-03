@@ -21,12 +21,13 @@ grn()  { printf '\033[32m%s\033[0m\n' "$*"; }
 fail() { red "GATE FAILED: $*"; exit 1; }
 
 # ---- 1. Anti-cheat scan -----------------------------------------------------
-# Scope: Go source under internal/, cmd/, and the public client/ package. TODO/
-# FIXME are intentionally NOT forbidden — this repo uses TODO.md as its backlog and
-# documents missing runner endpoints with inline TODO pointers. We forbid the
-# things that fake completion. Generated files (*.gen.go) are never scanned.
+# Scope: Go source under internal/, cmd/, the public client/ + tui/ packages,
+# and the sdktest conformance module. TODO/FIXME are intentionally NOT forbidden
+# — this repo uses TODO.md as its backlog and documents missing runner endpoints
+# with inline TODO pointers. We forbid the things that fake completion.
+# Generated files (*.gen.go) are never scanned.
 
-SCAN_PATHS=(internal cmd client)
+SCAN_PATHS=(internal cmd client tui sdktest)
 
 # (a) Stubs/panics in NON-test source.
 FORBID_SRC='panic\(|not implemented|unimplemented|return nil // stub'
@@ -54,9 +55,13 @@ grn "1/2 anti-cheat scan clean"
 # Twice catches global-state leakage (run 2 sees state left by run 1) and
 # nondeterministic output. Whole module: no hardcoded package list.
 #
-# In-sandbox caveat: internal/runner + internal/models bind httptest ports,
-# which the agent command-sandbox blocks. Run this with the sandbox disabled
-# (it is unrestricted in CI and normal local dev).
+# In-sandbox caveat: client, internal/runner, internal/models, and internal/k8s
+# bind httptest/local ports, which the agent command-sandbox blocks. Run this
+# with the sandbox disabled (it is unrestricted in CI and normal local dev).
+#
+# Scope note: `./...` stops at nested modules, so the sdktest conformance module
+# is NOT raced here — its tests are file-store/JSON only (no concurrency) and
+# run under `just sdk-conformance`.
 go test -race -count=1 ./... || fail "race tests failed (run 1)"
 go test -race -count=1 ./... || fail "race tests failed (run 2 — state leak / nondeterminism)"
 grn "2/2 race tests pass twice"

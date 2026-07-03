@@ -79,6 +79,7 @@ func NewRoot() *cobra.Command {
 					SyncProber:        dashboardSyncProber(),
 					SyncReaper:        dashboardSyncReaper(),
 					IdleTimeout:       defaultReaperIdleTimeout,
+					AccountStore:      newDashboardAccountStore(),
 				})
 			})
 		},

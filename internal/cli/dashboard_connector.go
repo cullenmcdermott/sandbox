@@ -128,7 +128,8 @@ func newDashboardObserverConnector(c *client.Client, reaperImage string) dashboa
 // session) action. It mirrors `sandbox claude` without a prompt, driven entirely
 // through the public client API.
 func newDashboardCreator(c *client.Client, runnerImage, reaperImage string) dashboard.Creator {
-	return func(ctx context.Context, backendName string, onStage func(dashboard.ConnectStage, string)) (dashboard.CreateResult, error) {
+	return func(ctx context.Context, params dashboard.CreateParams, onStage func(dashboard.ConnectStage, string)) (dashboard.CreateResult, error) {
+		backendName := params.Backend
 		if backendName == "" {
 			backendName = client.BackendClaudeSDK
 		}
@@ -139,7 +140,23 @@ func newDashboardCreator(c *client.Client, runnerImage, reaperImage string) dash
 
 		// Dashboard-created sessions use the account default model; the in-session
 		// /model command can switch it per turn afterwards.
-		sess, err := c.Create(ctx, client.CreateOptions{Backend: backendName, ProjectPath: projectPath, RunnerImage: runnerImage})
+		opts := client.CreateOptions{Backend: backendName, ProjectPath: projectPath, RunnerImage: runnerImage}
+		// A picked Anthropic account is resolved to a per-session credential here,
+		// via the SAME fail-closed SDK helper the CLI's `--account` flag uses: any
+		// resolution/Keychain error is returned (surfaced in the dashboard's
+		// connect-error UI), never a silent fall-back to the shared Secret. An empty
+		// id is the legacy/cluster-default path — opts is left untouched.
+		if params.AnthropicAccountID != "" {
+			store, serr := newCredStore()
+			if serr != nil {
+				return dashboard.CreateResult{}, serr
+			}
+			if aerr := opts.UseAnthropicAccount(store, params.AnthropicAccountID); aerr != nil {
+				return dashboard.CreateResult{}, aerr
+			}
+		}
+
+		sess, err := c.Create(ctx, opts)
 		if err != nil {
 			return dashboard.CreateResult{}, err
 		}

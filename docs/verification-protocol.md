@@ -48,15 +48,19 @@ They may **not** delete assertions, loosen thresholds, add `t.Skip`, or `//nolin
 `just verify` enforces the two checks that are valuable regardless of the goal:
 
 1. **Anti-cheat scan** — no `panic(`/`not implemented`/stub in non-test source; no
-   `t.Skip` or bare `//nolint` in any Go file under `internal/` + `cmd/`. A line
-   carrying an explicit `// gate-ok: <reason>` is exempt (a visible, reviewable
-   acknowledgement). `TODO`/`FIXME` are *not* forbidden — this repo uses `TODO.md`
-   as its backlog.
+   `t.Skip` or bare `//nolint` in any Go file under `internal/`, `cmd/`, the public
+   `client/` + `tui/` packages, and `sdktest/`. A line carrying an explicit
+   `// gate-ok: <reason>` is exempt (a visible, reviewable acknowledgement).
+   `TODO`/`FIXME` are *not* forbidden — this repo uses `TODO.md` as its backlog.
 2. **Race + determinism** — `go test -race ./...` over the whole module, run twice
-   (catches global-state leakage and nondeterministic output).
+   (catches global-state leakage and nondeterministic output). `./...` stops at
+   nested modules, so the `sdktest/` conformance module is covered by
+   `just sdk-conformance` instead (its tests have no concurrency).
 
 The wider gate is `just check`: gen drift, `gofmt`, lint, build, vet, the full test
-suite, runner typecheck, then `just verify`. Per-package during development, run
+suite, runner typecheck, SDK conformance (`just sdk-conformance` — the external
+`sdktest/` module compiling + testing the public SDK as a consumer), then
+`just verify`, then the e2e smoke test. Per-package during development, run
 e.g. `go test -race -count=1 ./tui/list/...`.
 
 ## Determinism requirements (so the gates are stable)
@@ -66,11 +70,9 @@ e.g. `go test -race -count=1 ./tui/list/...`.
 - `SANDBOX_REDUCE_MOTION=1` collapses animation to end-state. The gate runs with it set.
 - Fixed color profile + theme in tests (don't depend on terminal detection).
 
-## Module facts (for every package)
+## Module facts
 
-- Module path: `github.com/cullenmcdermott/sandbox`.
-- New packages live under `internal/tui/dashboard/`.
-- `list` has **no** external deps (pure Go + stdlib). `chat` depends on
-  `charm.land/glamour/v2`, `charm.land/lipgloss/v2`, `list`, and `internal/session`.
-- Go toolchain + env per `CLAUDE.md` (`GOPATH=/tmp/gopath GOMODCACHE=/tmp/gomodcache
-  GOFLAGS=-mod=mod` inside the sandbox VM).
+- Module path: `github.com/cullenmcdermott/sandbox`; the SDK-conformance
+  harness is a separate nested module, `sdktest/`.
+- Go toolchain + env per `CLAUDE.md` (writable `GOPATH`/`GOMODCACHE`/`GOCACHE`
+  inside the agent command-sandbox).

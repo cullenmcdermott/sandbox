@@ -19,6 +19,7 @@ func newClaudeRemoteCmd() *cobra.Command {
 		reaperImage string
 		nameFlag    string
 		modelFlag   string
+		accountFlag string
 	)
 	cmd := &cobra.Command{
 		Use:   "claude [prompt]",
@@ -28,13 +29,14 @@ func newClaudeRemoteCmd() *cobra.Command {
 			if len(args) > 0 {
 				prompt = args[0]
 			}
-			return runStartSession(cmd, session.BackendClaudeSDK, prompt, runnerImage, reaperImage, nameFlag, modelFlag)
+			return runStartSession(cmd, session.BackendClaudeSDK, prompt, runnerImage, reaperImage, nameFlag, modelFlag, accountFlag)
 		},
 	}
 	cmd.Flags().StringVar(&runnerImage, "runner-image", client.DefaultRunnerImage, "runner container image")
 	cmd.Flags().StringVar(&reaperImage, "reaper-image", k8s.DefaultReaperImage, "idle-reaper container image")
 	cmd.Flags().StringVar(&nameFlag, "name", "", "custom display name for the session (overrides the auto title)")
 	cmd.Flags().StringVar(&modelFlag, "model", "", "model id/alias for the session default (e.g. opus, sonnet, haiku); empty uses the account default. Switch in-session with /model")
+	cmd.Flags().StringVar(&accountFlag, "account", "", "stored Anthropic account (id or label from `sandbox auth list`) to run the session on; empty uses the default account, or the shared cluster Secret when none are stored")
 	return cmd
 }
 
@@ -54,8 +56,9 @@ func newOpencodeCmd() *cobra.Command {
 		Short: "Start a remote opencode-server session and open the local opencode TUI",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// opencode manages its own model selection, so there is no --model
-			// flag here (TODO.md): pass an empty model.
-			return runStartSession(cmd, session.BackendOpenCode, "", runnerImage, reaperImage, nameFlag, "")
+			// flag here (TODO.md): pass an empty model. opencode has no Anthropic
+			// account step either, so the account selector is always empty.
+			return runStartSession(cmd, session.BackendOpenCode, "", runnerImage, reaperImage, nameFlag, "", "")
 		},
 	}
 	cmd.Flags().StringVar(&runnerImage, "runner-image", client.DefaultRunnerImage, "runner container image")
@@ -88,7 +91,10 @@ func resolveProjectPath() (string, error) {
 // Creation and connection go through the public client package — the same path
 // an external Go program uses — so the CLI dogfoods the library rather than
 // keeping a parallel session engine.
-func runStartSession(cmd *cobra.Command, backendName, prompt, runnerImage, reaperImage, name, model string) error {
+//
+// account is the raw `--account` selector (id|label, may be ""); it is honored
+// only for the claude backend (opencode has no Anthropic account step).
+func runStartSession(cmd *cobra.Command, backendName, prompt, runnerImage, reaperImage, name, model, account string) error {
 	c, backend, err := newClientAndBackend()
 	if err != nil {
 		return err
@@ -100,15 +106,30 @@ func runStartSession(cmd *cobra.Command, backendName, prompt, runnerImage, reape
 		return err
 	}
 
-	// Create-but-don't-start: the pod-ready wait happens inside the dashboard's
-	// connect path so the animated connect splash (pod phase + elapsed timer) is
-	// on screen during schedule + image-pull instead of a frozen terminal.
-	sess, err := c.Create(ctx, client.CreateOptions{
+	opts := client.CreateOptions{
 		Backend:     backendName,
 		ProjectPath: projectPath,
 		RunnerImage: runnerImage,
 		Model:       model,
-	})
+	}
+	// Resolve the Anthropic account → per-session credential (fail closed): a
+	// requested account that can't be resolved/read is a hard error, never a
+	// silent fall-back to the shared cluster Secret. Only claude is
+	// account-aware; opencode always uses the empty selector.
+	if backendName == session.BackendClaudeSDK {
+		store, serr := newCredStore()
+		if serr != nil {
+			return serr
+		}
+		if aerr := applyAccountSelection(store, account, &opts); aerr != nil {
+			return aerr
+		}
+	}
+
+	// Create-but-don't-start: the pod-ready wait happens inside the dashboard's
+	// connect path so the animated connect splash (pod phase + elapsed timer) is
+	// on screen during schedule + image-pull instead of a frozen terminal.
+	sess, err := c.Create(ctx, opts)
 	if err != nil {
 		return err
 	}
@@ -131,7 +152,7 @@ func runStartSession(cmd *cobra.Command, backendName, prompt, runnerImage, reape
 			newDashboardCreator(c, runnerImage, reaperImage),
 			dashSess,
 			prompt,
-			dashboard.RunOptions{DestroyHook: newLocalDestroyHook(c), PreDestroyHook: newPreDestroySyncStop(c), TitleStore: indexTitleStore{}, SnapshotStore: indexSnapshotStore{}, EventCache: indexEventCache{}, ObserverConnector: newDashboardObserverConnector(c, reaperImage), SyncProber: dashboardSyncProber(), SyncReaper: dashboardSyncReaper(), IdleTimeout: defaultReaperIdleTimeout},
+			dashboard.RunOptions{DestroyHook: newLocalDestroyHook(c), PreDestroyHook: newPreDestroySyncStop(c), TitleStore: indexTitleStore{}, SnapshotStore: indexSnapshotStore{}, EventCache: indexEventCache{}, ObserverConnector: newDashboardObserverConnector(c, reaperImage), SyncProber: dashboardSyncProber(), SyncReaper: dashboardSyncReaper(), IdleTimeout: defaultReaperIdleTimeout, AccountStore: newDashboardAccountStore()},
 		)
 	})
 }

@@ -123,12 +123,31 @@ type CreateResult struct {
 	Warning string
 }
 
+// CreateParams carries the new-session choices the picker gathers before
+// provisioning. It keeps the Creator decoupled from Keychain: only the account
+// ID crosses the seam, never secret bytes. The CLI-side Creator resolves the ID
+// to a credential (fail closed — see setAnthropicAccount).
+type CreateParams struct {
+	// Backend is the session.Backend* value the user picked.
+	Backend string
+	// AnthropicAccountID is the stored Anthropic account the claude session runs
+	// on. Empty means the legacy/cluster-default path (shared operator Secret) —
+	// either no accounts are stored or the user explicitly chose "cluster
+	// default". Ignored for non-claude backends (opencode has no account step).
+	AnthropicAccountID string
+}
+
 // Creator provisions a brand-new session for the dashboard's working directory
 // and returns a live connection ready to attach. Like Connector, it is
 // implemented in internal/cli and injected into dashboard.Run so the dashboard
 // package never imports cli. It owns ID generation, SSH-key prep, Sandbox/PVC
 // creation, pod start, port-forward, and health-check.
 //
+// When params.AnthropicAccountID != "" the CLI-side Creator resolves the account
+// to a per-session credential and FAILS CLOSED on any resolution/Keychain error
+// (the error surfaces in the connect-error UI); it never silently falls back to
+// the shared Secret. When empty, the legacy shared-Secret path is used unchanged.
+//
 // A failed Creator returns a descriptive error; the dashboard renders it inline
 // and stays on the dashboard screen — it does NOT crash.
-type Creator func(ctx context.Context, backend string, onStage func(ConnectStage, string)) (CreateResult, error)
+type Creator func(ctx context.Context, params CreateParams, onStage func(ConnectStage, string)) (CreateResult, error)

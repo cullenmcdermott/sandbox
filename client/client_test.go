@@ -1,9 +1,70 @@
 package client
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
+
+// TestValidateAnthropicAuth: the valid selectors ("", "oauth", "api-key") clear
+// the gate; anything else (including a case/spacing typo) is rejected with
+// ErrInvalidAnthropicAuth rather than silently coercing to the default OAuth path.
+func TestValidateAnthropicAuth(t *testing.T) {
+	for _, ok := range []string{"", "oauth", "api-key"} {
+		if err := validateAnthropicAuth(ok); err != nil {
+			t.Errorf("validateAnthropicAuth(%q): unexpected error %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"apikey", "OAuth", "api_key", "console", "api-key "} {
+		if err := validateAnthropicAuth(bad); !errors.Is(err, ErrInvalidAnthropicAuth) {
+			t.Errorf("validateAnthropicAuth(%q): got %v, want ErrInvalidAnthropicAuth", bad, err)
+		}
+	}
+}
+
+// TestValidateAnthropicAccount covers the fail-closed account/credential
+// contract: a named account with empty bytes errors (ErrAnthropicCredentialMissing),
+// bytes with no account id error (ErrAnthropicAccountRequired), an id that is
+// not a valid Kubernetes label value errors (ErrInvalidAnthropicAccountID —
+// the id labels the per-session Secret, so it must fail fast here rather than
+// as an apiserver Invalid mid-create), and the both-set / both-empty cases
+// clear the gate. No error path echoes the credential bytes.
+func TestValidateAnthropicAccount(t *testing.T) {
+	cred := []byte("sk-ant-oat-SECRET")
+	cases := []struct {
+		name    string
+		id      string
+		cred    []byte
+		wantErr error
+	}{
+		{"both empty (shared fallback)", "", nil, nil},
+		{"account with credential", "acct-work", cred, nil},
+		{"account without credential", "acct-work", nil, ErrAnthropicCredentialMissing},
+		{"account with empty credential", "acct-work", []byte{}, ErrAnthropicCredentialMissing},
+		{"credential without account", "", cred, ErrAnthropicAccountRequired},
+		{"id with slash", "acct/work", cred, ErrInvalidAnthropicAccountID},
+		{"id with space", "acct work", cred, ErrInvalidAnthropicAccountID},
+		{"id too long for a label", strings.Repeat("a", 64), cred, ErrInvalidAnthropicAccountID},
+		{"id with leading dash", "-acct", cred, ErrInvalidAnthropicAccountID},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := validateAnthropicAccount(c.id, c.cred)
+			if c.wantErr == nil {
+				if err != nil {
+					t.Fatalf("got %v, want nil", err)
+				}
+				return
+			}
+			if !errors.Is(err, c.wantErr) {
+				t.Fatalf("got %v, want %v", err, c.wantErr)
+			}
+			if strings.Contains(err.Error(), string(cred)) {
+				t.Fatalf("error message leaked the credential bytes: %v", err)
+			}
+		})
+	}
+}
 
 // TestSanitizeLabel checks that sanitizeLabel produces values safe to embed in a
 // Kubernetes resource name: uppercase is lowercased, [a-z0-9-] passes through,
