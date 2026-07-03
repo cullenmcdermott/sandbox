@@ -260,11 +260,12 @@ OpenCode supervisor/external-pane pattern + runner metrics-observer. Backend id
 ChatGPT-plan OAuth (`codex login --device-auth`; access token lasts 10 days) owned by
 the CLI credential manager below.
 
-- [x] **Auth + cluster status surface (read-side)** — DONE 2026-06-24. New
-  `internal/cred` package (Provider abstraction + Claude/Codex/OpenCode providers,
-  offline, secret-free; JWT-exp decode for codex) + `internal/k8s` `Ping`/`Host`/
-  `Namespace` + `sandbox auth status` rendering red/green per agent/provider + k8s
-  reachability. Tested (`internal/cred/cred_test.go`, `internal/cli/auth_test.go`).
+- [x] **Auth + cluster status surface (read-side)** — DONE 2026-06-24. Provider
+  abstraction + Claude/Codex/OpenCode providers (offline, secret-free; JWT-exp
+  decode for codex) + `internal/k8s` `Ping`/`Host`/`Namespace` + `sandbox auth
+  status` rendering red/green per agent/provider + k8s reachability. Lives in
+  `internal/authstatus` since 2026-07-03 (briefly public in `client/cred`).
+  Tested (`internal/authstatus/authstatus_test.go`, `internal/cli/auth_test.go`).
   **Remaining:** dashboard strip rendering (currently CLI-only); `--check` live
   pings (codex plan/rate-limit via app-server; provider key liveness); Claude
   reads env only (the real setup-token may live in a keychain — folds into the
@@ -546,18 +547,17 @@ reschedule, footer "◇ —" placeholder. Deferred:
   cannot name (only an untyped nil compiles). Either drop it from the public
   surface or accept an exported interface. Deliberately un-pinned in
   `sdktest/surface_test.go`. `client/client.go:150`.
-- [ ] **Decide whether cred's read-side status report is really public SDK
-  (SDK, MED — cheap only until OSS).** `Report`, `DefaultProviders`, `Provider`,
-  `ClaudeProvider`/`CodexProvider`/`OpenCodeProvider`, `Status`, `Level`,
-  `Method`, `Env` moved public wholesale with the `internal/cred → client/cred`
-  promotion, but have exactly one consumer (`internal/cli/auth.go`), are
-  CLI-presentation machinery (`Level` is documented in render terms), and are
-  deliberately un-pinned in sdktest. Either move the read side back internal
-  (dissolves the `cred.Status` vs `client.Status` name collision), or harden it
-  and pin it. If it stays public: `Status.Level()` derives WARN from a
-  `strings.Contains(Detail, "EXPIRED")` substring contract with `expiryNote` —
-  replace with a structured field. `client/cred/cred.go:73`,
-  `client/cred/providers.go:102`.
+- [x] ~~Decide whether cred's read-side status report is really public SDK~~ —
+  DECIDED + DONE 2026-07-03: moved back internal as `internal/authstatus`
+  (fresh name so `internal/cli/auth.go` can import it alongside `client/cred`
+  without an alias). The read side is presentation, not capability — the
+  roadmap (store-backed Claude check, `--check` live pings, dashboard strip)
+  would have churned a pinned public surface. Dissolves the `cred.Status` vs
+  `client.Status` collision; `client/cred` is now write-side only (doc.go
+  rewritten). Also fixed in the move: `Status.Level()` now derives WARN from a
+  structured `Expired bool` instead of the `strings.Contains(Detail,
+  "EXPIRED")` substring contract. Re-promote deliberately (hardened + pinned)
+  only if a real external consumer appears.
 - [ ] **sdktest does not cover the public `tui/` packages (harness, LOW).**
   `tui/kit`/`anim`/`list`/`theme`/`terminal` are documented as importable by
   other projects but have no surface pins or consumer-compile check in

@@ -1,4 +1,4 @@
-package cred
+package authstatus
 
 import (
 	"context"
@@ -72,12 +72,13 @@ func TestCodexProviderAuthFile(t *testing.T) {
 		token         string
 		wantMethod    Method
 		wantLevel     Level
+		wantExpired   bool
 		wantDetailHas string
 	}{
-		{"chatgpt oauth + valid token", "chatgpt", future, MethodOAuth, LevelOK, "expires in 10d"},
-		{"chatgpt oauth + expired token", "chatgpt", past, MethodOAuth, LevelWarn, "EXPIRED"},
-		{"api key mode", "apikey", "", MethodAPIKey, LevelOK, "API key"},
-		{"unknown mode", "weird", "", MethodUnknown, LevelWarn, "auth_mode=weird"},
+		{"chatgpt oauth + valid token", "chatgpt", future, MethodOAuth, LevelOK, false, "expires in 10d"},
+		{"chatgpt oauth + expired token", "chatgpt", past, MethodOAuth, LevelWarn, true, "EXPIRED"},
+		{"api key mode", "apikey", "", MethodAPIKey, LevelOK, false, "API key"},
+		{"unknown mode", "weird", "", MethodUnknown, LevelWarn, false, "auth_mode=weird"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -89,6 +90,9 @@ func TestCodexProviderAuthFile(t *testing.T) {
 			}
 			if got.Level() != tt.wantLevel {
 				t.Errorf("level = %d, want %d (detail %q)", got.Level(), tt.wantLevel, got.Detail)
+			}
+			if got.Expired != tt.wantExpired {
+				t.Errorf("expired = %v, want %v", got.Expired, tt.wantExpired)
 			}
 			if !strings.Contains(got.Detail, tt.wantDetailHas) {
 				t.Errorf("detail = %q, want contains %q", got.Detail, tt.wantDetailHas)

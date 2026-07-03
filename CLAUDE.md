@@ -72,10 +72,11 @@ Module: `github.com/cullenmcdermott/sandbox`
 | `internal/runner` | HTTP client implementing `RunnerClient`: health, start/interrupt turn, resolve permission, SSE event streaming with `after=<seq>` replay |
 | `internal/models` | Resolves a model's context-window limit + per-million-token pricing; drives the TUI ctx% indicator (`models.Limit(model)`) |
 | `internal/cli` | Cobra command tree: `claude`, `opencode`, `attach`, `status`, `suspend`, `resume`, `cancel`, `destroy`, `shell`, `sync`, `trace`, `rename` |
+| `internal/authstatus` | Offline per-agent auth status report (Claude/Codex/OpenCode providers) behind `sandbox auth status` — deliberately internal presentation machinery, not SDK surface |
 | `internal/tui/dashboard` | Bubble Tea v2 command-center: session list, attention routing, transcript, tool cards, permission modal, external (opencode) PTY pane, detach/interrupt keys. App-specific styles/glyphs read `tui/theme` tokens and re-skin via `theme.OnChange` |
 | `tui/` (public) | Reusable, importable TUI building blocks split out of the dashboard: `tui/kit` (widgets), `tui/anim` (transitions/spinner), `tui/list` (scrolling list), `tui/theme` (palette registry, exported semantic color tokens, gradient/spinner/fade helpers, status glyphs). No app coupling — other projects can import these directly |
 | `client/` (public) | The Go SDK: create/connect/suspend/destroy sessions, turns, SSE events, sync — the CLI and TUI dogfood it. New capability goes HERE first, not in `internal/cli` |
-| `client/cred` (public) | Multi-account Anthropic credential store (Keychain/file backends, manifest, token parsing, account→CreateOptions selection) + the offline per-agent auth status report |
+| `client/cred` (public) | Multi-account Anthropic credential store (Keychain/file backends, manifest, token parsing, account→CreateOptions selection) |
 | `sdktest/` | SDK-conformance harness: a SEPARATE Go module that imports `client`/`client/cred` as an external consumer, with compile-time signature pins + behavioral contract tests. Run via `just sdk-conformance` (in `just check`). Breaking the public SDK fails here first — when a break is intentional, update the pins in the same change |
 | `internal/sync` | Mutagen sync manager: project (two-way-safe), config inputs (one-way), transcripts (one-way) |
 | `internal/index` | Local session index at `~/.local/share/sandbox/remote-sessions/<id>/session.json` |

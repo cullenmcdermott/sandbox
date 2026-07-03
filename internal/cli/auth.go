@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cullenmcdermott/sandbox/client/cred"
+	"github.com/cullenmcdermott/sandbox/internal/authstatus"
 )
 
 // newAuthCmd builds `sandbox auth`, which inspects the credentials the CLI uses
@@ -46,7 +47,7 @@ func newAuthCmd() *cobra.Command {
 
 func runAuthStatus(cmd *cobra.Command) error {
 	home, _ := os.UserHomeDir()
-	agents := cred.Report(cmd.Context(), cred.DefaultProviders(os.Getenv, home)...)
+	agents := authstatus.Report(cmd.Context(), authstatus.DefaultProviders(os.Getenv, home)...)
 
 	// Stored Anthropic accounts are part of the readout (metadata only — the
 	// status invariant that no secret bytes are ever read holds: List/Default
@@ -100,11 +101,11 @@ var (
 	dimText = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 )
 
-func dot(l cred.Level) string {
+func dot(l authstatus.Level) string {
 	switch l {
-	case cred.LevelOK:
+	case authstatus.LevelOK:
 		return dotOK.Render("●")
-	case cred.LevelWarn:
+	case authstatus.LevelWarn:
 		return dotWarn.Render("●")
 	default:
 		return dotBad.Render("●")
@@ -114,12 +115,12 @@ func dot(l cred.Level) string {
 // renderAuthStatus writes the red/green readout. Pure (no network) for testing.
 // accounts/def/storeErr describe the local Anthropic account store (metadata
 // only): a non-nil storeErr renders a warning line instead of the list.
-func renderAuthStatus(w io.Writer, cs clusterStatus, agents []cred.Status, accounts []cred.Account, def string, storeErr error) {
+func renderAuthStatus(w io.Writer, cs clusterStatus, agents []authstatus.Status, accounts []cred.Account, def string, storeErr error) {
 	fmt.Fprintf(w, "\n  auth status\n\n")
 
-	lvl, state, detail := cred.LevelBad, "unreachable", cs.detail
+	lvl, state, detail := authstatus.LevelBad, "unreachable", cs.detail
 	if cs.reachable {
-		lvl, state = cred.LevelOK, "reachable"
+		lvl, state = authstatus.LevelOK, "reachable"
 		detail = "ns: " + cs.namespace
 		if cs.host != "" {
 			detail += "  ·  " + cs.host
@@ -138,7 +139,7 @@ func renderAuthStatus(w io.Writer, cs clusterStatus, agents []cred.Status, accou
 	fmt.Fprintf(w, "\n  anthropic accounts\n")
 	switch {
 	case storeErr != nil:
-		fmt.Fprintf(w, "  %s %s\n", dot(cred.LevelWarn), dimText.Render(truncate("account store unreadable: "+storeErr.Error(), 140)))
+		fmt.Fprintf(w, "  %s %s\n", dot(authstatus.LevelWarn), dimText.Render(truncate("account store unreadable: "+storeErr.Error(), 140)))
 	case len(accounts) == 0:
 		fmt.Fprintf(w, "    %s\n", dimText.Render("none stored — add one with `sandbox auth login`"))
 	default:
@@ -147,7 +148,7 @@ func renderAuthStatus(w io.Writer, cs clusterStatus, agents []cred.Status, accou
 			if a.ID == def {
 				marker = "(default)"
 			}
-			fmt.Fprintf(w, "  %s %-18s %-14s %-8s %s\n", dot(cred.LevelOK), a.Label, string(a.Type), humanAge(a.CreatedAt), dimText.Render(marker))
+			fmt.Fprintf(w, "  %s %-18s %-14s %-8s %s\n", dot(authstatus.LevelOK), a.Label, string(a.Type), humanAge(a.CreatedAt), dimText.Render(marker))
 		}
 	}
 	fmt.Fprintln(w)

@@ -1,4 +1,4 @@
-package cred
+package authstatus
 
 import (
 	"context"
@@ -82,6 +82,7 @@ func (p CodexProvider) Status(_ context.Context) Status {
 				s.Configured, s.Method, s.Detail = true, MethodUnknown, "auth.json auth_mode="+af.AuthMode
 			}
 			if exp, ok := jwtExp(af.Tokens.AccessToken); ok {
+				s.Expired = !exp.After(now())
 				s.Detail += "; " + expiryNote(exp, now())
 			}
 			return s

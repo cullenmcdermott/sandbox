@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/cullenmcdermott/sandbox/client/cred"
+	"github.com/cullenmcdermott/sandbox/internal/authstatus"
 )
 
 // stripANSI removes color escape sequences so assertions match the plain text.
@@ -27,12 +28,12 @@ func stripANSI(s string) string {
 func TestRenderAuthStatus_Unreachable(t *testing.T) {
 	var buf bytes.Buffer
 	cs := clusterStatus{reachable: false, namespace: "agent-sessions", detail: "dial tcp: i/o timeout"}
-	agents := []cred.Status{
-		{Name: "claude", Configured: true, Method: cred.MethodOAuth, Detail: "CLAUDE_CODE_OAUTH_TOKEN (setup-token)"},
-		{Name: "codex", Configured: true, Method: cred.MethodOAuth, Detail: "ChatGPT OAuth; expires in 7d"},
-		{Name: "opencode", Configured: true, Method: cred.MethodAPIKey, Detail: "1/3 providers configured", Sub: []cred.Status{
-			{Name: "opencode/anthropic", Configured: true, Method: cred.MethodAPIKey, Detail: "ANTHROPIC_API_KEY set"},
-			{Name: "opencode/openai", Method: cred.MethodNone, Detail: "OPENAI_API_KEY unset"},
+	agents := []authstatus.Status{
+		{Name: "claude", Configured: true, Method: authstatus.MethodOAuth, Detail: "CLAUDE_CODE_OAUTH_TOKEN (setup-token)"},
+		{Name: "codex", Configured: true, Method: authstatus.MethodOAuth, Detail: "ChatGPT OAuth; expires in 7d"},
+		{Name: "opencode", Configured: true, Method: authstatus.MethodAPIKey, Detail: "1/3 providers configured", Sub: []authstatus.Status{
+			{Name: "opencode/anthropic", Configured: true, Method: authstatus.MethodAPIKey, Detail: "ANTHROPIC_API_KEY set"},
+			{Name: "opencode/openai", Method: authstatus.MethodNone, Detail: "OPENAI_API_KEY unset"},
 		}},
 	}
 	renderAuthStatus(&buf, cs, agents, nil, "", nil)
