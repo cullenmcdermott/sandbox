@@ -71,7 +71,7 @@ func newAttachCmd() *cobra.Command {
 					newDashboardCreator(c, "", ""),
 					dashboard.SessionFromState(st),
 					"",
-					dashboard.RunOptions{DestroyHook: newLocalDestroyHook(c), PreDestroyHook: newPreDestroySyncStop(c), TitleStore: indexTitleStore{}, SnapshotStore: indexSnapshotStore{}, EventCache: indexEventCache{}, ObserverConnector: newDashboardObserverConnector(c, ""), SyncProber: dashboardSyncProber(), SyncReaper: dashboardSyncReaper(), IdleTimeout: defaultReaperIdleTimeout},
+					dashboard.RunOptions{DestroyHook: newLocalDestroyHook(c), PreDestroyHook: newPreDestroySyncStop(c), TitleStore: indexTitleStore{}, SnapshotStore: indexSnapshotStore{}, EventCache: indexEventCache{}, ObserverConnector: newDashboardObserverConnector(c, ""), SyncProber: dashboardSyncProber(), SyncReaper: dashboardSyncReaper(), IdleTimeout: defaultReaperIdleTimeout, AccountStore: newDashboardAccountStore()},
 				)
 			})
 		},

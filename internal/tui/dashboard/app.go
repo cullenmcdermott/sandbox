@@ -117,6 +117,12 @@ type App struct {
 	// rendered over the dashboard and intercepts key input.
 	picker backendPicker
 
+	// accountStore is the injected metadata-only view of the Anthropic credential
+	// store, driving the account picker's list + add-account sub-flow. nil means
+	// no account step: claude selection creates on the shared Secret (legacy UX).
+	// Secret bytes never cross this interface.
+	accountStore AccountStore
+
 	// connector is called in a Cmd to establish a live runner connection.
 	// It is set by Run/NewApp; nil means attach is disabled (unit-test mode).
 	connector Connector
@@ -268,6 +274,13 @@ type RunOptions struct {
 	// IdleTimeout is the reaper idle-timeout, used to render the "suspends in"
 	// hint for warm sessions. Zero hides the hint.
 	IdleTimeout time.Duration
+
+	// AccountStore backs the new-session Anthropic account picker (list + add-
+	// account/login). nil disables the account step entirely: claude sessions are
+	// created on the shared cluster Secret, exactly as before this feature. The
+	// concrete impl (internal/cli) holds the Keychain-backed store; only metadata
+	// crosses this seam.
+	AccountStore AccountStore
 }
 
 // applyOpts threads RunOptions into the dashboard model.
@@ -301,6 +314,9 @@ func (a *App) applyOpts(opts []RunOptions) {
 	}
 	if opts[0].IdleTimeout > 0 {
 		a.dashboard = a.dashboard.WithIdleTimeout(opts[0].IdleTimeout)
+	}
+	if opts[0].AccountStore != nil {
+		a.accountStore = opts[0].AccountStore
 	}
 }
 
@@ -440,6 +456,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.connectErr = nil
 		a.openBackendPicker()
 		return a, nil
+
+	case accountLoginDoneMsg:
+		// The subscription login (tea.Exec terminal handover) finished; reflect
+		// the new account (or its error) back in the still-open account picker.
+		return a, a.handleAccountLoginDone(msg)
 
 	case attachReadyMsg:
 		// Connection established: build the transcript screen. msg.client and
@@ -1130,8 +1151,11 @@ func (a *App) connectCmd(sess Session) tea.Cmd {
 }
 
 // createCmd provisions a brand-new session via the Creator in a background
-// goroutine that streams ConnectStage updates (U1).
-func (a *App) createCmd(backend string) tea.Cmd {
+// goroutine that streams ConnectStage updates (U1). params carries the chosen
+// backend and (for claude) the selected Anthropic account id; an empty account
+// id is the legacy/cluster-default path.
+func (a *App) createCmd(params CreateParams) tea.Cmd {
+	backend := params.Backend
 	creator := a.creator
 	if creator == nil {
 		return func() tea.Msg {
@@ -1161,7 +1185,7 @@ func (a *App) createCmd(backend string) tea.Cmd {
 			case <-ctx.Done():
 			}
 		}
-		res, err := creator(ctx, backend, onStage)
+		res, err := creator(ctx, params, onStage)
 		if err != nil {
 			ch <- connectUpdateMsg{gen: gen, failed: &attachFailedMsg{err: err}}
 		} else {
