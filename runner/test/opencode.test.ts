@@ -6,7 +6,14 @@ import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import type { ChildProcess } from 'node:child_process';
-import { establishedConnections, buildOpencodeConfig, startOpencodeSupervisor, STOP_GRACE_MS } from '../src/opencode.js';
+import {
+  establishedConnections,
+  externalClientConnections,
+  runnerOwnedConnections,
+  buildOpencodeConfig,
+  startOpencodeSupervisor,
+  STOP_GRACE_MS,
+} from '../src/opencode.js';
 
 // A controllable stand-in for the spawned child. The supervisor uses .once,
 // .kill, .exitCode and .signalCode. kill() RECORDS the signal but does NOT
@@ -38,6 +45,40 @@ const PROC_TCP = `  sl  local_address rem_address   st tx_queue rx_queue tr tm->
 test('counts only ESTABLISHED connections on the target port', () => {
   const reader = (p: string) => (p === '/proc/net/tcp' ? PROC_TCP : (() => { throw new Error('no tcp6'); })());
   assert.equal(establishedConnections(4096, reader as typeof import('node:fs').readFileSync), 1);
+});
+
+test('external client count subtracts runner-owned opencode sockets', () => {
+  const observerOnly = `  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid timeout inode
+   0: 0100007F:1000 0100007F:C001 01 0 0 0 0 0 222
+   1: 0100007F:C001 0100007F:1000 01 0 0 0 0 0 111
+`;
+  const observerPlusAttach = `  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid timeout inode
+   0: 0100007F:1000 0100007F:C001 01 0 0 0 0 0 222
+   1: 0100007F:C001 0100007F:1000 01 0 0 0 0 0 111
+   2: 0100007F:1000 0100007F:C002 01 0 0 0 0 0 333
+`;
+  const one = (p: string) => (p === '/proc/net/tcp' ? observerOnly : (() => { throw new Error('no tcp6'); })());
+  const two = (p: string) => (p === '/proc/net/tcp' ? observerPlusAttach : (() => { throw new Error('no tcp6'); })());
+  const readdir = () => ['3'] as string[];
+  const readlink = () => 'socket:[111]';
+  assert.equal(runnerOwnedConnections(4096, one as typeof import('node:fs').readFileSync, readdir as typeof import('node:fs').readdirSync, readlink as typeof import('node:fs').readlinkSync), 1);
+  assert.equal(externalClientConnections(4096, one as typeof import('node:fs').readFileSync, readdir as typeof import('node:fs').readdirSync, readlink as typeof import('node:fs').readlinkSync), 0);
+  assert.equal(externalClientConnections(4096, two as typeof import('node:fs').readFileSync, readdir as typeof import('node:fs').readdirSync, readlink as typeof import('node:fs').readlinkSync), 1);
+});
+
+test('runner-owned socket scan tolerates disappearing fds', () => {
+  const proc = `  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid timeout inode
+   0: 0100007F:1000 0100007F:C001 01 0 0 0 0 0 222
+   1: 0100007F:C001 0100007F:1000 01 0 0 0 0 0 111
+`;
+  const reader = (p: string) => (p === '/proc/net/tcp' ? proc : (() => { throw new Error('no tcp6'); })());
+  const readdir = () => ['3', '4'] as string[];
+  const readlink = (p: string) => {
+    if (p.endsWith('/3')) throw new Error('ENOENT');
+    return 'socket:[111]';
+  };
+  assert.equal(runnerOwnedConnections(4096, reader as typeof import('node:fs').readFileSync, readdir as typeof import('node:fs').readdirSync, readlink as typeof import('node:fs').readlinkSync), 1);
+  assert.equal(externalClientConnections(4096, reader as typeof import('node:fs').readFileSync, readdir as typeof import('node:fs').readdirSync, readlink as typeof import('node:fs').readlinkSync), 0);
 });
 
 test('returns 0 when the port has only a LISTEN socket', () => {

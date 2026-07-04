@@ -607,6 +607,29 @@ func ApplyRunnerEvent(sess *Session, ev session.Event) bool {
 		}
 		return false
 
+	case session.EventSessionStatusChanged:
+		// Runner-level status is the only terminal signal emitted when the opencode
+		// observer abandons a synthetic turn on stream drop. Mirror the transcript's
+		// mapping so list rows and the external pane do not stay stale.
+		var p session.SessionStatusPayload
+		_ = json.Unmarshal(ev.Payload, &p) // malformed payload → zero value → no-op
+		switch p.Status {
+		case "busy":
+			sess.DashStatus = StatusBusy
+			sess.clearPendingPermission()
+		case "idle":
+			if sess.DashStatus == StatusFailed {
+				return false
+			}
+			sess.DashStatus = StatusNeedsInput
+			sess.clearPendingPermission()
+		case "error":
+			sess.DashStatus = StatusFailed
+			sess.clearPendingPermission()
+		default:
+			return false
+		}
+
 	case session.EventTurnStarted:
 		sess.DashStatus = StatusBusy
 		// Clear any stale permission state from a previous turn.

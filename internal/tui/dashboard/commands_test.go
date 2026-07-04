@@ -50,8 +50,8 @@ func TestSlashFilter(t *testing.T) {
 	// Fresh model: no models.available yet, so the Model group uses the alias
 	// fallback (/opus /sonnet /haiku /model-default).
 	mf := &TranscriptModel{}
-	if got := len(filteredGroups(mf, "")); got != 6 {
-		t.Errorf("empty query groups = %d, want 6 (Session/Mode/Model/Effort/Tools/Help)", got)
+	if got := len(filteredGroups(mf, "")); got != 7 {
+		t.Errorf("empty query groups = %d, want 7 (Session/Mode/Autopilot/Model/Effort/Tools/Help)", got)
 	}
 	cmds := flatCmds(mf, "plan")
 	if len(cmds) != 1 || cmds[0].name != "/plan" {
@@ -185,7 +185,7 @@ func TestEffortOverrideThreadedToTurn(t *testing.T) {
 	m.width, m.height = 80, 24
 
 	// A prompt before any /effort selection sends an empty effort.
-	startTurnCmd(fc, m.ref, "first", m.mode.apiValue(), m.modelOverride, m.effortOverride)()
+	startTurnCmd(fc, m.ref, "first", m.mode.apiValue(), m.modelOverride, m.effortOverride, false)()
 	if len(fc.startedEfforts) != 1 || fc.startedEfforts[0] != "" {
 		t.Fatalf("default effort = %v, want one empty entry", fc.startedEfforts)
 	}
@@ -205,7 +205,7 @@ func TestEffortOverrideThreadedToTurn(t *testing.T) {
 	}
 
 	// The next turn carries the selected effort.
-	startTurnCmd(fc, m.ref, "second", m.mode.apiValue(), m.modelOverride, m.effortOverride)()
+	startTurnCmd(fc, m.ref, "second", m.mode.apiValue(), m.modelOverride, m.effortOverride, false)()
 	if got := fc.startedEfforts[len(fc.startedEfforts)-1]; got != "max" {
 		t.Errorf("turn effort = %q, want max", got)
 	}

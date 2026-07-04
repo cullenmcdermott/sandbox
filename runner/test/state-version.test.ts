@@ -5,7 +5,7 @@
 
 import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { reviveSessionState, STATE_VERSION, type RunnerConfig } from '../src/session.js';
+import { initRegistry, reviveSessionState, setExternalActivityProbe, STATE_VERSION, type RunnerConfig } from '../src/session.js';
 import type { SessionState } from '../src/types.js';
 
 const cfg: RunnerConfig = {
@@ -81,5 +81,47 @@ test('a same-version file loads silently', () => {
     assert.equal(loaded.state_version, STATE_VERSION);
   } finally {
     errors.mock.restore();
+  }
+});
+
+test('idle status treats synthetic busy status as an active turn', () => {
+  const reg = initRegistry(
+    reviveSessionState(
+      {
+        sandbox_session_id: 'oc1',
+        backend: 'opencode-server',
+        project_path: '/proj',
+        status: 'idle',
+        last_turn_id: 'turn-1',
+      },
+      { ...cfg, sessionId: 'oc1', backend: 'opencode-server' },
+    ),
+  );
+
+  assert.ok(reg.idleStatus().idleSince, 'idle session should expose idleSince');
+
+  reg.state.status = 'busy';
+  const busy = reg.idleStatus();
+  assert.equal(busy.turnActive, true);
+  assert.equal(busy.idleSince, undefined);
+
+  reg.state.status = 'idle';
+  assert.ok(reg.idleStatus().idleSince, 'idleSince should return after synthetic turn finishes');
+});
+
+test('idle status samples the external activity probe synchronously', () => {
+  let externalActive = false;
+  const reg = initRegistry(reviveSessionState({ sandbox_session_id: 'oc2', backend: 'opencode-server' }, cfg));
+
+  try {
+    setExternalActivityProbe(() => externalActive);
+    assert.ok(reg.idleStatus().idleSince, 'starts idle without external activity');
+
+    externalActive = true;
+    const active = reg.idleStatus();
+    assert.equal(active.idleSince, undefined);
+    assert.equal(active.turnActive, false);
+  } finally {
+    setExternalActivityProbe(null);
   }
 });

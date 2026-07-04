@@ -122,3 +122,54 @@ func TestNotifyEdgeDedupes(t *testing.T) {
 		t.Fatal("re-entering attention after leaving should toast again")
 	}
 }
+
+func TestJumpToNextAttentionIncludesFailed(t *testing.T) {
+	m := New(nil)
+	m.sessions = []Session{
+		{State: session.State{ID: "idle", Status: session.StatusRunning}, DashStatus: StatusIdle},
+		{State: session.State{ID: "failed", Status: session.StatusRunning}, DashStatus: StatusFailed},
+	}
+	got := m.jumpToNextNeedingAttention()
+	if got == nil || got.ID() != "failed" {
+		t.Fatalf("jump target = %v, want failed session", got)
+	}
+}
+
+func TestJumpToNextAttentionUsesRowsInGroupView(t *testing.T) {
+	m := New(nil)
+	m.groupView.open = true
+	m.groupView.repos = map[string]bool{"repo-a": true, "repo-b": true}
+	m.sessions = []Session{
+		{State: session.State{ID: "idle", Status: session.StatusRunning, ProjectPath: "/repo-a"}, DashStatus: StatusIdle},
+		{State: session.State{ID: "failed", Status: session.StatusRunning, ProjectPath: "/repo-b"}, DashStatus: StatusFailed},
+	}
+	got := m.jumpToNextNeedingAttention()
+	if got == nil || got.ID() != "failed" {
+		t.Fatalf("jump target = %v, want failed session", got)
+	}
+	rows := m.visibleRows()
+	if m.cursor < 0 || m.cursor >= len(rows) || rows[m.cursor].session == nil || rows[m.cursor].session.ID() != "failed" {
+		t.Fatalf("cursor = %d, want row for failed session", m.cursor)
+	}
+}
+
+func TestJumpToNextAttentionExpandsCollapsedGroup(t *testing.T) {
+	m := New(nil)
+	m.groupView.open = true
+	m.groupView.repos = map[string]bool{"repo-a": true, "repo-b": false}
+	m.sessions = []Session{
+		{State: session.State{ID: "idle", Status: session.StatusRunning, ProjectPath: "/repo-a"}, DashStatus: StatusIdle},
+		{State: session.State{ID: "failed", Status: session.StatusRunning, ProjectPath: "/repo-b"}, DashStatus: StatusFailed},
+	}
+	got := m.jumpToNextNeedingAttention()
+	if got == nil || got.ID() != "failed" {
+		t.Fatalf("jump target = %v, want failed session", got)
+	}
+	if !m.groupView.repos["repo-b"] {
+		t.Fatal("jump should expand the target's collapsed group")
+	}
+	rows := m.visibleRows()
+	if m.cursor < 0 || m.cursor >= len(rows) || rows[m.cursor].session == nil || rows[m.cursor].session.ID() != "failed" {
+		t.Fatalf("cursor = %d, want row for failed session", m.cursor)
+	}
+}

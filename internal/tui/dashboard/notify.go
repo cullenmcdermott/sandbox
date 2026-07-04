@@ -59,7 +59,7 @@ type toastTickMsg struct{}
 
 // notifyIfBackgroundAttention emits at most one toastMsg for a background session
 // (one other than the attached one) that has just ENTERED an attention state
-// (waiting / needs-input). It is edge-triggered, not level-triggered: a session
+// (waiting / needs-input / failed). It is edge-triggered, not level-triggered: a session
 // is notified once per attention episode and not again until it leaves and
 // re-enters attention. Without this, every SSE event re-toasted a still-waiting
 // session (and re-fired its OS notification) the moment its 8s toast expired, and
@@ -71,12 +71,12 @@ func (m *Model) notifyIfBackgroundAttention(attached session.ID) tea.Cmd {
 	var cmd tea.Cmd
 	for _, s := range m.sessions {
 		id := s.ID()
-		if id == attached {
-			continue
-		}
-		if s.DashStatus != StatusWaiting && s.DashStatus != StatusNeedsInput {
+		if !needsAttention(s) {
 			// Left attention — forget it so a later attention episode re-notifies.
 			delete(m.notifiedAttention, id)
+			continue
+		}
+		if id == attached {
 			continue
 		}
 		if m.notifiedAttention[id] {
@@ -102,6 +102,25 @@ func (m *Model) notifyIfBackgroundAttention(attached session.ID) tea.Cmd {
 	return cmd
 }
 
+// autopilotToast surfaces an autopilot driver's termination — goal reached, loop
+// finished, or a silent lapse when the pod suspended — as a cross-session toast +
+// OS notification, reusing the toastMsg plumbing (§1e items 1–3) so a driver that
+// ends while the user is on the dashboard is never invisible. It pre-marks the
+// session notified so the generic attention pass in this same Update tick doesn't
+// also emit a plain "needs you" toast that would clobber this more specific one.
+func (m *Model) autopilotToast(id session.ID, note string) tea.Cmd {
+	if m.notifiedAttention == nil {
+		m.notifiedAttention = make(map[session.ID]bool)
+	}
+	m.notifiedAttention[id] = true
+	title := m.sessionByID(id).DisplayTitle()
+	if title == "" {
+		title = string(id)
+	}
+	toast := toastMsg{id: id, title: title, note: note, status: StatusNeedsInput}
+	return func() tea.Msg { return toast }
+}
+
 // renderToast builds the toast box and the column it should sit at for the
 // current frame (it slides in from the right edge during the first few frames).
 // The caller composites the box as a single layer at that column — see
@@ -118,6 +137,8 @@ func (m *Model) renderToast(w int) (string, int) {
 	glyph := theme.GlyphWaiting
 	if t.status == StatusNeedsInput {
 		glyph = theme.GlyphNeedsInput
+	} else if t.status == StatusFailed {
+		glyph = theme.GlyphFailed
 	}
 
 	// Opacity: steady at toastBaseAlpha, then fades slowly to 0 over the last
@@ -188,9 +209,43 @@ func firstLineOf(s string) string {
 }
 
 // jumpToNextNeedingAttention moves the cursor to the next session that needs
-// attention (waiting / needs-input), wrapping around the list. Returns the
+// attention, wrapping around the list. Returns the
 // selected session or nil if none need attention.
 func (m *Model) jumpToNextNeedingAttention() *Session {
+	if m.groupView.open {
+		visible := m.visibleSessions()
+		if len(visible) == 0 {
+			return nil
+		}
+		start := 0
+		if sel := m.selectedRowSession(); sel != nil {
+			for i, s := range visible {
+				if s.ID() == sel.ID() {
+					start = i
+					break
+				}
+			}
+		}
+		for offset := 1; offset <= len(visible); offset++ {
+			idx := (start + offset) % len(visible)
+			s := visible[idx]
+			if s.ID() == m.attachedID || !needsAttention(s) {
+				continue
+			}
+			if m.groupView.repos != nil {
+				m.groupView.repos[repoKey(s)] = true
+			}
+			rows := m.visibleRows()
+			for rowIdx, row := range rows {
+				if row.session != nil && row.session.ID() == s.ID() {
+					m.cursor = rowIdx
+					return row.session
+				}
+			}
+			return &s
+		}
+		return nil
+	}
 	visible := m.visibleSessions()
 	if len(visible) == 0 {
 		return nil
@@ -205,7 +260,7 @@ func (m *Model) jumpToNextNeedingAttention() *Session {
 		if s.ID() == m.attachedID {
 			continue // already viewing it — jumping here would be a no-op detach/attach
 		}
-		if s.DashStatus == StatusWaiting || s.DashStatus == StatusNeedsInput {
+		if needsAttention(s) {
 			m.cursor = idx
 			return &s
 		}

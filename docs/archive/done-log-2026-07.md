@@ -187,6 +187,50 @@ TODO.md §5.
   contract. Re-promote deliberately (hardened + pinned) only if a real external
   consumer appears.
 
+## TUI picker/search/sort fixes (`cb0e375`, 2026-07-04) — detail from TODO §1b
+
+- **Account picker silently dropped pastes.** Picker inputs only received
+  `tea.KeyPressMsg`; bracketed paste arrives as `tea.PasteMsg`, which had no
+  route to the picker (only handler was the external pane's,
+  ScreenExternal-gated) — the field whose placeholder says "paste your
+  Anthropic Console API key" got nothing; same gap on the label form. Fixed:
+  PasteMsg routed to picker label/console forms via `pickerPaste`.
+  `account_picker.go:340`, `app.go:422`.
+- **Descending sort comparator was invalid.** SortDesc = `!less`; equal keys
+  returned true both ways → `sort.SliceStable` swapped equal-title rows on
+  every re-sort (per cluster/runner event) — rows visibly ping-ponged and the
+  row-indexed cursor retargeted actions. SortByTitle also had no ID tie-break
+  and compared Title not DisplayTitle. Fixed: three-way cmp with sign flip +
+  fixed-direction ID tie-break, DisplayTitle. `sort.go:116`, `sort.go:101`.
+- **Transcript search dropped every uppercase letter** (`searchKey` required
+  `key.Mod == 0`, but bubbletea v2's decoder sets ModShift on plain typed
+  uppercase — "Readme" yielded "eadme") **and backspace was byte-wise**
+  (é → dangling 0xC3 → U+FFFD → fuzzy-matching garbage). Fixed: accept
+  `key.Mod &^ tea.ModShift == 0`; `utf8.DecodeLastRuneInString`.
+  `search.go:72`, `search.go:66`.
+
+## Fixed in the 2026-07-04 uncommitted claude-pane pass — detail from TODO §1a/§1c
+
+Verified fixed in the working tree by the 2026-07-04 Fable re-verification
+sweep (commit pending at time of writing).
+
+- **`truncate()` not ANSI-aware.** Measured with lipgloss.Width but trimmed
+  raw runes — could eat a trailing SGR reset or stop mid-escape on styled
+  input (tool-card summaries, overflow band, boxWithTitle). Fixed: `truncate()`
+  now delegates to `ansi.Truncate(s, maxW, "…")`. `model.go:2635-2645`.
+- **`hasLinkRefDef` wasn't fence-aware.** A fenced code line shaped like a TS
+  index signature (`[key: string]: string`) forced resetCache + full glamour
+  re-render on every subsequent delta, reinstating O(deltas²) keystroke
+  starvation. Fixed: tracks `openerChar`/`fenceInfo`+`closingFenceInfo` and
+  skips fenced lines before `isLinkRefDefinition`.
+  `chat/streaming_markdown.go:466-487`.
+- **`ggPending` had no reset on other keys.** Early-return branches
+  (R/A/space/overlays/…) skipped the reset, so a lone `g` minutes later was
+  misread as the `gg` chord. Fixed: reset hoisted to the top of `handleKey`
+  (`if ks != "g" { m.ggPending = false }`, `model.go:1748`); all key presses
+  route through handleKey so no branch can skip it. (The alternative 500ms
+  expiry was not added — the reset path is the implemented fix.)
+
 ## Inbox investigations (resolved)
 
 - **hall.kvitch.dev "not in use"** — typo; real URL is **hall.kvick.dev**. Hall
@@ -199,3 +243,15 @@ TODO.md §5.
 - **"Fresh start should drop into empty dashboard"** — already true: bare
   `sandbox` calls `dashboard.Run` with no auto-attach; only `sandbox claude` /
   `sandbox attach` auto-attach (intentional).
+- **"Do we need a claude-runner-specific image or is the name a misnomer?"**
+  (2026-07-04 triage) — misnomer: one shared runner image serves every backend
+  today (opencode is npm-globaled into it, `runner/Dockerfile`). Naming gets
+  decided inside the §5 split-per-backend-images item, where the note now
+  lives.
+- **"Why does `just dev` start a claude session automatically?"** (2026-07-04
+  triage) — by design: `dev backend="claude"` = `dev-up` + `dev-tui
+  {{backend}}` (`justfile:234-240`). `just dev-up` gives cluster-only; `just
+  dev opencode` picks another backend.
+- **"Match claude code UX"** → became TODO §2 (the program). **"Expose CLI as
+  a go library"** → shipped as the public `client/` SDK; remaining API-shape
+  work is TODO §8.

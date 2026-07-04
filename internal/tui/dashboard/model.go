@@ -13,6 +13,7 @@ import (
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/cullenmcdermott/sandbox/internal/k8s"
 	"github.com/cullenmcdermott/sandbox/internal/session"
@@ -784,7 +785,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.seeded = true // first watch event counts as loaded (U2)
 		m.seedErr = nil // a watch event proves the cluster is reachable
 		cmd := m.applyPodEvent(msg.Event)
-		cmds := []tea.Cmd{cmd, m.maybeStartAnim()}
+		cmds := []tea.Cmd{cmd, m.maybeStartAnim(), m.notifyIfBackgroundAttention(m.attachedID)}
 		// Re-arm the reader for the next event. Guarded so reducer tests that drive
 		// applyPodEvent via a synthetic PodEventMsg (and never set watchCh) don't
 		// spawn a Cmd blocked forever on a nil channel.
@@ -928,7 +929,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, liveSSEReconnectTick(msg.id, next, liveSSEReconnectDelay(next))
 		}
 		m.degradeUnreachable(msg.id)
-		return m, nil
+		return m, m.notifyIfBackgroundAttention(m.attachedID)
 
 	case RunnerEventMsg:
 		mdl, cmd := m.handleRunnerEvent(msg)
@@ -1350,6 +1351,10 @@ func (m *Model) handleRunnerEvent(msg RunnerEventMsg) (tea.Model, tea.Cmd) {
 		return m, retryCmd
 	}
 
+	// autopilotCmd carries a detached driver's continuation POST or termination
+	// toast (see the ingest block below), batched into the return.
+	var autopilotCmd tea.Cmd
+
 	// Patch the session's status from this event.
 	for i, s := range m.sessions {
 		if s.ID() == msg.ID {
@@ -1368,6 +1373,16 @@ func (m *Model) handleRunnerEvent(msg RunnerEventMsg) (tea.Model, tea.Cmd) {
 			// background (dedup is handled by the transcript's lastSeq guard).
 			if tr, ok := m.retained[msg.ID]; ok {
 				tr.ingest(msg.Event)
+				// Detached autopilot (§1e items 1–2): the foreground continuation
+				// path (handleEvent) discards a background model's Cmds, so a /goal
+				// stalls and a /loop can't self-terminate once the user detaches.
+				// Drive it HERE instead, where handleRunnerEvent can return the Cmd.
+				// Only for a genuinely background model (its own stream is nil); the
+				// foreground session runs continuation through its own handleEvent.
+				if msg.Event.Type == session.EventTurnCompleted &&
+					tr.events == nil && tr.autopilot.active() {
+					autopilotCmd = m.driveDetachedAutopilot(msg.ID, tr)
+				}
 			}
 			m.saveSnapshot(&m.sessions[i], changed)
 			// Persist a runner-generated auto title so it survives a re-seed (the
@@ -1394,9 +1409,30 @@ func (m *Model) handleRunnerEvent(msg RunnerEventMsg) (tea.Model, tea.Cmd) {
 	// Re-issue the Cmd to read the next event from the stored channel.
 	ch, ok := m.liveSSEChannels[msg.ID]
 	if !ok {
-		return m, nil // channel was cancelled; stop the loop
+		return m, autopilotCmd // channel cancelled; still deliver any autopilot Cmd
 	}
-	return m, liveSSENextCmd(msg.ID, ch)
+	return m, tea.Batch(autopilotCmd, liveSSENextCmd(msg.ID, ch))
+}
+
+// driveDetachedAutopilot continues (goal) or terminates (goal/loop) a warm
+// session's autopilot driver after a background turn completes. It points the
+// warm model at the live background SSE client before it POSTs — the parked
+// foreground client's port-forward may be gone, so this mirrors the reroute
+// App.autopilotTick does for loop ticks. A termination is surfaced as a toast +
+// OS notification so a driver that finishes while the user is on the dashboard is
+// never silent (§1e items 1–2). Returns nil when no live client is available this
+// cycle (a transient blip); the driver stays armed for a later event.
+func (m *Model) driveDetachedAutopilot(id session.ID, tr *TranscriptModel) tea.Cmd {
+	client, ok := m.liveClient(id)
+	if !ok {
+		return nil
+	}
+	tr.client = client
+	cont, ended := tr.autopilotAfterTurn()
+	if ended != "" {
+		return m.autopilotToast(id, ended)
+	}
+	return cont
 }
 
 // approveCmd fires a ResolvePermission call for the selected session.
@@ -1744,6 +1780,9 @@ func (m *Model) sessionByID(id session.ID) Session {
 
 func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	ks := msg.String()
+	if ks != "g" {
+		m.ggPending = false
+	}
 
 	// A destructive-action confirmation captures all keys until resolved.
 	if m.confirm != nil {
@@ -1887,11 +1926,6 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-	// Any key other than g resets the gg pending state.
-	if ks != "g" {
-		m.ggPending = false
-	}
-
 	// Navigation: in group view, up/down move over rows in grouped order.
 	if key.Matches(msg, m.keys.Up) {
 		if m.cursor > 0 {
@@ -2637,20 +2671,13 @@ func truncate(s string, maxW int) string {
 	if maxW <= 0 {
 		return ""
 	}
-	w := lipgloss.Width(s)
-	if w <= maxW {
+	if lipgloss.Width(s) <= maxW {
 		return s
 	}
-	// Trim runes until we fit, appending '…'.
-	r := []rune(s)
-	for len(r) > 0 {
-		candidate := string(r) + "…"
-		if lipgloss.Width(candidate) <= maxW {
-			return candidate
-		}
-		r = r[:len(r)-1]
+	if maxW == 1 {
+		return "…"
 	}
-	return "…"
+	return ansi.Truncate(s, maxW, "…")
 }
 
 // padRight pads s with spaces to exactly width display columns.

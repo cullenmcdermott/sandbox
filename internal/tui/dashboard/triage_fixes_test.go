@@ -1,9 +1,11 @@
 package dashboard
 
 import (
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/cullenmcdermott/sandbox/internal/session"
 )
@@ -112,6 +114,20 @@ func TestRenameEscapeCancels(t *testing.T) {
 	}
 	if got := store.LoadTitle("s1"); got != "" {
 		t.Fatalf("esc should not persist; store title = %q", got)
+	}
+}
+
+func TestTruncatePreservesANSISequences(t *testing.T) {
+	styled := "\x1b[31mabcdef\x1b[0m"
+	got := truncate(styled, 4)
+	if lipgloss.Width(got) > 4 {
+		t.Fatalf("truncate width = %d, want <= 4 (got %q)", lipgloss.Width(got), got)
+	}
+	if plain := stripANSI(got); plain != "abc…" {
+		t.Fatalf("truncate visible text = %q, want %q (raw %q)", plain, "abc…", got)
+	}
+	if strings.Contains(got, "\x1b[31") && !strings.Contains(got, "\x1b[0m") {
+		t.Fatalf("truncate dropped reset from styled output: %q", got)
 	}
 }
 

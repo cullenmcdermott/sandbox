@@ -274,7 +274,7 @@ func TestModelOverrideThreadedToTurn(t *testing.T) {
 	m.width, m.height = 80, 24
 
 	// A prompt before any /model selection sends an empty model.
-	startTurnCmd(fc, m.ref, "first", m.mode.apiValue(), m.modelOverride, m.effortOverride)()
+	startTurnCmd(fc, m.ref, "first", m.mode.apiValue(), m.modelOverride, m.effortOverride, false)()
 	if len(fc.startedModels) != 1 || fc.startedModels[0] != "" {
 		t.Fatalf("default model = %v, want one empty entry", fc.startedModels)
 	}
@@ -287,7 +287,7 @@ func TestModelOverrideThreadedToTurn(t *testing.T) {
 	}
 
 	// The next turn carries the selected model.
-	startTurnCmd(fc, m.ref, "second", m.mode.apiValue(), m.modelOverride, m.effortOverride)()
+	startTurnCmd(fc, m.ref, "second", m.mode.apiValue(), m.modelOverride, m.effortOverride, false)()
 	if got := fc.startedModels[len(fc.startedModels)-1]; got != "sonnet" {
 		t.Errorf("turn model = %q, want sonnet", got)
 	}

@@ -300,6 +300,25 @@ type TranscriptModel struct {
 	// on for the NORMAL/INSERT chords and the mode badge.
 	vimEnabled bool
 
+	// autopilot is the running /loop or /goal driver, if any (autopilot.go).
+	autopilot autopilotState
+	// autopilotGenSeq is a monotonic counter snapshotted into autopilot.gen so a
+	// loop tick left over from a stopped/restarted run is recognized as stale.
+	autopilotGenSeq int
+	// lastAssistantText is the most recent non-empty assistant message text,
+	// captured on message.completed and reset at turn start. /goal reads it to
+	// detect the completion sentinel once a turn ends.
+	lastAssistantText string
+	// advisorEnabled requests the SDK "advisor" tool for new turns (the /advisor
+	// toggle), sent as TurnInput.Advisor. Honored once the runner SDK exposes an
+	// advisor option; see session.TurnInput.Advisor.
+	advisorEnabled bool
+	// idleTimeout mirrors the dashboard's reaper idle timeout (copied on attach and
+	// when a warm model is built). cmdLoop reads it to warn when a /loop interval is
+	// long enough for the pod to suspend mid-loop (§1e item 4). Zero disables the
+	// warning (tests / no reaper configured).
+	idleTimeout time.Duration
+
 	reconnect    ReconnectFunc
 	reconnecting bool
 	terminating  bool
@@ -1419,6 +1438,15 @@ func (m *TranscriptModel) renderInput() string {
 		}
 		badge += chip
 	}
+	// A running /loop or /goal shows a persistent chip so it's clear a driver is
+	// firing turns and how to stop it. Empty when off — the idle hint row is
+	// unchanged.
+	if chip := m.autopilotChip(); chip != "" {
+		if badge != "" {
+			badge += " "
+		}
+		badge += chip
+	}
 	gap := m.width - lipgloss.Width(badge) - lipgloss.Width(right)
 	if gap < 1 {
 		gap = 1
@@ -1634,7 +1662,14 @@ func (m *TranscriptModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, m.queueSteer()
 		}
 		if m.turnActive {
-			return m, m.interruptTurn()
+			return m, m.interruptTurn() // also stops any running driver
+		}
+		// A /loop or /goal idle between ticks/turns: esc reclaims control and stops
+		// the driver, honoring the chip's "esc to stop" contract even when there's
+		// no live turn to interrupt (§1e item 5). Detach stays on ctrl+].
+		if m.autopilot.active() {
+			m.stopAutopilot("autopilot stopped")
+			return m, nil
 		}
 		if m.vimEnabled && m.imode == modeInsert {
 			m.enterNormal()
@@ -1816,6 +1851,11 @@ func (m *TranscriptModel) submit() tea.Cmd {
 	if text == "" {
 		return nil
 	}
+	// A manually typed prompt means the user is taking over from a running
+	// /loop or /goal; stop the driver so it doesn't keep firing turns underneath
+	// them. (Loop ticks and goal continuations submit via submitText, not here,
+	// so they don't self-cancel.)
+	m.stopAutopilot("autopilot stopped — you took over")
 	if m.turnActive {
 		m.queuedPrompt = text
 		m.input.Reset()
@@ -1851,6 +1891,9 @@ func (m *TranscriptModel) queueSteer() tea.Cmd {
 // turn id targets this exact turn; when it is still empty (esc before
 // turn.started landed) the runner falls back to its sole active turn.
 func (m *TranscriptModel) interruptTurn() tea.Cmd {
+	// An esc interrupt is the user reclaiming control: stop any /loop or /goal
+	// driver so it doesn't relaunch a turn after this one is torn down.
+	m.stopAutopilot("autopilot stopped")
 	if !m.turnActive {
 		return nil
 	}
@@ -1882,7 +1925,7 @@ func (m *TranscriptModel) submitText(text string) tea.Cmd {
 	m.dropTrailingFooter() // A2.2: only the latest turn keeps a footer
 	m.appendBlock(blockUser, text)
 	m.beginTurn()
-	return tea.Batch(startTurnCmd(m.client, m.ref, text, m.mode.apiValue(), m.modelOverride, m.effortOverride), m.maybeStartWorking())
+	return tea.Batch(startTurnCmd(m.client, m.ref, text, m.mode.apiValue(), m.modelOverride, m.effortOverride, m.advisorEnabled), m.maybeStartWorking())
 }
 
 // dropTrailingFooter removes the previous turn's footer block when a new turn
@@ -1916,6 +1959,9 @@ func (m *TranscriptModel) beginTurn() {
 	m.activeTurnID = ""
 	m.turnStart = time.Now()
 	m.inTok, m.outTok, m.costUSD = 0, 0, 0
+	// Clear the retained assistant text so a stale /goal sentinel from a prior
+	// turn can't trip completion before this turn produces its own reply.
+	m.lastAssistantText = ""
 }
 
 // workTickMsg drives the working-indicator clock/spinner while a turn runs.
@@ -2240,10 +2286,23 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		// state (user block, turnActive) while the startTurnCmd is thrown away:
 		// phantom busy, prompt never sent. Keeping it queued preserves it for the
 		// next re-attach.
+		queuedFlushed := false
 		if m.queuedPrompt != "" && m.events != nil {
 			q := m.queuedPrompt
 			m.queuedPrompt = ""
 			cmd = m.submitText(q) // capture so the queued turn's POST actually runs
+			queuedFlushed = true
+		}
+		// Autopilot continuation (foreground only, m.events != nil — a background
+		// ingest() discards the returned Cmd). A queued prompt is a manual steer
+		// that already stopped the driver in submit(), so it takes precedence.
+		if !queuedFlushed && m.events != nil && m.autopilot.active() {
+			// ended is ignored foreground: stopAutopilot already appended the
+			// reason and the user is watching. The detached path (handleRunnerEvent)
+			// is where a termination raises a toast/OS notification.
+			if c, _ := m.autopilotAfterTurn(); c != nil {
+				cmd = c
+			}
 		}
 
 	case session.EventTurnInterrupted:
@@ -2315,6 +2374,11 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		m.streaming = false
 		m.assistantBuf.Reset()
 		m.streamAI = nil
+		// Retain the last substantive assistant text so /goal can scan it for the
+		// completion sentinel when the turn ends.
+		if strings.TrimSpace(text) != "" {
+			m.lastAssistantText = text
+		}
 		switch {
 		case m.droppedPartialIdx >= 0 && m.droppedPartialIdx < len(m.blocks) &&
 			m.blocks[m.droppedPartialIdx].kind == blockAssistant:
@@ -2428,7 +2492,9 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		case "busy":
 			m.status = StatusBusy
 		case "idle":
-			m.status = StatusNeedsInput
+			if m.status != StatusFailed {
+				m.status = StatusNeedsInput
+			}
 		case "error":
 			m.status = StatusFailed
 			// M1: surface the reason for an error status (was silently dropped).
@@ -2746,11 +2812,11 @@ func (m *TranscriptModel) doReconnect() tea.Cmd {
 
 // startTurnCmd posts a new turn and surfaces a synchronous start failure; the
 // turn itself streams back over SSE.
-func startTurnCmd(client RunnerClient, ref session.Ref, prompt, mode, model, effort string) tea.Cmd {
+func startTurnCmd(client RunnerClient, ref session.Ref, prompt, mode, model, effort string, advisor bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if _, err := client.StartTurn(ctx, ref, session.TurnInput{Prompt: prompt, Mode: mode, Model: model, Effort: effort}); err != nil {
+		if _, err := client.StartTurn(ctx, ref, session.TurnInput{Prompt: prompt, Mode: mode, Model: model, Effort: effort, Advisor: advisor}); err != nil {
 			return turnErrMsg{err: err}
 		}
 		return nil

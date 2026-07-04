@@ -138,3 +138,38 @@ func TestStreamingLinkRefStaysExact(t *testing.T) {
 		}
 	}
 }
+
+func TestStreamingIgnoresLinkRefSyntaxInsideFences(t *testing.T) {
+	const width = 60
+	doc := "Intro paragraph with enough words to wrap a bit.\n\n" +
+		"```ts\ntype Values = {\n  [key: string]: string\n}\n```\n\n" +
+		strings.Repeat("Another ordinary paragraph after the code fence.\n\n", 20)
+
+	if hasLinkRefDef(doc) {
+		t.Fatal("fenced TypeScript index signature was treated as a link reference definition")
+	}
+	if !hasLinkRefDef("```ts\n[key: string]: string\n```\n\n[ref]: https://example.com\n") {
+		t.Fatal("real link reference definition outside a fence was not detected")
+	}
+	if hasLinkRefDef("```ts\n[key: string]: string\n``` not a close\n[still: fenced]: string\n```\n") {
+		t.Fatal("invalid closing fence with trailing text ended fence tracking")
+	}
+	if !hasLinkRefDef(`[foo \]]: https://example.com`) {
+		t.Fatal("link reference definition with escaped closing bracket was not detected")
+	}
+	if !hasLinkRefDef("> [ref]: https://example.com") {
+		t.Fatal("link reference definition inside a block quote was not detected")
+	}
+	if !hasLinkRefDef("[ref]:\nhttps://example.com") {
+		t.Fatal("link reference definition with destination on following line was not detected")
+	}
+
+	cr := &countingRendererInc{inner: newRendererInc(t, width)}
+	var s StreamingMarkdown
+	for _, p := range boundaryPrefixes(doc) {
+		s.Render(p, width, cr)
+	}
+	if cr.maxInput >= len(doc) {
+		t.Fatalf("a single render took the whole doc (%d >= %d): fenced syntax disabled incremental caching", cr.maxInput, len(doc))
+	}
+}

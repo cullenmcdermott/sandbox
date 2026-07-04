@@ -610,6 +610,11 @@ func TestSessionStatusChangedUpdatesStatus(t *testing.T) {
 	if m.status != StatusFailed {
 		t.Errorf("status after error: got %v, want StatusFailed", m.status)
 	}
+
+	sendEvent(m, session.EventSessionStatusChanged, session.SessionStatusPayload{Status: "idle"})
+	if m.status != StatusFailed {
+		t.Errorf("idle after error should not mask failure: got %v, want StatusFailed", m.status)
+	}
 }
 
 // ORACLE: tool.delta streams the tool's INPUT JSON (input_json_delta), not its

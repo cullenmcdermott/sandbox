@@ -32,6 +32,7 @@ func (m *Model) ensureRetained(sess Session, client RunnerClient) *TranscriptMod
 	t := NewTranscript(client, sess, nil)
 	t.caps = m.caps
 	t.cache = m.eventCache
+	t.idleTimeout = m.idleTimeout
 	m.retained[id] = t
 	return t
 }
@@ -40,6 +41,15 @@ func (m *Model) ensureRetained(sess Session, client RunnerClient) *TranscriptMod
 func (m *Model) retainedTranscript(id session.ID) (*TranscriptModel, bool) {
 	t, ok := m.retained[id]
 	return t, ok
+}
+
+// liveClient returns the runner client feeding the session's background SSE
+// stream, if one is open. The App uses it to POST a detached /loop's turns via a
+// currently-valid client (the parked foreground client's port-forward may be
+// gone) so the loop keeps firing after the user detaches.
+func (m *Model) liveClient(id session.ID) (RunnerClient, bool) {
+	c, ok := m.liveSSEClients[id]
+	return c, ok
 }
 
 // putRetained stores an externally-built model (the foreground attach path uses

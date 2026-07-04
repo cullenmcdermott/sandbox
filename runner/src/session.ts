@@ -12,6 +12,15 @@ import type { IdleStatus, SessionState, StatusResponse } from './types.js';
 import { PROTOCOL_VERSION, SESSION_JSON_PATH } from './types.js';
 import { appendEvent, sseClientCount, setClientsChangedHandler } from './events.js';
 
+let externalActivityProbe: (() => boolean) | null = null;
+
+/** Register a backend-specific current-activity probe. The opencode supervisor
+ * uses this so /idle can sample live attach sockets synchronously instead of
+ * relying only on its periodic activity poller. */
+export function setExternalActivityProbe(fn: (() => boolean) | null): void {
+  externalActivityProbe = fn;
+}
+
 /** Runner env configuration (set by the pod spec). */
 export interface RunnerConfig {
   sessionId: string;
@@ -206,11 +215,12 @@ class SessionRegistry {
 
   /**
    * Recompute idleSince from the current turn + attached-client state. Idle =
-   * no active turn AND no attached SSE clients. Sets idleSince on the
-   * transition into idle, clears it on any activity. Safe to call often.
+   * no active turn, no synthetic backend turn, AND no attached SSE clients. Sets
+   * idleSince on the transition into idle, clears it on any activity. Safe to
+   * call often.
    */
   recomputeIdle(): void {
-    const idle = this.activeTurns.size === 0 && this.isDetached();
+    const idle = this.activeTurns.size === 0 && this.state.status !== 'busy' && this.isDetached();
     if (idle && this.idleSince === null) {
       this.idleSince = new Date().toISOString();
     } else if (!idle) {
@@ -254,9 +264,14 @@ class SessionRegistry {
   }
 
   idleStatus(): IdleStatus {
+    try {
+      if (externalActivityProbe?.()) this.setExternalActivity();
+    } catch {
+      /* best-effort; stale cached activity still applies */
+    }
     this.recomputeIdle();
     return {
-      turnActive: this.activeTurns.size > 0,
+      turnActive: this.activeTurns.size > 0 || this.state.status === 'busy',
       attachedClients: sseClientCount(),
       ...(this.idleSince ? { idleSince: this.idleSince } : {}),
     };

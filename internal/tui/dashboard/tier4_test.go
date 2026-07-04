@@ -220,6 +220,17 @@ func TestAttentionFirstOrdering(t *testing.T) {
 	}
 }
 
+func TestAttentionFirstFloatsFailedSessions(t *testing.T) {
+	sessions := []Session{
+		{State: session.State{ID: "idle"}, DashStatus: StatusIdle},
+		{State: session.State{ID: "failed"}, DashStatus: StatusFailed},
+	}
+	got := sortByAttention(sessions, true)
+	if got[0].ID() != "failed" {
+		t.Fatalf("attention-first did not float failed session to top: %q", got[0].ID())
+	}
+}
+
 // ORACLE: the attention summary tallies waiting and needs-input; COUNTER: with
 // nothing waiting it is the empty string (no chrome for zero). [D4]
 func TestAttentionSummary(t *testing.T) {
@@ -227,10 +238,11 @@ func TestAttentionSummary(t *testing.T) {
 		{DashStatus: StatusWaiting},
 		{DashStatus: StatusWaiting},
 		{DashStatus: StatusNeedsInput},
+		{DashStatus: StatusFailed},
 		{DashStatus: StatusIdle},
 	}
 	out := attentionSummary(sessions)
-	if !strings.Contains(out, "2 waiting") || !strings.Contains(out, "1 needs input") {
+	if !strings.Contains(out, "2 waiting") || !strings.Contains(out, "1 needs input") || !strings.Contains(out, "1 failed") {
 		t.Fatalf("attention summary wrong: %q", out)
 	}
 	if got := attentionSummary([]Session{{DashStatus: StatusIdle}}); got != "" {
@@ -244,14 +256,22 @@ func TestOverflowSummary(t *testing.T) {
 	hidden := []Session{
 		{DashStatus: StatusBusy},
 		{DashStatus: StatusWaiting},
+		{DashStatus: StatusNeedsInput},
+		{DashStatus: StatusFailed},
 		{DashStatus: StatusIdle},
 	}
 	out := overflowSummary(hidden)
-	if !strings.Contains(out, "+3 more") {
+	if !strings.Contains(out, "+5 more") {
 		t.Fatalf("overflow summary missing count: %q", out)
 	}
 	if !strings.Contains(out, "1 waiting") {
 		t.Fatalf("overflow summary missing attention rollup: %q", out)
+	}
+	if !strings.Contains(out, "1 needs input") {
+		t.Fatalf("overflow summary missing needs-input rollup: %q", out)
+	}
+	if !strings.Contains(out, "1 failed") {
+		t.Fatalf("overflow summary missing failed rollup: %q", out)
 	}
 	if got := overflowSummary(nil); got != "" {
 		t.Fatalf("overflow summary should be empty when nothing hidden, got %q", got)
@@ -275,10 +295,11 @@ func TestGroupAttentionRollup(t *testing.T) {
 	g := []Session{
 		{DashStatus: StatusWaiting},
 		{DashStatus: StatusNeedsInput},
+		{DashStatus: StatusFailed},
 		{DashStatus: StatusIdle},
 	}
-	if got := groupAttentionCount(g); got != 2 {
-		t.Fatalf("group rollup = %d, want 2", got)
+	if got := groupAttentionCount(g); got != 3 {
+		t.Fatalf("group rollup = %d, want 3", got)
 	}
 }
 

@@ -10,7 +10,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Event } from '@opencode-ai/sdk';
 
-import { createObserverHandler, type ObserverDeps } from '../src/opencode-observer.js';
+import { createObserverHandler, markObservedTurnInterrupted, type ObserverDeps } from '../src/opencode-observer.js';
 
 const OC = 'ses_oc';
 
@@ -228,9 +228,24 @@ test('observer reset() abandons an in-flight cycle back to idle (stream dropped)
   h.reset(); // serve restarted mid-turn
   assert.equal(h.cycleActive, false);
   assert.equal(calls.statuses.at(-1), 'idle', 'status returns to idle on reset');
+  assert.equal(calls.emitted.at(-1)?.type, 'turn.interrupted', 'reset terminalizes the synthetic turn');
+  assert.equal(calls.emitted.at(-1)?.payload.reason, 'opencode observer stream ended');
 
   // reset with no active cycle is a no-op (no spurious idle).
   const before = calls.statuses.length;
   h.reset();
   assert.equal(calls.statuses.length, before);
+});
+
+test('observer suppresses turn.completed after an explicit interrupt terminal event', () => {
+  const { deps, calls } = fakeDeps();
+  const h = createObserverHandler(deps);
+
+  h.handle(asstMsg('m1'));
+  markObservedTurnInterrupted('turn-1');
+  h.handle(sessionIdle());
+
+  assert.equal(h.cycleActive, false);
+  assert.deepEqual(types(calls), ['turn.started', 'session.started', 'usage.updated']);
+  assert.equal(calls.statuses.at(-1), 'idle');
 });

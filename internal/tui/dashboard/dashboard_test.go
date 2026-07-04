@@ -245,6 +245,41 @@ func TestNotifyExcludesAttachedSession(t *testing.T) {
 	}
 }
 
+func TestNotifyIncludesFailedSessions(t *testing.T) {
+	m := New(nil)
+	m.sessions = []Session{
+		{State: session.State{ID: "s1"}, DashStatus: StatusFailed, Title: "s1"},
+	}
+	cmd := m.notifyIfBackgroundAttention("")
+	if cmd == nil {
+		t.Fatal("expected a toast for a failed background session")
+	}
+	tm, ok := cmd().(toastMsg)
+	if !ok {
+		t.Fatalf("expected toastMsg, got different message")
+	}
+	if tm.status != StatusFailed {
+		t.Fatalf("toast status = %v, want failed", tm.status)
+	}
+}
+
+func TestNotifyClearsAttachedSessionDedupeAfterLeavingAttention(t *testing.T) {
+	m := New(nil)
+	m.notifiedAttention = map[session.ID]bool{"s1": true}
+	m.sessions = []Session{
+		{State: session.State{ID: "s1"}, DashStatus: StatusIdle, Title: "s1"},
+	}
+	_ = m.notifyIfBackgroundAttention("s1")
+	if m.notifiedAttention["s1"] {
+		t.Fatal("attached idle session should clear stale notification dedupe")
+	}
+	m.sessions[0].DashStatus = StatusFailed
+	cmd := m.notifyIfBackgroundAttention("")
+	if cmd == nil {
+		t.Fatal("failed re-entry after attached idle should notify")
+	}
+}
+
 // TestAppAttachedSessionID is the B12 plumbing: the App reports the attached
 // session id (the exclusion key) per screen.
 func TestAppAttachedSessionID(t *testing.T) {
@@ -346,6 +381,33 @@ func TestGroupToggleAndGGChord(t *testing.T) {
 	}
 	if m2.ggPending {
 		t.Error("ggPending should be cleared after gg")
+	}
+}
+
+func TestGGChordResetsOnEarlyReturnKeys(t *testing.T) {
+	m := New(nil)
+	m.sessions = []Session{
+		SessionFromState(session.State{ID: "s1", Status: session.StatusRunning, ProjectPath: "/a"}),
+	}
+
+	m.handleKey(keyMsg("g"))
+	if !m.ggPending {
+		t.Fatal("first g should arm the gg chord")
+	}
+	m.handleKey(keyMsg("?"))
+	if m.ggPending {
+		t.Fatal("non-g key that returns early should clear ggPending")
+	}
+	if !m.showHelp {
+		t.Fatal("? should still open help")
+	}
+	m.showHelp = false
+	m.handleKey(keyMsg("g"))
+	if m.cursor != 0 {
+		t.Fatalf("stale ggPending caused lone g to jump instead of toggling: cursor=%d", m.cursor)
+	}
+	if !m.ggPending {
+		t.Fatal("lone g after reset should arm a new chord")
 	}
 }
 

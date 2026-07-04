@@ -12,11 +12,11 @@
 // OPENCODE_CONFIG a valid target.
 
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, readdirSync, readlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { serializeBlockedPatterns } from './guards.js';
-import { getRegistry } from './session.js';
+import { getRegistry, setExternalActivityProbe } from './session.js';
 
 const DEFAULT_PORT = 4096;
 
@@ -26,8 +26,8 @@ const ACTIVITY_POLL_MS = 20_000;
 /**
  * Count ESTABLISHED TCP connections whose local port is `port`, by parsing
  * /proc/net/tcp[6]. An attached `opencode attach` client holds such a
- * connection, so a non-zero count means the session is in use. This is
- * self-contained (no dependency on opencode's API) and Linux-native (the pod).
+ * connection. This is self-contained (no dependency on opencode's API) and
+ * Linux-native (the pod).
  */
 export function establishedConnections(port: number, readFile = readFileSync): number {
   let count = 0;
@@ -48,6 +48,61 @@ export function establishedConnections(port: number, readFile = readFileSync): n
     }
   }
   return count;
+}
+
+/** Count runner-owned client sockets connected to opencode. These are internal
+ * SDK clients (observer, warmup/headless turn, abort) and must not keep an
+ * otherwise-detached pod alive. */
+export function runnerOwnedConnections(
+  port: number,
+  readFile = readFileSync,
+  readdir = readdirSync,
+  readlink = readlinkSync,
+): number {
+  const ownedInodes = new Set<string>();
+  try {
+    for (const fd of readdir('/proc/self/fd')) {
+      let target: string;
+      try {
+        target = readlink(`/proc/self/fd/${fd}`);
+      } catch {
+        continue; // fd disappeared between readdir and readlink.
+      }
+      const match = /^socket:\[(\d+)\]$/.exec(target);
+      if (match) ownedInodes.add(match[1]);
+    }
+  } catch {
+    return 0;
+  }
+
+  let count = 0;
+  for (const path of ['/proc/net/tcp', '/proc/net/tcp6']) {
+    let text: string;
+    try {
+      text = readFile(path, 'utf8') as string;
+    } catch {
+      continue;
+    }
+    const lines = text.split('\n').slice(1);
+    for (const line of lines) {
+      const cols = line.trim().split(/\s+/);
+      if (cols.length < 10) continue;
+      const remotePort = parseInt(cols[2].split(':')[1] ?? '', 16);
+      const inode = cols[9];
+      if (remotePort === port && cols[3] === '01' && ownedInodes.has(inode)) count++;
+    }
+  }
+  return count;
+}
+
+/** ESTABLISHED server-side connections beyond runner-owned SDK clients. */
+export function externalClientConnections(
+  port: number,
+  readFile = readFileSync,
+  readdir = readdirSync,
+  readlink = readlinkSync,
+): number {
+  return Math.max(0, establishedConnections(port, readFile) - runnerOwnedConnections(port, readFile, readdir, readlink));
 }
 
 /** Provider env var -> opencode provider id, used to decide what to enable. */
@@ -230,6 +285,7 @@ export function startOpencodeSupervisor(
   const port = parseInt(env.OPENCODE_PORT ?? String(DEFAULT_PORT), 10);
   const configPath = writeOpencodeConfig(env);
   console.log(`opencode: config written to ${configPath ?? '(none)'}; starting serve on :${port}`);
+  setExternalActivityProbe(() => externalClientConnections(port) > 0);
 
   let stopped = false;
   let child: ChildProcess;
@@ -239,7 +295,7 @@ export function startOpencodeSupervisor(
   // no runner turn and no SSE client, so this is their only liveness signal.
   const activityTimer = setInterval(() => {
     try {
-      if (establishedConnections(port) > 0) getRegistry().setExternalActivity();
+      if (externalClientConnections(port) > 0) getRegistry().setExternalActivity();
     } catch {
       /* registry not ready / proc unreadable — best effort */
     }
@@ -267,6 +323,7 @@ export function startOpencodeSupervisor(
     child,
     stop(): Promise<void> {
       stopped = true;
+      setExternalActivityProbe(null);
       clearInterval(activityTimer);
       // Operate on the current child (the restart handler may have reassigned
       // it). If it already exited there is nothing to wait for.

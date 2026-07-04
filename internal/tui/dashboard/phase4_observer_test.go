@@ -56,6 +56,51 @@ func TestPhase4_ObserverEventsDriveOpencodeListRow(t *testing.T) {
 	}
 }
 
+func TestPhase4_StatusChangedDrivesOpencodeListRow(t *testing.T) {
+	sess := makeSession("opencode-xyz", StatusIdle)
+	sess.State.Backend = session.BackendOpenCode
+
+	if !ApplyRunnerEvent(&sess, mkEvent(session.EventSessionStatusChanged, session.SessionStatusPayload{Status: "busy"})) {
+		t.Fatal("session.status_changed busy should report a status change")
+	}
+	if sess.DashStatus != StatusBusy {
+		t.Fatalf("busy status_changed must lift opencode out of idle, got %v", sess.DashStatus)
+	}
+
+	ApplyRunnerEvent(&sess, mkEvent(session.EventPermissionRequested, session.PermissionPayload{PermissionID: "p1", Tool: "Bash"}))
+	if sess.PendingPermissionID == "" {
+		t.Fatal("test setup failed: permission should be pending")
+	}
+
+	if !ApplyRunnerEvent(&sess, mkEvent(session.EventSessionStatusChanged, session.SessionStatusPayload{Status: "idle"})) {
+		t.Fatal("session.status_changed idle should report a status change")
+	}
+	if sess.DashStatus != StatusNeedsInput {
+		t.Fatalf("idle status_changed must return opencode to needs-input, got %v", sess.DashStatus)
+	}
+	if sess.PendingPermissionID != "" {
+		t.Fatalf("idle status_changed must clear stale permission state, got %q", sess.PendingPermissionID)
+	}
+}
+
+func TestPhase4_IdleStatusChangedDoesNotMaskFailedTurn(t *testing.T) {
+	sess := makeSession("opencode-xyz", StatusBusy)
+	sess.State.Backend = session.BackendOpenCode
+
+	ApplyRunnerEvent(&sess, mkEvent(session.EventTurnFailed, nil))
+	if sess.DashStatus != StatusFailed {
+		t.Fatalf("turn.failed should mark failed, got %v", sess.DashStatus)
+	}
+
+	changed := ApplyRunnerEvent(&sess, mkEvent(session.EventSessionStatusChanged, session.SessionStatusPayload{Status: "idle"}))
+	if changed {
+		t.Fatal("idle status_changed after failure should not report a status change")
+	}
+	if sess.DashStatus != StatusFailed {
+		t.Fatalf("idle status_changed must not mask failed turn, got %v", sess.DashStatus)
+	}
+}
+
 // Phase 4 (in-pane statusline): the external opencode pane's status row reads the
 // LIVE dashboard read-model (fed by the passive observer stream), so it surfaces
 // DisplayTitle + status + ctx% + cost — at parity with the claude statusline —

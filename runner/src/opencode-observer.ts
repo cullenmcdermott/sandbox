@@ -46,6 +46,12 @@ const RECONNECT_BACKOFF_MS = 750;
 // ensureSession / warmupOpencodeSession). Never surface it as the agent title.
 const PLACEHOLDER_TITLE = 'sandbox runner session';
 
+const interruptedTurns = new Set<string>();
+
+export function markObservedTurnInterrupted(turnId: string): void {
+  if (turnId) interruptedTurns.add(turnId);
+}
+
 export interface OpencodeObserver {
   stop(): Promise<void>;
 }
@@ -107,6 +113,7 @@ export function createObserverHandler(deps: ObserverDeps) {
     /** Abandon an in-flight cycle and return status to idle (stream dropped). */
     reset(): void {
       if (activeTurnId !== undefined) {
+        deps.emit(activeTurnId, 'turn.interrupted', { reason: 'opencode observer stream ended' });
         deps.setStatus('idle');
         endCycle();
       }
@@ -178,6 +185,12 @@ export function createObserverHandler(deps: ObserverDeps) {
       // Feed the event to the active cycle's mapper. It returns true once the cycle
       // settles (session.idle/error → it already emitted turn.completed/turn.failed).
       if (activeTurnId !== undefined && mapper) {
+        if (interruptedTurns.has(activeTurnId) && type === 'session.idle') {
+          interruptedTurns.delete(activeTurnId);
+          deps.setStatus('idle');
+          endCycle();
+          return;
+        }
         const settled = mapper.handle(ev);
         // Discard any queued permission ids WITHOUT responding — the attached
         // opencode client owns the permission modal; the observer only mirrors.

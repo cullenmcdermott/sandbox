@@ -13,6 +13,7 @@ import { getRegistry, loadConfig, toStatusResponse } from './session.js';
 import { PORT, PROTOCOL_VERSION, type PermissionRequestBody, type TurnRequestBody, type TurnResponse, type ExecRequestBody } from './types.js';
 import { selectAgent, type Agent } from './agent.js';
 import { opencodeTurnClient } from './opencode-turn.js';
+import { markObservedTurnInterrupted } from './opencode-observer.js';
 import { runExec } from './exec.js';
 import { appendAudit } from './audit.js';
 import { bashCommandBlocked } from './guards.js';
@@ -213,6 +214,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, cfg: ReturnType
         const ocId = reg.state.opencode_session_id;
         void opencodeTurnClient().session.abort({ path: { id: ocId } }).catch(() => {});
         const interruptedTurn = turnId || reg.state.last_turn_id;
+        markObservedTurnInterrupted(interruptedTurn);
         appendEvent(sid, interruptedTurn || undefined, 'turn.interrupted', { reason: 'client interrupt' });
         return ok(res, { turnId: interruptedTurn }, 200);
       }

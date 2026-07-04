@@ -12,12 +12,12 @@ import (
 	"github.com/cullenmcdermott/sandbox/tui/theme"
 )
 
-// needsAttention reports whether a session is waiting or needs input.
+// needsAttention reports whether a session needs user attention.
 func needsAttention(s Session) bool {
-	return s.DashStatus == StatusWaiting || s.DashStatus == StatusNeedsInput
+	return s.DashStatus == StatusWaiting || s.DashStatus == StatusNeedsInput || s.DashStatus == StatusFailed
 }
 
-// sortByAttention floats Waiting/NeedsInput sessions to the top (regardless of
+// sortByAttention floats sessions that need attention to the top (regardless of
 // the manual sort) when attentionFirst is set, preserving the input order within
 // each attention tier (a stable partition). With attentionFirst false it returns
 // the input order unchanged.
@@ -42,13 +42,15 @@ func sortByAttention(sessions []Session, attentionFirst bool) []Session {
 // attentionSummary renders the persistent attention count, e.g.
 // "2 waiting · 1 needs input", or "" when nothing needs attention.
 func attentionSummary(sessions []Session) string {
-	waiting, needs := 0, 0
+	waiting, needs, failed := 0, 0, 0
 	for _, s := range sessions {
 		switch s.DashStatus {
 		case StatusWaiting:
 			waiting++
 		case StatusNeedsInput:
 			needs++
+		case StatusFailed:
+			failed++
 		}
 	}
 	var parts []string
@@ -57,6 +59,9 @@ func attentionSummary(sessions []Session) string {
 	}
 	if needs > 0 {
 		parts = append(parts, fmt.Sprintf("%d needs input", needs))
+	}
+	if failed > 0 {
+		parts = append(parts, fmt.Sprintf("%d failed", failed))
 	}
 	return strings.Join(parts, " · ")
 }
@@ -67,13 +72,17 @@ func overflowSummary(hidden []Session) string {
 	if len(hidden) == 0 {
 		return ""
 	}
-	busy, waiting := 0, 0
+	busy, waiting, needs, failed := 0, 0, 0, 0
 	for _, s := range hidden {
 		switch s.DashStatus {
 		case StatusBusy:
 			busy++
 		case StatusWaiting:
 			waiting++
+		case StatusNeedsInput:
+			needs++
+		case StatusFailed:
+			failed++
 		}
 	}
 	parts := []string{fmt.Sprintf("+%d more", len(hidden))}
@@ -82,6 +91,12 @@ func overflowSummary(hidden []Session) string {
 	}
 	if waiting > 0 {
 		parts = append(parts, fmt.Sprintf("%d waiting below", waiting))
+	}
+	if needs > 0 {
+		parts = append(parts, fmt.Sprintf("%d needs input below", needs))
+	}
+	if failed > 0 {
+		parts = append(parts, fmt.Sprintf("%d failed below", failed))
 	}
 	return strings.Join(parts, " · ")
 }

@@ -238,7 +238,7 @@ func prefixHasOpenHazard(prefix string) bool {
 		if fc != 0 {
 			if openerChar == 0 {
 				openerChar, openerLen = fc, fl
-			} else if fc == openerChar && fl >= openerLen {
+			} else if cc, cl := closingFenceInfo(line); cc == openerChar && cl >= openerLen {
 				openerChar, openerLen = 0, 0 // closed
 			}
 			// wrong char or insufficient length: literal content inside fence
@@ -298,7 +298,7 @@ func isInsideOpenFence(s string) bool {
 		}
 		if openerChar == 0 {
 			openerChar, openerLen = fc, fl // open a block
-		} else if fc == openerChar && fl >= openerLen {
+		} else if cc, cl := closingFenceInfo(line); cc == openerChar && cl >= openerLen {
 			openerChar, openerLen = 0, 0 // closed
 		}
 		// wrong char or insufficient length: literal content inside fence
@@ -329,6 +329,29 @@ func fenceInfo(line string) (c byte, n int) {
 		return 0, 0
 	}
 	return ch, run
+}
+
+// closingFenceInfo returns a fence only when the line is valid as a closing
+// fence: after the fence run, only spaces or tabs may follow.
+func closingFenceInfo(line string) (c byte, n int) {
+	c, n = fenceInfo(line)
+	if c == 0 {
+		return 0, 0
+	}
+	i := 0
+	for i < len(line) && i < 3 && line[i] == ' ' {
+		i++
+	}
+	for i < len(line) && line[i] == c {
+		i++
+	}
+	for i < len(line) {
+		if line[i] != ' ' && line[i] != '\t' {
+			return 0, 0
+		}
+		i++
+	}
+	return c, n
 }
 
 func isListItemMarker(t string) bool { // t is left-trimmed
@@ -441,7 +464,21 @@ func isHTMLBlockOpener(line string) bool {
 // line ("[label]: dest"), whose document-global scope can retroactively change
 // how earlier blocks render.
 func hasLinkRefDef(content string) bool {
+	var openerChar byte
+	var openerLen int
 	for _, line := range strings.Split(content, "\n") {
+		fc, fl := fenceInfo(line)
+		if fc != 0 {
+			if openerChar == 0 {
+				openerChar, openerLen = fc, fl
+			} else if cc, cl := closingFenceInfo(line); cc == openerChar && cl >= openerLen {
+				openerChar, openerLen = 0, 0
+			}
+			continue
+		}
+		if openerChar != 0 {
+			continue
+		}
 		if isLinkRefDefinition(line) {
 			return true
 		}
@@ -455,11 +492,28 @@ func isLinkRefDefinition(line string) bool {
 		i++
 	}
 	if i >= len(line) || line[i] != '[' {
+		if i < len(line) && line[i] == '>' {
+			return isLinkRefDefinition(strings.TrimLeft(line[i+1:], " \t"))
+		}
 		return false
 	}
 	i++
 	start := i
-	for i < len(line) && line[i] != ']' {
+	escaped := false
+	for i < len(line) {
+		if escaped {
+			escaped = false
+			i++
+			continue
+		}
+		if line[i] == '\\' {
+			escaped = true
+			i++
+			continue
+		}
+		if line[i] == ']' {
+			break
+		}
 		i++
 	}
 	if i >= len(line) || i == start {
@@ -469,11 +523,7 @@ func isLinkRefDefinition(line string) bool {
 	if i >= len(line) || line[i] != ':' {
 		return false
 	}
-	i++
-	for i < len(line) && (line[i] == ' ' || line[i] == '\t') {
-		i++
-	}
-	return i < len(line)
+	return true
 }
 
 func isASCIILetter(b byte) bool { return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') }

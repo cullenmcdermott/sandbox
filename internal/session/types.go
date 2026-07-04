@@ -188,6 +188,12 @@ type TurnInput struct {
 	// elsewhere. NOTE: the wire value is the real SDK enum — the TUI displays
 	// "max" as "ultracode".
 	Effort string `json:"effort,omitempty"`
+	// Advisor requests the SDK "advisor" tool for this turn (the in-session
+	// /advisor toggle): a stronger model the executor may consult on hard calls.
+	// The runner honors it once the pinned @anthropic-ai/claude-agent-sdk exposes
+	// an advisor option (v0.3.181 does not — the field is a harmless no-op there,
+	// so the wire/TUI plumbing is ready without breaking current turns).
+	Advisor bool `json:"advisor,omitempty"`
 }
 
 // TurnRef addresses a specific turn.

@@ -69,6 +69,11 @@ func commandGroups(m *TranscriptModel) []cmdGroup {
 			{"/yolo", "bypass all permissions", setModeCmd(modeBypass)},
 			{"/vim", "toggle vim-style modal editing (off by default)", toggleVimCmd},
 		}},
+		{name: "Autopilot", glyph: "⟳", cmds: []slashCmd{
+			{"/loop", "re-run a prompt on an interval — /loop [5m] <prompt>", func(m *TranscriptModel) tea.Cmd { return m.cmdLoop(nil) }},
+			{"/goal", "work autonomously until a condition is met — /goal <condition>", func(m *TranscriptModel) tea.Cmd { return m.cmdGoal("") }},
+			{"/advisor", "toggle consulting a more capable advisor on hard calls", func(m *TranscriptModel) tea.Cmd { return m.cmdAdvisor(nil) }},
+		}},
 		{name: "Model", glyph: "✸", cmds: modelGroupCmds(m)},
 		{name: "Effort", glyph: "⚡", cmds: effortGroupCmds()},
 		{name: "Tools", glyph: "▣", cmds: []slashCmd{
@@ -273,7 +278,11 @@ func (m *TranscriptModel) renderPalette(width int) string {
 		}
 	}
 	if len(lines) == 0 {
-		lines = append(lines, lipgloss.NewStyle().Foreground(theme.TextMuted).Render("no matching commands"))
+		if hint := autopilotUsageHint(m.paletteQuery()); hint != "" {
+			lines = append(lines, hint)
+		} else {
+			lines = append(lines, lipgloss.NewStyle().Foreground(theme.TextMuted).Render("no matching commands"))
+		}
 	}
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -328,6 +337,16 @@ func (m *TranscriptModel) paletteKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 		}
 		return nil, true
 	case "enter":
+		// The arg-taking drivers (/loop, /goal, /advisor) are dispatched from the
+		// raw input before palette selection, so "/loop 5m …" (which matches no
+		// palette entry by name) still runs. dispatchAutopilot also handles the
+		// bare "/loop"/"/goal"/"/advisor" cases, keeping the two paths consistent.
+		if cmd, ok := m.dispatchAutopilot(strings.TrimSpace(m.input.Value())); ok {
+			m.input.Reset()
+			m.cmdSel = 0
+			m.layout()
+			return cmd, true
+		}
 		cmds := flatCmds(m, m.paletteQuery())
 		var cmd tea.Cmd
 		if len(cmds) > 0 && m.cmdSel < len(cmds) {

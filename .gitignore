@@ -16,3 +16,5 @@ runner/dist/
 # overlay are machine-local and may carry credentials — never commit them.
 dev/local/.kubeconfig
 dev/local/secret.local.yaml
+
+.DS_STORE

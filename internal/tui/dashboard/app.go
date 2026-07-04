@@ -533,6 +533,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Workstream C: give the transcript the host-side event cache so it loads
 		// history instantly on a cold open and mirrors streamed events for next time.
 		m.cache = a.dashboard.eventCache
+		// Reaper idle timeout so a /loop can warn when its interval risks a
+		// mid-loop suspend (§1e item 4).
+		m.idleTimeout = a.dashboard.idleTimeout
 		// Hand off a one-shot initial prompt (from `sandbox claude "…"`) so the
 		// transcript submits it as the first turn once its stream is live.
 		m.initialPrompt = a.initialPrompt
@@ -650,6 +653,15 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		a.connectFrame++
 		return a, connectTickCmd()
+
+	case autopilotTickMsg:
+		// A /loop tick, routed to its owning model whether foreground or a
+		// detached (warm) background model — this is what keeps a loop firing
+		// after a detach. Returning the model's Cmd here (rather than delegating)
+		// ensures the POST + reschedule survive; a warm model fed only via
+		// ingest() would otherwise have its Cmds discarded. Handled early so it
+		// never double-dispatches through the per-screen delegation below.
+		return a, a.autopilotTick(msg)
 	}
 	// Keep the dashboard's notion of the attached session current so background
 	// attention toasts never fire for the session the user is already viewing.
@@ -848,6 +860,42 @@ func (a *App) parkTranscript(m *TranscriptModel) {
 	// SSE client open after detach (NEW-5). Every detach path parks the
 	// transcript immediately before releasing it, so this is the single hook.
 	m.cancelStream()
+}
+
+// autopilotTick advances a /loop for its session by dispatching the tick to the
+// owning model. When that model is detached (a warm background model), its POSTs
+// are rerouted through the dashboard's live background client, since the parked
+// foreground client's port-forward may already be torn down. Returns nil (the
+// loop lapses) when the session is gone or has no live client while detached.
+func (a *App) autopilotTick(msg autopilotTickMsg) tea.Cmd {
+	// Foreground: the model owns a live client and event stream — dispatch as-is.
+	if a.transcript != nil && a.transcript.ref.ID == msg.sess {
+		return a.transcript.autopilotTick(msg)
+	}
+	// Detached: drive the retained warm model, POSTing through the dashboard's
+	// live background client.
+	t, ok := a.dashboard.retainedTranscript(msg.sess)
+	if !ok {
+		// The warm model is gone — dropRetained fires when the pod suspends, is
+		// deleted, or the background stream is exhausted (a laptop sleep that
+		// outlives the SSE stream lands here too). The loop lapses; surface it as a
+		// toast + OS notification instead of dying silently (§1e item 3). A model
+		// this tick can no longer read carries no gen to re-check, but a lapse this
+		// deep is a genuine loss of the running loop, not a benign stale tick.
+		return a.dashboard.autopilotToast(msg.sess, "⟳ loop ended — session suspended")
+	}
+	client, ok := a.dashboard.liveClient(msg.sess)
+	if !ok {
+		// No live client this cycle (transient stream blip / pod resuming):
+		// skip the POST but keep the loop alive by rescheduling, as long as this
+		// tick still matches the running loop (guards a stopped/replaced loop).
+		if msg.gen == t.autopilot.gen {
+			return t.scheduleAutopilotTick()
+		}
+		return nil
+	}
+	t.client = client
+	return t.autopilotTick(msg)
 }
 
 // View renders the active screen. When a transcript is open it is composited
