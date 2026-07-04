@@ -19,7 +19,7 @@ buildGoModule {
 
   # Bump this whenever go.mod/go.sum change. Set to lib.fakeHash, run the build,
   # and copy the "got:" hash Nix prints.
-  vendorHash = "sha256-J0S9lWQ80nteCqHLFCiij+VfcEWHHY4OQLxGNiaN1tk=";
+  vendorHash = "sha256-x0za8ykfofr9d2COVjluGVnk6t5aS9Nntv97UJZRqXg=";
 
   # Only build the host CLI. The repo also contains gen-eventschema and
   # tuikit-demo commands that are dev-only and not shipped.
