@@ -129,6 +129,23 @@ func (a *App) pickerKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 	return nil, false
 }
 
+// pickerPaste forwards a bracketed-paste event to the active text field. Only
+// the label and console-key form stages own a text input; other stages have no
+// field to paste into, so paste is a no-op there. Without this route a pasted
+// console API key (the field whose placeholder literally says "paste your
+// Anthropic Console API key") would be silently dropped — pastes arrive as
+// tea.PasteMsg, never tea.KeyPressMsg, so pickerKey never sees them. bubbles'
+// textinput consumes tea.PasteMsg natively in Update.
+func (a *App) pickerPaste(msg tea.PasteMsg) (tea.Cmd, bool) {
+	switch a.picker.stage {
+	case stageLabelForm, stageConsoleForm:
+		ti, cmd := a.picker.input.Update(msg)
+		a.picker.input = ti
+		return cmd, true
+	}
+	return nil, false
+}
+
 // pickerKeyBackend handles the initial claude/opencode chooser. Selecting a
 // non-claude backend provisions immediately. Selecting claude transitions to the
 // account picker when stored accounts exist; with no store or zero accounts it

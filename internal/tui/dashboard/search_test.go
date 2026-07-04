@@ -39,6 +39,67 @@ func TestSearchQueryCanTypeUpperN(t *testing.T) {
 	}
 }
 
+// REGRESSION (audit 2026-07-04, search.go:72): bubbletea v2's decoder sets
+// ModShift on a plainly typed uppercase letter (see key_encode_test.go's
+// "shifted printable" case). The old `key.Mod == 0` gate dropped every such
+// key, so typing "TODO" added nothing and "Readme" yielded "eadme". searchKey
+// must accept text as long as no NON-shift modifier is held.
+func TestSearchQueryAcceptsShiftedUppercase(t *testing.T) {
+	m := &TranscriptModel{}
+	m.openSearch()
+
+	// Simulate the real decoder: uppercase letters arrive with ModShift set,
+	// lowercase with no modifier — exactly how ultraviolet decodes "Readme".
+	for _, r := range "Readme" {
+		msg := tea.KeyPressMsg{Code: r, Text: string(r)}
+		if r >= 'A' && r <= 'Z' {
+			msg.Mod = tea.ModShift
+		}
+		m.searchKey(msg)
+	}
+
+	if got, want := m.search.query, "Readme"; got != want {
+		t.Fatalf("query = %q, want %q (ModShift-only uppercase was dropped)", got, want)
+	}
+}
+
+// A held control/alt modifier is NOT text and must not leak into the query.
+func TestSearchQueryRejectsNonShiftModifier(t *testing.T) {
+	m := &TranscriptModel{}
+	m.openSearch()
+
+	// ctrl+a carries Text "" and ModCtrl — it must be rejected as text input.
+	m.searchKey(tea.KeyPressMsg{Code: 'a', Mod: tea.ModCtrl})
+	// alt+b (Text present but a non-shift modifier held) must also be rejected.
+	m.searchKey(tea.KeyPressMsg{Code: 'b', Text: "b", Mod: tea.ModAlt})
+
+	if m.search.query != "" {
+		t.Fatalf("query = %q, want empty (non-shift modifiers must not type)", m.search.query)
+	}
+}
+
+// REGRESSION (search.go:66): backspace must delete a whole rune, not one byte.
+// A byte-wise chop of a multibyte tail (é → dangling 0xC3) corrupts the query
+// into U+FFFD and poisons fuzzy matching.
+func TestSearchBackspaceIsRuneWise(t *testing.T) {
+	m := &TranscriptModel{}
+	m.openSearch()
+	m.search.query = "café"
+
+	bs := tea.KeyPressMsg{Code: tea.KeyBackspace}
+	m.searchKey(bs)
+	if got, want := m.search.query, "caf"; got != want {
+		t.Fatalf("after one backspace query = %q, want %q (byte-wise chop left a dangling continuation byte)", got, want)
+	}
+	// Exhaust the rest; the query must empty cleanly with no U+FFFD residue.
+	m.searchKey(bs)
+	m.searchKey(bs)
+	m.searchKey(bs)
+	if m.search.query != "" {
+		t.Fatalf("query = %q, want empty after deleting every rune", m.search.query)
+	}
+}
+
 // enter consumes the key without adding it to the query.
 func TestSearchEnterDoesNotAddToQuery(t *testing.T) {
 	m := &TranscriptModel{}

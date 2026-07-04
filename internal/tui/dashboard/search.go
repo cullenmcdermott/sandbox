@@ -10,6 +10,7 @@ package dashboard
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -62,14 +63,21 @@ func (m *TranscriptModel) searchKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 		m.prevSearchMatch()
 		return nil, true
 	case "backspace":
-		if len(m.search.query) > 0 {
-			m.search.query = m.search.query[:len(m.search.query)-1]
+		// Rune-wise, not byte-wise: chopping one byte off a multibyte tail (é →
+		// dangling 0xC3) corrupts the query into U+FFFD and poisons fuzzy matching.
+		// Mirrors the filter/rename buffers (model.go:2036/2076).
+		if r, size := utf8.DecodeLastRuneInString(m.search.query); r != utf8.RuneError {
+			m.search.query = m.search.query[:len(m.search.query)-size]
 			m.updateSearchMatches()
 		}
 		return nil, true
 	}
 	key := msg.Key()
-	if key.Code != 0 && key.Mod == 0 && key.Text != "" {
+	// Accept typed text. bubbletea v2's decoder sets ModShift on a plain uppercase
+	// letter, so require only that no NON-shift modifier is held — otherwise every
+	// capital ("TODO", the T in "Readme") would be silently dropped. Matches the
+	// filter/rename inputs' handling.
+	if key.Code != 0 && key.Mod&^tea.ModShift == 0 && key.Text != "" {
 		m.search.query += key.Text
 		m.updateSearchMatches()
 		return nil, true

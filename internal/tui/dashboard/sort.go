@@ -85,35 +85,34 @@ func statusOrder(s SessionStatus) int {
 func SortSessions(sessions []Session, key SortKey, dir SortDir) {
 	sort.SliceStable(sessions, func(i, j int) bool {
 		a, b := sessions[i], sessions[j]
-		var less bool
+		// Three-way primary comparison: <0 if a sorts before b, 0 if equal, >0 after.
+		var c int
 		switch key {
 		case SortByLastActive:
-			ta, tb := a.State.LastActivity, b.State.LastActivity
-			if ta.Equal(tb) {
-				less = string(a.ID()) < string(b.ID())
-			} else {
-				// Natural ascending order: earlier time first.
-				// The default sort (SortDesc) flips this so newest activity
-				// appears at the top of the list.
-				less = ta.Before(tb)
-			}
+			// Natural ascending order: earlier activity first. SortDesc flips this
+			// below so the newest activity floats to the top.
+			c = a.State.LastActivity.Compare(b.State.LastActivity)
 		case SortByTitle:
-			less = strings.ToLower(a.Title) < strings.ToLower(b.Title)
+			// Compare the rendered title (DisplayTitle), not the raw derived Title —
+			// a rename / auto-title is what the row actually shows and sorts by.
+			c = strings.Compare(strings.ToLower(a.DisplayTitle()), strings.ToLower(b.DisplayTitle()))
 		case SortByStatus:
-			oa, ob := statusOrder(a.DashStatus), statusOrder(b.DashStatus)
-			if oa == ob {
-				less = string(a.ID()) < string(b.ID())
-			} else {
-				less = oa < ob
-			}
-		default:
-			less = string(a.ID()) < string(b.ID())
+			c = statusOrder(a.DashStatus) - statusOrder(b.DashStatus)
 		}
-
-		if dir == SortAsc {
-			return less
+		// Flip the primary key for descending order (three-way cmp makes this exact:
+		// equal keys stay 0, so they never falsely compare "less" in both directions).
+		if dir == SortDesc {
+			c = -c
 		}
-		return !less
+		if c != 0 {
+			return c < 0
+		}
+		// Equal primary key: tie-break by ID in a FIXED (ascending) direction,
+		// independent of dir. This makes the order total and stable — equal-key rows
+		// keep a deterministic position and never ping-pong when SortSessions re-runs
+		// on each cluster/runner event (the old `!less` returned true both ways for
+		// equal keys, so sort.SliceStable swapped them on every re-sort).
+		return string(a.ID()) < string(b.ID())
 	})
 }
 

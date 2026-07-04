@@ -397,6 +397,17 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		theme.ApplyForBackground(msg.IsDark())
 		return a, nil
 
+	case tea.PasteMsg:
+		// The picker, when open, owns input over the dashboard (mirrors the
+		// KeyPressMsg route below). Bracketed paste arrives as its own message type,
+		// so without this the console-key / label fields never receive a paste.
+		if a.picker.open {
+			if cmd, consumed := a.pickerPaste(msg); consumed {
+				return a, cmd
+			}
+			return a, nil
+		}
+
 	case tea.KeyPressMsg:
 		// Ctrl+C is always fatal regardless of screen.
 		if msg.String() == "ctrl+c" {

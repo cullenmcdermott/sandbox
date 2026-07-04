@@ -311,6 +311,67 @@ func TestConsoleFormMasksKeyAndSubmits(t *testing.T) {
 	}
 }
 
+// REGRESSION (audit 2026-07-04, account_picker.go / app.go:788): a bracketed
+// paste arrives as tea.PasteMsg, NOT tea.KeyPressMsg, so the picker inputs — the
+// console-key field whose placeholder literally says "paste your Anthropic
+// Console API key" and the label field — never received it. A pasted 100+ char
+// key was silently dropped. App.Update must route PasteMsg into the active form
+// input while the picker is open.
+func TestConsoleFormAcceptsPaste(t *testing.T) {
+	store := &fakeAccountStore{accounts: []AccountInfo{{ID: "acct-aaaa", Label: "personal", Type: "console"}}}
+	app, _ := newAccountPickerApp(t, store)
+	openAccountStage(t, app)
+
+	// Navigate to add account → console → label form → console form.
+	app.Update(keyMsg("down"))
+	app.Update(keyMsg("down")) // add-account row
+	app.Update(keyMsg("enter"))
+	app.Update(keyMsg("down"))  // console (sel 1)
+	app.Update(keyMsg("enter")) // → stageLabelForm
+	app.Update(keyMsg("enter")) // accept default label → stageConsoleForm
+	if app.picker.stage != stageConsoleForm {
+		t.Fatalf("did not reach the console form: stage=%v", app.picker.stage)
+	}
+
+	const pasted = "sk-ant-api03-PASTED-KEY-0123456789"
+	app.Update(tea.PasteMsg{Content: pasted})
+
+	// The paste reached the (masked) field, so submitting hands the exact bytes
+	// to the store — proving the PasteMsg was not dropped.
+	app.Update(keyMsg("enter"))
+	if len(store.addedKeys) != 1 || store.addedKeys[0] != pasted {
+		t.Fatalf("AddConsoleKey got %v, want one call with the pasted key %q", store.addedKeys, pasted)
+	}
+}
+
+// TestLabelFormAcceptsPaste: the plain (unmasked) label field also receives a
+// paste — same PasteMsg route, different stage.
+func TestLabelFormAcceptsPaste(t *testing.T) {
+	store := &fakeAccountStore{accounts: []AccountInfo{{ID: "acct-aaaa", Label: "personal", Type: "console"}}}
+	app, _ := newAccountPickerApp(t, store)
+	openAccountStage(t, app)
+
+	app.Update(keyMsg("down"))
+	app.Update(keyMsg("down")) // add-account row
+	app.Update(keyMsg("enter"))
+	app.Update(keyMsg("down"))  // console (sel 1)
+	app.Update(keyMsg("enter")) // → stageLabelForm
+	if app.picker.stage != stageLabelForm {
+		t.Fatalf("did not reach the label form: stage=%v", app.picker.stage)
+	}
+
+	// The label field is prefilled with the type default ("console"); pasting must
+	// append into it, and the accepted label reaches the store on submit.
+	app.picker.input.SetValue("")
+	app.Update(tea.PasteMsg{Content: "work-laptop"})
+	app.Update(keyMsg("enter")) // accept label → console form
+	app.Update(keyMsg("k"))     // type a throwaway key
+	app.Update(keyMsg("enter")) // submit console form
+	if len(store.addedLabels) != 1 || store.addedLabels[0] != "work-laptop" {
+		t.Fatalf("AddConsoleKey labels = %v, want one call with the pasted label %q", store.addedLabels, "work-laptop")
+	}
+}
+
 // TestConsoleFormValidationErrorStaysInline: a store validation error keeps the
 // form open with the error shown, and the key is still masked.
 func TestConsoleFormValidationErrorStaysInline(t *testing.T) {
