@@ -109,8 +109,9 @@ the two row models** refactor — `visibleSessions()` vs `visibleRows()` both
 interpret `m.cursor`; one row abstraction with a `sessionAt(cursor)` accessor
 for render+nav+actions subsumes them (`groups.go:57`). Prefer that fix.
 
-- [ ] **Account picker silently drops pastes (HIGH — blocks the console-key
-  flow).** Picker inputs only receive `tea.KeyPressMsg`; bracketed paste
+- [x] **Account picker silently drops pastes (HIGH).** FIXED 2026-07-04
+  (`cb0e375`): PasteMsg routed to picker label/console forms via `pickerPaste`.
+  Original finding: Picker inputs only receive `tea.KeyPressMsg`; bracketed paste
   arrives as `tea.PasteMsg`, which has NO route to the picker (only handler is
   the external pane's, ScreenExternal-gated) — the field whose placeholder says
   "paste your Anthropic Console API key" gets nothing; 100+ char key must be
@@ -130,7 +131,9 @@ for render+nav+actions subsumes them (`groups.go:57`). Prefer that fix.
   approve/suspend/destroy target the wrongly highlighted session; target may be
   in a collapsed group. Fix: locate in `visibleRows()` skipping headers; expand
   collapsed group. `notify.go:209`.
-- [ ] **Descending sort comparator is invalid (MED).** SortDesc = `!less`; equal
+- [x] **Descending sort comparator is invalid (MED).** FIXED 2026-07-04
+  (`cb0e375`): three-way cmp + sign flip + fixed ID tie-break; DisplayTitle.
+  Original finding: SortDesc = `!less`; equal
   keys return true both ways → sort.SliceStable swaps equal-title rows on EVERY
   re-sort (runs per cluster/runner event) — rows visibly ping-pong and the
   row-indexed cursor retargets actions. SortByTitle also has no ID tie-break
@@ -140,12 +143,13 @@ for render+nav+actions subsumes them (`groups.go:57`). Prefer that fix.
   readers repo-wide (not in visibleSessions/grouped/sort/render); flag is
   in-memory only. Fix: filter + archived section, or remove the binding until
   built. `groups.go:200`.
-- [ ] **Transcript search drops every uppercase letter (MED).** `searchKey`
+- [x] **Transcript search drops every uppercase letter (MED).** FIXED
+  2026-07-04 (`cb0e375`). Original finding: `searchKey`
   requires `key.Mod == 0`, but bubbletea v2's decoder sets ModShift on plain
   typed uppercase (verified against the pinned ultraviolet decoder) — typing
   "TODO" adds nothing, "Readme" yields "eadme". Fix: accept when
   `key.Mod &^ tea.ModShift == 0`, as rename/filter do. `search.go:72`.
-- [ ] **Search backspace is byte-wise (LOW)** — corrupts multibyte queries
+- [x] **Search backspace is byte-wise (LOW)** — FIXED 2026-07-04 (`cb0e375`). — corrupts multibyte queries
   (é → dangling 0xC3 → U+FFFD → fuzzy-matching garbage). Fix:
   `utf8.DecodeLastRuneInString` like `model.go:2036/2076`. `search.go:66`.
 
