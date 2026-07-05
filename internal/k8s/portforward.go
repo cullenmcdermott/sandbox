@@ -10,6 +10,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/transport/spdy"
@@ -145,8 +146,23 @@ func (b *Backend) runForward(ctx context.Context, pod *corev1.Pod, localPort, re
 		if !first {
 			// Re-resolve the pod: after a restart the old pod name is gone, so a
 			// reconnect must target whatever pod now backs the session.
-			if rp, err := b.resolvePodForForward(ctx, pod); err == nil && rp != nil {
+			rp, rerr := b.resolvePodForForward(ctx, pod)
+			switch {
+			case rerr == nil && rp != nil:
 				pod = rp
+			case k8serrors.IsNotFound(rerr):
+				// The session's Sandbox is gone for good (e.g. `sandbox destroy`
+				// from another shell): the pod will never come back. Stop here
+				// instead of hammering the vanished pod at the capped ≤10s cadence
+				// forever (§1d), and surface the terminal state to the handle owner
+				// by closing h.done (via the deferred close) with h.err set.
+				// Transient failures — a reschedule gap or an API-server blip — are
+				// NOT NotFound, so they stay on the retry path below.
+				h.err = fmt.Errorf("port-forward %d→%d: session gone: %w", localPort, remotePort, rerr)
+				return
+			default:
+				// Transient/rescheduling resolve failure: keep the stale pod and
+				// retry with backoff, exactly as before.
 			}
 		}
 
@@ -236,6 +252,14 @@ func (b *Backend) resolvePodForForward(ctx context.Context, old *corev1.Pod) (*c
 		if pods.Items[i].DeletionTimestamp == nil {
 			return &pods.Items[i], nil
 		}
+	}
+	// No live pod backs the session. Distinguish a permanently-gone session from
+	// a transient reschedule gap: if the Sandbox object itself is gone, the pod
+	// will never return, so propagate the NotFound and let the caller stop
+	// retrying (§1d). If the Sandbox still exists, this is a reschedule gap —
+	// return a plain (non-NotFound) error so the caller keeps retrying.
+	if _, serr := b.agents.AgentsV1alpha1().Sandboxes(b.namespace).Get(ctx, sid, metav1.GetOptions{}); k8serrors.IsNotFound(serr) {
+		return nil, serr
 	}
 	return nil, fmt.Errorf("no live pod for session %s", sid)
 }
