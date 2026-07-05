@@ -75,6 +75,17 @@ function emptyState(cfg: RunnerConfig): SessionState {
  * session that has neither a runner turn nor an SSE client. */
 const EXTERNAL_ACTIVE_WINDOW_MS = 90_000;
 
+/** An observer-set synthetic 'busy' (an interactive opencode turn — no
+ * registered runner turn) normally clears when the always-on observer sees
+ * `session.idle`. But a wedged mapper or a missed `session.idle` would pin
+ * status='busy' forever; since recomputeIdle()/idleStatus() treat a 'busy'
+ * status as an active turn, that would block the idle reaper indefinitely. Bound
+ * it: once the observer has been quiet for this long, a synthetic busy is
+ * considered STALE and — when nothing is attached (isDetached) — the session
+ * becomes idle-eligible again. A real runner turn (activeTurns > 0) is never
+ * subject to this; it settles deterministically via finishTurn(). */
+const SYNTHETIC_BUSY_STALE_MS = 5 * 60_000;
+
 /** A freshly-started runner has no in-flight turns (activeTurns is rebuilt
  * empty), so a persisted 'busy' status — saved just before a crash/restart
  * mid-turn — is stale and would make /status report a turn that no longer
@@ -195,6 +206,12 @@ class SessionRegistry {
   // opencode supervisor calls setExternalActivity() while the client is live.
   private externalActivityAt = 0;
 
+  // Epoch ms of the last event the always-on opencode observer mapped for our
+  // session, or 0 if the observer has never fired. Distinguishes a live
+  // synthetic 'busy' (fresh observer events) from a wedged one (status pinned
+  // 'busy' but the stream went quiet). See SYNTHETIC_BUSY_STALE_MS.
+  private lastObserverEventAt = 0;
+
   constructor(state: SessionState) {
     this.state = state;
   }
@@ -215,17 +232,43 @@ class SessionRegistry {
 
   /**
    * Recompute idleSince from the current turn + attached-client state. Idle =
-   * no active turn, no synthetic backend turn, AND no attached SSE clients. Sets
+   * no active turn, no (fresh) synthetic backend turn, AND no attached SSE
+   * clients. A synthetic 'busy' normally blocks idle, but a STALE one does not
+   * (syntheticBusyStale) so a wedged mapper can't pin the pod unreapable. Sets
    * idleSince on the transition into idle, clears it on any activity. Safe to
    * call often.
    */
   recomputeIdle(): void {
-    const idle = this.activeTurns.size === 0 && this.state.status !== 'busy' && this.isDetached();
+    const busyBlocksIdle = this.state.status === 'busy' && !this.syntheticBusyStale();
+    const idle = this.activeTurns.size === 0 && !busyBlocksIdle && this.isDetached();
     if (idle && this.idleSince === null) {
+      // Only reachable with status still 'busy' via the stale-synthetic-busy
+      // release (a normal turn end flips status to 'idle' first); surface it.
+      if (this.state.status === 'busy') {
+        console.warn(
+          `session ${this.state.sandbox_session_id}: synthetic 'busy' went stale ` +
+            `(no opencode observer events for >=${SYNTHETIC_BUSY_STALE_MS}ms) with nothing ` +
+            'attached; releasing to the idle reaper',
+        );
+      }
       this.idleSince = new Date().toISOString();
     } else if (!idle) {
       this.idleSince = null;
     }
+  }
+
+  /**
+   * True when the session is in an observer-driven synthetic 'busy' that has
+   * gone stale — no observer event for SYNTHETIC_BUSY_STALE_MS. Only a synthetic
+   * busy (no registered runner turn) can be stale; a real /turns turn keeps
+   * activeTurns.size > 0 and settles via finishTurn(). A synthetic busy that has
+   * never recorded an observer event (lastObserverEventAt === 0) is treated as
+   * fresh, not stale — the observer stamps the clock as it opens a cycle, so
+   * this only shields the direct status-mutation path used by tests.
+   */
+  private syntheticBusyStale(): boolean {
+    if (this.activeTurns.size > 0 || this.lastObserverEventAt === 0) return false;
+    return Date.now() - this.lastObserverEventAt >= SYNTHETIC_BUSY_STALE_MS;
   }
 
   /**
@@ -246,6 +289,16 @@ class SessionRegistry {
    * clock treats the session as in use. Called by the opencode supervisor. */
   setExternalActivity(): void {
     this.externalActivityAt = Date.now();
+    this.recomputeIdle();
+  }
+
+  /** Record that the always-on opencode observer just mapped an event for our
+   * session, refreshing the synthetic-busy staleness clock so a live interactive
+   * turn stays "active" while a wedged/quiet stream eventually releases the pod
+   * to the reaper. `atMs` is injectable so tests can backdate the clock without
+   * waiting out the staleness window. */
+  noteObserverEvent(atMs: number = Date.now()): void {
+    this.lastObserverEventAt = atMs;
     this.recomputeIdle();
   }
 
@@ -271,7 +324,9 @@ class SessionRegistry {
     }
     this.recomputeIdle();
     return {
-      turnActive: this.activeTurns.size > 0 || this.state.status === 'busy',
+      // A synthetic 'busy' counts as an active turn only while fresh; a stale
+      // one (wedged mapper) reports inactive so it can't block the reaper.
+      turnActive: this.activeTurns.size > 0 || (this.state.status === 'busy' && !this.syntheticBusyStale()),
       attachedClients: sseClientCount(),
       ...(this.idleSince ? { idleSince: this.idleSince } : {}),
     };

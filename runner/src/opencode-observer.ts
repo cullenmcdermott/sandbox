@@ -52,6 +52,13 @@ export function markObservedTurnInterrupted(turnId: string): void {
   if (turnId) interruptedTurns.add(turnId);
 }
 
+/** Test-only: whether a turn id is still tracked as interrupted. Lets the GC
+ * regression assert reset()/endCycle() shed the entry (the set is module-local
+ * and only meaningfully holds the current synthetic turn's id). */
+export function hasInterruptedTurn(turnId: string): boolean {
+  return interruptedTurns.has(turnId);
+}
+
 export interface OpencodeObserver {
   stop(): Promise<void>;
 }
@@ -69,6 +76,11 @@ export interface ObserverDeps {
   nextTurnId(): string;
   setLastTurn(id: string): void;
   setExternalActivity(): void;
+  /** Refresh the synthetic-busy staleness clock: called for every observed event
+   * that pertains to our session so a live interactive turn stays "active" while
+   * a wedged/quiet stream lets the reaper reclaim the pod (optional so existing
+   * fake deps stay valid). */
+  noteObserverEvent?(): void;
   setStatus(s: 'busy' | 'idle' | 'error'): void;
   setModel(model: string): void;
   /** Append a normalized event to the log/SSE channel. */
@@ -101,6 +113,11 @@ export function createObserverHandler(deps: ObserverDeps) {
   let modelEmitted = false;
 
   const endCycle = () => {
+    // GC the interrupt marker for this turn: it is otherwise only shed when the
+    // turn's own `session.idle` arrives, so a stream drop (reset) or a non-idle
+    // settle in between would leak the module-global entry forever. Covers the
+    // reset() stream-drop path (which calls endCycle) and the mapper-settle path.
+    if (activeTurnId !== undefined) interruptedTurns.delete(activeTurnId);
     activeTurnId = undefined;
     mapper = undefined;
   };
@@ -149,6 +166,12 @@ export function createObserverHandler(deps: ObserverDeps) {
       // sessions inside the opencode TUI; their events are not ours to surface).
       const evSession = eventSessionId(props);
       if (evSession && evSession !== oc) return;
+
+      // The observer stream is delivering an event for our session — refresh the
+      // synthetic-busy staleness clock. A live interactive turn keeps this fresh
+      // (stays "active"); a wedged/quiet stream lets it go stale so the reaper
+      // can reclaim the pod instead of being blocked by a pinned 'busy'.
+      deps.noteObserverEvent?.();
 
       // Cycle start: the first assistant message.updated of a cycle. opencode
       // always emits message.updated(role) before that message's parts, so this
@@ -213,6 +236,7 @@ function registryDeps(): ObserverDeps {
     nextTurnId: () => getRegistry().nextTurnId(),
     setLastTurn: (id) => getRegistry().setLastTurn(id),
     setExternalActivity: () => getRegistry().setExternalActivity(),
+    noteObserverEvent: () => getRegistry().noteObserverEvent(),
     setStatus: (s) => getRegistry().setStatus(s),
     setModel: (m) => getRegistry().setModel(m),
     emit: (turnId, type, payload) => appendEvent(getRegistry().state.sandbox_session_id, turnId, type, payload),
