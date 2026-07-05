@@ -174,3 +174,37 @@ func (consumerStore) SetDefault(string) error        { return nil }
 func (consumerStore) Default() (string, error)       { return "", nil }
 
 var _ cred.Store = consumerStore{}
+
+// consumerRunnerClient proves client.RunnerClient stays implementable by outside
+// consumers (they build fakes of it for Create/Connect orchestration tests):
+// WIDENING the interface (adding a method) is a breaking change and must fail
+// HERE, not silently at every downstream fake. Mirrors consumerStore above.
+type consumerRunnerClient struct{}
+
+func (consumerRunnerClient) Health(context.Context) error { return nil }
+func (consumerRunnerClient) StartTurn(context.Context, client.Ref, client.TurnInput) (client.TurnRef, error) {
+	return client.TurnRef{}, nil
+}
+func (consumerRunnerClient) InterruptTurn(context.Context, client.Ref, client.TurnRef) error {
+	return nil
+}
+func (consumerRunnerClient) ResolvePermission(context.Context, client.Ref, client.PermissionDecision) error {
+	return nil
+}
+func (consumerRunnerClient) Events(context.Context, client.Ref, uint64) (<-chan client.Event, error) {
+	return nil, nil
+}
+func (consumerRunnerClient) EventsPassive(context.Context, client.Ref, uint64) (<-chan client.Event, error) {
+	return nil, nil
+}
+func (consumerRunnerClient) SessionState(context.Context, client.Ref) (client.State, error) {
+	return client.State{}, nil
+}
+func (consumerRunnerClient) Exec(context.Context, client.Ref, string) (client.ExecResult, error) {
+	return client.ExecResult{}, nil
+}
+func (consumerRunnerClient) Idle(context.Context, client.Ref) (client.IdleStatus, error) {
+	return client.IdleStatus{}, nil
+}
+
+var _ client.RunnerClient = consumerRunnerClient{}

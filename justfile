@@ -26,7 +26,16 @@ default:
 # cheapest-first within reason so failures surface fast (typecheck is seconds;
 # sdk-conformance compiles the whole SDK; verify/e2e are the heaviest).
 check: gen fmt-check lint build vet test typecheck sdk-conformance verify e2e
-    @printf '\033[32m%s\033[0m\n' "just check: all gates passed"
+    @skipped=""; \
+    command -v golangci-lint >/dev/null 2>&1 || skipped="$skipped golangci-lint"; \
+    [ -x runner/node_modules/.bin/eslint ] || skipped="$skipped runner-eslint"; \
+    [ -d runner/node_modules ] || skipped="$skipped runner-tests runner-typecheck"; \
+    if [ -n "$skipped" ]; then \
+        n=$(printf '%s' "$skipped" | wc -w | tr -d ' '); \
+        printf '\033[33m%s\033[0m\n' "just check: passed ($n gate(s) skipped — CI enforces them:$skipped)"; \
+    else \
+        printf '\033[32m%s\033[0m\n' "just check: all gates passed"; \
+    fi
 
 # Regenerate the event model from schema/events.json and fail on any drift
 # (schema edited without regeneration, or a *.gen.* file hand-edited).

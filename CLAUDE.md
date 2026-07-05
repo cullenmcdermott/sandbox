@@ -40,7 +40,10 @@ See `docs/verification-protocol.md` for the verification philosophy
 - **In-sandbox caveat:** `client`, `internal/runner`, `internal/models`, and
   `internal/k8s` bind httptest/local ports the command-sandbox blocks; run
   `just test` / `just verify` (and `just check`) with the sandbox disabled.
-  Other packages test fine in-sandbox.
+  Other packages test fine in-sandbox, with one exception:
+  `internal/tui/dashboard`'s `TestAppExternalPaneEscIsForwardedNotDetached`
+  spawns a PTY (blocked in-sandbox) — it passes unsandboxed. Run the dashboard
+  suite with the sandbox disabled if that test fails locally.
 - **Linters** (`golangci-lint`, `eslint`) aren't on the Nix host — local recipes
   skip them with a warning; CI is the hard enforcement point. Don't install them
   imperatively (run `golangci-lint` via `nix run nixpkgs#golangci-lint -- run`).
