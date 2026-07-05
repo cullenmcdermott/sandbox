@@ -44,9 +44,33 @@ done log.)
 **Plan this cluster together** around a single "stream registration" invariant
 (in-flight-connect tracking + per-stream generation tokens) — they interact,
 and piecemeal fixes will fight each other. All in `internal/tui/dashboard/`.
+**STATUS: the whole §1a cluster is now fixed (all PENDING FABLE REVIEW,
+2026-07-05)** — the replay-treated-as-live 7-step class and the duplicate-connect
+"stream registration" half (in-flight tracking + cancel-incoming + per-stream
+generation tokens) both landed; no open correctness items remain in §1a (the
+unchecked bullets below are reference/superseded diagnoses only).
 
-- [ ] **Replay-treated-as-live class (HIGH — root cause of the recurring
-  "relaunch replay" bugs; diagnosed 2026-07-04).** The replay/live boundary
+- [x] **Replay-treated-as-live class (HIGH) — FIXED (PENDING FABLE REVIEW,
+  2026-07-05).** Implemented the coordinated 7-step fix (all within
+  `internal/tui/dashboard`), mirroring the transcript's replay/live boundary in
+  the dashboard read-model: (a) per-session `catchingUp` flag set on background
+  stream install (`liveSSEReadyMsg`), cleared ONLY at the `EventStreamLive`
+  replay-complete boundary; (b) while catching up, state mutates but
+  `notifyIfBackgroundAttention` is suppressed — one honest toast at flip-to-live;
+  (c) `statusChangedAt` from `ev.Time` (new `eventTime` helper) so replayed
+  transitions don't re-flash; (d) seq dedup (`Seq!=0 && Seq<=lastSeq`) in the
+  apply path; (e) force-flush snapshots for all sessions on quit (`Cancel()`);
+  (f) folded in the hydration items (watch-beats-seed, seenSeq carry+hydrate,
+  StreamEnded preservation). 15 new test cases incl. the headline launch-storm
+  (resolved-in-replay → zero toasts). **Adversarial multi-lens review: 8
+  confirmed findings, all fixed** — the belt-and-braces ev.Time freshness clear
+  false-positived on short (~2s) reconnects (leaked a spurious toast) so it was
+  removed in favor of the reliable `EventStreamLive` marker; the notify skip was
+  reordered so a resolved-then-re-requested permission isn't masked; the dead
+  `catchUpAtConnect` field removed; install-path arming + detach cursor-sync now
+  tested. Race-twice clean. Original diagnosis retained below for reference.
+  **(status: [x])**
+- [ ] **(reference — the original diagnosis for the fixed item above).** The replay/live boundary
   (Workstream C) is implemented ONLY in the foreground transcript
   (`transcript.go:2160` consumes `EventStreamLive`; `replaying` flag +
   `attachSeq` watermark + seq dedup + idempotent cache). The dashboard's
@@ -110,19 +134,52 @@ and piecemeal fixes will fight each other. All in `internal/tui/dashboard/`.
   transcript identical to pre-quit, no duplicate blocks, pending permission
   still approvable.
 
-- [ ] **Duplicate background SSE connects per session (HIGH — two independent
-  verifiers confirmed; fires on the NORMAL startup path).** Launch guards check
-  `liveSSECancels[id]` but that map is only populated on `liveSSEReadyMsg` —
-  connects take seconds (connectSem-throttled), so seed + watch routinely both
-  launch. Second ready overwrites the first's cancel WITHOUT cancelling: leaked
-  uncancellable stream, double-applied events (`ApplyRunnerEvent` has no seq
-  dedup — `model.go:1356/1359` only advances the cursor), duplicate RecentTools
-  + re-fired notifications, and the orphan's eventual StreamEnded tears down the
-  healthy stream via unconditional `cancelLiveSSE` (`model.go:1306`). Fix: track
-  in-flight connects in every guard; on ready with an existing entry, cancel the
-  incoming stream; tag msgs with a per-stream generation token. `model.go:888`
-  (guards at `:1535`, `:1618`, `:910`).
-- [ ] **StreamEnded permanently strands 'waiting' sessions (MED).** On a
+- [x] **Duplicate background SSE connects per session (HIGH) — FULLY FIXED
+  (PENDING FABLE REVIEW, 2026-07-05); connect-side stream-registration pass now
+  landed.** The §1a step-2 seq dedup already NEUTRALIZED the double-apply damage
+  (`TestHandleRunnerEventDedupsSameSeqToolAppend`); this pass closes the connect
+  side itself. Three coordinated parts in `internal/tui/dashboard/model.go`:
+  (1) **in-flight tracking** — new `liveSSEConnecting` map set synchronously when
+  `startLiveSSECmd`/`reconnectLiveSSECmd` issue a connect (single-threaded Update,
+  so race-free), plus `hasLiveSSE(id)` = registered-OR-connecting, used by every
+  launch guard (`applySeed`, `applyPodEvent` patch+insert). A failed initial
+  connect now returns a new `liveSSEConnectFailedMsg` (was: nil) so the marker is
+  cleared instead of stranded. (2) **cancel-incoming-on-existing** — the
+  `liveSSEReadyMsg` handler cancels a raced duplicate and keeps the established
+  stream instead of overwriting (and orphaning) the live cancel func. (3)
+  **per-stream generation token** — `liveSSEGenCounter`/`liveSSEStreamGen`; every
+  connect mints a gen that rides on ready/RunnerEvent/failure msgs; a stale-gen
+  guard at the top of `handleRunnerEvent` drops any message from a
+  superseded/orphaned stream, so an orphan's StreamEnded can't tear down the
+  healthy stream and its late events can't double-apply. Routing verified: the new
+  failure msg is non-key so App.Update delegates it to the dashboard on every
+  screen; the detach-restore paths propagate their Cmds — `liveSSEConnecting` can
+  never stick true. Adversarial 4-lens review (concurrency / state-machine /
+  leak-teardown / test-quality → per-finding adversarial verify): 4 confirmed, 2
+  refuted. Confirmed + FIXED: a self-introduced regression where adding
+  `|| liveSSEConnecting` to the RECONNECT guard could strand a Running session
+  (a watch-driven connect racing the backoff window, then failing, dropped the
+  retry loop) → reverted that one check (reconnect now gates only on a REGISTERED
+  stream; the gen token makes any duplicate connect safe); plus 3 test-coverage
+  gaps (happy-path ready→gen-registration round-trip, `applySeed` in-flight guard,
+  reconnect-failed marker-clear). Refuted: `cancelLiveSSE` gen-forget (defensive,
+  self-correcting) and in-flight-marker-not-gen-aware (backstopped by parts 2+3,
+  no correctness impact). Tests: new `connect_side_test.go` (11 cases incl. a
+  regression lock-in) + updated `TestLiveSSEStartFailsDegrades`.
+- [x] **StreamEnded permanently strands 'waiting' sessions (MED) — FIXED (PENDING
+  FABLE REVIEW, 2026-07-05; §1a step 7).** The unconditional PendingPermission*
+  wipe is gone: on a still-Running-pod blip the handler now PRESERVES the pending
+  permission AND the attention state (Waiting/NeedsInput) and schedules a
+  reconnect; it clears + degrades only when the cluster says the pod is not
+  running. The reconnect replays `after=lastSeq` (excludes the below-cursor
+  permission.requested), so preserving it keeps approve/deny alive; if the runner
+  resolved it during the blip, the replayed permission.resolved clears it. This
+  also fixes the flagged default-branch NeedsInput→idle reset (a deliberate
+  behavior change to the old B13 oracle — degrade now happens only after
+  reconnects EXHAUST, via `degradeUnreachable`). Tests: `TestStreamEnded*`,
+  revised `TestRunnerStreamEndedAtRestPreservesAttentionAndReconnects`. Original
+  detail below.
+- [ ] **(superseded detail for the fixed StreamEnded item above).** On a
   transient drop while a permission is pending, `model.go:1341-1343` clears
   PendingPermission* but keeps StatusWaiting; reconnect replays `after=lastSeq`
   and the permission.requested is below it — approve/deny silently dead, broken
@@ -130,27 +187,39 @@ and piecemeal fixes will fight each other. All in `internal/tui/dashboard/`.
   resets NeedsInput→idle, permanently losing attention state. Fix: preserve
   PendingPermission*/DashStatus when the pod is Running and a reconnect is
   scheduled; or re-fetch authoritative state on reconnect.
-- [ ] **Watch-beats-seed race skips snapshot hydration (MED).** `applyPodEvent`'s
-  insert path (`model.go:1625-1634`) never consults snapStore/titleStore →
-  lastSeq=0 → background SSE replays entire history (launch-time notification
-  flashes, usage counting from zero); later `applySeed` takes the carry-forward
-  branch so hydration is permanently skipped that launch.
-  `internal/k8s/watch.go:82-84` documents "seed before watch" — the dashboard
-  violates it. Fix: hydrate in the insert path, or defer background SSE until
-  first seed applied.
-- [ ] **seenSeq never restored → phantom "N new" badges (MED).** Not in
-  SessionSnapshot; `applySeed` carry-forward copies lastSeq but drops
-  prev.seenSeq (`model.go:1504-1506`) — every relaunch shows
-  lifetime-event-count unread badges; `r` re-seed resurrects them mid-run. Fix:
-  carry seenSeq forward + init seenSeq=lastSeq on snapshot hydration.
-  `session.go:219-224`. Related pre-existing item: **`applySeed` re-seed also
-  drops usage tokens, Model, Branch, RecentTools** (`model.go:1452-1483`) — fix
-  in the same carry-forward pass.
-- [ ] **liveSSEReadyMsg lacks the attachedID guard (LOW)** that
-  liveSSEReconnectMsg has (`model.go:916-918`): detach→fast-reattach installs a
-  passive stream alongside the transcript's active client (double client, extra
-  port-forward). Fix: mirror the guard — if `msg.id == m.attachedID`, cancel.
-  `model.go:882`.
+- [x] **Watch-beats-seed race skips snapshot hydration (MED) — FIXED (PENDING
+  FABLE REVIEW, 2026-07-05; §1a step 6).** `applyPodEvent`'s new-session insert
+  path now hydrates persisted titles + snapshot (lastSeq/seenSeq, and full
+  `applySnapshot` when the pod isn't Suspended/Failed) BEFORE appending and
+  starting the SSE stream (which resumes at `sess.lastSeq`), so an informer-first
+  insert resumes from head instead of `after=0`/full-replay. Test:
+  `TestWatchInsertHydratesFromSnapshot` (running + suspended variants).
+- [x] **seenSeq never restored → phantom "N new" badges (MED) — FIXED (PENDING
+  FABLE REVIEW, 2026-07-05; §1a step 5).** `applySeed`'s carry-forward now carries
+  `seenSeq` (and usage/cost/Model+CtxLimit/Branch+Dirty/RecentTools — the related
+  pre-existing drop) forward across re-seeds; `applySnapshot` + the suspended-
+  hydrate path set `seenSeq = snap.LastSeq` (restored history is already-seen).
+  The adversarial review also caught a detach-path inflation (background stream
+  replaying just-watched events into a phantom badge) — fixed by syncing the
+  dashboard cursor from the transcript on detach (`syncCursorFromTranscript` in
+  the single `parkTranscript` hook). Tests: `TestApplySeedCarriesSeenSeqForward`,
+  `TestApplySeedCarriesLiveStateForward`, `TestApplySnapshotHydrateMarksAllSeen`,
+  `TestSyncCursorFromTranscriptOnDetach`.
+- [x] **liveSSEReadyMsg lacks the attachedID guard (LOW) — FIXED (PENDING FABLE
+  REVIEW, 2026-07-05).** The case only skipped `ensureRetained` when attached but
+  still stored the cancel/channel/client and returned `liveSSENextCmd`, so a
+  connector that became ready after a detach→fast-reattach installed a second
+  passive stream (double client + extra port-forward) alongside the transcript's
+  active one. Added the `if msg.id == m.attachedID { msg.cancel(); return m, nil }`
+  guard mirroring `liveSSEReconnectMsg`, and dropped the now-redundant
+  `&& msg.id != m.attachedID` on the ensureRetained condition. Test:
+  `TestLiveSSEReadyCancelledForAttachedSession`. `model.go`. Adversarial review:
+  0 confirmed findings; applied its one suggestion — `applyPodEvent` now also
+  skips `startLiveSSECmd` for the attached session (`id != m.attachedID`), so we
+  avoid the start-then-cancel connect/port-forward churn on every pod event, not
+  just tear it down after. NOTE: this is the isolated LOW guard only — the HIGH
+  replay/duplicate-stream items in this §1a cluster remain open and still need
+  the coordinated stream-registration pass.
 - [x] **ggPending has no reset-on-other-keys (LOW).** Fixed 2026-07-04
   (uncommitted claude-pane pass): reset hoisted to the top of `handleKey`
   (`model.go:1748`). Detail in the done log. (The `q`/`g` binding overloads
@@ -166,26 +235,42 @@ for render+nav+actions subsumes them (`groups.go:57`). Prefer that fix.
 - [x] **Account picker silently drops pastes (HIGH).** Fixed 2026-07-04
   (`cb0e375`): PasteMsg routed to picker label/console forms via `pickerPaste`.
   Detail in the done log.
-- [ ] **Group view ignores filter + attention ordering (MED).**
-  `groupedSessions()` iterates `m.sessions` raw; `/` filter is enterable but
-  silently inert (no narrowing, no 'no match' state); attention-first float
-  inert too. Also filter-mode j/k clamps against `visibleSessions()` while the
-  cursor indexes header-inclusive `visibleRows()` (last rows unreachable), and
-  j/k interception makes those letters untypeable in queries. Fix: build groups
-  from `visibleSessions()`; clamp with `visibleRows()`; arrows-only nav while
-  the filter buffer captures text. `groups.go:88-96`, `model.go:2042-2054`.
-- [ ] **ctrl+g jump sets a session index into a display-row cursor (MED).** In
-  group view (headers occupy rows) the cursor lands wrong — post-detach
-  approve/suspend/destroy target the wrongly highlighted session; target may be
-  in a collapsed group. Fix: locate in `visibleRows()` skipping headers; expand
-  collapsed group. `notify.go:209`.
+- [x] **Group view ignores filter + attention ordering — FIXED (PENDING FABLE
+  REVIEW, 2026-07-05).** `groupedSessions()` now builds groups from
+  `visibleSessions()` (filtered + attention-sorted) instead of raw `m.sessions`,
+  so `/` narrows group contents and drops now-empty groups and attention-first
+  ordering carries through; the collapsed-group attention badge counts from
+  `visibleSessions()` too. Filter-mode nav is now arrows-only, clamped against
+  `visibleRows()` (header-inclusive) so trailing grouped rows are reachable and
+  j/k stay typeable in the query (`model.go` handleFilterKey). Tests:
+  `TestGroupViewRespectsFilter`, `TestFilterNavReachesLastGroupedRow`,
+  `TestFilterLettersAreTypeable`. Adversarial review: 0 confirmed findings (a
+  per-frame `visibleSessions()` recompute is pre-existing and tracked in §4; the
+  arrows-only nav is intentional). `groups.go`, `model.go`.
+- [x] **ctrl+g jump sets a session index into a display-row cursor — RESOLVED +
+  TESTED (PENDING FABLE REVIEW, 2026-07-05).** The current
+  `jumpToNextNeedingAttention` (`notify.go`) already fixes this: its group-view
+  branch expands the target's collapsed group (`m.groupView.repos[...] = true`)
+  then locates the session in `visibleRows()` and sets `m.cursor` to that display
+  row — so the cursor is a row index, not a raw session index, and post-jump
+  approve/suspend/destroy target the correct highlighted row. The behavior was
+  previously untested for group view; added `TestCtrlGGroupViewLandsOnRowAndExpands`
+  (collapsed group expands + cursor lands on the attention session's row +
+  `selectedRowSession()` agrees). Test-only addition on my part.
 - [x] **Descending sort comparator is invalid (MED).** Fixed 2026-07-04
   (`cb0e375`): three-way cmp + sign flip + fixed ID tie-break; DisplayTitle.
   Detail in the done log.
-- [ ] **Archive is a complete no-op (MED).** `A` writes `Archived=true`; zero
-  readers repo-wide (not in visibleSessions/grouped/sort/render); flag is
-  in-memory only. Fix: filter + archived section, or remove the binding until
-  built. `groups.go:200`.
+- [x] **Archive is a complete no-op — REMOVED the dead binding (PENDING FABLE
+  REVIEW, 2026-07-05).** `A`/`archiveSelected`/`Session.Archived` wrote a flag
+  no reader ever consulted (not in visibleSessions/grouped/sort/render), so the
+  key silently did nothing and misled users. Removed the binding, its FullHelp
+  entry, the `archiveSelected` method, and the dead `Session.Archived` field
+  (`keymap.go`, `model.go`, `groups.go`, `session.go`). Chose removal over
+  building the section: the designed archived *section* (design S15) needs a new
+  row class, which belongs with the §2a row-model consolidation
+  (`visibleSessions` vs `visibleRows`) — a `groups.go` header comment records
+  that pointer so the intent isn't lost. Build/vet/gofmt/test clean; no dangling
+  refs repo-wide.
 - [x] **Transcript search drops uppercase + byte-wise backspace (MED/LOW).**
   Fixed 2026-07-04 (`cb0e375`): accept ModShift in `searchKey`; rune-wise
   backspace. Detail in the done log.
@@ -198,30 +283,46 @@ for render+nav+actions subsumes them (`groups.go:57`). Prefer that fix.
 - [x] **`truncate()` not ANSI-aware (LOW).** Fixed 2026-07-04 (uncommitted
   claude-pane pass): delegates to `ansi.Truncate`. `model.go:2635-2645`.
   Detail in the done log.
-- [ ] **Spread rows never truncate segments (LOW, three spots).**
-  (1) header/hint/status rows (`transcript.go:1352,1422`, `statusline.go:440`):
-  long title or queued-chip+workingStatus overflow and fitModal right-clips —
-  exactly the status glyph / "esc sends now" affordance disappears at ~100
-  cols; (2) `clampLines` pads but never truncates, breaking its "exactly w×h"
-  contract — topBar/clusterStrip escape at narrow widths (`zones.go:33`);
-  (3) external pane statusRow: long DisplayTitle wraps the bar to 2-3 lines
-  (`external_pane.go:459`). Fix pattern for all: measure right segment,
-  truncate left to fit, THEN pad.
+- [~] **Spread rows never truncate segments (LOW, three spots) — ALL SPREAD-
+  SHAPED ROWS DONE (PENDING FABLE REVIEW, 2026-07-05); only the statusline
+  segment-join tail remains, deferred to §2c.** Hardened the shared `spread()`
+  helper (`zones.go`) to truncate the left segment (keeping the right
+  glyph/affordance visible) and never overflow width — fixes the dashboard band
+  rows (topBar/clusterStrip/progressState); fixed `clampLines` (spot 2) to clip
+  over-wide lines so its "exactly w×h" contract holds; routed external-pane
+  statusRow (spot 3) through `spread` and removed its duplicated overflow logic
+  (`external_pane.go`, dead `spaces()` deleted). **Spot 1 (2026-07-05, 2nd
+  pass):** the attached transcript header (`renderHeader`) and composer hint
+  (`renderInput`) hand-rolled the same gap/overflow bug — both now route through
+  `spread`, so a long title / long queued-prompt chip can't clip the status
+  glyph or the send/esc affordance off the right edge. Tests lock `spread`/
+  `clampLines` (pure) + a header/hint no-overflow integration test at width 40.
+  **STILL OPEN (folds into §2c statusline collapse, not a `spread` fix):**
+  `statusline.go` row1 is a left-only `strings.Join(segs, sep)` growing row with
+  no right-anchored affordance — its tail (mode/effort/sync tags) is dropped by
+  `fitModal` at narrow widths; the §2c redesign reworks this row wholesale.
 - [ ] **renderToolCard budgets overflow by construction (LOW).** arg≤width/2 +
   summary≤width/3 + icon/name/separators ≈ (5/6)·width + len(name) + 8, then
   placeIndent adds 3 — clip cuts the result text ("· old_string not found")
   with no ellipsis. Fix: budget summary from measured remaining width.
   `transcript.go:1209`. (The §2c two-line ⏺/⎿ card redesign fixes this by
   construction — prefer doing them together.)
-- [ ] **Theme change doesn't invalidate render caches (LOW).** list cache
-  (blockFP has no theme input), AssistantItem sections, StreamingMarkdown
-  stable prefix all keep old-palette ANSI after `ApplyForBackground` —
-  dark-palette lines near-invisible on light terminals until a width change
-  flushes. Fix: theme epoch folded into cache keys via `theme.OnChange`.
-  `transcript_list.go:78`, `chat/assistant.go:138`, `chat/streaming_markdown.go:34`.
-- [ ] **Composer width formula split-brain below width 21 (LOW; latent).**
-  layout() uses `max(10, m.width-5)`, renderInput() uses `max(20, m.width-1)-4`.
-  Fix: one shared formula. `transcript.go:914` vs `:1373`.
+- [x] **Theme change doesn't invalidate render caches (PENDING FABLE REVIEW,
+  2026-07-05).** Added `theme.Epoch()` (bumps on every `ApplyTheme`) and folded
+  it into all three palette-derived cache keys: `blockFP` (list reconcile
+  re-renders every block on swap), the three `AssistantItem` section keys (via
+  the second key slot), and `StreamingMarkdown` (new `epoch` field resets the
+  stable prefix so it can't mix palettes). Closes the "stale-palette ANSI until
+  a width change" window — the next render after `/theme` now misses cleanly.
+  Touches theme+dashboard+chat but one cohesive concern, no contract changes.
+  Tests: epoch bumps on apply; section keys change after a swap. Build/test/
+  vet/gofmt clean across all three packages.
+- [x] **Composer width formula split-brain below width 21 (PENDING FABLE
+  REVIEW, 2026-07-05).** Extracted `composerBoxWidth()`/`composerInnerWidth()`
+  helpers (`transcript.go`) and pointed both `layout()` and `renderInput()` at
+  `composerInnerWidth()`, so the reserved body height can't drift from the
+  rendered composer at narrow widths. Identical to the old formula for
+  `width ≥ 21`; only `width ≤ 20` changes (the latent bug). Dashboard tests pass.
 
 ### 1d. System reliability (2026-07-01 whole-system review; HIGHs all fixed — see done log)
 
@@ -249,18 +350,33 @@ for render+nav+actions subsumes them (`groups.go:57`). Prefer that fix.
   dedup (LOW-MED).** Mutagen session name keys on SessionID only; two agents on
   the same repo silently cross-feed edits (same-file race → perpetual
   conflicts). `internal/sync/sync.go:130`.
-- [ ] **Mutagen conflicts invisible in the TUI (LOW-MED).** `classify()`
-  collapses conflicts into the same `SyncStalled` glyph as transport errors; no
-  file/side detail, no resolution hint. `internal/sync/status.go:154`,
-  `internal/tui/dashboard/model.go:2431`.
+- [~] **Mutagen conflicts invisible in the TUI — DISTINCTION DONE (PENDING
+  FABLE REVIEW, 2026-07-05); per-file detail deferred. CROSSCUTTING
+  (sync+dashboard).** Added a distinct `SyncConflicted` state (`status.go`):
+  `classify()` now returns it for conflicts (transport halt/error stays
+  `SyncStalled`), and it outranks `SyncStalled` in the worst-of reducer so a
+  conflict surfaces over a co-occurring transport stall (tested). Both TUI glyph
+  maps (`statusline.go` syncSegment, `model.go` detail pane) render `⇄
+  conflicted`; the statusline colors it Gold ("needs you", vs Coral for a
+  transport error that may self-heal) — a color-coded resolution cue. Tests:
+  `conflicts→SyncConflicted`, `conflict-beats-halted`. **STILL OPEN:** per-file/
+  side detail + an explicit textual resolution hint (needs parsing the mutagen
+  `conflicts[]` JSON shape, currently `[]any`) — a separate follow-up.
 - [ ] **Transcript sync merges pod-agent history into local `~/.claude`
   unscoped (LOW-MED).** By design (subPath bind), but pod conversations become
   locally `--resume`-able with no tag or audit trail back to the sandbox
   session. `internal/k8s/backend.go:1233`, `internal/sync/sync.go:62`.
-- [ ] **`destroy` gives no active-turn warning though reversible `suspend` does
-  (LOW-MED).** `suspend` dials the runner and warns on `ActiveTurnID`;
-  irreversible `destroy` prints a generic prompt. `internal/cli/commands.go:168`
-  (vs `:97`).
+- [x] **`destroy` gives no active-turn warning though reversible `suspend` does
+  (PENDING FABLE REVIEW, 2026-07-05).** `newDestroyCmd` now runs suspend's
+  best-effort active-turn probe (`DialRunner` → `SessionState.ActiveTurnID`)
+  BEFORE the confirmation gate, so the operator sees "session X has an active
+  turn; destroying will terminate it" and decides with full information.
+  Bounded the probe with a 5s timeout so destroying an already-dead/suspended
+  pod (the common case) can't stall the `[y/N]` prompt on a port-forward
+  timeout. Warn → stderr, non-fatal on any failure. `internal/cli/commands.go`.
+  Build/test/vet/gofmt clean. Note: the probe (like suspend's) needs a live
+  runner and isn't unit-testable without client injection; `confirmDestroy`
+  stays covered.
 
 ### 1e. Autopilot (`/loop`/`/goal`) — detach durability + termination (2026-07-04 review of the uncommitted `autopilot.go`)
 
@@ -318,11 +434,25 @@ items 1–2 together** — they share one "completion scan on turn end" mechanis
   the esc handler stops the driver in that branch when there is no live turn to
   interrupt (`transcript.go`); detach stays on ctrl+]. Test:
   `TestEscStopsIdleAutopilot`.
-- [ ] **6. Server-side loop for true laptop-closed autonomy (ADR
-  Opus-draftable; implementation gated on maintainer sign-off — items 1–5 do
-  NOT depend on it).** The driver is a `tea.Tick` in the local TUI; quitting
-  the TUI or a long sleep kills it. **Fable review (2026-07-04): proceed with
-  the ADR; recommended direction = runner-owned driver.** Sketch for the ADR:
+- [~] **6. Server-side loop for true laptop-closed autonomy — ADR DRAFTED
+  (PENDING FABLE REVIEW, 2026-07-05); implementation still gated on maintainer
+  sign-off.** Wrote [`docs/server-side-loop-adr.md`](docs/server-side-loop-adr.md):
+  commits to the Fable-recommended runner-owned driver, specifies the persisted
+  autopilot spec, the `PUT/DELETE /sessions/:id/autopilot` endpoint (vs a
+  turns-API flag — recommends the endpoint), the self-submit-on-turn-completion
+  loop, and a new `autopilot.state` normalized event (schema→`just gen`) the TUI
+  renders from. Answers the three must-answer questions: (Q1) armed driver marks
+  the session non-idle until `stopped`, with a staleness bound so a wedged driver
+  can't block the reaper forever; (Q2) hard `max_iterations` + optional
+  `token_budget` enforced at each turn boundary; (Q3) keep the local `tea.Tick`
+  driver as a degraded fallback for no-runner-driver backends, gated by a runner
+  capability bit so the two can't double-submit. Implementation (schema/runner/
+  TUI/tests) awaits sign-off on the open items listed at the ADR's end. Items 1–5
+  remain independent and done. Original sketch retained below for reference:
+- [ ] **(reference — superseded by the ADR above)** The driver is a `tea.Tick`
+  in the local TUI; quitting the TUI or a long sleep kills it. **Fable review
+  (2026-07-04): proceed with the ADR; recommended direction = runner-owned
+  driver.** Sketch for the ADR:
   loop/goal spec persisted on the session (new endpoint or a turns-API
   extension); runner self-submits the next turn on turn-completion +
   interval; driver state (armed/tick/stopped/sentinel-met) becomes a new
@@ -333,9 +463,10 @@ items 1–2 together** — they share one "completion scan on turn end" mechanis
   loop can't run away, and whether the local tea.Tick driver is retired or
   kept as a degraded fallback once this lands.
 - Context note for long runs: each iteration is a new turn in one continuous
-  SDK session — multi-hour Opus runs lean entirely on server-side compaction,
-  and ctx% is silently wrong after it (§2b gap 4). Fix that item before or
-  alongside heavy loop usage; no separate work here.
+  SDK session — multi-hour Opus runs lean entirely on server-side compaction.
+  ctx% used to be silently wrong after it; §2b gap 4 (the `context.compacted`
+  event + baseline reset) is now fixed (PENDING FABLE REVIEW), so this
+  prerequisite is cleared — no separate work here.
 
 ## 2) The "feels like Claude Code" program (2026-07-04 audit)
 
@@ -396,16 +527,47 @@ resume.
   independent surface in permqueue.go. Component owns grace-gate/diff/plan
   variant + Height()/Render(w)/HandleKey; perm queue reuses it. Natural vehicle
   for the §2c numbered-options redesign. `transcript.go:135,1433,2817`.
-- [ ] **Clock injection sweep (MED, testability).** nowFunc exists but the
-  permission grace gate anchors on time.Now() (`transcript.go:2382`) while
-  permissionAnswerable compares nowFunc (`:1591`) — the anti-type-ahead
-  behavior is untestable; same for turnStart/toast/status fades. Also:
-  test-only counters (reconciles/fpComputes/bdBuilds) live as prod struct
-  fields → test-observer interface. `rg 'time\.Now\(\)' internal/tui/dashboard`.
-- [ ] **Dedup: markdown-renderer closure ×3 (LOW)** (`transcript.go:1029,2331`,
-  `transcript_list.go:88` — T1-drift hazard) and **status→label switches ×2,
-  already drifted** ('waiting' vs 'awaiting approval'; `session.go:338` vs
-  `transcript.go:1304`) → one `SessionStatus.Label()` table + exhaustive test.
+- [~] **Clock injection sweep — DASHBOARD-PACKAGE CLOCKS DONE (PENDING FABLE
+  REVIEW, 2026-07-05); cross-package + counter-observer deferred.** Routed every
+  in-package animation/timing clock through the injectable `nowFunc` (states.go),
+  so the anti-type-ahead + fade/flash/turn behaviors are now unit-testable
+  without real sleeps: permission grace gate (`transcript.go` `since:` anchors +
+  `permissionAnswerable` already matched); `turnStart` assign + both
+  elapsed readers; the cross-session toast on ONE clock end-to-end (`createdAt` +
+  auto-dismiss + the `renderToast` fade/slide animations — the last two were a
+  gap the adversarial review caught and I closed); the motion loop
+  (`anyMotionActive` engine call + `rowMotionActive`); and all three
+  transitions.go fades (`rowEnter`/`statusFlash`/`permissionAppear`). Tests:
+  `TestPermissionGraceGateUsesInjectableClock`, `TestRowMotionActiveUsesInjectableClock`,
+  `TestToastDismissUsesInjectableClock`, `TestTransitionFadesUseInjectableClock`.
+  **DEFERRED (precise):** (a) `statusChangedAt` *assignments* (`model.go` 4 sites,
+  `session.go:706`) and `lastSnapSave` stay on `time.Now()` — those are §1a's
+  territory (item 2 wants `ev.Time`, item 4 reworks snapshot cadence); converting
+  them to `nowFunc` now would collide with that coordinated fix. The *read* side
+  (elapsed comparisons) already uses `nowFunc`, which is independent of how the
+  anchor is set. (b) `tui/theme.FadeColor` computes elapsed via real `time.Since`
+  internally (`tui/theme/styles.go:88`) — the glyph-fade *color* stays on the
+  real clock; injecting there is a public `tui/theme` change (§8 surface), a
+  separate item. (c) test-only counters (`reconciles`/`fpComputes`/`bdBuilds`) as
+  prod struct fields → test-observer interface: a distinct refactor, not started.
+- [x] **Dedup: markdown-renderer closure (PENDING FABLE REVIEW, 2026-07-05).**
+  Extracted the identical assistant-markdown closure into package-level
+  `renderAssistantMD(text, width)` (`transcript.go`) and pointed both the
+  finalized-block path (`renderBlockRaw`) and the streaming path (`streamAI`)
+  at it, so the two can't drift (T1). Triage note: it was ×2 real copies, not
+  ×3 — `transcript_list.go:88` renders via `streamAI.RawRender`, reusing the
+  same closure, so it was never a separate copy. Behavior-preserving; dashboard
+  suite passes.
+- [x] **status→label switches — the "drift" is intentional (PENDING FABLE
+  REVIEW, 2026-07-05; RETRIAGED).** The premise was wrong: `statusLabel()`
+  (list-row prose) and `chatStatusLabel()` (chat header) diverge *by design*
+  and `chatStatusLabel` documents why ("awaiting approval"/"ready for input"
+  read from the user's seat). Merging into one `SessionStatus.Label()` table
+  would regress that. Instead locked all three maps against the real risk — a
+  new enum value silently hitting `default`: `TestStatusLabelExhaustive` walks
+  the full `StatusIdle..StatusFailed` iota range for `statusLabel`, and
+  `TestChatStatusLabel` now covers all 6 statuses (was 4). `String`/`Glyph`
+  were already exhaustive. Tests only; dashboard suite passes.
 
 ### 2b. Event-model parity gaps (schema → mapper → renderer)
 
@@ -436,10 +598,32 @@ changes go through `schema/events.json` + `just gen` (never hand-edit `*.gen.*`)
   Renderer-only: mirror the streamAI live path (`:2284-2306`); make blocks
   expandable. (Folds in the earlier "multi-line reasoning unrecoverable" item;
   target presentation in §2c.)
-- [ ] **4. No compaction signal.** `compact_boundary` system msg dropped
-  (`mapping.ts:48-60`), no event type — ctx% silently wrong after server-side
-  compaction. Fix: `context.compacted` event (pre/post tokens) + one-line TUI
-  marker.
+- [x] **4. No compaction signal.** (PENDING FABLE REVIEW, 2026-07-05)
+  `compact_boundary` system msg dropped (`mapping.ts`), no event type — ctx%
+  silently wrong after server-side compaction. Fix: `context.compacted` event
+  (pre/post tokens) + one-line TUI marker.
+  Crosscutting (schema→runner→TUI), all done & green: `schema/events.json`
+  adds the `context.compacted` type + `ContextCompactedPayload{trigger,
+  preTokens, postTokens(optional)}` (regen'd via `go run ./cmd/gen-eventschema`);
+  hand-written struct in `event.go` (pinned by `schema_test.go`);
+  `runner/src/mapping.ts` maps `compact_boundary`→`emit('context.compacted',…)`
+  reading `compact_metadata.{trigger,pre_tokens,post_tokens ?? 0}` (verified
+  against the SDK type `SDKCompactBoundaryMessage`); `session.go`
+  `ApplyRunnerEvent` + `transcript.go` `handleEvent` reset the ctx% baseline to
+  `PostTokens` (InputTokens=PostTokens, cache=0) when reported, and the
+  transcript drops a `blockInfo` "context compacted · N→M tokens" marker.
+  PostTokens absent → counters left untouched (graceful degradation; a
+  `usage.updated` refreshes next turn), NOT zeroed. Tests: 14/14 runner
+  `mapping.test.ts`; 5 Go tests in `compaction_signal_test.go` (both reducers,
+  the marker's three format arms, and the absent-PostTokens preserve-baseline
+  path). Replay-safe: the transcript seq-dedup (`transcript.go:2205`) drops any
+  replayed `context.compacted` at/below `m.lastSeq`, so the marker can't
+  double-append on reconnect. Adversarial multi-lens review (correctness /
+  schema-wire / tui-integration / test-coverage → per-finding adversarial
+  verify): 0 confirmed findings; two raised items refuted as real=false
+  (stale-gauge-when-post_tokens-absent is intentional/tested graceful
+  degradation; PostTokens-only marker branch is effectively dead since the SDK
+  always sends pre_tokens — added a covering test anyway).
 - [ ] **5. Background tasks / tool progress dropped.** `tool_progress` ignored
   (`mapping.ts:81-85`), no progress/notification event type — background Bash
   + async completion (signature Claude Code features) unrepresentable. Fix:
@@ -461,9 +645,16 @@ changes go through `schema/events.json` + `just gen` (never hand-edit `*.gen.*`)
 - [ ] **10. MCP unwired.** No `mcpServers` in buildOptions; `mcp_*` blocks
   dropped. Generic tool.* events would mostly work once configured; non-text
   MCP results flattened.
-- [ ] Minor: TUI ignores `MessagePayload.Role` — `message.completed` always
-  appends a blockAssistant (`transcript.go:2308-2336`); mapper's `role:'user'`
-  emissions would render as assistant markdown.
+- [x] Minor: TUI ignores `MessagePayload.Role` — FIXED (PENDING FABLE REVIEW,
+  2026-07-05). `EventMessageCompleted` now branches on `p.Role`: a `role:"user"`
+  echo (runner `handleUserMessage`) renders as a `blockUser` (user styling, not
+  assistant markdown), is kept out of `lastAssistantText` (so it can't poison the
+  `/goal` sentinel scan), and dedups against the optimistic user block from
+  submit. Uses strictly `p.Content` in the user branch (no `assistantBuf`
+  fallback) so an empty echo is an unconditional no-op. `transcript.go`. Tests:
+  `TestMessageCompletedUserRole{RendersAsUser,DedupsOptimisticBlock,AppendsDistinct}`.
+  Adversarial review: 0 confirmed findings; applied the two robustness
+  suggestions (strict `p.Content`; the notify.go §1b fallback now fails closed).
 
 ### 2c. Design/layout changes (renderer)
 
@@ -541,12 +732,29 @@ there. HIGH items are the at-a-glance tells; most are renderer-local.
   group view, `gg` = top. Surprising vs advertised bindings.
   `model.go:1817,1866`. (Fix alongside the §2a input-context tables + §1a
   ggPending bug.)
-- [ ] **ctrl+g/ctrl+k dead in the external pane; no next-attention key on the
-  dashboard screen (LOW).** Cross-session nav inconsistent by screen.
-  `app.go:752`.
-- [ ] **Fresh Claude session renders a blank body (LOW).** No
-  welcome/first-hint block, unlike the dashboard's firstRunView.
-  `transcript_list.go:290`.
+- [~] **ctrl+g/ctrl+k nav inconsistent by screen — DASHBOARD HALF DONE (PENDING
+  FABLE REVIEW, 2026-07-05); external-pane half needs a maintainer decision.**
+  Added a proper `NextAttention` keymap binding (ctrl+g → jump to next attention;
+  `keymap.go`), wired it in the dashboard `handleKey` (`model.go`), and it now
+  auto-surfaces in the `?` help via `FullHelp` (no drift). Previously ctrl+g was
+  documented + handled only in the chat modal (`app.go`), dead on the dashboard
+  itself. Test: `TestCtrlGJumpsToAttentionOnDashboard`. **STILL OPEN (design
+  call):** ctrl+g/ctrl+k in the external (opencode) pane are forwarded to the
+  embedded client (`app.go` ScreenExternal default case). Reserving them for
+  cross-session nav risks trapping the user in opencode's own UI — esp. ctrl+k
+  (command palette). Needs a maintainer decision on which keys the pane reserves
+  (the ctrl+]-family is already reserved for detach); do it alongside the §2a
+  input-context/binding-table work.
+- [x] **Fresh Claude session renders a blank body (PENDING FABLE REVIEW,
+  2026-07-05).** Added a centered first-hint welcome (`emptyTranscriptView` +
+  `transcriptEmpty` guard, `transcript_list.go`) rendered in place of the blank
+  body when a session has no committed blocks, no streaming turn, and no pending
+  permission. Wired ONLY into the live attached view (`renderTranscript`), so
+  the connect-preview path (`previewView`) keeps its plain body under the
+  connect banner. `fitModal`-enforced to the exact body rect at any width (plain
+  whitespace fill, matching bodyView). Tests: welcome appears fresh / vanishes
+  on first block / suppressed while streaming / exact rect at widths 20-80.
+  Build/test/vet/gofmt clean.
 - [x] **Failed sessions aren't floated by attention-first sort (LOW).** Fixed
   2026-07-04 (uncommitted): `needsAttention()` now includes Failed and
   `sortByAttention()` floats via it. `attention.go:17`.
@@ -629,14 +837,24 @@ Outcome: **not happening; invest in §2 instead.** Kept here so nobody re-treads
   every frame (no unchanged-guard). Re-verified 2026-07-04: it renders via
   `tr.tailLines(5, width)` (bounded), so cost is lower than originally
   claimed — measure before optimizing. `model.go:2537`, `transcript.go:2113`.
-- [ ] `visibleSessions()` re-filters+re-sorts 4+ times per frame (twice in one
-  statement at `groups.go:145`). Memoize per frame. Related: `partition()`
-  computed 3× per frame (topBar, clusterStrip, progressState) —
-  `zones.go:319`, `model.go:2616`.
+- [~] **`partition()` render-path dedup DONE (PENDING FABLE REVIEW, 2026-07-05);
+  `visibleSessions()` memoization deferred (measure-first).** `renderZoned` now
+  computes `partition()` once and passes it to both `topBar`/`clusterStrip`
+  (previously each recomputed it, tallying `m.sessions` twice per frame) —
+  honoring the `sessionPartition` struct's own "computed once per render"
+  contract (`zones.go`). `progressState` (`model.go`) is a separate App.Update-
+  path call, left as-is. **STILL OPEN:** `visibleSessions()` re-filters+re-sorts
+  4+ times per frame (twice in one statement at `groups.go`) — per-frame
+  memoization deferred: it carries cache-invalidation risk and the adversarial
+  review of the group-view change assessed the analogous recompute as negligible
+  at realistic session counts. Measure before adding memo machinery.
 - [ ] `bodyView` still ~283µs/frame: `fitModal` does two ANSI `lipgloss.Width`
   scans per visible line every frame. `transcript_list.go:302`.
-- [ ] SSE `broadcast()` re-serializes the SSE frame once per client;
-  serialize once. `runner/src/events.ts:263-266`.
+- [x] **SSE `broadcast()` re-serializes the SSE frame once per client
+  (PENDING FABLE REVIEW, 2026-07-05).** Hoisted `sseFrame(evt)` out of the
+  per-client loop in `broadcast()` (`runner/src/events.ts`); frame is identical
+  for every client. Added a `clients.size === 0` early-return so a zero-listener
+  session serializes nothing. Behavior-preserving; 145 runner tests pass.
 - [ ] Streaming-markdown safe-boundary predicates rescan the whole growing
   buffer per delta (O(N²) over a turn). `chat/streaming_markdown.go:111-233`.
   (The §1c fence-awareness bug that compounded this was fixed 2026-07-04.)
@@ -1017,19 +1235,40 @@ update `sdktest/` pins in the same change.
 
 ## 10) Harness / tests / docs / ops
 
-- [ ] **`just check` prints green even when gates were skipped.**
-  lint/typecheck/runner-tests skip-with-warning when tools are absent, then
-  `check` still ends "all gates passed". Track skips: "passed (N gates skipped
-  — CI enforces them)". `justfile:24`.
-- [ ] **sdktest does not cover the public `tui/` packages.** Add
-  `tui_surface_test.go` pinning load-bearing exports of
-  `tui/kit`/`anim`/`list`/`theme`/`terminal`.
-- [ ] **`client.RunnerClient` widening is not guarded.** Consumers implement it
-  for fakes; adding a method is a silent break. Pin in sdktest with a stub
-  like `consumerStore` does for `cred.Store`. `client/client.go:47`.
-- [ ] `TestAppExternalPaneEscIsForwardedNotDetached` fails in-sandbox (PTY
-  spawn blocked; passes unsandboxed) — add to the in-sandbox caveat list in
-  CLAUDE.md. `internal/tui/dashboard/actions_test.go:403`.
+- [x] **`just check` prints green even when gates were skipped — FIXED (PENDING
+  FABLE REVIEW, 2026-07-05).** The `check` recipe body now re-derives which
+  optional gates were skipped from the same tool-presence conditions the recipes
+  use (golangci-lint, runner eslint, runner node_modules → runner-tests +
+  typecheck) and prints an amber `passed (N gate(s) skipped — CI enforces them: …)`
+  instead of the unconditional green "all gates passed"; only a truly complete
+  run stays green. No shared cross-recipe state — self-contained in the body.
+  Verified the skip-count logic + that `just --dry-run check` still parses.
+  `justfile`.
+- [x] **sdktest does not cover the public `tui/` packages — ADDED (PENDING FABLE
+  REVIEW, 2026-07-05).** New `sdktest/tui_surface_test.go` compile-time-pins the
+  load-bearing exports of all five public tui packages: `tui/anim`
+  (Transition/Engine/Spinner/LerpColor/ReduceMotion/…), `tui/kit`
+  (SetComponentColors/FormatTokens/Scrollbar/Badge/Role/…), `tui/list` (List ops
+  + the `Item` interface via a `consumerListItem` stub — so widening `Item` fails
+  here, and dropping the §8-flagged `Finished()` updates stub+interface together),
+  `tui/theme` (ApplyTheme/Epoch/OnChange/GradientText/FadeColor + a slice of the
+  exported color tokens), and `tui/terminal` (OSCProgress/Detect/kitty graphics/
+  NotifyString). `go mod tidy` added the transitive charmbracelet/lipgloss deps
+  (all `// indirect`, same versions as the main module); `go mod tidy -diff`
+  gate clean, vet+test pass. Scope is load-bearing surface, not every helper.
+- [x] **`client.RunnerClient` widening is not guarded — PINNED (PENDING FABLE
+  REVIEW, 2026-07-05).** Added `consumerRunnerClient` to `sdktest/surface_test.go`
+  (a zero-value struct implementing all 9 methods) + `var _ client.RunnerClient =
+  consumerRunnerClient{}`, mirroring the existing `consumerStore` pin for
+  `cred.Store`. Widening the interface (adding a method) now fails the sdktest
+  module's compile — the earliest "you broke a consumer's fake" signal — instead
+  of silently breaking downstream implementers. All param types are already
+  exported aliases, so the pin names them as an external consumer would. sdktest
+  vet+test pass. `sdktest/surface_test.go`.
+- [x] `TestAppExternalPaneEscIsForwardedNotDetached` fails in-sandbox (PTY
+  spawn blocked; passes unsandboxed) — DONE (PENDING FABLE REVIEW, 2026-07-05):
+  documented in the CLAUDE.md in-sandbox caveat bullet.
+  `internal/tui/dashboard/actions_test.go:405`.
 - [ ] Ops: new CLI-created sessions use `:latest` and can hit the stale traefik
   manifest cache — bust the cache or pin digests CLI-side. (Resume path
   already fixed via digest pinning — see done log.)
