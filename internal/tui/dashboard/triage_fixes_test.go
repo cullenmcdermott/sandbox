@@ -165,6 +165,8 @@ func TestChatStatusLabel(t *testing.T) {
 		StatusWaiting:    "awaiting approval",
 		StatusNeedsInput: "ready for input",
 		StatusIdle:       "idle",
+		StatusSuspended:  "suspended",
+		StatusFailed:     "failed",
 	}
 	for st, want := range cases {
 		if got := chatStatusLabel(st); got != want {

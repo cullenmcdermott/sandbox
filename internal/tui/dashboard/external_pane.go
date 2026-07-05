@@ -452,21 +452,9 @@ func (p *ExternalPane) statusRow() string {
 	if w < 1 {
 		w = extDefaultW
 	}
-	gap := w - lipgloss.Width(left) - lipgloss.Width(right)
-	if gap < 1 {
-		gap = 1
-	}
-	bar := left + lipgloss.NewStyle().Render(spaces(gap)) + right
+	// spread truncates the (long) title-and-model left segment so a wide
+	// DisplayTitle can't wrap the status bar to 2-3 lines; the ^]/dash key on the
+	// right always stays visible.
+	bar := spread(left, right, w)
 	return lipgloss.NewStyle().Width(w).Background(theme.Surface).Render(bar)
-}
-
-func spaces(n int) string {
-	if n < 0 {
-		n = 0
-	}
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = ' '
-	}
-	return string(b)
 }

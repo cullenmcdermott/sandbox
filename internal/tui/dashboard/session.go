@@ -121,10 +121,6 @@ type Session struct {
 	// entry (making the session resumable from the laptop's `claude --resume`).
 	ClaudeSessionID string
 
-	// Archived marks a finished session (needs-input after a completed turn)
-	// that the user has archived into a separate section.
-	Archived bool
-
 	// BusyFrame is the current spinner frame index for busy sessions.
 	BusyFrame int
 
@@ -160,6 +156,15 @@ type Session struct {
 	// seenSeq is the highest seq the user has viewed; lastSeq-seenSeq is the
 	// number of unread events accumulated while the session was hidden (warm).
 	seenSeq uint64
+
+	// catchingUp is true while a freshly-(re)connected background stream is
+	// replaying its after=<seq> history. Events during this window mutate STATE
+	// (status/usage/pending-permission) but must produce NO live side effects —
+	// no attention toast/OS notification, no glyph flash. It flips false at the
+	// runner's replay-complete boundary (EventStreamLive, the last event of the
+	// replay burst). This is the list read-model's analog of the transcript's
+	// `replaying` flag (§1a).
+	catchingUp bool
 
 	// lastSnapSave is when the snapshot for this session was last persisted, used
 	// to throttle the high-frequency usage stream (see Model.saveSnapshot).
@@ -527,6 +532,10 @@ func (s *Session) applySnapshot(snap SessionSnapshot) {
 		s.Dirty = snap.Dirty
 	}
 	s.lastSeq = snap.LastSeq
+	// Treat all hydrated history as already-seen (§1a step 5): a relaunch must
+	// restore the read-model silently, so the unread badge is 0 immediately after
+	// hydrate rather than showing the whole lifetime event count as "new".
+	s.seenSeq = snap.LastSeq
 }
 
 // SessionFromState converts a session.State into a dashboard Session.
@@ -694,6 +703,23 @@ func ApplyRunnerEvent(sess *Session, ev session.Event) bool {
 		}
 		return false
 
+	case session.EventContextCompacted:
+		// The SDK compacted (summarized) the conversation to fit the context
+		// window. Reset the ctx% baseline to the post-compaction size so the
+		// gauge reflects the smaller conversation instead of the stale
+		// pre-compaction count. PostTokens is optional on the wire; when it is
+		// absent (0) we leave the counters untouched — a usage.updated event
+		// will refresh them on the next turn. Does not change the six-state
+		// status.
+		var p session.ContextCompactedPayload
+		_ = json.Unmarshal(ev.Payload, &p) // malformed payload → zero value → no-op
+		if p.PostTokens > 0 {
+			sess.InputTokens = p.PostTokens
+			sess.CacheReadTokens = 0
+			sess.CacheWriteTokens = 0
+		}
+		return false
+
 	default:
 		// All other known events (message deltas, tool events, etc.) do not
 		// change the six-state status — AND this is also the safety net for
@@ -707,10 +733,34 @@ func ApplyRunnerEvent(sess *Session, ev session.Event) bool {
 		return false
 	}
 	if sess.DashStatus != prev {
-		sess.statusChangedAt = time.Now()
+		// Stamp from the event's OWN time, not wall-clock, so a replayed /
+		// catch-up status transition doesn't re-trigger the glyph flash: the row
+		// flash keys off statusChangedAt (statusFlashDur), so an old ev.Time is
+		// already past the flash window while a live ev.Time (~now) still flashes.
+		// Fall back to now when the event carries no parseable timestamp.
+		if t, ok := eventTime(ev); ok {
+			sess.statusChangedAt = t
+		} else {
+			sess.statusChangedAt = time.Now()
+		}
 		return true
 	}
 	return false
+}
+
+// eventTime parses an event's RFC3339 Time field (internal/session/event.go).
+// The runner stamps ISO-8601-with-milliseconds, so parse with RFC3339Nano
+// (which also accepts timestamps without a fractional part). Returns ok=false
+// when the field is empty or unparseable so callers fall back to wall-clock.
+func eventTime(ev session.Event) (time.Time, bool) {
+	if ev.Time == "" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339Nano, ev.Time)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
 }
 
 // relativeTime returns a compact human-readable relative time string.

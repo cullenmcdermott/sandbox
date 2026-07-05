@@ -73,10 +73,23 @@ func (m *Model) notifyIfBackgroundAttention(attached session.ID) tea.Cmd {
 		id := s.ID()
 		if !needsAttention(s) {
 			// Left attention — forget it so a later attention episode re-notifies.
+			// This runs even during catch-up (below): a permission RESOLVED in a
+			// replay burst must end its episode, so a DIFFERENT permission
+			// requested later in the same burst is a fresh episode that toasts
+			// once at the flip-to-live — not masked by the stale entry.
 			delete(m.notifiedAttention, id)
 			continue
 		}
 		if id == attached {
+			continue
+		}
+		if s.catchingUp {
+			// A background stream is replaying history (§1a step 3): the state is
+			// applied, but do NOT toast for a replayed attention state, and do NOT
+			// mark notifiedAttention — leave that to the single flip-to-live scan
+			// (when catchingUp clears at EventStreamLive) so it makes one honest
+			// decision on the session's FINAL post-replay state. The leave-episode
+			// delete above still runs during the burst.
 			continue
 		}
 		if m.notifiedAttention[id] {
@@ -147,7 +160,7 @@ func (m *Model) renderToast(w int) (string, int) {
 	// reduce-motion we keep it fully opaque (no fade).
 	alpha := toastBaseAlpha
 	if !anim.ReduceMotion() {
-		if remaining := toastDismissAfter - time.Since(t.createdAt); remaining < toastFade {
+		if remaining := toastDismissAfter - nowFunc().Sub(t.createdAt); remaining < toastFade {
 			frac := float64(remaining) / float64(toastFade)
 			if frac < 0 {
 				frac = 0
@@ -180,7 +193,7 @@ func (m *Model) renderToast(w int) (string, int) {
 		targetX = 0
 	}
 	const slideCols = 8
-	age := time.Since(t.createdAt)
+	age := nowFunc().Sub(t.createdAt)
 	off := 0.0
 	if !anim.ReduceMotion() {
 		// Eased slide-in, then slide-out as the toast nears dismissal (§C.3).
@@ -242,7 +255,13 @@ func (m *Model) jumpToNextNeedingAttention() *Session {
 					return row.session
 				}
 			}
-			return &s
+			// Unreachable today: after expanding s's group, groupedSessions()
+			// always emits its row. But fail closed rather than return a session
+			// without having moved the row cursor — a future hidden/archived row
+			// class (TODO §2a row-model consolidation) could make visibleRows()
+			// diverge from visibleSessions() and silently reintroduce the exact
+			// stale-row-cursor bug §1b fixed.
+			return nil
 		}
 		return nil
 	}

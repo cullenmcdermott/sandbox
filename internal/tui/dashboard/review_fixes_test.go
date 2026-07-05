@@ -79,7 +79,7 @@ func TestParkedModelKeepsQueuedPromptOnBackgroundTurnCompleted(t *testing.T) {
 }
 
 // HIGH-3: in group view the cursor indexes display rows (headers included), so
-// selection/rename/archive must map through the same row accessor the renderer
+// selection/rename must map through the same row accessor the renderer
 // uses — not index visibleSessions with a row cursor.
 func TestGroupViewSelectionMatchesCursorRow(t *testing.T) {
 	m := New(nil)

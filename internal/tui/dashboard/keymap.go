@@ -12,12 +12,13 @@ import (
 // KeyMap is the complete keybinding set for the dashboard.
 type KeyMap struct {
 	// Navigation
-	Up     key.Binding
-	Down   key.Binding
-	Top    key.Binding
-	Bottom key.Binding
-	Attach key.Binding
-	Detach key.Binding
+	Up            key.Binding
+	Down          key.Binding
+	Top           key.Binding
+	Bottom        key.Binding
+	Attach        key.Binding
+	Detach        key.Binding
+	NextAttention key.Binding
 
 	// Filter & sort
 	Filter          key.Binding
@@ -42,7 +43,6 @@ type KeyMap struct {
 	// Session organization
 	GroupToggle key.Binding
 	Rename      key.Binding
-	Archive     key.Binding
 }
 
 // DefaultKeyMap returns the canonical keybinding set.
@@ -54,6 +54,7 @@ func DefaultKeyMap() KeyMap {
 		Bottom:          key.NewBinding(key.WithKeys("G"), key.WithHelp("G", "bottom")),
 		Attach:          key.NewBinding(key.WithKeys("enter", "o"), key.WithHelp("↵/o", "attach")),
 		Detach:          key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "detach / clear filter")),
+		NextAttention:   key.NewBinding(key.WithKeys("ctrl+g"), key.WithHelp("^g", "next attention")),
 		Filter:          key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
 		SortCycle:       key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "sort key")),
 		SortFlip:        key.NewBinding(key.WithKeys("S"), key.WithHelp("S", "sort dir")),
@@ -70,7 +71,6 @@ func DefaultKeyMap() KeyMap {
 		Switcher:        key.NewBinding(key.WithKeys("ctrl+k"), key.WithHelp("^k", "quick switch")),
 		GroupToggle:     key.NewBinding(key.WithKeys("g"), key.WithHelp("g", "group view")),
 		Rename:          key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "rename")),
-		Archive:         key.NewBinding(key.WithKeys("A"), key.WithHelp("A", "archive")),
 	}
 }
 
@@ -89,9 +89,9 @@ func (km KeyMap) ShortHelp() []key.Binding {
 // per column). Implements help.KeyMap.
 func (km KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{km.Up, km.Down, km.Top, km.Bottom, km.Attach, km.Detach},
+		{km.Up, km.Down, km.Top, km.Bottom, km.Attach, km.Detach, km.NextAttention},
 		{km.Filter, km.SortCycle, km.SortFlip, km.AttentionToggle, km.GroupToggle},
 		{km.New, km.Suspend, km.Resume, km.Approve, km.Deny, km.Destroy},
-		{km.Rename, km.Archive, km.Help, km.Switcher, km.Quit},
+		{km.Rename, km.Help, km.Switcher, km.Quit},
 	}
 }

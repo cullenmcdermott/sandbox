@@ -52,6 +52,11 @@ type RunnerEventMsg struct {
 	// StreamEnded is true when the SSE channel was closed without an event
 	// (connection lost). The handler degrades to cluster-derived status.
 	StreamEnded bool
+	// gen is the generation of the stream that produced this message (see
+	// Model.liveSSEStreamGen). A message whose gen no longer matches the
+	// registered stream is from a superseded/orphaned connect and is ignored.
+	// Zero on test-synthesized / pre-generation messages, which always apply.
+	gen uint64
 }
 
 // syncStatusMsg carries one warm session's freshly-probed sync health.
@@ -257,6 +262,9 @@ type liveSSEReadyMsg struct {
 	ch     <-chan session.Event
 	cancel context.CancelFunc
 	client RunnerClient
+	// gen is the generation token minted for this connect at launch (see
+	// Model.liveSSEStreamGen). Stored as the registered generation on success.
+	gen uint64
 }
 
 // liveSSEReconnectMsg fires after a backoff delay to (re)attempt a background
@@ -276,6 +284,19 @@ type liveSSEReconnectMsg struct {
 type liveSSEReconnectFailedMsg struct {
 	id      session.ID
 	attempt int
+	// gen is the generation of the failed reconnect connect, so the handler can
+	// clear the in-flight marker it set at launch.
+	gen uint64
+}
+
+// liveSSEConnectFailedMsg reports that an initial background connect (not a
+// reconnect) could not open its stream. The session keeps its cluster-derived
+// status (graceful degradation, as before); the handler exists only to clear the
+// in-flight marker so a later launch guard can retry. Carries the connect's
+// generation for symmetry with the other stream messages.
+type liveSSEConnectFailedMsg struct {
+	id  session.ID
+	gen uint64
 }
 
 // snapshotSaveInterval throttles non-transition snapshot writes (the usage
@@ -411,7 +432,7 @@ type Model struct {
 	// Pending-permission queue view.
 	permQueue permQueueModel
 
-	// Group-by-repo, rename, archive state.
+	// Group-by-repo and rename state.
 	groupView groupViewState
 	renaming  bool
 	renameBuf string
@@ -448,6 +469,27 @@ type Model struct {
 	// approve/deny reuses the already-open port-forward instead of dialing a
 	// fresh connection. Keyed by session.ID.
 	liveSSEClients map[session.ID]RunnerClient
+
+	// liveSSEConnecting marks sessions whose background-connect Cmd is in flight
+	// (issued but not yet resolved to ready/failed). Every launch guard checks
+	// this IN ADDITION to liveSSECancels: a background connect is
+	// connectSem-throttled and takes seconds, but liveSSECancels is only
+	// populated on ready — so without an in-flight marker a seed + a watch event
+	// (or two watch events) routinely both launch a connect for the same session,
+	// and the second ready orphans the first stream. Set synchronously when a
+	// connect Cmd is issued (single-threaded Update), cleared when it resolves.
+	liveSSEConnecting map[session.ID]bool
+
+	// liveSSEStreamGen holds the generation token of the CURRENTLY-registered
+	// background stream per session; liveSSEGenCounter mints them monotonically.
+	// Every connect is tagged with a generation at launch, and that generation
+	// rides on its liveSSEReadyMsg / RunnerEventMsg / failure messages. A message
+	// whose generation no longer matches the registered one comes from a
+	// superseded or cancelled stream whose goroutine hadn't yet observed
+	// cancellation; it is ignored, so an orphan's StreamEnded can't tear down the
+	// healthy stream and its late events can't double-apply (§1a connect-side).
+	liveSSEGenCounter uint64
+	liveSSEStreamGen  map[session.ID]uint64
 
 	// connectSem bounds how many background observer connects run their expensive
 	// setup (cluster Status + port-forward + runner health) concurrently. On
@@ -568,18 +610,20 @@ type Model struct {
 // connector may be nil; live per-session status will be skipped gracefully.
 func New(backend Backend) *Model {
 	return &Model{
-		backend:         backend,
-		sortKey:         SortByLastActive,
-		sortDir:         SortDesc,
-		keys:            DefaultKeyMap(),
-		help:            newHelp(),
-		liveSSECancels:  make(map[session.ID]context.CancelFunc),
-		liveSSEChannels: make(map[session.ID]<-chan session.Event),
-		liveSSEClients:  make(map[session.ID]RunnerClient),
-		retained:        make(map[session.ID]*TranscriptModel),
-		connectSem:      make(chan struct{}, maxConcurrentBackgroundConnects),
-		engine:          anim.NewEngine(),
-		caps:            terminal.Detect(),
+		backend:           backend,
+		sortKey:           SortByLastActive,
+		sortDir:           SortDesc,
+		keys:              DefaultKeyMap(),
+		help:              newHelp(),
+		liveSSECancels:    make(map[session.ID]context.CancelFunc),
+		liveSSEChannels:   make(map[session.ID]<-chan session.Event),
+		liveSSEClients:    make(map[session.ID]RunnerClient),
+		liveSSEConnecting: make(map[session.ID]bool),
+		liveSSEStreamGen:  make(map[session.ID]uint64),
+		retained:          make(map[session.ID]*TranscriptModel),
+		connectSem:        make(chan struct{}, maxConcurrentBackgroundConnects),
+		engine:            anim.NewEngine(),
+		caps:              terminal.Detect(),
 	}
 }
 
@@ -816,7 +860,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.toastTickActive = false
 			return m, nil
 		}
-		if time.Since(m.toast.createdAt) > toastDismissAfter {
+		if nowFunc().Sub(m.toast.createdAt) > toastDismissAfter {
 			m.toast = nil
 			m.toastTickActive = false
 			return m, nil
@@ -876,6 +920,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.reapOrphans(msg.orphans)
 
 	case liveSSEReadyMsg:
+		// This connect resolved — clear its in-flight marker so guards reflect
+		// reality (whether we register it below or discard it).
+		delete(m.liveSSEConnecting, msg.id)
 		// Guard: if the session was deleted or suspended while the connector
 		// was in flight, cancel the stream immediately (B14). We check the
 		// session still exists and is still in a Running state before storing
@@ -885,20 +932,49 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			msg.cancel()
 			return m, nil
 		}
-		// Store the cancel, channel, and client for this session's SSE stream.
+		// The foreground session's stream is owned by its transcript's active
+		// client (B2's one-client intent; detach explicitly restarts the passive
+		// stream). A background connector that becomes ready after a
+		// detach→fast-reattach would otherwise install a SECOND passive stream —
+		// double client + extra port-forward — alongside the active one. Mirror
+		// the liveSSEReconnectMsg guard below: cancel the redundant incoming stream.
+		if msg.id == m.attachedID {
+			msg.cancel()
+			return m, nil
+		}
+		// A stream is already registered for this session — this incoming one is a
+		// raced duplicate (two connects launched before either reached ready) that
+		// beat the in-flight guard. Cancel it and keep the established stream;
+		// blindly overwriting the map would orphan the live stream's cancel func,
+		// leaking an uncancellable connection whose later StreamEnded would tear
+		// down the healthy stream (§1a connect-side).
+		if _, exists := m.liveSSECancels[msg.id]; exists {
+			msg.cancel()
+			return m, nil
+		}
+		// Store the cancel, channel, client, and generation for this SSE stream.
 		m.liveSSECancels[msg.id] = msg.cancel
 		m.liveSSEChannels[msg.id] = msg.ch
 		m.liveSSEClients[msg.id] = msg.client
+		m.liveSSEStreamGen[msg.id] = msg.gen
+		// Mark the session catching-up (§1a step 3): the after=<seq> replay burst
+		// that follows mutates state but must not toast/flash. Cleared at the
+		// EventStreamLive boundary in handleRunnerEvent.
+		for i := range m.sessions {
+			if m.sessions[i].ID() == msg.id {
+				m.sessions[i].catchingUp = true
+				break
+			}
+		}
 		// Build (or reuse) the warm transcript for this session so the background
 		// stream keeps a full, live chat in memory — making a later show an O(1)
 		// swap instead of a rebuild+replay. Skip opencode sessions (no Go
-		// transcript) and skip if this session is currently the foreground one
-		// (its own active stream already owns the model).
-		if sess.State.Backend != session.BackendOpenCode && msg.id != m.attachedID {
+		// transcript).
+		if sess.State.Backend != session.BackendOpenCode {
 			m.ensureRetained(sess, msg.client)
 			m.maybeWarnWarm()
 		}
-		return m, liveSSENextCmd(msg.id, msg.ch)
+		return m, liveSSENextCmd(msg.id, msg.ch, msg.gen)
 
 	case liveSSEReconnectMsg:
 		// Backoff elapsed — try to re-open the background stream, unless the
@@ -908,6 +984,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if sess.ID() == "" || sess.State.Status != session.StatusRunning {
 			return m, nil
 		}
+		// Skip only when a stream is already REGISTERED. Deliberately do NOT skip
+		// on liveSSEConnecting: the reconnect tick is this session's only path to
+		// the retry/degrade loop, so if an in-flight connect (e.g. a watch-driven
+		// startLiveSSECmd that raced into the backoff window) later FAILS it
+		// schedules no retry of its own — suppressing the reconnect here would then
+		// strand a Running session with no stream and no pending retry (its glyph
+		// frozen, degradeUnreachable never reached). Letting the reconnect proceed
+		// at worst races that connect into a duplicate, which the generation token
+		// + the ready-handler's cancel-incoming already make safe (§1a connect-side
+		// review finding).
 		if _, exists := m.liveSSECancels[msg.id]; exists {
 			return m, nil
 		}
@@ -919,10 +1005,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.reconnectLiveSSECmd(sess, msg.attempt)
 
+	case liveSSEConnectFailedMsg:
+		// An initial background connect failed; clear its in-flight marker so a
+		// later guard can retry. The session keeps its cluster-derived status
+		// (graceful degradation) — no status change here.
+		delete(m.liveSSEConnecting, msg.id)
+		return m, nil
+
 	case liveSSEReconnectFailedMsg:
-		// A reconnect attempt couldn't open the stream. Retry with backoff while
-		// the cluster still believes the pod is Running and we have budget left;
-		// otherwise declare it unreachable and show its honest status.
+		// A reconnect attempt couldn't open the stream — clear its in-flight
+		// marker. Retry with backoff while the cluster still believes the pod is
+		// Running and we have budget left; otherwise declare it unreachable and
+		// show its honest status.
+		delete(m.liveSSEConnecting, msg.id)
 		next := msg.attempt + 1
 		sess := m.sessionByID(msg.id)
 		if sess.ID() != "" && sess.State.Status == session.StatusRunning && next < liveSSEMaxRetries {
@@ -946,7 +1041,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			title:     msg.title,
 			note:      msg.note,
 			status:    msg.status,
-			createdAt: time.Now(),
+			createdAt: nowFunc(),
 		}
 		var cmds []tea.Cmd
 		// Alongside the in-TUI toast, fire a real OS notification so a background
@@ -1013,6 +1108,15 @@ func (m *Model) View() tea.View {
 // Cancel stops the cluster-watch goroutine and all live SSE streams. Call
 // this before discarding the model (e.g. on program exit or screen switch).
 func (m *Model) Cancel() {
+	// Flush a final snapshot for every session before teardown (§1a step 4).
+	// Snapshots are otherwise coalesced to a 3s throttle and only force-saved on
+	// status transitions, so at quit the persisted resume cursor (lastSeq) plus
+	// the last few seconds of usage/branch/cost are stale — which makes EVERY
+	// relaunch replay a tail of history as if it were live. Force bypasses the
+	// throttle; saveSnapshot no-ops when there is no store (unit tests).
+	for i := range m.sessions {
+		m.saveSnapshot(&m.sessions[i], true)
+	}
 	if m.watchCancel != nil {
 		m.watchCancel()
 	}
@@ -1086,7 +1190,7 @@ func (m *Model) animCmd() tea.Cmd {
 // of the two (statusFlashDur ≥ theme.FadeDuration) so the loop covers both.
 func (m *Model) rowMotionActive() bool {
 	for i := range m.sessions {
-		if t := m.sessions[i].statusChangedAt; !t.IsZero() && time.Since(t) < statusFlashDur {
+		if t := m.sessions[i].statusChangedAt; !t.IsZero() && nowFunc().Sub(t) < statusFlashDur {
 			return true
 		}
 	}
@@ -1098,7 +1202,7 @@ func (m *Model) rowMotionActive() bool {
 // false the single tick loop stops scheduling itself.
 func (m *Model) anyMotionActive() bool {
 	m.engine.SetSpinners(m.countStatus(StatusBusy))
-	return m.engine.AnyMotionActive(time.Now()) || m.rowMotionActive()
+	return m.engine.AnyMotionActive(nowFunc()) || m.rowMotionActive()
 }
 
 // maybeStartAnim starts the single gated motion tick loop if motion is active
@@ -1128,6 +1232,10 @@ func (m *Model) startLiveSSECmd(sess Session) tea.Cmd {
 	m.cancelLiveSSE(sess.ID())
 
 	id := sess.ID()
+	// Mint this connect's generation and mark it in flight, both synchronously in
+	// Update so a racing seed/watch guard sees it before it can launch a duplicate.
+	gen := m.nextLiveSSEGen()
+	m.liveSSEConnecting[id] = true
 	ref := session.Ref{ID: id}
 	projectPath := sess.State.ProjectPath
 	// Resume from the last event we persisted for this session instead of 0, so
@@ -1147,19 +1255,37 @@ func (m *Model) startLiveSSECmd(sess Session) tea.Cmd {
 		if err != nil {
 			release()
 			cancel()
-			// Graceful degradation: stream could not be opened; no crash.
-			return nil
+			// Graceful degradation: stream could not be opened; no crash. The
+			// failed msg only clears the in-flight marker so a later guard retries.
+			return liveSSEConnectFailedMsg{id: id, gen: gen}
 		}
 		ch, err := res.Client.EventsPassive(ctx, ref, afterSeq)
 		release()
 		if err != nil {
 			cancel()
-			return nil
+			return liveSSEConnectFailedMsg{id: id, gen: gen}
 		}
 		// Deliver the ready message; the Update loop stores the cancel and
 		// starts reading events.
-		return liveSSEReadyMsg{id: id, ch: ch, cancel: cancel, client: res.Client}
+		return liveSSEReadyMsg{id: id, ch: ch, cancel: cancel, client: res.Client, gen: gen}
 	}
+}
+
+// nextLiveSSEGen mints a fresh monotonic generation token for a background
+// stream connect. Called synchronously in Update, so no locking is needed.
+func (m *Model) nextLiveSSEGen() uint64 {
+	m.liveSSEGenCounter++
+	return m.liveSSEGenCounter
+}
+
+// hasLiveSSE reports whether a session already has a background stream — either
+// registered (open channel) or a connect in flight. Launch guards use this so a
+// slow connectSem-throttled connect can't be launched twice by seed + watch.
+func (m *Model) hasLiveSSE(id session.ID) bool {
+	if _, ok := m.liveSSECancels[id]; ok {
+		return true
+	}
+	return m.liveSSEConnecting[id]
 }
 
 // maxConcurrentBackgroundConnects caps how many background observer connects run
@@ -1192,6 +1318,8 @@ func (m *Model) reconnectLiveSSECmd(sess Session, attempt int) tea.Cmd {
 	m.cancelLiveSSE(sess.ID())
 
 	id := sess.ID()
+	gen := m.nextLiveSSEGen()
+	m.liveSSEConnecting[id] = true
 	ref := session.Ref{ID: id}
 	projectPath := sess.State.ProjectPath
 	// Resume from the last persisted event (see startLiveSSECmd): a reconnect
@@ -1206,15 +1334,15 @@ func (m *Model) reconnectLiveSSECmd(sess Session, attempt int) tea.Cmd {
 		if err != nil {
 			release()
 			cancel()
-			return liveSSEReconnectFailedMsg{id: id, attempt: attempt}
+			return liveSSEReconnectFailedMsg{id: id, attempt: attempt, gen: gen}
 		}
 		ch, err := res.Client.EventsPassive(ctx, ref, afterSeq)
 		release()
 		if err != nil {
 			cancel()
-			return liveSSEReconnectFailedMsg{id: id, attempt: attempt}
+			return liveSSEReconnectFailedMsg{id: id, attempt: attempt, gen: gen}
 		}
-		return liveSSEReadyMsg{id: id, ch: ch, cancel: cancel, client: res.Client}
+		return liveSSEReadyMsg{id: id, ch: ch, cancel: cancel, client: res.Client, gen: gen}
 	}
 }
 
@@ -1247,17 +1375,23 @@ func (m *Model) cancelLiveSSE(id session.ID) {
 	}
 	delete(m.liveSSEChannels, id)
 	delete(m.liveSSEClients, id)
+	// Forget the registered generation so any late message from the just-
+	// cancelled stream (whose goroutine may still deliver a buffered event or the
+	// channel-close StreamEnded) is treated as stale and ignored.
+	delete(m.liveSSEStreamGen, id)
 }
 
 // liveSSENextCmd reads one event from the channel and re-issues itself.
-// Returns a RunnerEventMsg (or StreamEnded=true on channel close).
-func liveSSENextCmd(id session.ID, ch <-chan session.Event) tea.Cmd {
+// Returns a RunnerEventMsg (or StreamEnded=true on channel close). gen tags the
+// message with the producing stream's generation so a stale reader (from a
+// superseded connect) is ignored by handleRunnerEvent.
+func liveSSENextCmd(id session.ID, ch <-chan session.Event, gen uint64) tea.Cmd {
 	return func() tea.Msg {
 		ev, ok := <-ch
 		if !ok {
-			return RunnerEventMsg{ID: id, StreamEnded: true}
+			return RunnerEventMsg{ID: id, StreamEnded: true, gen: gen}
 		}
-		return RunnerEventMsg{ID: id, Event: ev}
+		return RunnerEventMsg{ID: id, Event: ev, gen: gen}
 	}
 }
 
@@ -1296,6 +1430,19 @@ func (m *Model) saveSnapshot(s *Session, force bool) {
 // read-model. If the stream ended, it degrades back to the cluster-derived
 // status (idle/suspended/failed) without crashing.
 func (m *Model) handleRunnerEvent(msg RunnerEventMsg) (tea.Model, tea.Cmd) {
+	// Stale-stream guard (§1a connect-side): a message tagged with a generation
+	// that no longer matches this session's registered stream came from a
+	// superseded or cancelled connect whose goroutine hadn't yet observed
+	// cancellation. Ignore it — applying its event would double-apply, and acting
+	// on its StreamEnded would tear down the healthy stream via cancelLiveSSE.
+	// gen==0 is a test-synthesized / pre-generation message and always passes;
+	// such messages set no liveSSEStreamGen entry either, so the ok check below is
+	// skipped for them.
+	if msg.gen != 0 {
+		if cur, ok := m.liveSSEStreamGen[msg.ID]; !ok || cur != msg.gen {
+			return m, nil
+		}
+	}
 	if msg.StreamEnded {
 		// warm→cold: a closed stream means the pod is no longer feeding us. Drop
 		// the warm model unless the cluster still believes the pod is running (a
@@ -1309,41 +1456,37 @@ func (m *Model) handleRunnerEvent(msg RunnerEventMsg) (tea.Model, tea.Cmd) {
 		var retryCmd tea.Cmd
 		for i, s := range m.sessions {
 			if s.ID() == msg.ID {
-				switch m.sessions[i].DashStatus {
-				case StatusBusy, StatusWaiting:
-					// A mid-turn drop is either a genuinely dead runner (B13:
-					// "runner unreachable = failed") or just a transient
-					// port-forward blip on a healthy pod (common with client-go
-					// SPDY forwards). Don't flip straight to a scary 'failed'
-					// glyph: while the cluster still believes the pod is Running,
-					// retry the background stream with backoff (preserving the
-					// busy/waiting glyph) and only degrade to Failed once the
-					// reconnects are exhausted (RV1). Background streams had no
-					// reconnect path at all before this.
-					if m.sessions[i].State.Status == session.StatusRunning {
-						retryCmd = liveSSEReconnectTick(msg.ID, 0, liveSSEReconnectDelay(0))
-					} else {
-						// Cluster says not-running (suspended/gone) — honest now.
-						m.sessions[i].DashStatus = DeriveStatus(m.sessions[i].State)
-					}
-				default:
-					// Turn was already complete; fall back to cluster-derived state.
+				// A stream drop is either a genuinely dead runner (B13: "runner
+				// unreachable = failed") or just a transient port-forward blip on
+				// a healthy pod (common with client-go SPDY forwards).
+				if m.sessions[i].State.Status == session.StatusRunning {
+					// Transient blip on a still-Running pod: PRESERVE the current
+					// attention state — the Busy/Waiting glyph, a NeedsInput
+					// awaiting-input state, and any pending permission — and retry
+					// the background stream with backoff rather than flip to a scary
+					// 'failed' glyph (RV1). Background streams had no reconnect path
+					// at all before this. Preservation matters because the reconnect
+					// replays after=lastSeq, which EXCLUDES the events that produced
+					// this state (permission.requested, turn.completed→NeedsInput,
+					// their Seq<=lastSeq) — so resetting to cluster-derived idle or
+					// clearing the permission here would PERMANENTLY lose it (§1a
+					// step 7; the old default branch reset NeedsInput→idle and the
+					// Busy/Waiting branch wiped the permission → dead approve/deny).
+					// If the state genuinely changed during the blip, the reconnect
+					// replays the newer events at higher seqs and ApplyRunnerEvent
+					// updates it; degradeUnreachable degrades only once the
+					// reconnects are exhausted.
+					retryCmd = liveSSEReconnectTick(msg.ID, 0, liveSSEReconnectDelay(0))
+				} else {
+					// Cluster says not-running (suspended/gone) — degrade to the
+					// authoritative status and clear any now-unresolvable permission.
 					m.sessions[i].DashStatus = DeriveStatus(m.sessions[i].State)
-					// An idle/needs-input session whose pod is still Running lost
-					// its stream to a transient blip too — without a reconnect the
-					// row would stay permanently deaf (no status/permission updates)
-					// until a pod event happened to restart it. Same backoff loop as
-					// the busy path; degradeUnreachable leaves non-busy sessions at
-					// their cluster-derived status if it never heals.
-					if m.sessions[i].State.Status == session.StatusRunning {
-						retryCmd = liveSSEReconnectTick(msg.ID, 0, liveSSEReconnectDelay(0))
-					}
+					m.sessions[i].clearPendingPermission()
 				}
-				m.sessions[i].PendingPermissionID = ""
-				m.sessions[i].PendingPermissionTool = ""
-				m.sessions[i].PendingPermissionArg = ""
 				// Persist the final state so a relaunch reflects it (and resumes
-				// from the last seq we saw) rather than replaying from zero.
+				// from the last seq we saw) rather than replaying from zero. A
+				// preserved permission/attention state rides along in the snapshot
+				// so it stays resolvable after a relaunch.
 				m.saveSnapshot(&m.sessions[i], true)
 				break
 			}
@@ -1358,19 +1501,47 @@ func (m *Model) handleRunnerEvent(msg RunnerEventMsg) (tea.Model, tea.Cmd) {
 	// Patch the session's status from this event.
 	for i, s := range m.sessions {
 		if s.ID() == msg.ID {
-			changed := ApplyRunnerEvent(&m.sessions[i], msg.Event)
-			// Advance the resume cursor and persist the snapshot so a relaunch
-			// resumes from here instead of replaying history.
-			if msg.Event.Seq > m.sessions[i].lastSeq {
-				m.sessions[i].lastSeq = msg.Event.Seq
+			// §1a step 3: clear the catch-up flag ONLY at the runner's
+			// replay-complete boundary — EventStreamLive (Seq==0), which the runner
+			// reliably emits as the LAST event of the after=<seq> replay burst
+			// (runner/src/events.ts writes `: replay-complete`; client.go maps it).
+			// A time-based "is this event fresh?" fallback was deliberately
+			// REJECTED: on a short (~2s) reconnect the last replayed events carry
+			// near-now timestamps and are indistinguishable from live ones, so a
+			// freshness heuristic false-positives and leaks a spurious toast + OS
+			// notification for an attention state resolved later in the same burst
+			// (adversarial review, 2026-07-05).
+			if m.sessions[i].catchingUp && msg.Event.Type == session.EventStreamLive {
+				m.sessions[i].catchingUp = false
 			}
-			// Keep the foreground session fully "seen" so it never accumulates an
-			// unread badge for output the user is actively watching.
-			if msg.ID == m.attachedID {
-				m.sessions[i].seenSeq = m.sessions[i].lastSeq
+			// Seq dedup (§1a step 2 — the list reducer's analog of the
+			// transcript's lastSeq guard): an event at or below the resume cursor
+			// is a REPLAY (a reconnect's after=lastSeq catch-up, or a duplicate
+			// background stream). Do NOT re-drive read-model state
+			// (DashStatus/statusChangedAt/usage/pending-permission), re-persist,
+			// or re-arm attention for it — that is the relaunch-replay +
+			// duplicate-stream bug class. Seq==0 events (EventStreamLive,
+			// locally-synthesized markers) always pass through so downstream
+			// boundary handling still sees them. The transcript self-dedups, so
+			// the warm model is still fed below unconditionally.
+			dup := msg.Event.Seq != 0 && msg.Event.Seq <= m.sessions[i].lastSeq
+			var changed bool
+			if !dup {
+				changed = ApplyRunnerEvent(&m.sessions[i], msg.Event)
+				// Advance the resume cursor so a relaunch resumes from here
+				// instead of replaying history.
+				if msg.Event.Seq > m.sessions[i].lastSeq {
+					m.sessions[i].lastSeq = msg.Event.Seq
+				}
+				// Keep the foreground session fully "seen" so it never accumulates
+				// an unread badge for output the user is actively watching.
+				if msg.ID == m.attachedID {
+					m.sessions[i].seenSeq = m.sessions[i].lastSeq
+				}
 			}
 			// Feed the warm model so the retained chat stays live in the
-			// background (dedup is handled by the transcript's lastSeq guard).
+			// background (dedup is handled by the transcript's own lastSeq guard,
+			// so a replayed event here is harmless to the transcript).
 			if tr, ok := m.retained[msg.ID]; ok {
 				tr.ingest(msg.Event)
 				// Detached autopilot (§1e items 1–2): the foreground continuation
@@ -1379,39 +1550,45 @@ func (m *Model) handleRunnerEvent(msg RunnerEventMsg) (tea.Model, tea.Cmd) {
 				// Drive it HERE instead, where handleRunnerEvent can return the Cmd.
 				// Only for a genuinely background model (its own stream is nil); the
 				// foreground session runs continuation through its own handleEvent.
-				if msg.Event.Type == session.EventTurnCompleted &&
+				// Gated on !dup so a REPLAYED turn.completed can't re-submit the
+				// next turn (double-drive the driver).
+				if !dup && msg.Event.Type == session.EventTurnCompleted &&
 					tr.events == nil && tr.autopilot.active() {
 					autopilotCmd = m.driveDetachedAutopilot(msg.ID, tr)
 				}
 			}
-			m.saveSnapshot(&m.sessions[i], changed)
-			// Persist a runner-generated auto title so it survives a re-seed (the
-			// cluster state carries no local label). RenamedTitle still wins at
-			// display time, so this is safe even for a renamed session.
-			if msg.Event.Type == session.EventSessionTitle &&
-				m.titleStore != nil && m.sessions[i].AutoTitle != "" {
-				m.titleStore.SaveAutoTitle(msg.ID, m.sessions[i].AutoTitle)
-			}
-			// Persist the Claude SDK session id (session.started) so the CLI can
-			// make the session resumable from the laptop on shutdown.
-			if msg.Event.Type == session.EventSessionStarted &&
-				m.titleStore != nil && m.sessions[i].ClaudeSessionID != "" {
-				m.titleStore.SaveClaudeSessionID(msg.ID, m.sessions[i].ClaudeSessionID)
-			}
-			if changed {
-				m.sortSessions()
-				m.clampCursor()
+			if !dup {
+				m.saveSnapshot(&m.sessions[i], changed)
+				// Persist a runner-generated auto title so it survives a re-seed
+				// (the cluster state carries no local label). RenamedTitle still
+				// wins at display time, so this is safe even for a renamed session.
+				if msg.Event.Type == session.EventSessionTitle &&
+					m.titleStore != nil && m.sessions[i].AutoTitle != "" {
+					m.titleStore.SaveAutoTitle(msg.ID, m.sessions[i].AutoTitle)
+				}
+				// Persist the Claude SDK session id (session.started) so the CLI
+				// can make the session resumable from the laptop on shutdown.
+				if msg.Event.Type == session.EventSessionStarted &&
+					m.titleStore != nil && m.sessions[i].ClaudeSessionID != "" {
+					m.titleStore.SaveClaudeSessionID(msg.ID, m.sessions[i].ClaudeSessionID)
+				}
+				if changed {
+					m.sortSessions()
+					m.clampCursor()
+				}
 			}
 			break
 		}
 	}
 
-	// Re-issue the Cmd to read the next event from the stored channel.
+	// Re-issue the Cmd to read the next event from the stored channel. Carry the
+	// same generation forward so the continuing reader stays tagged as this
+	// stream (msg.gen matched the registered gen via the guard above).
 	ch, ok := m.liveSSEChannels[msg.ID]
 	if !ok {
 		return m, autopilotCmd // channel cancelled; still deliver any autopilot Cmd
 	}
-	return m, tea.Batch(autopilotCmd, liveSSENextCmd(msg.ID, ch))
+	return m, tea.Batch(autopilotCmd, liveSSENextCmd(msg.ID, ch, msg.gen))
 }
 
 // driveDetachedAutopilot continues (goal) or terminates (goal/loop) a warm
@@ -1540,12 +1717,36 @@ func (m *Model) applySeed(states []session.State) (*Model, []tea.Cmd) {
 			// later reconnect resumes from head, not 0 (which would replay).
 			s.lastSeq = prev.lastSeq
 			s.lastSnapSave = prev.lastSnapSave
+			// Carry seenSeq too (§1a step 5): a cluster re-List must not reset it
+			// to 0 while carrying lastSeq forward, or the row shows a phantom
+			// lifetime-event-count unread badge after every re-seed.
+			s.seenSeq = prev.seenSeq
+			// The cluster List carries none of the SSE-accumulated live state, so
+			// a re-seed would otherwise zero it (a phantom "just started" row):
+			// carry usage/cost/model/branch/recent-tools forward like the cursor
+			// above (§1b "re-seed drops usage tokens, Model, Branch, RecentTools").
+			s.InputTokens, s.OutputTokens = prev.InputTokens, prev.OutputTokens
+			s.CacheReadTokens, s.CacheWriteTokens = prev.CacheReadTokens, prev.CacheWriteTokens
+			s.TotalCostUSD = prev.TotalCostUSD
+			if prev.Model != "" {
+				s.Model, s.CtxLimit = prev.Model, prev.CtxLimit
+			}
+			if prev.Branch != "" {
+				s.Branch, s.Dirty = prev.Branch, prev.Dirty
+			}
+			if len(prev.RecentTools) > 0 {
+				s.RecentTools = prev.RecentTools
+			}
 		} else if m.snapStore != nil {
 			// First time we've seen this session this launch: hydrate the cached
 			// snapshot so the row shows its real status/usage immediately and the
 			// SSE stream resumes from the cached seq instead of replaying history.
 			if snap, ok := m.snapStore.LoadSnapshot(s.ID()); ok {
 				s.lastSeq = snap.LastSeq
+				// Hydrated history is already-seen (§1a step 5) — set seenSeq here
+				// too so a Suspended/Failed pod (which skips applySnapshot below)
+				// still restores silently instead of showing a phantom unread badge.
+				s.seenSeq = snap.LastSeq
 				// Only trust the cached running-status while the cluster agrees the
 				// pod is up; a suspended/failed pod's status is authoritative and a
 				// stale "busy/waiting" can never resolve (mirrors the prev branch +
@@ -1562,13 +1763,16 @@ func (m *Model) applySeed(states []session.State) (*Model, []tea.Cmd) {
 	m.seeded = true
 	m.seedErr = nil // a successful seed proves the cluster is reachable
 
-	// Start live SSE streams for running sessions that don't already have one.
+	// Start live SSE streams for running sessions that don't already have one —
+	// neither registered (liveSSECancels) nor a connect in flight
+	// (liveSSEConnecting). The in-flight check is what stops a seed running while
+	// a watch-driven connect is mid-setup from launching a duplicate stream.
 	var cmds []tea.Cmd
 	if m.connector != nil {
 		for i := range m.sessions {
 			if m.sessions[i].State.Status == session.StatusRunning {
 				id := m.sessions[i].ID()
-				if _, exists := m.liveSSECancels[id]; !exists {
+				if !m.hasLiveSSE(id) {
 					cmds = append(cmds, m.startLiveSSECmd(m.sessions[i]))
 				}
 			}
@@ -1649,9 +1853,14 @@ func (m *Model) applyPodEvent(ev k8s.StateEvent) tea.Cmd {
 			m.sessions[i].Title = deriveTitle(merged)
 			m.sortSessions()
 			m.clampCursor()
-			// Start SSE if the session is now running and we don't have one.
-			if ev.State.Status == session.StatusRunning && m.connector != nil {
-				if _, exists := m.liveSSECancels[id]; !exists {
+			// Start a background SSE stream if the session is now Running and
+			// lacks one — but never for the attached session: its transcript owns
+			// the live stream, so a background connect here would be immediately
+			// torn down by the liveSSEReadyMsg attachedID guard. Skip the
+			// start-then-cancel connect/port-forward churn on every pod event.
+			if ev.State.Status == session.StatusRunning && m.connector != nil &&
+				id != m.attachedID {
+				if !m.hasLiveSSE(id) {
 					return m.startLiveSSECmd(m.sessions[i])
 				}
 			}
@@ -1661,10 +1870,36 @@ func (m *Model) applyPodEvent(ev k8s.StateEvent) tea.Cmd {
 	// New session appeared — fade its glyph in.
 	sess := SessionFromState(ev.State)
 	sess.statusChangedAt = time.Now()
+	// §1a step 6: hydrate persisted titles + snapshot BEFORE appending and
+	// starting the SSE stream. The watch can beat the seed
+	// (internal/k8s/watch.go documents "seed before watch"); without hydration
+	// this insert path leaves lastSeq=0, so the stream started just below resumes
+	// at after=0 and replays the ENTIRE history as if live (launch-time
+	// notification flashes, usage counted from zero). Mirror applySeed's
+	// first-seen hydration so an informer-first insert resumes from head.
+	if m.titleStore != nil {
+		if sess.RenamedTitle == "" {
+			sess.RenamedTitle = m.titleStore.LoadTitle(sess.ID())
+		}
+		if sess.AutoTitle == "" {
+			sess.AutoTitle = m.titleStore.LoadAutoTitle(sess.ID())
+		}
+	}
+	if m.snapStore != nil {
+		if snap, ok := m.snapStore.LoadSnapshot(sess.ID()); ok {
+			sess.lastSeq = snap.LastSeq
+			sess.seenSeq = snap.LastSeq
+			// C12: only trust a cached running-status while the cluster agrees the
+			// pod is up (a suspended/failed pod's status is authoritative).
+			if cs := DeriveStatus(ev.State); cs != StatusSuspended && cs != StatusFailed {
+				sess.applySnapshot(snap)
+			}
+		}
+	}
 	m.sessions = append(m.sessions, sess)
 	m.sortSessions()
 	m.clampCursor()
-	if ev.State.Status == session.StatusRunning && m.connector != nil {
+	if ev.State.Status == session.StatusRunning && m.connector != nil && !m.hasLiveSSE(sess.ID()) {
 		return m.startLiveSSECmd(sess)
 	}
 	return nil
@@ -1774,6 +2009,26 @@ func (m *Model) sessionByID(id session.ID) Session {
 	return Session{}
 }
 
+// syncCursorFromTranscript advances a session's resume cursor to the transcript's
+// position (and marks it all seen) when the user DETACHES. While attached, the
+// foreground transcript owns the live stream and the dashboard Session.lastSeq
+// stays frozen; without this, the background stream restarted on detach resumes
+// at the stale cursor and REPLAYS the just-watched events — advancing lastSeq but
+// not seenSeq, which inflates the unread badge for content the user just viewed
+// live (§1a adversarial review, 2026-07-05). Syncing the cursor also skips
+// re-replaying those events entirely.
+func (m *Model) syncCursorFromTranscript(id session.ID, trLastSeq uint64) {
+	for i := range m.sessions {
+		if m.sessions[i].ID() == id {
+			if trLastSeq > m.sessions[i].lastSeq {
+				m.sessions[i].lastSeq = trLastSeq
+			}
+			m.sessions[i].seenSeq = m.sessions[i].lastSeq // watched live during attach
+			break
+		}
+	}
+}
+
 // --------------------------------------------------------------------------
 // Key handling
 // --------------------------------------------------------------------------
@@ -1872,15 +2127,17 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Archive selected finished session.
-	if key.Matches(msg, m.keys.Archive) {
-		m.archiveSelected()
-		return m, nil
-	}
-
 	// In group view, space expands/collapses the repo group at the cursor.
 	if m.groupView.open && ks == "space" {
 		m.toggleRepoGroup()
+		return m, nil
+	}
+
+	// ⌃G: jump the cursor to the next session needing attention (wraps; expands a
+	// collapsed group in group view). Already worked from inside the chat modal
+	// (app.go); this makes the documented key live on the dashboard screen too.
+	if key.Matches(msg, m.keys.NextAttention) {
+		m.jumpToNextNeedingAttention()
 		return m, nil
 	}
 
@@ -2072,15 +2329,18 @@ func (m *Model) handleFilterKey(ks string) (tea.Model, tea.Cmd) {
 		}
 
 	default:
-		// Accept printable characters; j/k also update cursor while filtering.
-		if ks == "j" || ks == "down" {
-			visible := m.visibleSessions()
-			if m.cursor < len(visible)-1 {
+		// Arrow keys navigate while the filter buffer captures text, so letters
+		// like j/k/g stay typeable in the query. Clamp against visibleRows() —
+		// group headers count as rows, so the old visibleSessions() bound left the
+		// last rows of a grouped list unreachable while filtering.
+		if ks == "down" {
+			rows := m.visibleRows()
+			if m.cursor < len(rows)-1 {
 				m.cursor++
 			}
 			return m, nil
 		}
-		if ks == "k" || ks == "up" {
+		if ks == "up" {
 			if m.cursor > 0 {
 				m.cursor--
 			}
@@ -2468,9 +2728,10 @@ func (m *Model) renderDetailLines(width, height int) []string {
 	// Sync health (warm sessions, polled).
 	if s.SyncStatus != "" {
 		glyph := map[string]string{
-			"synced":  "✓",
-			"syncing": "⟳",
-			"stalled": "⚠",
+			"synced":     "✓",
+			"syncing":    "⟳",
+			"stalled":    "⚠",
+			"conflicted": "⇄",
 		}[s.SyncStatus]
 		kvPairs = append(kvPairs, struct{ k, v string }{"sync", strings.TrimSpace(glyph + " " + s.SyncStatus)})
 	}

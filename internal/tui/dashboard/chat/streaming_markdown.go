@@ -1,7 +1,11 @@
 // Package chat implements streaming markdown rendering with stable-prefix caching.
 package chat
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/cullenmcdermott/sandbox/tui/theme"
+)
 
 // MarkdownRenderer is satisfied by *glamour.TermRenderer (Render(string)(string,error)).
 // Abstracting it lets tests inject a byte-counting wrapper.
@@ -31,6 +35,9 @@ type Renderer interface {
 // sub-quadratic test actually engages.
 type StreamingMarkdown struct {
 	width int
+	// epoch is the theme epoch the cached stableRender was built under; a swap
+	// bumps it and forces a reset so the streamed prefix can't mix palettes.
+	epoch uint64
 	// stableSource is the content up to the latest safe boundary that has been
 	// folded into stableRender; stableRender is its trimmed render.
 	stableSource string
@@ -90,6 +97,12 @@ func (s *StreamingMarkdown) setJunction(r Renderer, block string) bool {
 // Render returns the render of content at width, byte-for-byte identical to a
 // full glamour render with the trailing newline trimmed.
 func (s *StreamingMarkdown) Render(content string, width int, r Renderer) string {
+	// A theme swap re-palettes the renderer (the pool is invalidated); drop the
+	// stale-palette stable prefix so it isn't concatenated with new-palette deltas.
+	if e := theme.Epoch(); e != s.epoch {
+		s.epoch = e
+		s.resetCache()
+	}
 	if width != s.width {
 		s.width = width
 		s.resetCache()

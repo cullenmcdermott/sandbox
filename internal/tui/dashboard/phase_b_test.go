@@ -236,18 +236,34 @@ func TestLiveSSEStartFailsDegrades(t *testing.T) {
 		},
 	}
 
-	// Running startLiveSSECmd returns a tea.Cmd; calling it synchronously
-	// should produce nil (failed connector degrades gracefully, no crash).
+	// Running startLiveSSECmd returns a tea.Cmd and synchronously marks the
+	// connect in flight so a racing guard can't launch a duplicate.
 	cmd := m.startLiveSSECmd(m.sessions[0])
 	if cmd == nil {
 		t.Fatal("startLiveSSECmd returned nil before attempting connection")
 	}
+	if !m.liveSSEConnecting["sess-down"] {
+		t.Fatal("startLiveSSECmd must mark the session connecting in flight")
+	}
+	// On connector failure the Cmd yields liveSSEConnectFailedMsg (not nil): the
+	// connect still degrades gracefully — no status change — but the message is
+	// needed so the Update loop can clear the in-flight marker and a later guard
+	// can retry (a nil msg would strand liveSSEConnecting=true forever).
 	msg := cmd()
-	if msg != nil {
-		t.Errorf("expected nil msg on connector failure (graceful degradation), got %T: %v", msg, msg)
+	failed, ok := msg.(liveSSEConnectFailedMsg)
+	if !ok {
+		t.Fatalf("expected liveSSEConnectFailedMsg on connector failure, got %T: %v", msg, msg)
+	}
+	if failed.id != "sess-down" || failed.gen == 0 {
+		t.Errorf("failed msg must carry the id + a nonzero generation, got %+v", failed)
 	}
 
-	// The session status must still be the cluster-derived baseline (idle).
+	// Handling that message clears the in-flight marker and leaves the session on
+	// its cluster-derived baseline (idle) — graceful degradation, no crash.
+	m.Update(msg)
+	if m.liveSSEConnecting["sess-down"] {
+		t.Error("liveSSEConnectFailedMsg must clear the in-flight marker")
+	}
 	if m.sessions[0].DashStatus != StatusIdle {
 		t.Errorf("DashStatus after failure: got %v, want StatusIdle (graceful degradation)", m.sessions[0].DashStatus)
 	}

@@ -6,6 +6,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/cullenmcdermott/sandbox/tui/list"
+	"github.com/cullenmcdermott/sandbox/tui/theme"
 )
 
 // AssistantMessage is the plain data struct the TranscriptModel mutates.
@@ -126,13 +127,15 @@ func (a *AssistantItem) SetRendererFactory(fn func(width int) Renderer) {
 
 func (a *AssistantItem) Finished() bool { return a.msg.Finished && !a.msg.Streaming }
 
-func (a *AssistantItem) contentKey() (uint64, uint64)  { return fnv64(a.msg.Content), 0 }
-func (a *AssistantItem) thinkingKey() (uint64, uint64) { return fnv64(a.msg.Thinking), 0 }
+// The second key slot carries the theme epoch so a palette swap invalidates the
+// section caches (the rendered ANSI bakes in the old colors otherwise).
+func (a *AssistantItem) contentKey() (uint64, uint64)  { return fnv64(a.msg.Content), theme.Epoch() }
+func (a *AssistantItem) thinkingKey() (uint64, uint64) { return fnv64(a.msg.Thinking), theme.Epoch() }
 func (a *AssistantItem) errorKey() (uint64, uint64) {
 	if !a.msg.Errored {
 		return 0, 0
 	}
-	return fnvFields([]byte(a.msg.ErrText)), 0
+	return fnvFields([]byte(a.msg.ErrText)), theme.Epoch()
 }
 
 func (a *AssistantItem) cachedContent(width int) string {

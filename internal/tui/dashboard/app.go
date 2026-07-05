@@ -856,6 +856,12 @@ func (a *App) parkTranscript(m *TranscriptModel) {
 		a.parkedTranscripts = make(map[session.ID]ParkedTranscriptState)
 	}
 	a.parkedTranscripts[m.ref.ID] = m.ParkState()
+	// Sync the dashboard's resume cursor forward to where the transcript got to
+	// (§1a review): the Session.lastSeq is frozen while attached, so without this
+	// the background stream restarted on detach replays the just-watched events
+	// and inflates the unread badge. This is the single detach hook, so it covers
+	// every detach path.
+	a.dashboard.syncCursorFromTranscript(m.ref.ID, m.lastSeq)
 	// Tear down the transcript's own live SSE stream so we don't leave a second
 	// SSE client open after detach (NEW-5). Every detach path parks the
 	// transcript immediately before releasing it, so this is the single hook.

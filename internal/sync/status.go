@@ -13,7 +13,12 @@ const (
 	SyncUnknown SyncState = iota // no sessions / could not determine
 	SyncSynced                   // watching for changes, no conflicts
 	SyncSyncing                  // scanning / staging / transitioning
-	SyncStalled                  // halted, errored, or has conflicts
+	SyncStalled                  // halted or errored (transport-level; may self-heal)
+	// SyncConflicted: file conflicts need user resolution. Distinct from (and
+	// ranked above) SyncStalled — a transport stall can clear on reconnect, but a
+	// conflict is stuck until resolved, so it wins the worst-of reducer and gets
+	// its own glyph instead of masquerading as a transport error.
+	SyncConflicted
 )
 
 func (s SyncState) String() string {
@@ -24,6 +29,8 @@ func (s SyncState) String() string {
 		return "syncing"
 	case SyncStalled:
 		return "stalled"
+	case SyncConflicted:
+		return "conflicted"
 	default:
 		return "unknown"
 	}
@@ -37,8 +44,8 @@ type mutagenSession struct {
 }
 
 // StatusSummary returns a reduced SyncState for the given session's Mutagen
-// sessions. The worst state across the session's syncs wins (stalled >
-// syncing > synced) so a single stuck endpoint surfaces.
+// sessions. The worst state across the session's syncs wins (conflicted >
+// stalled > syncing > synced) so a single stuck endpoint surfaces.
 func (m *Manager) StatusSummary(ctx context.Context, sessionID string) (SyncState, error) {
 	out, err := m.r.Output(ctx, nil,
 		"sync", "list",
@@ -70,7 +77,7 @@ func parseSyncState(out []byte) SyncState {
 	worst := SyncSynced
 	for _, s := range sessions {
 		st := classify(s)
-		if st > worst { // ordering: Stalled(3) > Syncing(2) > Synced(1)
+		if st > worst { // ordering: Conflicted(4) > Stalled(3) > Syncing(2) > Synced(1)
 			worst = st
 		}
 	}
@@ -152,7 +159,7 @@ func stagingRank(p string) int {
 
 func classify(s mutagenSession) SyncState {
 	if len(s.Conflicts) > 0 {
-		return SyncStalled
+		return SyncConflicted
 	}
 	status := strings.ToLower(s.Status)
 	switch {

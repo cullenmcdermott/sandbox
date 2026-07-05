@@ -13,15 +13,32 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/cullenmcdermott/sandbox/internal/session"
 	"github.com/cullenmcdermott/sandbox/tui/theme"
 )
 
 // spread lays left/right against width with filler between (left-aligned left,
-// right-aligned right).
+// right-aligned right). The right segment (status glyph / affordance) always
+// survives: if left+right won't fit, the left is truncated into the remaining
+// space so the row never overflows width and clips the right off the edge.
 func spread(left, right string, width int) string {
-	gap := width - lipgloss.Width(left) - lipgloss.Width(right)
+	if width < 1 {
+		return ""
+	}
+	rw := lipgloss.Width(right)
+	if rw >= width {
+		// The right segment alone fills (or overflows) the row: it wins, clipped
+		// to fit; no room for the left or filler.
+		return truncate(right, width)
+	}
+	// Reserve the right segment + at least one filler column, then truncate the
+	// left into whatever remains.
+	if avail := width - rw - 1; lipgloss.Width(left) > avail {
+		left = truncate(left, avail)
+	}
+	gap := width - lipgloss.Width(left) - rw
 	if gap < 1 {
 		gap = 1
 	}
@@ -40,9 +57,16 @@ func clampLines(s string, w, h int) string {
 		lines = append(lines, pagePad)
 	}
 	for i, l := range lines {
-		if d := w - lipgloss.Width(l); d > 0 {
-			lines[i] = l + withBackground(strings.Repeat(" ", d), theme.Page)
+		// Enforce the "exactly w" contract in both directions: clip a line that
+		// overflows w (else topBar/clusterStrip escape at narrow widths), then pad
+		// any shortfall (including the sub-w remainder a wide-rune clip can leave).
+		if lipgloss.Width(l) > w {
+			l = ansi.Truncate(l, w, "")
 		}
+		if d := w - lipgloss.Width(l); d > 0 {
+			l = l + withBackground(strings.Repeat(" ", d), theme.Page)
+		}
+		lines[i] = l
 	}
 	return strings.Join(lines, "\n")
 }
@@ -132,8 +156,12 @@ func boxWithTitle(title string, body []string, w, h int, bc, bg color.Color) str
 // list/detail + status bar), clamped to exactly w×h. If a toast notification is
 // active, it is overlaid at the top-right via the lipgloss compositor.
 func (m *Model) renderZoned(w, h int) string {
-	top := m.topBar(w)
-	strip := m.clusterStrip(w)
+	// Compute the session tally once per render and pass it to both bands (the
+	// sessionPartition contract: "computed once per render"). topBar and
+	// clusterStrip previously each recomputed it, tallying m.sessions twice.
+	c := m.partition()
+	top := m.topBar(w, c)
+	strip := m.clusterStrip(w, c)
 	bottom := m.bottomBar(w)
 
 	midH := h - 3 // minus the top + strip + bottom bands
@@ -193,9 +221,8 @@ func (m *Model) detailTitle(boxW int) string {
 
 // topBar is the persistent header band: branded wordmark + session tally, with a
 // "needs you" badge on the right when sessions are waiting.
-func (m *Model) topBar(w int) string {
+func (m *Model) topBar(w int, c sessionPartition) string {
 	wordmark := theme.GradientText("sandbox", true, theme.Charple, theme.Dolly)
-	c := m.partition()
 	// Use attentionSummary for the waiting/needs-input portion (D4): renders
 	// "2 waiting · 1 needs input" or "" when nothing needs attention.
 	attnStr := attentionSummary(m.sessions)
@@ -233,8 +260,7 @@ func (m *Model) topBar(w int) string {
 // pod-state counts (running / suspended / failed) on the left and the real
 // backend mix (claude N · opencode M) on the right, both derived from the live
 // sessions (P9, P13).
-func (m *Model) clusterStrip(w int) string {
-	c := m.partition()
+func (m *Model) clusterStrip(w int, c sessionPartition) string {
 	key := lipgloss.NewStyle().Foreground(theme.TextMuted)
 	val := lipgloss.NewStyle().Foreground(theme.TextBody)
 

@@ -169,6 +169,16 @@ func OnChange(fn func()) func() {
 	return func() { changeHooks[idx] = nil }
 }
 
+// themeEpoch bumps on every ApplyTheme so palette-derived render caches keyed on
+// it miss after a swap (a cached ANSI string from the old palette must not be
+// re-served). Read via Epoch(). Single-threaded with the UI render loop, so no
+// atomic is needed (consistent with the plain-global palette tokens).
+var themeEpoch uint64
+
+// Epoch returns a counter that increments on every theme swap. Fold it into a
+// render cache's key so the cache invalidates when the palette changes.
+func Epoch() uint64 { return themeEpoch }
+
 // Active returns the name of the currently applied theme.
 func Active() string { return activeTheme }
 
@@ -180,6 +190,7 @@ func init() { ApplyTheme(themes[0]) }
 // last so app-side styles re-skin.
 func ApplyTheme(t Theme) {
 	activeTheme = t.Name
+	themeEpoch++
 
 	Charple, Hazy, Dolly = t.Charple, t.Hazy, t.Dolly
 	Gold, Guac, Coral, Malibu, Peach = t.Gold, t.Guac, t.Coral, t.Malibu, t.Peach

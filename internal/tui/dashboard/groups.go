@@ -1,9 +1,15 @@
 package dashboard
 
-// groups.go — group-by-repo, rename, and archive for the session list (slice
+// groups.go — group-by-repo and rename for the session list (slice
 // 5f / Mockup C, design S15). Sessions can be grouped by project repo
-// (collapsible), renamed to human labels, and archived into a separate section
-// when finished.
+// (collapsible) and renamed to human labels.
+//
+// Archive (a separate "finished" section, design S15) is intentionally NOT
+// implemented here: the earlier `A`/archiveSelected/Session.Archived scaffold
+// was a no-op (nothing read the flag) and misled users, so it was removed. The
+// designed archived section belongs with the §2a row-model consolidation
+// (visibleSessions vs visibleRows), which is the right home for a new row
+// class — see TODO.md §1b.
 
 import (
 	"fmt"
@@ -60,15 +66,21 @@ func repoKey(s Session) string {
 }
 
 // groupedSessions returns sessions partitioned by repo when group view is on.
-// Each group header is represented by a session with an empty ID.
+// Each group header is represented by a groupedSession with a non-empty repo.
+//
+// Groups are built from visibleSessions() — NOT the raw m.sessions — so the `/`
+// filter narrows group contents (and drops now-empty groups) and the
+// attention-first float carries into group ordering. Repo order follows first
+// appearance in the already-filtered/sorted visibleSessions list.
 func (m *Model) groupedSessions() []groupedSession {
+	visible := m.visibleSessions()
 	type key struct {
 		repo     string
 		expanded bool
 	}
 	order := make(map[string]int)
 	var groups []key
-	for _, s := range m.sessions {
+	for _, s := range visible {
 		r := repoKey(s)
 		if _, ok := order[r]; !ok {
 			order[r] = len(groups)
@@ -79,15 +91,15 @@ func (m *Model) groupedSessions() []groupedSession {
 			groups = append(groups, key{repo: r, expanded: expanded})
 		}
 	}
-	// Preserve repo order by first appearance of a session in m.sessions.
 	var out []groupedSession
 	for _, g := range groups {
 		out = append(out, groupedSession{repo: g.repo})
 		if !g.expanded {
 			continue
 		}
-		for _, s := range m.sessions {
-			if repoKey(s) == g.repo {
+		for i := range visible {
+			if repoKey(visible[i]) == g.repo {
+				s := visible[i]
 				out = append(out, groupedSession{session: &s})
 			}
 		}
@@ -186,25 +198,6 @@ func (m *Model) selectedRowSession() *Session {
 	return nil
 }
 
-// archiveSelected archives the selected finished session.
-func (m *Model) archiveSelected() {
-	sel := m.selectedSession()
-	if sel == nil {
-		return
-	}
-	if sel.DashStatus != StatusNeedsInput {
-		return
-	}
-	for i := range m.sessions {
-		if m.sessions[i].ID() == sel.ID() {
-			m.sessions[i].Archived = true
-			break
-		}
-	}
-	m.sortSessions()
-	m.clampCursor()
-}
-
 // renderGroupHeader renders a repo header row.
 func (m *Model) renderGroupHeader(repo string, width int) string {
 	expanded := m.groupView.repos[repo]
@@ -216,8 +209,10 @@ func (m *Model) renderGroupHeader(repo string, width int) string {
 	// For collapsed groups, show an attention count so off-screen children still
 	// signal (D4 group rollup, design-system-and-states §3.3).
 	if !expanded {
+		// Count from visibleSessions() so the badge respects the active filter —
+		// it must not advertise attention in sessions the filter hid.
 		var groupSessions []Session
-		for _, s := range m.sessions {
+		for _, s := range m.visibleSessions() {
 			if repoKey(s) == repo {
 				groupSessions = append(groupSessions, s)
 			}

@@ -96,6 +96,35 @@ func TestSessionStatusGlyphAndString(t *testing.T) {
 	}
 }
 
+// TestStatusLabelExhaustive pins the list-row prose labels for every
+// SessionStatus. statusLabel(), chatStatusLabel() and String() are DELIBERATELY
+// distinct label sets for their contexts (list row vs chat header vs internal
+// state) — see chatStatusLabel's doc comment. This locks each mapping so a newly
+// added enum value can't silently fall through to the "unknown" default without
+// a test failing.
+func TestStatusLabelExhaustive(t *testing.T) {
+	want := map[SessionStatus]string{
+		StatusBusy:       "working",
+		StatusWaiting:    "waiting",
+		StatusNeedsInput: "needs input",
+		StatusIdle:       "idle",
+		StatusSuspended:  "suspended",
+		StatusFailed:     "failed",
+	}
+	// Walk the whole iota range (StatusIdle..StatusFailed) so a value added
+	// inside the range without a label is caught here rather than shipping as
+	// "unknown".
+	for st := StatusIdle; st <= StatusFailed; st++ {
+		w, ok := want[st]
+		if !ok {
+			t.Fatalf("statusLabel test has no expectation for status %d — add it", st)
+		}
+		if got := statusLabel(st); got != w {
+			t.Errorf("statusLabel(%v) = %q, want %q", st, got, w)
+		}
+	}
+}
+
 // --------------------------------------------------------------------------
 // Sort ordering tests
 // --------------------------------------------------------------------------
@@ -591,9 +620,18 @@ func TestRunnerUnreachableMidTurnRetriesThenFails(t *testing.T) {
 	}
 }
 
-// ORACLE: When the stream ends while the session is already idle/needs-input,
-// the status degrades to cluster-derived baseline (not failed). [B13]
-func TestRunnerStreamEndedWhenAtRestDegradesToIdle(t *testing.T) {
+// ORACLE: When the stream ends on a still-Running pod, an at-rest NeedsInput
+// session PRESERVES its attention state and schedules a reconnect — it does NOT
+// immediately degrade to idle. [B13, revised by §1a step 7]
+//
+// This revises the original B13 contract (which degraded NeedsInput→idle on the
+// first stream-end). The §1a audit found that reset permanently loses the
+// "awaiting your input" signal on a transient port-forward blip, because the
+// reconnect replays after=lastSeq and never re-emits the turn.completed that set
+// NeedsInput. The degrade-to-idle now happens only after the reconnects are
+// EXHAUSTED (via degradeUnreachable — see TestRunnerUnreachableMidTurnRetriesThenFails
+// for the Busy path), i.e. when the pod is genuinely unreachable, not on a blip.
+func TestRunnerStreamEndedAtRestPreservesAttentionAndReconnects(t *testing.T) {
 	m := New(nil)
 	m.sessions = []Session{
 		{
@@ -604,11 +642,13 @@ func TestRunnerStreamEndedWhenAtRestDegradesToIdle(t *testing.T) {
 	m.liveSSECancels["sess-d"] = func() {}
 	m.liveSSEChannels["sess-d"] = make(chan session.Event)
 
-	next, _ := m.handleRunnerEvent(RunnerEventMsg{ID: "sess-d", StreamEnded: true})
+	next, cmd := m.handleRunnerEvent(RunnerEventMsg{ID: "sess-d", StreamEnded: true})
 	dm := next.(*Model)
-	// For a Running pod at rest, cluster-derived = idle.
-	if dm.sessions[0].DashStatus != StatusIdle {
-		t.Errorf("DashStatus after stream-ended at rest = %v, want StatusIdle", dm.sessions[0].DashStatus)
+	if dm.sessions[0].DashStatus != StatusNeedsInput {
+		t.Errorf("DashStatus after stream-ended on a Running pod = %v, want preserved StatusNeedsInput", dm.sessions[0].DashStatus)
+	}
+	if cmd == nil {
+		t.Error("stream-ended on a Running pod should schedule a reconnect tick, got nil")
 	}
 }
 
@@ -696,6 +736,42 @@ func TestLiveSSEReadyAcceptedForRunningSession(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Error("liveSSEReadyMsg for running session must return a cmd")
+	}
+}
+
+// ORACLE: liveSSEReadyMsg for the CURRENTLY-ATTACHED session must cancel the
+// incoming background stream — the foreground transcript already owns an active
+// client, so installing a second passive stream (detach→fast-reattach race)
+// means a double client + extra port-forward. Mirrors the liveSSEReconnectMsg
+// attachedID guard. [§1a LOW]
+func TestLiveSSEReadyCancelledForAttachedSession(t *testing.T) {
+	m := New(nil)
+	m.sessions = []Session{
+		{
+			State:      session.State{ID: "att-id", Status: session.StatusRunning},
+			DashStatus: StatusIdle,
+		},
+	}
+	m.attachedID = "att-id" // foreground transcript owns this session's stream
+
+	cancelled := false
+	msg := liveSSEReadyMsg{
+		id:     "att-id",
+		ch:     make(chan session.Event),
+		cancel: func() { cancelled = true },
+	}
+
+	next, cmd := m.Update(msg)
+	dm := next.(*Model)
+
+	if !cancelled {
+		t.Error("liveSSEReadyMsg for the attached session must call cancel()")
+	}
+	if _, exists := dm.liveSSECancels["att-id"]; exists {
+		t.Error("must NOT store a background stream for the attached (foreground) session")
+	}
+	if cmd != nil {
+		t.Error("liveSSEReadyMsg for the attached session must return nil cmd (no passive consume)")
 	}
 }
 

@@ -36,9 +36,12 @@ func TestParseSyncState(t *testing.T) {
 		{"staging", `[{"status":"Staging files on beta"}]`, SyncSyncing},
 		{"scanning", `[{"status":"Scanning files"}]`, SyncSyncing},
 		{"halted", `[{"status":"Halted on root emptied"}]`, SyncStalled},
-		{"conflicts", `[{"status":"Watching for changes","conflicts":[{"root":"x"}]}]`, SyncStalled},
+		{"conflicts", `[{"status":"Watching for changes","conflicts":[{"root":"x"}]}]`, SyncConflicted},
 		{"empty", `[]`, SyncUnknown},
 		{"two-sessions-worst-wins", `[{"status":"Watching for changes"},{"status":"Staging files on beta"}]`, SyncSyncing},
+		// A conflict outranks a co-occurring transport stall so the actionable
+		// problem surfaces instead of being masked as a generic error.
+		{"conflict-beats-halted", `[{"status":"Halted on root emptied"},{"status":"Watching for changes","conflicts":[{"root":"x"}]}]`, SyncConflicted},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

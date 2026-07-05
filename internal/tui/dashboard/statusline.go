@@ -502,16 +502,22 @@ func (m *TranscriptModel) renderStatusLine() string {
 // An empty/unknown status returns "" so the status line stays unchanged.
 func syncSegment(status string) string {
 	glyph, ok := map[string]string{
-		"synced":  "✓",
-		"syncing": "⟳",
-		"stalled": "⚠",
+		"synced":     "✓",
+		"syncing":    "⟳",
+		"stalled":    "⚠",
+		"conflicted": "⇄",
 	}[status]
 	if !ok {
 		return ""
 	}
+	// Transport stall = Coral (an error that may self-heal); conflict = Gold (it
+	// needs YOU to resolve, mirroring the waiting-on-user status color).
 	color := theme.TextMuted
-	if status == "stalled" {
+	switch status {
+	case "stalled":
 		color = theme.Coral
+	case "conflicted":
+		color = theme.Gold
 	}
 	return lipgloss.NewStyle().Foreground(color).Render(glyph + " " + status)
 }

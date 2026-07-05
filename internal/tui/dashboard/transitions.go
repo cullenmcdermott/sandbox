@@ -22,11 +22,11 @@ const (
 // at `since` (a fresh session/message fades in over rowEnterDur), collapsing to
 // 1 immediately under reduce-motion. It is 1 once the window has elapsed.
 func rowEnter(since time.Time) float64 {
-	if since.IsZero() || time.Since(since) >= rowEnterDur {
+	if since.IsZero() || nowFunc().Sub(since) >= rowEnterDur {
 		return 1
 	}
 	tr := anim.Transition{Total: rowEnterDur}
-	return tr.At(time.Since(since))
+	return tr.At(nowFunc().Sub(since))
 }
 
 // statusFlash returns the strength (1→0) of a fading status-change highlight for
@@ -37,7 +37,7 @@ func statusFlash(since time.Time) float64 {
 	if since.IsZero() {
 		return 0
 	}
-	el := time.Since(since)
+	el := nowFunc().Sub(since)
 	if el >= statusFlashDur {
 		return 0
 	}
@@ -62,5 +62,5 @@ func flashBg(base, accent color.Color, since time.Time) (color.Color, bool) {
 // permissionAppearDur), collapsing to 1 immediately under reduce-motion.
 func permissionAppear(since time.Time) float64 {
 	tr := anim.Transition{Total: permissionAppearDur}
-	return tr.At(time.Since(since))
+	return tr.At(nowFunc().Sub(since))
 }

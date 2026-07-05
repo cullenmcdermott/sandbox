@@ -43,8 +43,13 @@ type blockItem struct {
 	m         *TranscriptModel
 	idx       int
 	streaming bool
-	unread    bool
-	fp        uint64
+	// streamReasoning marks the ephemeral tail as the live THINKING tail (fed from
+	// m.reasoningBuf) rather than the assistant-message tail (m.assistantBuf). Only
+	// one is ever live at a time — a message's thinking block completes before its
+	// text block starts — so the single streamItem serves both (§2b gap 3).
+	streamReasoning bool
+	unread          bool
+	fp              uint64
 	// fresh marks an item whose fingerprint has never been computed (just
 	// created); dirty marks an immutable-kind block whose content was mutated in
 	// place (the only such case is the RV9 dropped-partial text replacement).
@@ -77,6 +82,16 @@ func (m *TranscriptModel) markBlockDirty(idx int) {
 
 func (it *blockItem) Render(width int) string {
 	var body string
+	if it.streaming && it.streamReasoning {
+		// Live THINKING tail (§2b gap 3): stream the reasoning text as it arrives,
+		// muted+italic under a "∴ Thinking" header, instead of buffering silently
+		// until reasoning.completed. It collapses to the compact "∴ Thought (N
+		// lines): …" summary (renderBlock's blockReasoning) when the block commits.
+		if it.unread {
+			return it.m.renderUnreadDivider() + "\n" + it.m.renderLiveReasoning(it.m.reasoningBuf.String())
+		}
+		return it.m.renderLiveReasoning(it.m.reasoningBuf.String())
+	}
 	if it.streaming {
 		// A2: use persistent AssistantItem + StreamingMarkdown for incremental
 		// rendering of the live tail instead of creating a new item per delta.
@@ -210,13 +225,26 @@ func (m *TranscriptModel) reconcileItems() {
 	for _, it := range m.items {
 		items = append(items, it)
 	}
-	if m.streaming && m.assistantBuf.Len() > 0 {
+	// Append the ephemeral live tail: the streaming assistant message, or — when a
+	// thinking block is in flight before any text — the live reasoning (§2b gap 3).
+	// Assistant wins if both flags are somehow set (a text block supersedes an
+	// unfinished think). Exactly one tail, reusing the single streamItem.
+	switch {
+	case m.streaming && m.assistantBuf.Len() > 0:
 		if m.streamItem == nil {
 			m.streamItem = &blockItem{Versioned: list.NewVersioned(), m: m, idx: -1, streaming: true}
 		}
+		m.streamItem.streamReasoning = false
 		m.bumpStreamItem()
 		items = append(items, m.streamItem)
-	} else {
+	case m.reasoning:
+		if m.streamItem == nil {
+			m.streamItem = &blockItem{Versioned: list.NewVersioned(), m: m, idx: -1, streaming: true}
+		}
+		m.streamItem.streamReasoning = true
+		m.bumpStreamItem()
+		items = append(items, m.streamItem)
+	default:
 		m.streamItem = nil
 	}
 	m.body.SetItems(items...)
@@ -228,7 +256,15 @@ func (m *TranscriptModel) bumpStreamItem() {
 	if m.streamItem == nil {
 		return
 	}
-	fp := fnvStr("stream", m.assistantBuf.String())
+	// Fingerprint the live buffer for the tail's current mode. The mode is folded
+	// in so a thinking→text handoff (reasoning tail replaced by the assistant tail)
+	// can't collide fingerprints even at identical text.
+	var fp uint64
+	if m.streamItem.streamReasoning {
+		fp = fnvStr("think", m.reasoningBuf.String())
+	} else {
+		fp = fnvStr("stream", m.assistantBuf.String())
+	}
 	if fp != m.streamItem.fp {
 		m.streamItem.fp = fp
 		m.streamItem.Bump()
@@ -258,6 +294,9 @@ func (m *TranscriptModel) streamDelta() {
 func (m *TranscriptModel) blockFP(b tblock, unread bool) uint64 {
 	m.fpComputes++
 	var sb strings.Builder
+	// Fold the theme epoch in so a /theme swap invalidates every block's cached
+	// render (the palette baked into the ANSI would otherwise persist).
+	fmt.Fprintf(&sb, "e%d\x00", theme.Epoch())
 	fmt.Fprintf(&sb, "k%d\x00", b.kind)
 	sb.WriteString(b.text)
 	sb.WriteByte(0)
@@ -282,6 +321,28 @@ func (m *TranscriptModel) blockFP(b tblock, unread bool) uint64 {
 		sb.WriteString("U")
 	}
 	return fnvStr(sb.String())
+}
+
+// transcriptEmpty reports whether there is nothing to show in the body yet — a
+// freshly opened session with no committed blocks, no streaming turn, and no
+// pending permission. Drives the first-hint welcome (renderTranscript).
+func (m *TranscriptModel) transcriptEmpty() bool {
+	return len(m.blocks) == 0 && !m.streaming && !m.reasoning && m.pending == nil
+}
+
+// emptyTranscriptView is the centered first-hint shown in a fresh session so a
+// new Claude session isn't a blank void. Padded with plain whitespace to match
+// bodyView's fitModal fill (no forced background). Sized to the body rect.
+func (m *TranscriptModel) emptyTranscriptView(width, height int) string {
+	title := theme.GradientText("new session", true, theme.Charple, theme.Dolly)
+	tagline := lipgloss.NewStyle().Foreground(theme.TextBody).Render("ready when you are")
+	hint := lipgloss.NewStyle().Foreground(theme.TextMuted).Render("type a message below to begin · ") +
+		kit.Kbd("ctrl+]", "detach")
+	body := strings.Join([]string{title, "", tagline, "", hint}, "\n")
+	placed := lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, body)
+	// Enforce the exact body rect the same way bodyView does, so a narrow terminal
+	// (where a hint line would overflow) can't push the surrounding chrome around.
+	return fitModal(placed, width, height)
 }
 
 // bodyView renders the list and pads it to the body height so the surrounding

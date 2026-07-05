@@ -867,7 +867,14 @@ func (m *TranscriptModel) previewView(w, h int, banner string) string {
 
 // renderTranscript builds the actual transcript string for the current size.
 func (m *TranscriptModel) renderTranscript(w, h int) string {
-	parts := []string{m.renderHeader(), styleDivider.Render(strings.Repeat("─", w)), m.bodyView()}
+	body := m.bodyView()
+	// A fresh session has no history yet; show a brief welcome instead of a blank
+	// void (parity with the dashboard's firstRunView). Live attached view only —
+	// previewView keeps its plain body under the connect banner.
+	if m.transcriptEmpty() {
+		body = m.emptyTranscriptView(max(1, m.width-1), m.body.Height())
+	}
+	parts := []string{m.renderHeader(), styleDivider.Render(strings.Repeat("─", w)), body}
 	if m.pending != nil {
 		// Rebuild the box at render time so the permission-appear border fade
 		// (§C.3) reads the live elapsed time rather than the cached layout build.
@@ -928,9 +935,9 @@ func (m *TranscriptModel) layout() {
 	}
 
 	// Size the composer first so inputRows() (which wraps on this width) is
-	// accurate, then reserve the body height around the boxed input. Box inner
-	// width = full width - scrollbar(1) - border(2) - padding(2).
-	m.input.SetWidth(max(10, m.width-5))
+	// accurate, then reserve the body height around the boxed input. Must match
+	// renderInput() exactly, or the reserved height drifts from what renders.
+	m.input.SetWidth(m.composerInnerWidth())
 	// header(1) + divider(1) + input gap(1) + box(border 2 + rows) + hint row(1).
 	inputH := m.inputRows() + 3
 	vpH := m.height - 3 - inputH - statusLineRows - permH - palH - searchH
@@ -947,6 +954,22 @@ const maxInputRows = 6
 
 // inputRows is the composer's current display height (1..maxInputRows), driving
 // both the box render and the body-height reservation in layout.
+// composerBoxWidth is the outer width of the rounded composer box: the full
+// width minus one column reserved for the scrollbar gutter, floored so the box
+// never collapses.
+func (m *TranscriptModel) composerBoxWidth() int {
+	return max(20, m.width-1)
+}
+
+// composerInnerWidth is the textarea's content/wrap width inside the box:
+// box width minus border(2) + padding(2). layout() (which reserves body height
+// from inputRows()) and renderInput() (which renders) MUST size the textarea
+// with this same value, or the reserved height drifts from the rendered height
+// at narrow widths.
+func (m *TranscriptModel) composerInnerWidth() int {
+	return m.composerBoxWidth() - 4
+}
+
 func (m *TranscriptModel) inputRows() int {
 	n := m.input.LineCount()
 	if n < 1 {
@@ -1034,6 +1057,24 @@ func (m *TranscriptModel) assistantWrapWidth() int {
 
 // renderBlockRaw renders a block's bare content (no gutter/indent). Wrapping
 // kinds reserve gutterInset columns so the chrome added by renderBlock fits.
+// renderAssistantMD renders assistant markdown through the pooled glamour
+// renderer, falling back to a plainly-styled render when the renderer is
+// unavailable or errors. The finalized-block path (renderBlockRaw) and the live
+// streaming path (streamAI) MUST share this so their output can't drift — a
+// difference here reflows the block at message.completed and lurches the view
+// (T1). Matches AssistantItem.SetRenderContentMD's signature.
+func renderAssistantMD(text string, width int) string {
+	r := chat.MarkdownRenderer(width)
+	if r == nil {
+		return styleTAssistant.Render(text)
+	}
+	out, err := r.Render(text)
+	if err != nil {
+		return styleTAssistant.Render(text)
+	}
+	return strings.TrimRight(out, "\n")
+}
+
 func (m *TranscriptModel) renderBlockRaw(b tblock) string {
 	switch b.kind {
 	case blockUser:
@@ -1045,17 +1086,7 @@ func (m *TranscriptModel) renderBlockRaw(b tblock) string {
 		// m.md allocation. RawRender emits no focus prefix, preserving
 		// byte-for-byte parity with the former m.md.Render + TrimRight path.
 		ai := chat.NewAssistantItem(&chat.AssistantMessage{Content: b.text, Finished: true})
-		ai.SetRenderContentMD(func(text string, width int) string {
-			r := chat.MarkdownRenderer(width)
-			if r == nil {
-				return styleTAssistant.Render(text)
-			}
-			out, err := r.Render(text)
-			if err != nil {
-				return styleTAssistant.Render(text)
-			}
-			return strings.TrimRight(out, "\n")
-		})
+		ai.SetRenderContentMD(renderAssistantMD)
 		return ai.RawRender(wrap)
 	case blockToolCard:
 		if b.tool != nil {
@@ -1102,6 +1133,24 @@ func (m *TranscriptModel) renderBlockRaw(b tblock) string {
 	}
 	return b.text
 }
+
+// renderLiveReasoning renders the in-flight thinking text as a muted, italic,
+// word-wrapped block under a "∴ Thinking" header — the live counterpart of the
+// compact finalized blockReasoning summary (§2b gap 3). It shares placeIndent
+// placement with the finalized block, so when the think collapses to its
+// one-line summary at reasoning.completed the content stays in the same column.
+// Empty text (thinking just started) shows the header alone as a live indicator.
+func (m *TranscriptModel) renderLiveReasoning(text string) string {
+	label := lipgloss.NewStyle().Foreground(theme.TextMuted).Bold(true).Render("∴ Thinking")
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return placeIndent(label)
+	}
+	body := lipgloss.NewStyle().Foreground(theme.TextMuted).Italic(true).
+		Width(m.assistantWrapWidth()).Render(text)
+	return placeIndent(label + "\n" + body)
+}
+
 func (m *TranscriptModel) appendBlock(kind tblockKind, text string) {
 	m.blocks = append(m.blocks, tblock{kind: kind, text: text})
 	m.syncBody()
@@ -1368,11 +1417,9 @@ func (m *TranscriptModel) renderHeader() string {
 		right = meta + "  " + glyph
 	}
 
-	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)
-	if gap < 1 {
-		gap = 1
-	}
-	return left + strings.Repeat(" ", gap) + right
+	// spread truncates a long title rather than letting it overflow and clip the
+	// status glyph / reconnect state off the right edge (§1c spot 1).
+	return spread(left, right, m.width)
 }
 
 func (m *TranscriptModel) renderInput() string {
@@ -1389,8 +1436,8 @@ func (m *TranscriptModel) renderInput() string {
 	// reserved for the scrollbar gutter). Its border brightens to Charple when
 	// you're typing (INSERT) and stays quiet otherwise, so the box itself signals
 	// focus instead of a separate badge.
-	boxW := max(20, m.width-1)
-	m.input.SetWidth(boxW - 4) // border(2) + padding(2)
+	boxW := m.composerBoxWidth()
+	m.input.SetWidth(m.composerInnerWidth())
 	m.input.SetHeight(m.inputRows())
 	borderColor := theme.BorderMedium
 	if m.imode == modeInsert {
@@ -1447,11 +1494,9 @@ func (m *TranscriptModel) renderInput() string {
 		}
 		badge += chip
 	}
-	gap := m.width - lipgloss.Width(badge) - lipgloss.Width(right)
-	if gap < 1 {
-		gap = 1
-	}
-	hint := badge + strings.Repeat(" ", gap) + right
+	// spread truncates the (already internally-clipped) chips rather than letting
+	// them overflow and clip the send/esc affordance off the right edge (§1c spot 1).
+	hint := spread(badge, right, m.width)
 
 	return box + "\n" + hint
 }
@@ -1957,7 +2002,7 @@ func (m *TranscriptModel) beginTurn() {
 	// Clear the previous turn's id; turn.started repopulates it. Until then an
 	// interrupt relies on the runner's sole-active-turn fallback.
 	m.activeTurnID = ""
-	m.turnStart = time.Now()
+	m.turnStart = nowFunc()
 	m.inTok, m.outTok, m.costUSD = 0, 0, 0
 	// Clear the retained assistant text so a stale /goal sentinel from a prior
 	// turn can't trip completion before this turn produces its own reply.
@@ -2015,7 +2060,7 @@ func (m *TranscriptModel) workingStatus() string {
 	}
 	working := styleSLBusy.Render("working" + ell)
 	out := spin + " " + working + "  " +
-		styleSLLabel.Render(fmtElapsed(time.Since(m.turnStart)))
+		styleSLLabel.Render(fmtElapsed(nowFunc().Sub(m.turnStart)))
 	if m.inTok > 0 || m.outTok > 0 {
 		out += styleSLMuted.
 			Render(fmt.Sprintf("  ↑%s ↓%s", kit.FormatTokens(m.inTok), kit.FormatTokens(m.outTok)))
@@ -2041,7 +2086,7 @@ func (m *TranscriptModel) turnFooter() string {
 		parts = append(parts, "via "+MarkedClientLabel(m.agent))
 	}
 	if !m.turnStart.IsZero() {
-		parts = append(parts, fmtElapsed(time.Since(m.turnStart)))
+		parts = append(parts, fmtElapsed(nowFunc().Sub(m.turnStart)))
 	}
 	if m.inTok > 0 || m.outTok > 0 {
 		parts = append(parts, fmt.Sprintf("↑%s ↓%s", kit.FormatTokens(m.inTok), kit.FormatTokens(m.outTok)))
@@ -2244,6 +2289,32 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 			m.costUSD = p.TotalCostUSD
 		}
 
+	case session.EventContextCompacted:
+		// The SDK compacted (summarized) the conversation to fit the context
+		// window. Reset the ctx% token baseline to the post-compaction size so
+		// the header gauge reflects the smaller conversation (a usage.updated
+		// event refreshes it on the next turn); PostTokens is optional on the
+		// wire, so when it is absent (0) we leave the counters untouched. Drop a
+		// one-line marker so a long run's compaction is visible in scrollback.
+		var p session.ContextCompactedPayload
+		_ = json.Unmarshal(ev.Payload, &p)
+		if p.PostTokens > 0 {
+			m.inTok = p.PostTokens
+			m.cacheReadTok = 0
+			m.cacheWriteTok = 0
+		}
+		marker := "context compacted"
+		switch {
+		case p.PreTokens > 0 && p.PostTokens > 0:
+			marker = fmt.Sprintf("context compacted · %s→%s tokens",
+				kit.FormatTokens(p.PreTokens), kit.FormatTokens(p.PostTokens))
+		case p.PreTokens > 0:
+			marker = fmt.Sprintf("context compacted · %s tokens", kit.FormatTokens(p.PreTokens))
+		case p.PostTokens > 0:
+			marker = fmt.Sprintf("context compacted · %s tokens", kit.FormatTokens(p.PostTokens))
+		}
+		m.appendBlock(blockInfo, marker)
+
 	case session.EventRateLimitUpdated:
 		var p session.RateLimitPayload
 		_ = json.Unmarshal(ev.Payload, &p)
@@ -2343,17 +2414,7 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		m.streaming = true
 		m.assistantBuf.Reset()
 		m.streamAI = chat.NewAssistantItem(&chat.AssistantMessage{Streaming: true})
-		m.streamAI.SetRenderContentMD(func(text string, width int) string {
-			r := chat.MarkdownRenderer(width)
-			if r == nil {
-				return styleTAssistant.Render(text)
-			}
-			out, err := r.Render(text)
-			if err != nil {
-				return styleTAssistant.Render(text)
-			}
-			return strings.TrimRight(out, "\n")
-		})
+		m.streamAI.SetRenderContentMD(renderAssistantMD)
 		m.streamAI.SetRendererFactory(func(width int) chat.Renderer {
 			return chat.MarkdownRenderer(width)
 		})
@@ -2374,6 +2435,31 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		m.streaming = false
 		m.assistantBuf.Reset()
 		m.streamAI = nil
+		if p.Role == "user" {
+			// A user-role message.completed is the runner echoing an injected /
+			// string user message (runner/src/mapping.ts handleUserMessage), not
+			// assistant output. Render it with the user's own styling instead of
+			// as assistant markdown, and keep it out of lastAssistantText (the
+			// /goal sentinel scan reads that). Dedup against the optimistic user
+			// block appended at submit so an echo of the just-sent prompt doesn't
+			// double up.
+			//
+			// Use strictly p.Content here — NOT the assistantBuf fallback computed
+			// above for the assistant path — so an empty user echo is an
+			// unconditional no-op and can never attribute buffered assistant text
+			// to the user.
+			if t := strings.TrimSpace(p.Content); t != "" {
+				if n := len(m.blocks); n > 0 && m.blocks[n-1].kind == blockUser &&
+					strings.TrimSpace(m.blocks[n-1].text) == t {
+					m.syncBody() // duplicate of the optimistic block — skip
+				} else {
+					m.appendBlock(blockUser, p.Content)
+				}
+			} else {
+				m.syncBody()
+			}
+			break
+		}
 		// Retain the last substantive assistant text so /goal can scan it for the
 		// completion sentinel when the turn ends.
 		if strings.TrimSpace(text) != "" {
@@ -2443,10 +2529,13 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 				Plan string `json:"plan"`
 			}
 			_ = json.Unmarshal(p.Input, &pl)
-			m.pending = &transcriptPermission{id: p.PermissionID, tool: p.Tool, isPlan: true, plan: pl.Plan, since: time.Now()}
+			// nowFunc (not time.Now) so the anti-type-ahead grace gate is anchored
+			// on the same injectable clock permissionAnswerable() compares against
+			// — otherwise a test that swaps nowFunc can't exercise the gate.
+			m.pending = &transcriptPermission{id: p.PermissionID, tool: p.Tool, isPlan: true, plan: pl.Plan, since: nowFunc()}
 		} else {
 			adds, dels, diffLines := permissionDiffStat(p.Tool, p.Input)
-			m.pending = &transcriptPermission{id: p.PermissionID, tool: p.Tool, arg: toolArg(p.Tool, p.Input), adds: adds, dels: dels, diffLines: diffLines, since: time.Now()}
+			m.pending = &transcriptPermission{id: p.PermissionID, tool: p.Tool, arg: toolArg(p.Tool, p.Input), adds: adds, dels: dels, diffLines: diffLines, since: nowFunc()}
 		}
 		m.status = StatusWaiting
 		m.layout()
@@ -2504,16 +2593,21 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		}
 
 	case session.EventReasoningStarted:
-		// A reasoning/thinking block is beginning. Initialize the buffer.
+		// A reasoning/thinking block is beginning. Initialize the buffer and show
+		// the live "∴ Thinking" tail immediately (§2b gap 3) instead of a bare
+		// spinner — syncBody reconciles the ephemeral reasoning tail into the list.
 		m.reasoning = true
 		m.reasoningBuf.Reset()
+		m.syncBody()
 
 	case session.EventReasoningDelta:
-		// Incremental chunk of thinking text.
+		// Incremental chunk of thinking text — stream it into the live tail as it
+		// arrives (§2b gap 3), mirroring the assistant streamDelta hot path.
 		if m.reasoning {
 			var p session.MessagePayload // same {Content} shape as message.delta
 			_ = json.Unmarshal(ev.Payload, &p)
 			m.reasoningBuf.WriteString(p.Content)
+			m.streamDelta()
 		}
 
 	case session.EventReasoningCompleted:
@@ -2530,7 +2624,12 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		m.reasoning = false
 		m.reasoningBuf.Reset()
 		if text != "" {
-			m.appendBlock(blockReasoning, text)
+			m.appendBlock(blockReasoning, text) // appendBlock syncs the body (clears the live tail)
+		} else {
+			// Nothing to commit, but the live "∴ Thinking" tail must still be torn
+			// down now that reasoning has ended (§2b gap 3) — appendBlock's implicit
+			// syncBody didn't run.
+			m.syncBody()
 		}
 
 	case session.EventToolDelta:

@@ -297,7 +297,7 @@ func TestP9_ClusterStripDerivesBackendMix(t *testing.T) {
 		Session{State: session.State{ID: "1", Backend: session.BackendClaudeSDK, Status: session.StatusRunning}, DashStatus: StatusIdle},
 		Session{State: session.State{ID: "2", Backend: session.BackendOpenCode, Status: session.StatusRunning}, DashStatus: StatusIdle},
 	)
-	strip := stripANSI(m.clusterStrip(m.width))
+	strip := stripANSI(m.clusterStrip(m.width, m.partition()))
 	if !strings.Contains(strip, "claude 1") {
 		t.Errorf("cluster strip should show 'claude 1'; got:\n%s", strip)
 	}
@@ -380,10 +380,10 @@ func TestP13_SharedPartitionCounts(t *testing.T) {
 		t.Errorf("partition backend mix wrong: %+v", c.byBackend)
 	}
 	// Header tally and cluster strip both consume it.
-	if !strings.Contains(stripANSI(m.topBar(m.width)), "1 busy") {
+	if !strings.Contains(stripANSI(m.topBar(m.width, m.partition())), "1 busy") {
 		t.Error("header should reflect shared busy count")
 	}
-	if !strings.Contains(stripANSI(m.clusterStrip(m.width)), "1 failed") {
+	if !strings.Contains(stripANSI(m.clusterStrip(m.width, m.partition())), "1 failed") {
 		t.Error("cluster strip should reflect shared failed count")
 	}
 }

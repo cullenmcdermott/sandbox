@@ -563,13 +563,13 @@ func TestAttentionSummaryWiredInTopBar(t *testing.T) {
 	m.width, m.height = 120, 24
 
 	m.sessions = []Session{makeSession("w", StatusWaiting)}
-	bar := m.topBar(120)
+	bar := m.topBar(120, m.partition())
 	if !strings.Contains(bar, "waiting") {
 		t.Errorf("topBar should contain 'waiting' when a session is waiting; got: %q", bar)
 	}
 
 	m.sessions = []Session{makeSession("i", StatusIdle)}
-	bar = m.topBar(120)
+	bar = m.topBar(120, m.partition())
 	if strings.Contains(bar, "waiting") {
 		t.Errorf("topBar should not contain 'waiting' when no session is waiting; got: %q", bar)
 	}
