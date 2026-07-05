@@ -222,6 +222,14 @@ func sandboxToState(sb *agentv1alpha1.Sandbox) session.State {
 	switch {
 	case replicas == 0:
 		st.Status = session.StatusSuspended
+	case sandboxStale(sb, time.Now()):
+		// Staleness cross-check (§1d): the Sandbox is being deleted, or its Ready
+		// condition has been not-True long enough that we no longer trust the
+		// controller's reporting (node-eviction lag). Report UNKNOWN rather than a
+		// confident RUNNING/CREATING. Mirrors statusFromSandbox's pod cross-check;
+		// the pod-level NodeLost signal isn't visible on the watch (no pod Get by
+		// design), so the backend Status path covers that window.
+		st.Status = session.StatusUnknown
 	case sandboxReady(sb):
 		// The controller sets Ready=True only once the backing pod is Running,
 		// its PodReady condition is true, and it has pod IPs (and any required
@@ -257,6 +265,24 @@ func sandboxReady(sb *agentv1alpha1.Sandbox) bool {
 	for _, cond := range sb.Status.Conditions {
 		if cond.Type == string(agentv1alpha1.SandboxConditionReady) {
 			return cond.Status == metav1.ConditionTrue
+		}
+	}
+	return false
+}
+
+// sandboxStale mirrors podStale for the watch path, which holds only the Sandbox
+// (no pod Get by design). It flags a Sandbox being deleted, or one whose Ready
+// condition has been not-True past stalenessThreshold, so the watch doesn't emit
+// a confident RUNNING/CREATING for a session the controller can no longer vouch
+// for (§1d). The pod-level NodeLost signal isn't observable here; the backend
+// Status path (which does hold the pod) covers that.
+func sandboxStale(sb *agentv1alpha1.Sandbox, now time.Time) bool {
+	if sb.DeletionTimestamp != nil {
+		return true
+	}
+	for _, cond := range sb.Status.Conditions {
+		if cond.Type == string(agentv1alpha1.SandboxConditionReady) {
+			return readyStale(string(cond.Status), cond.LastTransitionTime, now)
 		}
 	}
 	return false

@@ -801,10 +801,19 @@ func (b *Backend) statusFromSandbox(ctx context.Context, sb *agentv1alpha1.Sandb
 		pod, err := b.getPodForSandbox(ctx, sb)
 		if err == nil && pod != nil {
 			st.PodName = pod.Name
-			st.PodReady = isPodReady(pod)
-			if st.PodReady {
+			switch {
+			case podStale(pod, time.Now()):
+				// Node-eviction lag (§1d): a pod on a dead/unreachable node keeps
+				// reading Running/Ready for minutes while the kubelet is silent. A
+				// staleness signal (terminating, NodeLost, or Ready-not-True too long)
+				// means we can't trust that — report UNKNOWN rather than a confident
+				// RUNNING whose SSE stream would be silently stalled.
+				st.PodReady = false
+				st.Status = session.StatusUnknown
+			case isPodReady(pod):
+				st.PodReady = true
 				st.Status = session.StatusRunning
-			} else {
+			default:
 				st.Status = session.StatusCreating
 			}
 		} else {
@@ -1055,6 +1064,62 @@ func isPodReady(pod *corev1.Pod) bool {
 	for _, cond := range pod.Status.Conditions {
 		if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
 			return true
+		}
+	}
+	return false
+}
+
+// stalenessThreshold bounds how long we keep trusting a k8s object's Ready/phase
+// reporting after readiness lapses. When a node dies the kubelet stops
+// heart-beating and k8s takes minutes (node-monitor-grace-period + eviction lag)
+// to mark the pod NotReady/Failed, so a crashed session keeps reading Running
+// with a silently-stalled SSE stream (§1d). Once a not-True Ready condition has
+// held past this threshold we stop trusting the phase and report UNKNOWN. Set
+// above the default node-monitor-grace-period (~40s) so a pod that is briefly
+// not-Ready while starting isn't misflagged.
+const stalenessThreshold = 90 * time.Second
+
+// podReasonNodeLost is the status reason the node lifecycle controller stamps on
+// pods whose node became unreachable/lost (k8s pkg/controller/util/node:
+// NodeUnreachablePodReason). The kubelet has gone silent, so the pod's phase and
+// Ready condition are stale even when they still read Running/True.
+const podReasonNodeLost = "NodeLost"
+
+// readyStale reports whether a Ready-style condition that is no longer True has
+// held that way past stalenessThreshold. A True condition is never stale; a
+// condition with no recorded transition time is treated as not-yet-stale (we
+// can't age it). Shared by the pod (Status/List) and Sandbox (watch) paths so
+// both apply the same cross-check to whatever object they hold.
+func readyStale(status string, lastTransition metav1.Time, now time.Time) bool {
+	if status == string(metav1.ConditionTrue) {
+		return false
+	}
+	return !lastTransition.IsZero() && now.Sub(lastTransition.Time) >= stalenessThreshold
+}
+
+// podStale reports whether a pod that might otherwise read Running/Ready is
+// actually in a state we can't trust (§1d): being deleted (eviction/drain),
+// reported lost by the node controller, or Running-but-Ready-not-True past the
+// staleness threshold. Cross-checking this before mapping to StatusRunning stops
+// a dead-node pod — whose phase/Ready lag by minutes — from masquerading as a
+// healthy session with a stalled SSE stream. A still-Pending pod that is slow to
+// start is left to the normal Creating path, not flagged here.
+func podStale(pod *corev1.Pod, now time.Time) bool {
+	if pod.DeletionTimestamp != nil {
+		return true
+	}
+	if pod.Status.Reason == podReasonNodeLost {
+		return true
+	}
+	if pod.Status.Phase == corev1.PodRunning {
+		for _, cond := range pod.Status.Conditions {
+			if cond.Type != corev1.PodReady {
+				continue
+			}
+			if cond.Reason == podReasonNodeLost {
+				return true
+			}
+			return readyStale(string(cond.Status), cond.LastTransitionTime, now)
 		}
 	}
 	return false
