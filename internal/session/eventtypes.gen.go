@@ -35,6 +35,7 @@ const (
 	EventPermissionResolved   EventType = "permission.resolved"
 	EventTodoUpdated          EventType = "todo.updated"
 	EventUsageUpdated         EventType = "usage.updated"
+	EventContextCompacted     EventType = "context.compacted"
 	EventRateLimitUpdated     EventType = "rate_limit.updated"
 	EventWorkspaceStatus      EventType = "workspace.status"
 	EventSessionTitle         EventType = "session.title"
@@ -66,6 +67,7 @@ var AllEventTypes = []EventType{
 	EventPermissionResolved,
 	EventTodoUpdated,
 	EventUsageUpdated,
+	EventContextCompacted,
 	EventRateLimitUpdated,
 	EventWorkspaceStatus,
 	EventSessionTitle,

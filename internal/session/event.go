@@ -102,6 +102,18 @@ type ErrorPayload struct {
 	Code    string `json:"code,omitempty"`
 }
 
+// ContextCompactedPayload is the payload for context.compacted events: emitted
+// when the SDK compacts (summarizes) the conversation to fit the context window
+// (the SDK's compact_boundary system message). The TUI resets the ctx% gauge to
+// PostTokens (when reported) so it reflects the post-compaction size instead of
+// the stale pre-compaction count, and drops a one-line "context compacted"
+// marker so a long run's compaction is visible in scrollback.
+type ContextCompactedPayload struct {
+	Trigger    string `json:"trigger"`
+	PreTokens  int    `json:"preTokens"`
+	PostTokens int    `json:"postTokens,omitempty"`
+}
+
 // SessionStartedPayload is the payload for session.started events: the model,
 // pod cwd, and applied permission mode reported by the SDK init message. The
 // CLI uses model+cwd for the status line and the model id to look up the

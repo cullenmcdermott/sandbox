@@ -35,6 +35,7 @@ export type EventType =
   | 'permission.resolved'
   | 'todo.updated'
   | 'usage.updated'
+  | 'context.compacted'
   | 'rate_limit.updated'
   | 'workspace.status'
   | 'session.title'
@@ -64,6 +65,7 @@ export const ALL_EVENT_TYPES: EventType[] = [
   'permission.resolved',
   'todo.updated',
   'usage.updated',
+  'context.compacted',
   'rate_limit.updated',
   'workspace.status',
   'session.title',
@@ -220,4 +222,14 @@ export interface TodoUpdatedPayload {
 export interface ErrorPayload {
   message: string;
   code?: string;
+}
+
+/** payload for context.compacted events: emitted when the SDK compacts (summarizes) the conversation to fit the context window. preTokens/postTokens let the TUI reset the ctx% gauge to the post-compaction size instead of the stale pre-compaction count, and drop a one-line transcript marker. */
+export interface ContextCompactedPayload {
+  /** 'auto' (context-window pressure) or 'manual' (/compact) */
+  trigger: string;
+  /** effective token count before compaction */
+  preTokens: number;
+  /** effective token count after compaction; 0/absent when the SDK did not report it */
+  postTokens?: number;
 }

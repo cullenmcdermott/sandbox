@@ -88,6 +88,7 @@ var payloadOrder = []string{
 	"ModelsAvailablePayload",
 	"TodoUpdatedPayload",
 	"ErrorPayload",
+	"ContextCompactedPayload",
 }
 
 func main() {

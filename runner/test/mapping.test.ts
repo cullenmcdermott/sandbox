@@ -50,6 +50,39 @@ test('system/init → session.started + init observation', () => {
   assert.deepEqual(res, { model: 'opus-4.8', claudeSessionId: 'claude-abc', isInit: true });
 });
 
+// ORACLE: a system/compact_boundary message emits context.compacted with the
+// trigger + pre/post token counts (schema §2b gap 4 — previously dropped).
+test('system/compact_boundary → context.compacted', () => {
+  const { events, emit } = collector();
+  mapMessage(
+    asMsg({
+      type: 'system',
+      subtype: 'compact_boundary',
+      compact_metadata: { trigger: 'auto', pre_tokens: 180000, post_tokens: 42000 },
+    }),
+    emit,
+  );
+  assert.equal(events.length, 1);
+  assert.equal(events[0].type, 'context.compacted');
+  assert.deepEqual(events[0].payload, { trigger: 'auto', preTokens: 180000, postTokens: 42000 });
+});
+
+// post_tokens is optional in the SDK; absence maps to 0 (TUI leaves ctx% for the
+// next usage event to refine).
+test('system/compact_boundary without post_tokens → postTokens 0', () => {
+  const { events, emit } = collector();
+  mapMessage(
+    asMsg({
+      type: 'system',
+      subtype: 'compact_boundary',
+      compact_metadata: { trigger: 'manual', pre_tokens: 150000 },
+    }),
+    emit,
+  );
+  assert.equal(events.length, 1);
+  assert.deepEqual(events[0].payload, { trigger: 'manual', preTokens: 150000, postTokens: 0 });
+});
+
 // ORACLE: an assistant text block emits message.started + message.completed.
 test('assistant text block → message.started + message.completed', () => {
   const { events, emit } = collector();

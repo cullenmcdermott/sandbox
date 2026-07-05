@@ -42,19 +42,20 @@ type schemaFile struct {
 // set-equality check below fails if the two disagree.
 func payloadRegistry() map[string]reflect.Type {
 	return map[string]reflect.Type{
-		"SessionStartedPayload":  reflect.TypeOf(SessionStartedPayload{}),
-		"SessionStatusPayload":   reflect.TypeOf(SessionStatusPayload{}),
-		"TerminatingPayload":     reflect.TypeOf(TerminatingPayload{}),
-		"MessagePayload":         reflect.TypeOf(MessagePayload{}),
-		"ToolPayload":            reflect.TypeOf(ToolPayload{}),
-		"PermissionPayload":      reflect.TypeOf(PermissionPayload{}),
-		"UsagePayload":           reflect.TypeOf(UsagePayload{}),
-		"RateLimitPayload":       reflect.TypeOf(RateLimitPayload{}),
-		"WorkspaceStatusPayload": reflect.TypeOf(WorkspaceStatusPayload{}),
-		"SessionTitlePayload":    reflect.TypeOf(SessionTitlePayload{}),
-		"ModelsAvailablePayload": reflect.TypeOf(ModelsAvailablePayload{}),
-		"TodoUpdatedPayload":     reflect.TypeOf(TodoUpdatedPayload{}),
-		"ErrorPayload":           reflect.TypeOf(ErrorPayload{}),
+		"SessionStartedPayload":   reflect.TypeOf(SessionStartedPayload{}),
+		"SessionStatusPayload":    reflect.TypeOf(SessionStatusPayload{}),
+		"TerminatingPayload":      reflect.TypeOf(TerminatingPayload{}),
+		"MessagePayload":          reflect.TypeOf(MessagePayload{}),
+		"ToolPayload":             reflect.TypeOf(ToolPayload{}),
+		"PermissionPayload":       reflect.TypeOf(PermissionPayload{}),
+		"UsagePayload":            reflect.TypeOf(UsagePayload{}),
+		"RateLimitPayload":        reflect.TypeOf(RateLimitPayload{}),
+		"WorkspaceStatusPayload":  reflect.TypeOf(WorkspaceStatusPayload{}),
+		"SessionTitlePayload":     reflect.TypeOf(SessionTitlePayload{}),
+		"ModelsAvailablePayload":  reflect.TypeOf(ModelsAvailablePayload{}),
+		"TodoUpdatedPayload":      reflect.TypeOf(TodoUpdatedPayload{}),
+		"ErrorPayload":            reflect.TypeOf(ErrorPayload{}),
+		"ContextCompactedPayload": reflect.TypeOf(ContextCompactedPayload{}),
 	}
 }
 

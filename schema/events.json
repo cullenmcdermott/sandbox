@@ -53,6 +53,7 @@
     "permission.resolved",
     "todo.updated",
     "usage.updated",
+    "context.compacted",
     "rate_limit.updated",
     "workspace.status",
     "session.title",
@@ -173,6 +174,14 @@
       "fields": [
         {"json": "message", "type": "string", "optional": false},
         {"json": "code", "type": "string", "optional": true}
+      ]
+    },
+    "ContextCompactedPayload": {
+      "doc": "payload for context.compacted events: emitted when the SDK compacts (summarizes) the conversation to fit the context window. preTokens/postTokens let the TUI reset the ctx% gauge to the post-compaction size instead of the stale pre-compaction count, and drop a one-line transcript marker.",
+      "fields": [
+        {"json": "trigger", "type": "string", "optional": false, "doc": "'auto' (context-window pressure) or 'manual' (/compact)"},
+        {"json": "preTokens", "type": "int", "optional": false, "doc": "effective token count before compaction"},
+        {"json": "postTokens", "type": "int", "optional": true, "doc": "effective token count after compaction; 0/absent when the SDK did not report it"}
       ]
     }
   }

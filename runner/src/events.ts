@@ -264,9 +264,12 @@ function sseFrame(evt: Event): string {
 }
 
 function broadcast(evt: Event): void {
+  if (clients.size === 0) return;
+  // Serialize the frame once — it is identical for every client.
+  const frame = sseFrame(evt);
   for (const client of clients) {
     if (evt.seq <= client.afterSeq) continue;
-    writeSse(client.res, sseFrame(evt));
+    writeSse(client.res, frame);
   }
 }
 

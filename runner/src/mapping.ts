@@ -56,6 +56,19 @@ export function mapMessage(msg: SDKMessage, emit: EmitFn): MapResult {
         });
         return { model: msg.model, claudeSessionId: msg.session_id, isInit: true };
       }
+      if (msg.subtype === 'compact_boundary') {
+        // The SDK compacted (summarized) the conversation to fit the context
+        // window. Surface it as a normalized event so the TUI can reset the ctx%
+        // gauge to the post-compaction size and mark scrollback — previously this
+        // system message was dropped and ctx% stayed stale (schema §2b gap 4).
+        const meta = msg.compact_metadata;
+        emit('context.compacted', {
+          trigger: meta.trigger,
+          preTokens: meta.pre_tokens,
+          postTokens: meta.post_tokens ?? 0,
+        });
+        return {};
+      }
       return {};
     }
     case 'assistant': {
