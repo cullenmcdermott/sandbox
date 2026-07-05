@@ -77,8 +77,63 @@ type syncPollTickMsg struct{}
 // syncPollInterval is the cadence for probing warm sessions' sync + idle state.
 const syncPollInterval = 4 * time.Second
 
+// unfocusedSyncPollInterval throttles the Mutagen `sync list` probe for warm
+// sessions the user is NOT looking at. The focused session(s) — the row selected
+// in the list and/or the attached transcript — keep probing at syncPollInterval so
+// their indicator stays fresh; every other warm session's sync-list fork backs off
+// to this longer cadence. This drops the steady-state subprocess rate from one per
+// warm session every 4s to one per warm session every 30s (an initial tick still
+// sweeps every session once, so each gets a prompt first reading). See
+// selectSyncProbeTargets.
+const unfocusedSyncPollInterval = 30 * time.Second
+
 func syncPollCmd() tea.Cmd {
 	return tea.Tick(syncPollInterval, func(time.Time) tea.Msg { return syncPollTickMsg{} })
+}
+
+// selectSyncProbeTargets decides which warm sessions to fork a `mutagen sync list`
+// probe for on a poll tick. Probing every warm session every tick is wasteful once
+// the set grows, so the focused sessions (selected + attached) always probe while
+// the rest back off to `backoff`. It stamps lastProbe for the chosen ids and prunes
+// entries for sessions no longer warm so the map can't grow unbounded. A session
+// absent from lastProbe (freshly warm, or after the dashboard's first tick) probes
+// immediately, giving every session a prompt initial reading before it throttles.
+func selectSyncProbeTargets(now time.Time, warm []session.ID, focused map[session.ID]bool, lastProbe map[session.ID]time.Time, backoff time.Duration) []session.ID {
+	live := make(map[session.ID]bool, len(warm))
+	var targets []session.ID
+	for _, id := range warm {
+		live[id] = true
+		if focused[id] {
+			targets = append(targets, id)
+			lastProbe[id] = now
+			continue
+		}
+		if last, ok := lastProbe[id]; !ok || now.Sub(last) >= backoff {
+			targets = append(targets, id)
+			lastProbe[id] = now
+		}
+	}
+	for id := range lastProbe {
+		if !live[id] {
+			delete(lastProbe, id)
+		}
+	}
+	return targets
+}
+
+// syncFocusSet is the set of sessions whose Mutagen sync indicator is currently on
+// screen — the row selected in the list (detail pane) and the attached session
+// (transcript header). These probe every tick so their status stays fresh; other
+// warm sessions are throttled by selectSyncProbeTargets.
+func (m *Model) syncFocusSet() map[session.ID]bool {
+	focused := make(map[session.ID]bool, 2)
+	if m.attachedID != "" {
+		focused[m.attachedID] = true
+	}
+	if sel := m.selectedSession(); sel != nil {
+		focused[sel.ID()] = true
+	}
+	return focused
 }
 
 // reconcileTickMsg schedules the next periodic full cluster re-list.
@@ -517,6 +572,13 @@ type Model struct {
 	// nil disables the indicator (unit-test default).
 	syncProber SyncProber
 
+	// syncProbedAt records the last time each warm session's Mutagen sync health
+	// was probed. Each probe forks a `mutagen sync list` subprocess, so unfocused
+	// warm sessions back off to unfocusedSyncPollInterval instead of forking every
+	// poll tick; the focused session(s) still probe at syncPollInterval. Pruned to
+	// the warm set each tick so it can't grow unbounded. See selectSyncProbeTargets.
+	syncProbedAt map[session.ID]time.Time
+
 	// syncReaper enumerates + terminates this tool's orphaned mutagen syncs. nil
 	// disables the periodic sync GC (unit-test / no-backend default).
 	syncReaper SyncReaper
@@ -620,6 +682,7 @@ func New(backend Backend) *Model {
 		liveSSEClients:    make(map[session.ID]RunnerClient),
 		liveSSEConnecting: make(map[session.ID]bool),
 		liveSSEStreamGen:  make(map[session.ID]uint64),
+		syncProbedAt:      make(map[session.ID]time.Time),
 		retained:          make(map[session.ID]*TranscriptModel),
 		connectSem:        make(chan struct{}, maxConcurrentBackgroundConnects),
 		engine:            anim.NewEngine(),
@@ -888,10 +951,24 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case syncPollTickMsg:
 		var cmds []tea.Cmd
+		// Sync-health probes fork a `mutagen sync list` subprocess each, so gate them
+		// on focus: the focused session(s) probe every tick, the rest back off (§4).
+		if m.syncProbedAt == nil {
+			m.syncProbedAt = make(map[session.ID]time.Time)
+		}
+		warm := make([]session.ID, 0, len(m.retained))
 		for id := range m.retained { // warm sessions only
+			warm = append(warm, id)
+		}
+		for _, id := range selectSyncProbeTargets(nowFunc(), warm, m.syncFocusSet(), m.syncProbedAt, unfocusedSyncPollInterval) {
 			if c := m.probeSyncCmd(id); c != nil {
 				cmds = append(cmds, c)
 			}
+		}
+		// Idle probes reuse the session's already-open SSE client (no subprocess),
+		// so they stay on every warm session each tick to keep the idle-reaper clock
+		// responsive.
+		for id := range m.retained {
 			if c := m.probeIdleCmd(id); c != nil {
 				cmds = append(cmds, c)
 			}
