@@ -189,13 +189,30 @@ func newDestroyCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			id := args[0]
-			// Require confirmation unless --force is passed.
-			if !force && !confirmDestroy(cmd.InOrStdin(), cmd.OutOrStdout(), id) {
-				return nil
-			}
 			c, err := newClient()
 			if err != nil {
 				return err
+			}
+			// Warn if a turn is in flight BEFORE the irreversible confirmation, so
+			// the operator decides with full information — destroy can't be undone,
+			// unlike suspend. Mirrors suspend's best-effort probe: the active turn
+			// id lives in the runner (not the Sandbox CRD), so ask it directly. Any
+			// failure (unreachable / already suspended) is non-fatal. Bound it
+			// tightly so probing a dead/suspended pod can't stall the confirmation
+			// prompt on a port-forward timeout — the common destroy target.
+			ref := session.Ref{ID: session.ID(id)}
+			probeCtx, probeCancel := context.WithTimeout(ctx, 5*time.Second)
+			if rc, cleanup, derr := c.DialRunner(probeCtx, ref); derr == nil {
+				st, sErr := rc.SessionState(probeCtx, ref)
+				cleanup()
+				if sErr == nil && st.ActiveTurnID != "" {
+					fmt.Fprintf(cmd.ErrOrStderr(), "warning: session %q has an active turn (%s); destroying will terminate it\n", id, st.ActiveTurnID)
+				}
+			}
+			probeCancel()
+			// Require confirmation unless --force is passed.
+			if !force && !confirmDestroy(cmd.InOrStdin(), cmd.OutOrStdout(), id) {
+				return nil
 			}
 			// Destroy tears down the cluster resources, then the file sync and all
 			// local state (SSH alias, key dir, index entry).
