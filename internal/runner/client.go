@@ -284,15 +284,76 @@ func (c *Client) events(ctx context.Context, ref session.Ref, afterSeq uint64, p
 	}
 
 	events := make(chan session.Event, 64)
+
+	// §1d: decouple socket reading from consumer draining. A stalled consumer
+	// must NOT be able to manufacture a reconnect. Previously the scanner sent
+	// decoded events straight to `events`; when the TUI stalled, that buffered
+	// channel filled, the scanner blocked mid-send, and it therefore stopped
+	// calling Scan() — starving the read watchdog below, which then force-closed
+	// a perfectly live stream (reconnect+replay) purely from consumer
+	// backpressure. Now a dedicated scanner goroutine reads the socket as fast as
+	// the server sends and hands events to a forwarder over `decoded`; the
+	// forwarder is the ONLY thing that ever blocks on the (possibly slow)
+	// consumer. That keeps the watchdog's liveness a measure of SERVER activity
+	// (bytes read off the socket), not consumer consumption.
+	decoded := make(chan session.Event)
+
+	// Forwarder: drain `decoded` into the consumer's `events` channel through an
+	// internal FIFO queue that grows as needed, so the scanner never blocks on a
+	// slow consumer. The queue is bounded in practice by the consumer eventually
+	// draining; a consumer that never drains at all is a distinct failure mode a
+	// reconnect wouldn't fix either — and we drop no events, preserving the
+	// after=<seq> contiguity the replay path relies on.
+	go func() {
+		defer close(events)
+		var queue []session.Event
+		in := decoded // nil'd once the scanner closes `decoded`, to stop selecting it
+		for in != nil || len(queue) > 0 {
+			if len(queue) == 0 {
+				// Nothing to deliver yet — only wait for more input (or cancel).
+				select {
+				case ev, ok := <-in:
+					if !ok {
+						in = nil
+						continue
+					}
+					queue = append(queue, ev)
+				case <-ctx.Done():
+					return
+				}
+				continue
+			}
+			// Race delivering the head against accepting more, so a slow
+			// consumer parks on `events <- queue[0]` while the scanner keeps
+			// feeding `decoded` into the queue unabated.
+			select {
+			case ev, ok := <-in:
+				if !ok {
+					in = nil
+					continue
+				}
+				queue = append(queue, ev)
+			case events <- queue[0]:
+				queue = queue[1:]
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
 	go func() {
 		defer resp.Body.Close()
-		defer close(events)
+		defer close(decoded)
 
-		// R6: Half-open connection watchdog. scanner.Scan() blocks forever on a
-		// half-open TCP connection (pod hard-loss, no FIN/RST). The server now
-		// sends ': heartbeat\n\n' every 30s (R5); if we receive nothing for
+		// R6/§1d: Half-open connection watchdog. scanner.Scan() blocks forever on
+		// a half-open TCP connection (pod hard-loss, no FIN/RST). The server sends
+		// ': heartbeat\n\n' every 30s (R5); if the scanner reads nothing for
 		// sseReadTimeout the connection is dead and we close the body to unblock
-		// the scanner. (Package var so tests can shorten it.)
+		// the scanner. Liveness (lastRead) is keyed on the scanner's socket reads,
+		// i.e. server activity — with the forwarder above absorbing consumer
+		// backpressure, the scanner keeps reading regardless of how slowly the
+		// consumer drains, so a slow consumer can no longer starve this signal.
+		// (Package var so tests can shorten it.)
 		lastRead := make(chan struct{}, 1)
 		// M11: close lastRead exactly once on any exit path so the watchdog
 		// always unblocks. Replaces two hand-placed closes that were correct but
@@ -304,7 +365,7 @@ func (c *Client) events(ctx context.Context, ref session.Ref, afterSeq uint64, p
 			for {
 				select {
 				case <-timer.C:
-					// No data in 90s — force-close the body to unblock Scan().
+					// No data in sseReadTimeout — force-close the body to unblock Scan().
 					resp.Body.Close()
 					return
 				case _, ok := <-lastRead:
@@ -347,7 +408,7 @@ func (c *Client) events(ctx context.Context, ref session.Ref, afterSeq uint64, p
 			// data: decode path below.
 			if strings.HasPrefix(line, ": replay-complete") {
 				select {
-				case events <- session.Event{Type: session.EventStreamLive, SessionID: ref.ID}:
+				case decoded <- session.Event{Type: session.EventStreamLive, SessionID: ref.ID}:
 				case <-ctx.Done():
 					return
 				}
@@ -362,7 +423,7 @@ func (c *Client) events(ctx context.Context, ref session.Ref, afterSeq uint64, p
 				continue // skip malformed events
 			}
 			select {
-			case events <- ev:
+			case decoded <- ev:
 			case <-ctx.Done():
 				return
 			}
@@ -379,7 +440,7 @@ func (c *Client) events(ctx context.Context, ref session.Ref, afterSeq uint64, p
 				Message: fmt.Sprintf("event stream: a single event exceeded the %d-byte limit and was dropped; the transcript may be incomplete", maxLine),
 			})
 			select {
-			case events <- session.Event{Type: session.EventError, SessionID: ref.ID, Payload: payload}:
+			case decoded <- session.Event{Type: session.EventError, SessionID: ref.ID, Payload: payload}:
 			case <-ctx.Done():
 			}
 		}
