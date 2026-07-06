@@ -410,3 +410,93 @@ gated on maintainer sign-off of the listed open items.
   API + local index.
 - `notify.go` staticcheck QF1003 (tagged switch) fixed to keep
   `golangci-lint` green now that it's on the Flox host.
+
+## Fable-coordinated batch (2026-07-06, second pass) — §1d/§4/§7 verification + fix
+
+The five commits that landed after the morning review pass (`c72f0c7`,
+`c191c85`, `fe259d6`, `114223d`, `5f96ccd`) were adversarially verified; one
+real defect found and fixed in-tree.
+
+### §1d system reliability (3 items)
+
+- **SSE consumer backpressure** (`c72f0c7`): `events()` split into a scanner
+  goroutine (feeds watchdog liveness on every wire read) and a forwarder
+  goroutine draining an internal growable FIFO — a stalled consumer can no
+  longer starve the watchdog into a forced disconnect, and `after=<seq>`
+  contiguity/ordering/close semantics are preserved. Tradeoff (documented):
+  the internal queue is unbounded if the consumer never drains.
+  `TestEventsSlowConsumerDoesNotForceReconnect` +
+  `TestEventsSilentStreamStillForceCloses` green under `-race`.
+- **Port-forward terminal state** (`c191c85`): `resolvePodForForward`
+  distinguishes Sandbox-gone (NotFound propagates, loop stops, `h.err` set,
+  `h.done` closes) from reschedule gaps (retry as before). Verified: the
+  ≤10s-forever hammering class is dead. Follow-up stays in TODO §1d: no
+  caller consumes `ForwardHandle.Done()` yet.
+- **Dead-node staleness cross-check** (`fe259d6`): pod path verified correct
+  (phase-gated, zero-LastTransitionTime guarded, applied on Status/List/watch).
+  **Review found a real watch-path defect:** `sandboxStale` aged the Ready
+  condition with no phase gate, and the agent-sandbox controller stamps
+  `Ready=False` at first reconcile with `LastTransitionTime` pinned at
+  creation (`meta.SetStatusCondition` only bumps on Status change) — so a
+  healthy >90s cold-start (slow image pull) read UNKNOWN from the watch.
+  Masked today (dashboard folds UNKNOWN→Idle) but wrong on the public
+  `StatusUnknown` surface. **Fixed:** `sandboxNeverReady` gate — a not-True
+  Ready still stamped within `stalenessThreshold` of CreationTimestamp is a
+  slow start (stays CREATING), not a stall. New tests: never-Ready slow start
+  (unit + through `sandboxToState`), Ready-lost-long-after-creation still
+  stale. Known-narrow tradeoff documented in the helper comment.
+
+### §4 perf (1 item)
+
+- **Focus-gated mutagen polling** (`114223d`): selected-row + attached
+  sessions probe at 4s, others back off to 30s, first tick sweeps everyone,
+  map pruned to live sessions; regaining focus re-probes on the next 4s tick.
+  Conflict-latency concern checked: sync status feeds no attention routing /
+  needs-you sort / notify — only the focused detail-pane/header indicators,
+  which still probe at 4s. Group-view cursor resolution via
+  `selectedRowSession` is nil-safe.
+
+### §7 opencode reaper follow-ups (2 items, `5f96ccd`)
+
+- Synthetic-busy staleness bound: reaper keys solely on `idleSince`;
+  `recomputeIdle` ANDs `isDetached()`, so an attached client always pins the
+  session non-idle; real runner turns immune via the `activeTurns>0` guard.
+  Accepted tradeoff: a fully-detached opencode turn with zero observer events
+  for >5min becomes idle-eligible (the conscious replacement for
+  unreapable-forever). 152 runner tests green.
+- `interruptedTurns` GC in `reset()`: safe — `reset()` clears `activeTurnId`,
+  so a late `session.idle` after reconnect can't flip status. Residual
+  pre-existing leak for never-active interrupted ids noted in TODO §7.
+
+### §2a mechanical god-file split (Opus build, Fable-verified)
+
+- `transcript.go` 3087 → 745 + `transcript_{stream,reduce,render,input}.go` +
+  `permission_diff.go`; `model.go` 3086 → 799 +
+  `model_{sse,reduce,render,input}.go`. Pure code motion (whole declarations,
+  doc comments attached): verified three ways — AST decl-key accounting
+  (105/105 + 109/109, no dups), byte-identical non-comment code lines, and an
+  independent sorted-line-multiset diff (coordinator). Only content change: a
+  merged straddling comment above `tailLines` split so `handleEvent` gets its
+  own doc. goimports grouping on three new files fixed post-hoc (caught by
+  `just check` lint).
+
+### §4 perf pair (Opus build, Fable-verified)
+
+- **Streaming-markdown O(N²) → incremental** (`chat/streaming_markdown.go`):
+  `mdScanner` processes each completed line exactly once, snapshotting
+  follow-independent boundary safety (`scanBound`) at each blank-line
+  boundary; only the setext "what follows" check re-evaluates per query.
+  Fence-skipping for link-ref-defs preserved (existing test still green).
+  Original predicates kept as the reference oracle;
+  `TestIncrementalScannerMatchesReference` + `TestStreamingRenderChunkingInvariant`
+  assert equality at every prefix under whole/1-byte/random chunkings.
+  `BenchmarkStreamingDeltas`: 119ms → 14.7ms/op, 180MB → 59MB, 57k → 20k
+  allocs. staticcheck QF1001 De Morgan applied post-hoc.
+- **tui/list resize coalescing**: `SetSize` records size + sets `needReflow`
+  (following only); `applyReflow` runs at the head of `normalize()` so every
+  anchor read settles the deferred re-pin — a drag's burst collapses to one
+  `GotoBottom` at final size. Eager cache drop removed (entries refresh
+  lazily on width mismatch; oscillation re-hits). `GotoTop`/`GotoBottom`
+  clear the flag; `SetFollow` flushes under the old intent first. API
+  unchanged (public §8 surface). New tests: drag coalescing, width
+  oscillation zero-rerender, stacked-shrink repin.

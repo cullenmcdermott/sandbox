@@ -118,19 +118,19 @@ for render+nav+actions subsumes them (`groups.go:57`). Prefer that fix.
   API-server port-forward pressure (~30 sessions). Cap
   concurrently-*established* observer forwards, evict the coldest.
   `internal/tui/dashboard/model.go:1166`.
-- [ ] **SSE consumer backpressure → forced disconnect/replay loop (MED).**
-  Events channel buffered at 64; a stalled TUI blocks the scanner, the 90s
-  watchdog sees no reads and force-closes → reconnect-with-replay. A slow
-  consumer manufactures reconnects. `internal/runner/client.go:286,291`.
-- [ ] **Port-forward retries a dead pod forever (MED).** On
-  `resolvePodForForward` error the loop keeps the *stale* pod, no terminal
-  state — after `sandbox destroy` from another shell, an observer forward
-  hammers the vanished pod at ≤10s cadence indefinitely; no "gone forever" vs
-  "rescheduling" distinction for the handle owner. `internal/k8s/portforward.go:148`.
-- [ ] **Dead-node pods read as Running for minutes (MED).** Both status paths
-  trust k8s conditions with no staleness cross-check — node-eviction lag makes
-  a crashed session look healthy with a silently-stalled SSE stream.
-  `internal/k8s/backend.go:804`, `internal/k8s/watch.go:203`.
+- [x] **SSE consumer backpressure** — scanner/forwarder split with an internal
+  FIFO; watchdog liveness now measures wire reads, not consumer drain
+  (`c72f0c7`); Fable-verified 2026-07-06. Done log.
+- [~] **Port-forward retries a dead pod forever** — terminal state landed
+  (`c191c85`): Sandbox-NotFound stops the loop and surfaces via
+  `ForwardHandle.Done()`/`Err()`; Fable-verified 2026-07-06. STILL OPEN
+  (SMALL): nothing consumes the terminal seam yet — wire the dashboard
+  observer manager to `handle.Done()` so a destroyed session's forward is
+  dropped promptly instead of via SSE-reconnect exhaustion.
+- [x] **Dead-node pods read as Running** — shared staleness cross-check on
+  both paths (`fe259d6`); Fable review 2026-07-06 found + fixed one watch-path
+  defect (never-Ready slow start read UNKNOWN after 90s — now gated by
+  `sandboxNeverReady`). Done log.
 - [ ] **Concurrent sessions on one project share one local sync endpoint, no
   dedup (LOW-MED).** Mutagen session name keys on SessionID only; two agents on
   the same repo silently cross-feed edits (same-file race → perpetual
@@ -258,10 +258,11 @@ resume.
   every copy; mouse hit-testing silently breaks. Fix: one per-frame
   `[]region{name, height, render}` with body as flex; all consumers walk it.
   `transcript.go:882`.
-- [ ] **Mechanical god-file split (MED — do first; makes the rest reviewable).**
-  Seams already exist as function clusters: transcript_{stream,reduce,render,
-  input}.go + permission_diff.go; model_{sse,reduce,render}.go. Zero behavior
-  change. `transcript.go:29`.
+- [x] **Mechanical god-file split** — transcript.go (3087→745) →
+  {stream,reduce,render,input,permission_diff}; model.go (3086→799) →
+  {sse,reduce,render,input}. Pure code motion, verified by AST decl
+  accounting + independent line-multiset diff; Fable-verified 2026-07-06.
+  Done log.
 - [ ] **App.Update flat dispatch + one detachTranscript() (MED).** 450-line
   screen-router; detach sequence duplicated 4×; recursive
   `a.Update(*msg.ready)` re-entry (`app.go:615,630`); B17 single-delegation
@@ -510,10 +511,10 @@ Outcome: **not happening; invest in §2 instead.** Kept here so nobody re-treads
 
 ## 4) Performance
 
-- [ ] **Mutagen `sync list` subprocess forked per warm session every 4s** for
-  the dashboard's whole life, regardless of focus. Gate on focus/visibility +
-  back off. `model.go:73,845` (syncPollInterval / tick handler),
-  `sync_support.go:55` (dashboardSyncProber), `status.go:42`.
+- [x] **Mutagen `sync list` polling gated on focus** — selected+attached
+  sessions probe at 4s, others back off to 30s, first tick sweeps all
+  (`114223d`); Fable-verified 2026-07-06 (conflict-detection latency is
+  cosmetic-only — sync status never drove attention routing). Done log.
 - [ ] Warm-session detail preview re-renders the retained transcript tail
   every frame (no unchanged-guard). Re-verified 2026-07-04: it renders via
   `tr.tailLines(5, width)` (bounded), so cost is lower than originally
@@ -527,11 +528,18 @@ Outcome: **not happening; invest in §2 instead.** Kept here so nobody re-treads
 - [x] **SSE `broadcast()` frame hoist + zero-client early return** —
   behavior-preserving (frame is a pure function of the event; per-client
   `afterSeq` filtering untouched); Fable-approved 2026-07-06.
-- [ ] Streaming-markdown safe-boundary predicates rescan the whole growing
-  buffer per delta (O(N²) over a turn). `chat/streaming_markdown.go:111-233`.
-  (The §1c fence-awareness bug that compounded this was fixed 2026-07-04.)
-- [ ] Resize is uncoalesced: width change drops the whole list cache + rebuilds
-  a pooled renderer per WindowSizeMsg during a drag. `tui/list/list.go:74`.
+- [x] **Streaming-markdown incremental boundary scanning** — `mdScanner`
+  commits each complete line once (fence/link-ref/boundary state carried
+  across deltas); ~8× faster, 3× fewer allocs; property-tested against the
+  original predicates as oracle at every prefix × multiple chunkings;
+  Fable-verified 2026-07-06. Done log. Residual (smaller term):
+  `lastCompleteBlock` still rescans per block-boundary crossing — O(blocks·N),
+  measure before touching.
+- [x] **Resize coalescing in tui/list** — `SetSize` is O(1); deferred re-pin
+  settles once in `normalize()`; no eager cache drop (stale-width entries
+  refresh lazily, width oscillation re-hits cache); Fable-verified 2026-07-06
+  (renderer pool is width-keyed, so no per-WindowSizeMsg rebuild remains).
+  Done log.
 - [ ] Glamour pads wrapped lines with per-space SGR runs (bytes; upstream
   glamour style; inflates parse work).
 - Reconcile-is-O(n)-per-event: retired by the §2a block unification — don't
@@ -800,18 +808,16 @@ go — it mutates go.mod/module cache as a side effect of `cd`.
   `setStatus` dedups and busy/idle fire only at turn boundaries
   (`runner/src/session.ts:202`, `claude.ts:345`) — re-verify if status
   emission points ever grow.
-- [ ] **Follow-up: bound stuck synthetic-busy so it can't block the reaper
-  forever (MED).** `recomputeIdle()` and `idleStatus().turnActive` now treat
-  observer-set `status === 'busy'` as activity — right for real turns, but a
-  wedged mapper / missed `session.idle` (the residual failure family) keeps
-  the pod unreapable indefinitely. Add a staleness bound: synthetic busy with
-  no observer events for N minutes AND no external clients → idle-eligible
-  (or at minimum emit a warning event). `runner/src/session.ts:218,266`,
-  `runner/src/opencode-observer.ts:114`.
-- [ ] **Follow-up: GC `interruptedTurns` (LOW).** The module-global set only
-  sheds an id when that turn's `session.idle` arrives; a stream drop in
-  between leaks the entry. Clear it in `reset()`.
-  `runner/src/opencode-observer.ts:49,188`.
+- [x] **Bound stuck synthetic-busy** — 5-min staleness bound gated on
+  `isDetached()`; real turns immune via the `activeTurns>0` guard; reaper keys
+  on `idleSince` only (`5f96ccd`); Fable-verified 2026-07-06 (accepted
+  tradeoff: a fully-detached opencode turn silent >5min becomes
+  idle-eligible). Done log.
+- [x] **GC `interruptedTurns` in `reset()`** (`5f96ccd`); Fable-verified —
+  safe because `reset()` also clears `activeTurnId`. Residual pre-existing
+  edge (LOW, not a regression): `markObservedTurnInterrupted(id)` for an id
+  that never becomes the active cycle still leaks
+  (`runner/src/opencode-observer.ts:120`).
 - [ ] **Diagnose live: opencode looks stuck after disconnect/reconnect
   (maintainer report 2026-07-04; needs the real cluster — recipe below).**
   Symptom: sometimes, after detaching, a session appears frozen; on reconnect
