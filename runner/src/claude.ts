@@ -31,6 +31,7 @@ import { CLAUDE_CONFIG_DIR } from './types.js';
 import { TITLE_PROMPT, sanitizeTitle, shouldGenerateTitle } from './title.js';
 import { SessionGrants, resolutionOutcome } from './grants.js';
 import { mapMessage as mapMessagePure } from './mapping.js';
+import { startTurnTrace } from './trace.js';
 
 // Tool-name-level "allow for this session" grants (permission scope:'session').
 // One session per pod, so a single module-level store is the whole session's
@@ -511,6 +512,20 @@ function makeCanUseTool(
 
 // --- SDK message → normalized event mapping ------------------------------
 
+/**
+ * True when an SDK message carries the first streamed assistant TEXT token — a
+ * `stream_event` whose partial event is a content_block_delta of type
+ * `text_delta`. Drives the §10 `turn.first_delta` trace milestone (the moment
+ * the model starts producing visible output), distinct from `turn.first_message`
+ * (the first SDK message of any kind, typically the init system message). Pure
+ * and exported so the classification is unit-testable.
+ */
+export function isAssistantTextDelta(msg: SDKMessage): boolean {
+  if (msg.type !== 'stream_event') return false;
+  const ev = (msg as { event?: { type?: string; delta?: { type?: string } } }).event;
+  return ev?.type === 'content_block_delta' && ev.delta?.type === 'text_delta';
+}
+
 /** Run a single turn: call query() and map the message stream to events. */
 export async function runTurn(
   cfg: RunnerConfig,
@@ -525,6 +540,13 @@ export async function runTurn(
 ): Promise<void> {
   const reg = getRegistry();
   const sessionId = reg.state.sandbox_session_id;
+
+  // §10 observability: time the turn lifecycle (first SDK message, first
+  // assistant delta, settle) under the turn id. No-op unless SANDBOX_TRACE is
+  // set. msgCount tallies SDK messages consumed across the (possibly retried)
+  // query loop for the per-turn summary line.
+  const trace = startTurnTrace(turnId);
+  let msgCount = 0;
 
   appendEvent(sessionId, turnId, 'turn.started', { prompt });
 
@@ -548,6 +570,9 @@ export async function runTurn(
       let staleResume = false;
       try {
         for await (const msg of q) {
+          msgCount++;
+          trace.mark('turn.first_message');
+          if (isAssistantTextDelta(msg)) trace.mark('turn.first_delta');
           // Fail-soft (1/2): the SDK yields an is_error `result` for a stale
           // resume id and THEN throws. While a retry is still available, do NOT
           // map that terminal result — mapMessage would emit a spurious
@@ -604,6 +629,9 @@ export async function runTurn(
       console.error(`runTurn: resume id ${usedResume} is stale; retrying once without resume`);
     }
   } finally {
+    // §10: settle the turn trace (total duration + SDK message count) before the
+    // idle/title bookkeeping, so the summary line reflects the query() lifetime.
+    trace.settle(msgCount);
     // Finalize the turn FIRST so the session goes idle promptly: finishTurn
     // clears the active-turn count and starts the idle reaper's clock. The
     // one-time title summary below runs an extra summarizer round-trip, and we

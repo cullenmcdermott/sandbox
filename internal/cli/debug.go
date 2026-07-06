@@ -38,3 +38,20 @@ func configureDebugLogging() {
 func dbg(msg string, args ...any) {
 	debugLogger.Debug(msg, args...)
 }
+
+// traceEnabledFlag is bound to the root --trace persistent flag. Connect/create
+// timing spans (§10 observability) live in the public client package, gated on
+// the SANDBOX_TRACE env var so the library has a single, dependency-free switch.
+// The CLI flag is sugar over that env var: configureTracing sets it so `sandbox
+// --trace …` and `SANDBOX_TRACE=1 sandbox …` behave identically.
+var traceEnabledFlag bool
+
+// configureTracing turns the --trace flag into the SANDBOX_TRACE env var the
+// client package reads. Setting (never unsetting) it means either the flag or a
+// pre-set env var enables tracing; neither leaves it off. Called from the root
+// command's PersistentPreRun so every subcommand honors the flag.
+func configureTracing() {
+	if traceEnabledFlag {
+		_ = os.Setenv("SANDBOX_TRACE", "1")
+	}
+}

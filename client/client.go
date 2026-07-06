@@ -290,6 +290,11 @@ type CreateOptions struct {
 // the local index. It does NOT wait for the pod or connect — call
 // Session.Connect for that.
 func (c *Client) Create(ctx context.Context, opt CreateOptions) (*Session, error) {
+	// §10 observability: time create end-to-end (and the ssh-key + cluster-create
+	// phases below) under one correlation id. tr is nil unless SANDBOX_TRACE is
+	// set, so this is a no-op when off.
+	tr := newTracer()
+	defer tr.start("create.total").end()
 	backendName := opt.Backend
 	if backendName == "" {
 		backendName = session.BackendClaudeSDK
@@ -328,7 +333,9 @@ func (c *Client) Create(ctx context.Context, opt CreateOptions) (*Session, error
 	// its public half is baked into the session Secret. The private-key path is
 	// stamped onto the returned Session so the first Connect can reuse it instead
 	// of re-deriving the key (§5).
+	keySpan := tr.start("create.ssh_key")
 	privPath, authKey, err := c.ensureSSHKey(string(sid))
+	keySpan.end()
 	if err != nil {
 		return nil, fmt.Errorf("prepare ssh key: %w", err)
 	}
@@ -348,7 +355,9 @@ func (c *Client) Create(ctx context.Context, opt CreateOptions) (*Session, error
 		StorageGiB:          opt.StorageGiB,
 	}
 
+	createSpan := tr.start("create.session")
 	ref, err := c.backend.CreateSession(ctx, spec)
+	createSpan.end()
 	if err != nil {
 		return nil, fmt.Errorf("create session: %w", err)
 	}

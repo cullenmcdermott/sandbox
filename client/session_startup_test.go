@@ -41,7 +41,7 @@ func TestBackgroundSyncRunsDeferredReaper(t *testing.T) {
 	c, core := startupTestClient(t)
 	s := c.Open("sess-reaper")
 
-	s.startBackgroundSync(syncpkg.Spec{}, false, false, "", "", time.Minute)
+	s.startBackgroundSync(nil, syncpkg.Spec{}, false, false, "", "", time.Minute)
 
 	warn, err := s.AwaitSync(ctx)
 	if err != nil {
@@ -67,7 +67,7 @@ func TestBackgroundSyncSurfacesReaperFailure(t *testing.T) {
 	})
 	s := c.Open("sess-reaper-fail")
 
-	s.startBackgroundSync(syncpkg.Spec{}, false, false, "", "", time.Minute)
+	s.startBackgroundSync(nil, syncpkg.Spec{}, false, false, "", "", time.Minute)
 
 	warn, err := s.AwaitSync(ctx)
 	if err != nil {
@@ -136,7 +136,7 @@ func TestAwaitSyncRespectsContextCancel(t *testing.T) {
 func TestCloseCancelsBackgroundSync(t *testing.T) {
 	c, _ := startupTestClient(t)
 	s := c.Open("sess-close")
-	s.startBackgroundSync(syncpkg.Spec{}, false, false, "", "", time.Minute)
+	s.startBackgroundSync(nil, syncpkg.Spec{}, false, false, "", "", time.Minute)
 
 	// The captured task must still complete even after Close (the goroutine
 	// unblocks via the cancelled context).

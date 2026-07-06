@@ -52,6 +52,7 @@ func NewRoot() *cobra.Command {
 		// SANDBOX_DEBUG) is parsed, before any subcommand runs.
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
 			configureDebugLogging()
+			configureTracing()
 			// Keep client-go's port-forward error spew (klog → stderr) off the
 			// terminal so it can't corrupt the dashboard's alt-screen.
 			silenceKubernetesLogging()
@@ -86,6 +87,7 @@ func NewRoot() *cobra.Command {
 	}
 	cmd.PersistentFlags().StringVarP(&namespaceFlag, "namespace", "n", "", "Kubernetes namespace (default: agent-sessions)")
 	cmd.PersistentFlags().BoolVar(&debugEnabled, "debug", false, "emit structured JSON-line debug logs to stderr (see docs/runner-api.md)")
+	cmd.PersistentFlags().BoolVar(&traceEnabledFlag, "trace", false, "emit connect/create timing spans to stderr (§10 observability; also via SANDBOX_TRACE=1)")
 	cmd.AddCommand(newClaudeRemoteCmd())
 	cmd.AddCommand(newOpencodeCmd())
 	cmd.AddCommand(newAttachCmd())

@@ -201,6 +201,11 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 		return nil, err
 	}
 	s.closeHandles()
+	// §10 observability: time the whole connect flow (and each phase below) under
+	// one correlation id. tr is nil unless SANDBOX_TRACE is set, so this costs
+	// ~nothing when off; the total span fires on every return path (incl. errors).
+	tr := newTracer()
+	defer tr.start("connect.total").end()
 	onPhase := opt.OnPhase
 	if onPhase == nil {
 		onPhase = func(Stage, string) {}
@@ -228,8 +233,10 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 		// readiness, so this only elides the status probe, not the readiness gate.
 		st = session.State{ID: s.ref.ID, Status: session.StatusCreating, Backend: freshBackend, ProjectPath: s.projectPath}
 	} else {
+		sp := tr.start("connect.status")
 		var serr error
 		st, serr = s.c.backend.Status(ctx, s.ref)
+		sp.end()
 		if serr != nil {
 			return nil, serr
 		}
@@ -261,9 +268,12 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 	// for a just-resumed one the new pod is booting. Observer streams only attach
 	// to already-warm sessions, so they skip the explicit wait.
 	if full {
-		if err := s.c.backend.StartWithProgress(ctx, s.ref, func(detail string) {
+		sp := tr.start("connect.pod_ready")
+		err := s.c.backend.StartWithProgress(ctx, s.ref, func(detail string) {
 			onPhase(StageResume, detail)
-		}); err != nil {
+		})
+		sp.end()
+		if err != nil {
 			return nil, fmt.Errorf("wait for pod: %w", err)
 		}
 	}
@@ -272,6 +282,7 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 	opencode := st.Backend == session.BackendOpenCode
 	var handles []session.ForwardHandle
 	var err error
+	fwdSpan := tr.start("connect.port_forward")
 	switch {
 	case opencode:
 		handles, err = s.c.backend.PortForward(ctx, s.ref, k8s.ForwardSpecsWithOpencode(0, 0, 0))
@@ -283,6 +294,7 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 	default:
 		handles, err = s.c.backend.PortForward(ctx, s.ref, k8s.ForwardSpecs(0, 0))
 	}
+	fwdSpan.end()
 	if err != nil {
 		return nil, fmt.Errorf("port-forward: %w", err)
 	}
@@ -301,7 +313,10 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 	rc := runner.New(endpoint, token)
 	s.setRunner(rc)
 	stage(StageRunner)
-	if err := waitHealthy(ctx, rc); err != nil {
+	healthSpan := tr.start("connect.runner_health")
+	err = waitHealthy(ctx, rc)
+	healthSpan.end()
+	if err != nil {
 		s.closeHandles()
 		return nil, fmt.Errorf("runner health: %w", err)
 	}
@@ -354,14 +369,16 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 		case kerr != nil:
 			// No usable SSH key → no file sync at all, but the reaper must still run.
 			syncWarning = appendWarning(syncWarning, fmt.Sprintf("file sync unavailable (ssh key): %v", kerr))
-			s.startBackgroundSync(syncpkg.Spec{}, false, false, reaperImage, reaperPullPolicy, idleTimeout)
+			s.startBackgroundSync(tr, syncpkg.Spec{}, false, false, reaperImage, reaperPullPolicy, idleTimeout)
 		default:
+			syncSpan := tr.start("connect.project_sync")
 			created, spec, serr := s.c.startProjectSync(ctx, string(s.ref.ID), s.projectPath, privPath, handles[1].LocalPort())
+			syncSpan.end()
 			if serr != nil {
 				syncWarning = appendWarning(syncWarning, fmt.Sprintf("file sync unavailable: %v", serr))
-				s.startBackgroundSync(syncpkg.Spec{}, false, false, reaperImage, reaperPullPolicy, idleTimeout)
+				s.startBackgroundSync(tr, syncpkg.Spec{}, false, false, reaperImage, reaperPullPolicy, idleTimeout)
 			} else {
-				s.startBackgroundSync(spec, created, true, reaperImage, reaperPullPolicy, idleTimeout)
+				s.startBackgroundSync(tr, spec, created, true, reaperImage, reaperPullPolicy, idleTimeout)
 			}
 		}
 	}
@@ -382,7 +399,10 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 		}
 		addr := fmt.Sprintf("127.0.0.1:%d", handles[2].LocalPort())
 		stage(StageOpencode)
-		if werr := waitOpencodeReady(ctx, "http://"+addr+"/"); werr != nil {
+		ocSpan := tr.start("connect.opencode_ready")
+		werr := waitOpencodeReady(ctx, "http://"+addr+"/")
+		ocSpan.end()
+		if werr != nil {
 			s.closeHandles()
 			return nil, fmt.Errorf("opencode serve not ready: %w", werr)
 		}
@@ -434,7 +454,7 @@ func protocolVersionWarning(rc *runner.Client) string {
 // can't outlive the session. When doSync is false (SSH key or project sync failed
 // upstream) only the reaper is ensured; created marks this session's first-ever
 // sync (gate the flush) versus a reconnect (detached flush).
-func (s *Session) startBackgroundSync(spec syncpkg.Spec, created, doSync bool, reaperImage, reaperPullPolicy string, idleTimeout time.Duration) {
+func (s *Session) startBackgroundSync(tr *tracer, spec syncpkg.Spec, created, doSync bool, reaperImage, reaperPullPolicy string, idleTimeout time.Duration) {
 	bgCtx, cancel := context.WithCancel(context.Background())
 	task := &syncTask{done: make(chan struct{})}
 	s.mu.Lock()
@@ -443,6 +463,10 @@ func (s *Session) startBackgroundSync(spec syncpkg.Spec, created, doSync bool, r
 	s.mu.Unlock()
 
 	go func() {
+		// §10: time the background phase under the same connect id, so the cost
+		// that Connect deferred off the foreground (§5) is still visible in a trace.
+		bgSpan := tr.start("connect.background")
+		defer bgSpan.end()
 		var warn string
 		id := string(s.ref.ID)
 		mgr := s.c.syncManager()
@@ -453,10 +477,12 @@ func (s *Session) startBackgroundSync(spec syncpkg.Spec, created, doSync bool, r
 				// project upload and surface a broken transport (RV20/RV21). Bounded:
 				// a healthy-but-large first sync just keeps uploading in the
 				// background. This is the step AwaitSync gates the first turn on.
+				flushSpan := tr.start("connect.first_flush")
 				flushCtx, fc := context.WithTimeout(bgCtx, 12*time.Second)
 				ferr := mgr.FlushAll(flushCtx, id)
 				timedOut := flushCtx.Err() == context.DeadlineExceeded
 				fc()
+				flushSpan.end()
 				switch {
 				case ferr != nil && timedOut:
 					warn = appendWarning(warn, "initial file sync still in progress (continuing in the background)")
@@ -476,7 +502,10 @@ func (s *Session) startBackgroundSync(spec syncpkg.Spec, created, doSync bool, r
 			}
 			// Create the config/transcript syncs now, off the foreground. A real
 			// failure is surfaced via the advisory (AwaitSync), never dropped.
-			if ierr := mgr.CreateInputs(bgCtx, spec); ierr != nil && bgCtx.Err() == nil {
+			inputsSpan := tr.start("connect.create_inputs")
+			ierr := mgr.CreateInputs(bgCtx, spec)
+			inputsSpan.end()
+			if ierr != nil && bgCtx.Err() == nil {
 				warn = appendWarning(warn, fmt.Sprintf("config/transcript sync setup failed: %v", ierr))
 			}
 		}
@@ -484,7 +513,10 @@ func (s *Session) startBackgroundSync(spec syncpkg.Spec, created, doSync bool, r
 		// it must run reliably even off the foreground — a transient blip must not
 		// silently leave a session with no auto-suspend.
 		if bgCtx.Err() == nil {
-			if w := s.c.ensureReaperWithRetry(bgCtx, s.ref, reaperImage, reaperPullPolicy, idleTimeout); w != "" {
+			reaperSpan := tr.start("connect.reaper")
+			w := s.c.ensureReaperWithRetry(bgCtx, s.ref, reaperImage, reaperPullPolicy, idleTimeout)
+			reaperSpan.end()
+			if w != "" {
 				warn = appendWarning(warn, w)
 			}
 		}
