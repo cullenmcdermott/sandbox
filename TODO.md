@@ -240,14 +240,14 @@ resume.
   deltas refresh only the tail card (O(1)). Per-block state (unread/turnGap/
   future expanded) lives on the card. Fable-verified 2026-07-06 (bump-site
   audit + ported parity/golden/T1 suites). Done log.
-- [ ] **One event reducer, not two drifting switches (HIGH).** `handleEvent`
-  (~25 cases, `transcript.go:2118`) and `ApplyRunnerEvent` (`session.go:565`)
-  both unmarshal the same payloads into duplicated state (status/usage/git/
-  rate-limit), forcing App.Update to mirror across the seam
-  (`app.go:521,688`). New event type = editing two switches + SessionSnapshot.
-  Fix: shared `sessionReadModel` with one ApplyEvent reducer (event-type
-  table), embedded by both; SessionSnapshot becomes its serialization.
-  De-risks every §2b event addition.
+- [x] **One event reducer** — `sessionReadModel` (`readmodel.go`) embedded by
+  both `Session` and `TranscriptModel`; the 6 doubly-parsed payloads
+  (started/usage/compacted/workspace/permission/status) each unmarshal in
+  exactly one place; `handleEvent` keeps presentation only, `ApplyRunnerEvent`
+  keeps dashboard extras; snapshot format unchanged (kept flat by design).
+  Two divergences unified (Branch=="" preserves; resolved→busy safe by runner
+  event order — settled-once + resolve-precedes-terminal). Fable-verified
+  2026-07-06. Done log.
 - [ ] **Declarative vertical layout regions (HIGH).** Stack arithmetic
   hand-counted in 4+ places (layout(), renderTranscript(), previewView
   `h-3-bannerH`, scrollbarDragTo `bodyTop=2`, App.modalRect) — any layout
@@ -696,29 +696,26 @@ local store → per-session Secret → GC, one provider per Secret) is §6's
   (`client/session.go:217-221,301-312`). Add a cluster-aware check for the
   selected provider key and, if feasible, a lightweight model/provider liveness
   probe before launching/attaching.
-- [ ] **Stop injecting every provider key into every OpenCode session.** Current
-  `opencodeEnv` adds optional refs for Anthropic, OpenAI, and OpenCode Zen from a
-  shared Secret (`internal/k8s/backend.go:1342-1378`); generated config enables
-  whichever env vars are present (`runner/src/opencode.ts:103-125`
-  `buildOpencodeConfig`, `:225` `writeOpencodeConfig`). Move
-  to per-session or selected-provider Secrets, reusing the per-session Secret
-  creation seam (`internal/k8s/backend.go:292-319`) and make selected refs
-  fail-closed.
-- [ ] **Add freshness/rotation semantics for OpenCode credentials.** Stamp Secret
-  data hash/source/version labels and reconcile on create/connect; document that
-  env SecretKeyRefs are pod-start-time state, so rotation requires a pod restart
-  or suspend/resume. Current local script preserves stale Secrets when no current
-  source resolves (`dev/local/opencode-creds.sh:87-99`); OpenCode env is baked
-  into the pod template at `internal/k8s/backend.go:1118-1119,1342-1378`.
-- [ ] **Harden OpenCode secret handling and RBAC.** Stop printing secret prefixes
-  (`dev/local/opencode-creds.sh:119-126`), enforce/warn on `0600` local overlays
-  (`dev/local/secret-template.yaml:18-33`), avoid hardcoded namespace assumptions
-  (`dev/local/opencode-creds.sh:29-32`), and narrow the reaper's Secret access
-  from broad ClusterRole scope (`dev/local/manifests/agent-reaper.yaml:29-69`).
-- [ ] **Document OpenCode auth/persistence for real clusters.** README only says
-  OpenCode reads `opencode-credentials` (`README.md:117-123`); add exact keys,
-  local-store/JIT reconcile behavior, validation limits, rotation requirements,
-  namespace scoping, and what persists across suspend/resume vs new sessions.
+- [x] **Selected-provider-only key injection, fail-closed** —
+  `Spec.OpencodeProvider` (defaults Anthropic) → `opencodeEnv` injects exactly
+  one non-Optional SecretKeyRef; missing key = `CreateContainerConfigError`,
+  never an uncredentialed pod. Fable-verified 2026-07-06. NOTE for the §6
+  selector: `resolveOpencodeProvider` silently defaults unrecognized values to
+  Anthropic — the future `CreateOptions` selector must validate, not default.
+  Done log.
+- [x] **Freshness/rotation stamps** — Sandbox annotated with truncated-sha256
+  key hash + provider at create; re-create reconcile warns on drift; Resume
+  re-stamps; local script's kept-stale-Secret branch is now loud.
+  Fable-verified 2026-07-06. Done log.
+- [x] **Secret handling + RBAC hardening** — prefix printing removed; 0600
+  overlay check; namespace derived (env → context → default); reaper
+  `secrets: get` moved to a namespaced Role in `agent-sessions` (the reaper
+  DOES need it — `RunnerToken` authenticates the `/idle` poll). Follow-up
+  noted in the manifest: the remaining Sandbox/pod ClusterRole grants could
+  also be namespaced. Fable-verified 2026-07-06. Done log.
+- [x] **README OpenCode auth section** — keys→env table, fail-closed +
+  rotation-requires-restart semantics, namespace scoping, suspend/resume
+  persistence. 2026-07-06.
 
 ### 7b. Flox/Nix-first runner environment (2026-07-04 triage)
 

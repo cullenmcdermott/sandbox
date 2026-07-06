@@ -554,3 +554,53 @@ real defect found and fixed in-tree.
   `syncAdvisoryMsg`; opencode external-pane drops it, matching the existing
   Warning behavior on that path.
 - Public SDK impact: one added method (`Session.AwaitSync`); sdktest green.
+
+## Fable-coordinated batch 3 (2026-07-06) — §2a one reducer + §7a cred hardening
+
+### §2a — one event reducer (Opus build, Fable-verified)
+
+- `sessionReadModel` (new `readmodel.go`) embedded by BOTH the dashboard
+  `Session` and `TranscriptModel`; field names match Session's old exported
+  fields so ~26 reader files needed zero churn (promotion). One `ApplyEvent`
+  reducer; the 6 doubly-parsed payloads (session.started, usage,
+  context.compacted, workspace.status, permission.requested, session.status)
+  now unmarshal in exactly one place (independently grep-verified).
+  `handleEvent` keeps presentation only (blocks/streaming/permission UI);
+  `ApplyRunnerEvent` keeps dashboard extras (auto-title, RecentTools, glyph
+  flash). `ApplyEvent` returns the parsed payloads the transcript needs so
+  nothing re-parses.
+- SessionSnapshot deliberately kept flat (on-disk JSON shape unchanged;
+  encoder ownership outside the dashboard); saveSnapshot/applySnapshot read
+  via promoted fields with all preserve-guards intact.
+- Two documented divergences unified, both verified safe: workspace
+  `Branch==""` preserves (was transcript-zeroing; unobservable);
+  `permission.resolved`→busy unconditional — safe because the runner settles
+  each permission exactly once, the interrupt path auto-denies BEFORE the
+  turn-terminal event, and a post-settle client resolve is a server-side
+  no-op, so resolved always precedes turn.completed/interrupted in the log
+  and the busy→needs-input correction follows in-order (replay preserves log
+  order).
+- 90 composite literals rewritten to nest `sessionReadModel{…}`; full suite +
+  `-race` + lint green.
+
+### §7a — opencode credential hardening, items 3–5 + docs (Opus build, Fable-verified)
+
+- **One provider key per session, fail-closed:** `Spec.OpencodeProvider` +
+  canonical constants; `opencodeEnv(spec, name)` injects exactly the selected
+  provider's SecretKeyRef with `Optional` removed — missing key stalls the
+  pod in `CreateContainerConfigError` instead of starting uncredentialed.
+  Finding: no provider selection reaches CreateSession today (defaults
+  Anthropic); the user-facing selector is §6's client/cred item, and it must
+  VALIDATE (resolveOpencodeProvider currently defaults unrecognized values).
+- **Freshness stamps:** `sandbox.cullen.dev/opencode-creds-hash` (first 8 hex
+  of sha256 of the selected key) + provider annotation at create;
+  `warnIfOpencodeCredsRotated` on the idempotent re-create path; Resume
+  re-stamps to the current Secret. Local script's kept-stale-Secret branch
+  warns loudly.
+- **Hardening:** secret-prefix printing removed from `cmd_status`; 0600
+  overlay enforcement; namespace = `$SANDBOX_NAMESPACE` → kubeconfig context
+  → default; reaper `secrets: get` moved from the ClusterRole to a namespaced
+  Role/RoleBinding in `agent-sessions` (reaper genuinely needs the read:
+  `RunnerToken` for the `/idle` poll auth). k8s/README already consistent.
+- **README:** OpenCode credentials section (keys→env table, fail-closed,
+  rotation-requires-restart, scoping, persistence).
