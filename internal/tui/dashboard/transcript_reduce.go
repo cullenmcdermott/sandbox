@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/cullenmcdermott/sandbox/internal/models"
 	"github.com/cullenmcdermott/sandbox/internal/session"
 	"github.com/cullenmcdermott/sandbox/internal/tui/dashboard/chat"
 	"github.com/cullenmcdermott/sandbox/tui/kit"
@@ -102,13 +101,13 @@ func (m *TranscriptModel) beginTurn() {
 	// the prior footer here too (no-op in the interactive path, where the new
 	// user block is already the trailing block).
 	m.dropTrailingFooter()
-	m.status = StatusBusy
+	m.DashStatus = StatusBusy
 	m.turnActive = true
 	// Clear the previous turn's id; turn.started repopulates it. Until then an
 	// interrupt relies on the runner's sole-active-turn fallback.
 	m.activeTurnID = ""
 	m.turnStart = nowFunc()
-	m.inTok, m.outTok, m.costUSD = 0, 0, 0
+	m.InputTokens, m.OutputTokens, m.TotalCostUSD = 0, 0, 0
 	// Clear the retained assistant text so a stale /goal sentinel from a prior
 	// turn can't trip completion before this turn produces its own reply.
 	m.lastAssistantText = ""
@@ -164,6 +163,15 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		}
 	}
 
+	// Shared read-model reducer (embedded sessionReadModel): the ONE place that
+	// unmarshals status/model/usage/git/permission payloads and derives
+	// DashStatus/Model/CtxLimit/InputTokens/…/Branch/pending-permission. It no-ops
+	// for events it doesn't own (deltas, tool/message/reasoning), so it's safe to
+	// call for every event. handleEvent below keeps ONLY transcript presentation
+	// (blocks, streaming buffers, the rich permission card) and reads back the
+	// parsed payloads it needs via res, so nothing is unmarshalled twice.
+	res := m.ApplyEvent(ev) // the embedded sessionReadModel's reducer
+
 	var cmd tea.Cmd
 
 	switch ev.Type {
@@ -177,68 +185,22 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		// attach/replay too, where StartTurn was never called locally).
 		m.activeTurnID = ev.TurnID
 
-	case session.EventSessionStarted:
-		var p session.SessionStartedPayload
-		_ = json.Unmarshal(ev.Payload, &p)
-		if p.Model != "" {
-			m.model = p.Model
-			m.ctxLimit = models.Limit(p.Model).ContextLimit
-			if m.defaultModel == "" {
-				// First resolved id is the account/session default; remember it so
-				// /model-default can restore the status line to it.
-				m.defaultModel = p.Model
-			}
-		}
-		if p.Cwd != "" {
-			m.cwd = p.Cwd
-		}
-
-	case session.EventWorkspaceStatus:
-		var p session.WorkspaceStatusPayload
-		_ = json.Unmarshal(ev.Payload, &p)
-		m.branch = p.Branch
-		m.dirty = p.Dirty
-		m.ahead = p.Ahead
-		m.behind = p.Behind
-
-	case session.EventUsageUpdated:
-		var p session.UsagePayload
-		_ = json.Unmarshal(ev.Payload, &p)
-		if p.InputTokens > 0 {
-			m.inTok = p.InputTokens
-			m.cacheReadTok = p.CacheReadTokens
-			m.cacheWriteTok = p.CacheWriteTokens
-		}
-		if p.OutputTokens > 0 {
-			m.outTok = p.OutputTokens
-		}
-		if p.TotalCostUSD > 0 {
-			m.costUSD = p.TotalCostUSD
-		}
-
 	case session.EventContextCompacted:
-		// The SDK compacted (summarized) the conversation to fit the context
-		// window. Reset the ctx% token baseline to the post-compaction size so
-		// the header gauge reflects the smaller conversation (a usage.updated
-		// event refreshes it on the next turn); PostTokens is optional on the
-		// wire, so when it is absent (0) we leave the counters untouched. Drop a
-		// one-line marker so a long run's compaction is visible in scrollback.
-		var p session.ContextCompactedPayload
-		_ = json.Unmarshal(ev.Payload, &p)
-		if p.PostTokens > 0 {
-			m.inTok = p.PostTokens
-			m.cacheReadTok = 0
-			m.cacheWriteTok = 0
-		}
+		// The shared reducer already reset the ctx% token baseline to the
+		// post-compaction size. Presentation-only here: drop a one-line marker so a
+		// long run's compaction is visible in scrollback, using the parsed payload
+		// the reducer handed back (no re-unmarshal).
 		marker := "context compacted"
-		switch {
-		case p.PreTokens > 0 && p.PostTokens > 0:
-			marker = fmt.Sprintf("context compacted · %s→%s tokens",
-				kit.FormatTokens(p.PreTokens), kit.FormatTokens(p.PostTokens))
-		case p.PreTokens > 0:
-			marker = fmt.Sprintf("context compacted · %s tokens", kit.FormatTokens(p.PreTokens))
-		case p.PostTokens > 0:
-			marker = fmt.Sprintf("context compacted · %s tokens", kit.FormatTokens(p.PostTokens))
+		if p := res.compacted; p != nil {
+			switch {
+			case p.PreTokens > 0 && p.PostTokens > 0:
+				marker = fmt.Sprintf("context compacted · %s→%s tokens",
+					kit.FormatTokens(p.PreTokens), kit.FormatTokens(p.PostTokens))
+			case p.PreTokens > 0:
+				marker = fmt.Sprintf("context compacted · %s tokens", kit.FormatTokens(p.PreTokens))
+			case p.PostTokens > 0:
+				marker = fmt.Sprintf("context compacted · %s tokens", kit.FormatTokens(p.PostTokens))
+			}
 		}
 		m.appendBlock(blockInfo, marker)
 
@@ -270,13 +232,13 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		}
 
 	case session.EventTurnCompleted:
+		// Status → needs-input is set by the shared reducer.
 		m.finalizeStreaming()
 		// Per-turn footer: a dim model/cost summary so scrollback is self-
 		// documenting (§D).
 		if f := m.turnFooter(); f != "" {
 			m.appendBlock(blockFooter, f)
 		}
-		m.status = StatusNeedsInput
 		m.turnActive = false
 		// Flush the queued prompt only while foreground (m.events != nil, i.e.
 		// this model owns the live stream). A parked/background model is fed via
@@ -304,8 +266,8 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		}
 
 	case session.EventTurnInterrupted:
+		// Status → needs-input is set by the shared reducer.
 		m.finalizeStreaming()
-		m.status = StatusNeedsInput
 		m.turnActive = false
 		m.appendBlock(blockInfo, "[interrupted]")
 		// A queued prompt here means the interrupt was a steer (queueSteer keeps
@@ -320,8 +282,8 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		}
 
 	case session.EventTurnFailed:
+		// Status → failed is set by the shared reducer.
 		m.finalizeStreaming()
-		m.status = StatusFailed
 		m.turnActive = false
 		var p session.ErrorPayload
 		_ = json.Unmarshal(ev.Payload, &p)
@@ -447,32 +409,32 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		}
 
 	case session.EventPermissionRequested:
-		var p session.PermissionPayload
-		_ = json.Unmarshal(ev.Payload, &p)
-		if p.Tool == "ExitPlanMode" {
-			// Plan mode: the agent presents its plan for review. Surface the
-			// distinct gold plan card (slice 1c) instead of the permission box.
-			var pl struct {
-				Plan string `json:"plan"`
+		// The shared reducer set status → waiting and captured the plain descriptor.
+		// Presentation-only here: build the rich plan/diff permission card from the
+		// payload the reducer handed back (no re-unmarshal).
+		if p := res.permission; p != nil {
+			if p.Tool == "ExitPlanMode" {
+				// Plan mode: the agent presents its plan for review. Surface the
+				// distinct gold plan card (slice 1c) instead of the permission box.
+				var pl struct {
+					Plan string `json:"plan"`
+				}
+				_ = json.Unmarshal(p.Input, &pl)
+				// nowFunc (not time.Now) so the anti-type-ahead grace gate is anchored
+				// on the same injectable clock permissionAnswerable() compares against
+				// — otherwise a test that swaps nowFunc can't exercise the gate.
+				m.pending = &transcriptPermission{id: p.PermissionID, tool: p.Tool, isPlan: true, plan: pl.Plan, since: nowFunc()}
+			} else {
+				adds, dels, diffLines := permissionDiffStat(p.Tool, p.Input)
+				m.pending = &transcriptPermission{id: p.PermissionID, tool: p.Tool, arg: toolArg(p.Tool, p.Input), adds: adds, dels: dels, diffLines: diffLines, since: nowFunc()}
 			}
-			_ = json.Unmarshal(p.Input, &pl)
-			// nowFunc (not time.Now) so the anti-type-ahead grace gate is anchored
-			// on the same injectable clock permissionAnswerable() compares against
-			// — otherwise a test that swaps nowFunc can't exercise the gate.
-			m.pending = &transcriptPermission{id: p.PermissionID, tool: p.Tool, isPlan: true, plan: pl.Plan, since: nowFunc()}
-		} else {
-			adds, dels, diffLines := permissionDiffStat(p.Tool, p.Input)
-			m.pending = &transcriptPermission{id: p.PermissionID, tool: p.Tool, arg: toolArg(p.Tool, p.Input), adds: adds, dels: dels, diffLines: diffLines, since: nowFunc()}
 		}
-		m.status = StatusWaiting
 		m.layout()
 
 	case session.EventPermissionResolved:
+		// The shared reducer reverted status → busy. Presentation-only here.
 		m.pending = nil
 		m.showDiff = false
-		if m.turnActive {
-			m.status = StatusBusy
-		}
 		m.layout()
 
 	case session.EventSessionTerminating:
@@ -501,22 +463,11 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 	// ---- B8: Previously-dropped events, now handled ----
 
 	case session.EventSessionStatusChanged:
-		// Runner reports session status transitions (idle/busy/error).
-		var p session.SessionStatusPayload
-		_ = json.Unmarshal(ev.Payload, &p)
-		switch p.Status {
-		case "busy":
-			m.status = StatusBusy
-		case "idle":
-			if m.status != StatusFailed {
-				m.status = StatusNeedsInput
-			}
-		case "error":
-			m.status = StatusFailed
-			// M1: surface the reason for an error status (was silently dropped).
-			if p.Reason != "" {
-				m.appendBlock(blockError, "session error: "+p.Reason)
-			}
+		// Runner reports session status transitions (idle/busy/error). The shared
+		// reducer applied the status mapping; presentation-only here: surface the
+		// error reason (M1: was silently dropped) via the reducer's statusReason.
+		if res.statusReason != "" {
+			m.appendBlock(blockError, "session error: "+res.statusReason)
 		}
 
 	case session.EventReasoningStarted:

@@ -45,8 +45,8 @@ func TestApplyPodEventSkipsConnectWhenInFlight(t *testing.T) {
 	m := New(nil)
 	m.connector = failingConnector // non-nil so the guard is actually reached
 	m.sessions = []Session{{
-		State:      session.State{ID: "s", Status: session.StatusRunning},
-		DashStatus: StatusBusy,
+		State:            session.State{ID: "s", Status: session.StatusRunning},
+		sessionReadModel: sessionReadModel{DashStatus: StatusBusy},
 	}}
 
 	// Baseline: no in-flight connect → the pod event launches one.
@@ -73,8 +73,8 @@ func TestApplyPodEventSkipsConnectWhenInFlight(t *testing.T) {
 func TestLiveSSEReadyCancelsRacedDuplicate(t *testing.T) {
 	m := New(nil)
 	m.sessions = []Session{{
-		State:      session.State{ID: "s", Status: session.StatusRunning},
-		DashStatus: StatusBusy,
+		State:            session.State{ID: "s", Status: session.StatusRunning},
+		sessionReadModel: sessionReadModel{DashStatus: StatusBusy},
 	}}
 	// An established stream: gen 5, its own cancel func.
 	establishedCancelled := false
@@ -110,8 +110,8 @@ func TestLiveSSEReadyCancelsRacedDuplicate(t *testing.T) {
 func TestStaleStreamEndedDoesNotTearDownHealthyStream(t *testing.T) {
 	m := New(nil)
 	m.sessions = []Session{{
-		State:      session.State{ID: "s", Status: session.StatusRunning},
-		DashStatus: StatusBusy,
+		State:            session.State{ID: "s", Status: session.StatusRunning},
+		sessionReadModel: sessionReadModel{DashStatus: StatusBusy},
 	}}
 	healthyCancelled := false
 	m.liveSSECancels["s"] = func() { healthyCancelled = true }
@@ -149,9 +149,8 @@ func TestStaleStreamEndedDoesNotTearDownHealthyStream(t *testing.T) {
 func TestStaleEventIsNotApplied(t *testing.T) {
 	m := New(nil)
 	m.sessions = []Session{{
-		State:      session.State{ID: "s", Status: session.StatusRunning},
-		DashStatus: StatusBusy,
-		CtxLimit:   200_000,
+		State:            session.State{ID: "s", Status: session.StatusRunning},
+		sessionReadModel: sessionReadModel{DashStatus: StatusBusy, CtxLimit: 200_000},
 	}}
 	m.liveSSEChannels["s"] = make(chan session.Event)
 	m.liveSSEStreamGen["s"] = 7
@@ -237,8 +236,10 @@ func TestLiveSSEReadyRegistersGenerationRoundTrip(t *testing.T) {
 func TestApplySeedSkipsConnectWhenInFlight(t *testing.T) {
 	m := New(nil)
 	m.sessions = []Session{
-		{State: session.State{ID: "s", Status: session.StatusRunning}, DashStatus: StatusBusy},
-	}
+		{
+			State:            session.State{ID: "s", Status: session.StatusRunning},
+			sessionReadModel: sessionReadModel{DashStatus: StatusBusy},
+		}}
 	m.liveSSEConnecting["s"] = true // a watch-driven connect is mid-setup
 	called := false
 	m.connector = func(_ context.Context, _ session.Ref, _ string, _ func(ConnectStage, string)) (ConnectResult, error) {
@@ -260,8 +261,10 @@ func TestApplySeedSkipsConnectWhenInFlight(t *testing.T) {
 func TestReconnectFailedClearsMarkerAndRetries(t *testing.T) {
 	m := New(nil)
 	m.sessions = []Session{
-		{State: session.State{ID: "s", Status: session.StatusRunning}, DashStatus: StatusBusy},
-	}
+		{
+			State:            session.State{ID: "s", Status: session.StatusRunning},
+			sessionReadModel: sessionReadModel{DashStatus: StatusBusy},
+		}}
 	m.liveSSEConnecting["s"] = true // set by the reconnect connect now failing
 
 	_, cmd := m.Update(liveSSEReconnectFailedMsg{id: "s", attempt: 0, gen: 3})
@@ -282,8 +285,10 @@ func TestReconnectProceedsDespiteInFlightConnect(t *testing.T) {
 	m := New(nil)
 	m.connector = failingConnector // non-nil so reconnectLiveSSECmd yields a Cmd
 	m.sessions = []Session{
-		{State: session.State{ID: "s", Status: session.StatusRunning}, DashStatus: StatusBusy},
-	}
+		{
+			State:            session.State{ID: "s", Status: session.StatusRunning},
+			sessionReadModel: sessionReadModel{DashStatus: StatusBusy},
+		}}
 	m.liveSSEConnecting["s"] = true // a racing connect is in flight, nothing registered
 
 	_, cmd := m.Update(liveSSEReconnectMsg{id: "s", attempt: 0})

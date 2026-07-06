@@ -106,7 +106,11 @@ func TestP1_BoxWithTitlePaintsBackground(t *testing.T) {
 
 func TestP2_TwoLineRowWithShortID(t *testing.T) {
 	m := triageModel(t)
-	s := Session{State: session.State{ID: "a3f1c9de", Backend: session.BackendClaudeSDK, ProjectPath: "/g/sandbox"}, Title: "sandbox", DashStatus: StatusIdle}
+	s := Session{
+		State:            session.State{ID: "a3f1c9de", Backend: session.BackendClaudeSDK, ProjectPath: "/g/sandbox"},
+		Title:            "sandbox",
+		sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+	}
 	row := stripANSI(m.renderSessionRow(s, false, 80))
 	lines := strings.Split(row, "\n")
 	if len(lines) != 2 {
@@ -144,10 +148,13 @@ func TestP3_RelTimeFallsBackToCreated(t *testing.T) {
 	nowFunc = func() time.Time { return time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC) }
 	defer func() { nowFunc = old }()
 
-	s := Session{State: session.State{
-		ID:        "s1",
-		CreatedAt: nowFunc().Add(-2 * time.Hour), // active is zero → fall back
-	}, DashStatus: StatusIdle}
+	s := Session{
+		State: session.State{
+			ID:        "s1",
+			CreatedAt: nowFunc().Add(-2 * time.Hour), // active is zero → fall back
+		},
+		sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+	}
 	if got := rowRelTime(s); got == "—" {
 		t.Errorf("rowRelTime should fall back to created-age, not '—'; got %q", got)
 	}
@@ -163,11 +170,8 @@ func TestP3_RelTimeFallsBackToCreated(t *testing.T) {
 func TestP4_RowAndDetailShowModelAndCtx(t *testing.T) {
 	m := triageModel(t)
 	s := Session{
-		State:       session.State{ID: "s1", Backend: session.BackendClaudeSDK, Status: session.StatusRunning},
-		Model:       "opus-4.8",
-		DashStatus:  StatusBusy,
-		CtxLimit:    1000000,
-		InputTokens: 620000,
+		State:            session.State{ID: "s1", Backend: session.BackendClaudeSDK, Status: session.StatusRunning},
+		sessionReadModel: sessionReadModel{Model: "opus-4.8", DashStatus: StatusBusy, CtxLimit: 1000000, InputTokens: 620000},
 	}
 	m.sessions = []Session{s}
 
@@ -209,10 +213,14 @@ func TestP5_LegendInSessionListBody(t *testing.T) {
 // --------------------------------------------------------------------------
 
 func TestP6_AttentionDotFiresOnFailed(t *testing.T) {
-	if attentionDot(Session{DashStatus: StatusFailed}) == "" {
+	if attentionDot(Session{
+		sessionReadModel: sessionReadModel{DashStatus: StatusFailed},
+	}) == "" {
 		t.Error("attentionDot should fire (non-empty) for a Failed session (P6)")
 	}
-	if attentionDot(Session{DashStatus: StatusIdle}) != "" {
+	if attentionDot(Session{
+		sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+	}) != "" {
 		t.Error("attentionDot should be empty for an Idle session")
 	}
 }
@@ -227,7 +235,10 @@ func TestP7_NoUsageBoxRealCostInDetail(t *testing.T) {
 	if strings.Contains(out, "USAGE") {
 		t.Error("the USAGE box should be deleted (P7)")
 	}
-	s := Session{State: session.State{ID: "s1", Status: session.StatusRunning}, DashStatus: StatusBusy, TotalCostUSD: 1.23}
+	s := Session{
+		State:            session.State{ID: "s1", Status: session.StatusRunning},
+		sessionReadModel: sessionReadModel{DashStatus: StatusBusy, TotalCostUSD: 1.23},
+	}
 	m.sessions = []Session{s}
 	detail := stripANSI(strings.Join(m.renderDetailLines(60, 20), "\n"))
 	if !strings.Contains(detail, "$1.23") {
@@ -294,8 +305,14 @@ func TestP13_ActionBlockForEveryActionableStatus(t *testing.T) {
 
 func TestP9_ClusterStripDerivesBackendMix(t *testing.T) {
 	m := triageModel(t,
-		Session{State: session.State{ID: "1", Backend: session.BackendClaudeSDK, Status: session.StatusRunning}, DashStatus: StatusIdle},
-		Session{State: session.State{ID: "2", Backend: session.BackendOpenCode, Status: session.StatusRunning}, DashStatus: StatusIdle},
+		Session{
+			State:            session.State{ID: "1", Backend: session.BackendClaudeSDK, Status: session.StatusRunning},
+			sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+		},
+		Session{
+			State:            session.State{ID: "2", Backend: session.BackendOpenCode, Status: session.StatusRunning},
+			sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+		},
 	)
 	strip := stripANSI(m.clusterStrip(m.width, m.partition()))
 	if !strings.Contains(strip, "claude 1") {
@@ -368,9 +385,18 @@ func TestP12_NeutralBorders(t *testing.T) {
 
 func TestP13_SharedPartitionCounts(t *testing.T) {
 	m := triageModel(t,
-		Session{State: session.State{ID: "1", Backend: session.BackendClaudeSDK, Status: session.StatusRunning}, DashStatus: StatusBusy},
-		Session{State: session.State{ID: "2", Backend: session.BackendClaudeSDK, Status: session.StatusSuspended}, DashStatus: StatusSuspended},
-		Session{State: session.State{ID: "3", Backend: session.BackendClaudeSDK, Status: session.StatusFailed}, DashStatus: StatusFailed},
+		Session{
+			State:            session.State{ID: "1", Backend: session.BackendClaudeSDK, Status: session.StatusRunning},
+			sessionReadModel: sessionReadModel{DashStatus: StatusBusy},
+		},
+		Session{
+			State:            session.State{ID: "2", Backend: session.BackendClaudeSDK, Status: session.StatusSuspended},
+			sessionReadModel: sessionReadModel{DashStatus: StatusSuspended},
+		},
+		Session{
+			State:            session.State{ID: "3", Backend: session.BackendClaudeSDK, Status: session.StatusFailed},
+			sessionReadModel: sessionReadModel{DashStatus: StatusFailed},
+		},
 	)
 	c := m.partition()
 	if c.total != 3 || c.busy != 1 || c.running != 1 || c.suspended != 1 || c.failed != 1 {
@@ -454,7 +480,10 @@ func TestPhase4_ToolStartedRingMainThreadOnly(t *testing.T) {
 
 func TestPhase4_DetailRecentSectionNewestFirst(t *testing.T) {
 	m := triageModel(t)
-	s := Session{State: session.State{ID: "s1", Status: session.StatusRunning}, DashStatus: StatusBusy}
+	s := Session{
+		State:            session.State{ID: "s1", Status: session.StatusRunning},
+		sessionReadModel: sessionReadModel{DashStatus: StatusBusy},
+	}
 	s.RecentTools = []ToolRef{
 		{Tool: "Read", Arg: "ssh.go"},
 		{Tool: "Bash", Arg: "go test ./..."},
@@ -479,7 +508,11 @@ func TestPhase4_DetailRecentSectionNewestFirst(t *testing.T) {
 
 func TestDetailPaneWiredIntoRenderZoned(t *testing.T) {
 	m := triageModel(t)
-	s := Session{State: session.State{ID: "wired1", Backend: session.BackendClaudeSDK, ProjectPath: "/g/wired", Status: session.StatusRunning}, Title: "wired-detail", DashStatus: StatusIdle}
+	s := Session{
+		State:            session.State{ID: "wired1", Backend: session.BackendClaudeSDK, ProjectPath: "/g/wired", Status: session.StatusRunning},
+		Title:            "wired-detail",
+		sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+	}
 	m.sessions = []Session{s}
 	out := stripANSI(m.renderZoned(m.width, m.height))
 	if !strings.Contains(out, "DETAIL") {

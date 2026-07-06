@@ -12,14 +12,18 @@ import (
 
 func busySessions() []Session {
 	return []Session{
-		{State: session.State{ID: "a", Status: session.StatusRunning}, DashStatus: StatusBusy},
-	}
+		{
+			State:            session.State{ID: "a", Status: session.StatusRunning},
+			sessionReadModel: sessionReadModel{DashStatus: StatusBusy},
+		}}
 }
 
 func waitingSessions() []Session {
 	return []Session{
-		{State: session.State{ID: "a", Status: session.StatusRunning}, DashStatus: StatusWaiting},
-	}
+		{
+			State:            session.State{ID: "a", Status: session.StatusRunning},
+			sessionReadModel: sessionReadModel{DashStatus: StatusWaiting},
+		}}
 }
 
 // progressState must stay ProgressNone on a non-Ghostty terminal regardless of

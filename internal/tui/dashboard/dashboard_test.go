@@ -176,13 +176,30 @@ func TestSortByTitle(t *testing.T) {
 
 func TestSortByStatus(t *testing.T) {
 	sessions := []Session{
-		{State: session.State{ID: "1"}, DashStatus: StatusSuspended},
-		{State: session.State{ID: "2"}, DashStatus: StatusWaiting},
-		{State: session.State{ID: "3"}, DashStatus: StatusBusy},
-		{State: session.State{ID: "4"}, DashStatus: StatusFailed},
-		{State: session.State{ID: "5"}, DashStatus: StatusIdle},
-		{State: session.State{ID: "6"}, DashStatus: StatusNeedsInput},
-	}
+		{
+			State:            session.State{ID: "1"},
+			sessionReadModel: sessionReadModel{DashStatus: StatusSuspended},
+		},
+		{
+			State:            session.State{ID: "2"},
+			sessionReadModel: sessionReadModel{DashStatus: StatusWaiting},
+		},
+		{
+			State:            session.State{ID: "3"},
+			sessionReadModel: sessionReadModel{DashStatus: StatusBusy},
+		},
+		{
+			State:            session.State{ID: "4"},
+			sessionReadModel: sessionReadModel{DashStatus: StatusFailed},
+		},
+		{
+			State:            session.State{ID: "5"},
+			sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+		},
+		{
+			State:            session.State{ID: "6"},
+			sessionReadModel: sessionReadModel{DashStatus: StatusNeedsInput},
+		}}
 
 	// Asc: most urgent first.
 	SortSessions(sessions, SortByStatus, SortAsc)
@@ -205,9 +222,14 @@ func TestSortByStatus(t *testing.T) {
 func TestApplyPodEventPatch(t *testing.T) {
 	m := New(nil) // nil backend — driven manually
 	m.sessions = []Session{
-		{State: session.State{ID: "sess-a", Status: session.StatusRunning}, DashStatus: StatusIdle},
-		{State: session.State{ID: "sess-b", Status: session.StatusRunning}, DashStatus: StatusIdle},
-	}
+		{
+			State:            session.State{ID: "sess-a", Status: session.StatusRunning},
+			sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+		},
+		{
+			State:            session.State{ID: "sess-b", Status: session.StatusRunning},
+			sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+		}}
 
 	// Update sess-a to suspended.
 	m.applyPodEvent(k8s.StateEvent{
@@ -257,9 +279,16 @@ func TestToastTickLoopGuarded(t *testing.T) {
 func TestNotifyExcludesAttachedSession(t *testing.T) {
 	m := New(nil)
 	m.sessions = []Session{
-		{State: session.State{ID: "s1"}, DashStatus: StatusWaiting, Title: "s1"},
-		{State: session.State{ID: "s2"}, DashStatus: StatusWaiting, Title: "s2"},
-	}
+		{
+			State:            session.State{ID: "s1"},
+			Title:            "s1",
+			sessionReadModel: sessionReadModel{DashStatus: StatusWaiting},
+		},
+		{
+			State:            session.State{ID: "s2"},
+			Title:            "s2",
+			sessionReadModel: sessionReadModel{DashStatus: StatusWaiting},
+		}}
 	// Attached to s1 → the toast must be for s2, not s1.
 	cmd := m.notifyIfBackgroundAttention("s1")
 	if cmd == nil {
@@ -277,8 +306,11 @@ func TestNotifyExcludesAttachedSession(t *testing.T) {
 func TestNotifyIncludesFailedSessions(t *testing.T) {
 	m := New(nil)
 	m.sessions = []Session{
-		{State: session.State{ID: "s1"}, DashStatus: StatusFailed, Title: "s1"},
-	}
+		{
+			State:            session.State{ID: "s1"},
+			Title:            "s1",
+			sessionReadModel: sessionReadModel{DashStatus: StatusFailed},
+		}}
 	cmd := m.notifyIfBackgroundAttention("")
 	if cmd == nil {
 		t.Fatal("expected a toast for a failed background session")
@@ -296,8 +328,11 @@ func TestNotifyClearsAttachedSessionDedupeAfterLeavingAttention(t *testing.T) {
 	m := New(nil)
 	m.notifiedAttention = map[session.ID]bool{"s1": true}
 	m.sessions = []Session{
-		{State: session.State{ID: "s1"}, DashStatus: StatusIdle, Title: "s1"},
-	}
+		{
+			State:            session.State{ID: "s1"},
+			Title:            "s1",
+			sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+		}}
 	_ = m.notifyIfBackgroundAttention("s1")
 	if m.notifiedAttention["s1"] {
 		t.Fatal("attached idle session should clear stale notification dedupe")
@@ -443,8 +478,10 @@ func TestGGChordResetsOnEarlyReturnKeys(t *testing.T) {
 func TestApplyPodEventInsert(t *testing.T) {
 	m := New(nil)
 	m.sessions = []Session{
-		{State: session.State{ID: "sess-a"}, DashStatus: StatusIdle},
-	}
+		{
+			State:            session.State{ID: "sess-a"},
+			sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+		}}
 
 	// A new session appears.
 	m.applyPodEvent(k8s.StateEvent{
@@ -468,9 +505,14 @@ func TestApplyPodEventInsert(t *testing.T) {
 func TestApplyPodEventDelete(t *testing.T) {
 	m := New(nil)
 	m.sessions = []Session{
-		{State: session.State{ID: "sess-a"}, DashStatus: StatusIdle},
-		{State: session.State{ID: "sess-b"}, DashStatus: StatusIdle},
-	}
+		{
+			State:            session.State{ID: "sess-a"},
+			sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+		},
+		{
+			State:            session.State{ID: "sess-b"},
+			sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+		}}
 
 	// sess-a is deleted.
 	m.applyPodEvent(k8s.StateEvent{
@@ -490,8 +532,10 @@ func TestApplyPodEventGoneStatus(t *testing.T) {
 	// A StateEvent with Status=GONE (not Deleted flag) should also remove.
 	m := New(nil)
 	m.sessions = []Session{
-		{State: session.State{ID: "sess-x"}, DashStatus: StatusIdle},
-	}
+		{
+			State:            session.State{ID: "sess-x"},
+			sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+		}}
 	m.applyPodEvent(k8s.StateEvent{
 		State:   session.State{ID: "sess-x", Status: session.StatusGone},
 		Deleted: false,
@@ -516,10 +560,9 @@ func TestApplySeedPreservesRunnerDerivedStatus(t *testing.T) {
 	// dashboard has already set a runner-derived DashStatus of StatusBusy.
 	m.sessions = []Session{
 		{
-			State:      session.State{ID: "sess-a", Status: session.StatusRunning},
-			DashStatus: StatusBusy,
-		},
-	}
+			State:            session.State{ID: "sess-a", Status: session.StatusRunning},
+			sessionReadModel: sessionReadModel{DashStatus: StatusBusy},
+		}}
 
 	// Now seedMsg arrives late (concurrent with watch).
 	// The seed carries only the cluster-derived view (idle-ish).
@@ -549,8 +592,10 @@ func TestApplySeedPreservesRunnerDerivedStatus(t *testing.T) {
 func TestApplySeedSkipsSSEWhenAlreadyRunning(t *testing.T) {
 	m := New(nil)
 	m.sessions = []Session{
-		{State: session.State{ID: "sess-b", Status: session.StatusRunning}, DashStatus: StatusBusy},
-	}
+		{
+			State:            session.State{ID: "sess-b", Status: session.StatusRunning},
+			sessionReadModel: sessionReadModel{DashStatus: StatusBusy},
+		}}
 	// Fake a live SSE cancel to mark the session as already streaming.
 	started := false
 	m.liveSSECancels["sess-b"] = func() {}
@@ -588,10 +633,9 @@ func TestRunnerUnreachableMidTurnRetriesThenFails(t *testing.T) {
 		m := New(nil)
 		m.sessions = []Session{
 			{
-				State:      session.State{ID: "sess-c", Status: session.StatusRunning},
-				DashStatus: startStatus,
-			},
-		}
+				State:            session.State{ID: "sess-c", Status: session.StatusRunning},
+				sessionReadModel: sessionReadModel{DashStatus: startStatus},
+			}}
 		// Fake a live SSE cancel so the stream-ended logic doesn't no-op.
 		m.liveSSECancels["sess-c"] = func() {}
 		m.liveSSEChannels["sess-c"] = make(chan session.Event)
@@ -635,10 +679,9 @@ func TestRunnerStreamEndedAtRestPreservesAttentionAndReconnects(t *testing.T) {
 	m := New(nil)
 	m.sessions = []Session{
 		{
-			State:      session.State{ID: "sess-d", Status: session.StatusRunning},
-			DashStatus: StatusNeedsInput,
-		},
-	}
+			State:            session.State{ID: "sess-d", Status: session.StatusRunning},
+			sessionReadModel: sessionReadModel{DashStatus: StatusNeedsInput},
+		}}
 	m.liveSSECancels["sess-d"] = func() {}
 	m.liveSSEChannels["sess-d"] = make(chan session.Event)
 
@@ -689,10 +732,9 @@ func TestLiveSSEReadyDroppedForSuspendedSession(t *testing.T) {
 	m := New(nil)
 	m.sessions = []Session{
 		{
-			State:      session.State{ID: "susp-id", Status: session.StatusSuspended},
-			DashStatus: StatusSuspended,
-		},
-	}
+			State:            session.State{ID: "susp-id", Status: session.StatusSuspended},
+			sessionReadModel: sessionReadModel{DashStatus: StatusSuspended},
+		}}
 
 	cancelled := false
 	msg := liveSSEReadyMsg{
@@ -712,10 +754,9 @@ func TestLiveSSEReadyAcceptedForRunningSession(t *testing.T) {
 	m := New(nil)
 	m.sessions = []Session{
 		{
-			State:      session.State{ID: "run-id", Status: session.StatusRunning},
-			DashStatus: StatusIdle,
-		},
-	}
+			State:            session.State{ID: "run-id", Status: session.StatusRunning},
+			sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+		}}
 
 	cancelled := false
 	ch := make(chan session.Event)
@@ -748,10 +789,9 @@ func TestLiveSSEReadyCancelledForAttachedSession(t *testing.T) {
 	m := New(nil)
 	m.sessions = []Session{
 		{
-			State:      session.State{ID: "att-id", Status: session.StatusRunning},
-			DashStatus: StatusIdle,
-		},
-	}
+			State:            session.State{ID: "att-id", Status: session.StatusRunning},
+			sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+		}}
 	m.attachedID = "att-id" // foreground transcript owns this session's stream
 
 	cancelled := false
@@ -838,7 +878,11 @@ func TestPendingActionRendersSpinner(t *testing.T) {
 	m := New(&fakeBackend{})
 	m.spinnerFrame = 3
 
-	s := Session{State: session.State{ID: "s1"}, DashStatus: StatusIdle, PendingAction: "suspend"}
+	s := Session{
+		State:            session.State{ID: "s1"},
+		PendingAction:    "suspend",
+		sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+	}
 	row := m.renderSessionRow(s, false, 80)
 
 	// The spinner frame at index 3 should appear in the row.

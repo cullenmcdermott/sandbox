@@ -52,8 +52,10 @@ func TestRunnerEventDelegatedOnceOnDashboard(t *testing.T) {
 	app.dashboard.seeded = true
 	app.screen = ScreenDashboard
 	app.dashboard.sessions = []Session{
-		{State: session.State{ID: "s1", Status: session.StatusRunning}, DashStatus: StatusIdle},
-	}
+		{
+			State:            session.State{ID: "s1", Status: session.StatusRunning},
+			sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+		}}
 
 	ch := make(chan session.Event)
 	close(ch) // readers return StreamEnded instantly instead of blocking
@@ -81,8 +83,10 @@ func TestNonKeyStillReachesDashboardBehindModal(t *testing.T) {
 	app := NewApp(nil, nil, nil)
 	app.dashboard.seeded = true
 	app.dashboard.sessions = []Session{
-		{State: session.State{ID: "s1", Status: session.StatusRunning}, DashStatus: StatusIdle},
-	}
+		{
+			State:            session.State{ID: "s1", Status: session.StatusRunning},
+			sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+		}}
 	app.screen = ScreenTranscript
 	app.transcript = NewTranscript(&fakeRunnerClient{}, app.dashboard.sessions[0], nil)
 

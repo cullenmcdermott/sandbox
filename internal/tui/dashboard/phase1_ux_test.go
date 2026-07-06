@@ -22,8 +22,8 @@ func TestApproveResultErrorSurfaced(t *testing.T) {
 	m.liveSSEClients = map[session.ID]RunnerClient{id: fc}
 
 	sess := Session{
-		State:               session.State{ID: id, Status: session.StatusRunning},
-		PendingPermissionID: "p1",
+		State:            session.State{ID: id, Status: session.StatusRunning},
+		sessionReadModel: sessionReadModel{PendingPermissionID: "p1"},
 	}
 	cmd := m.approveCmd(sess, true)
 	if cmd == nil {

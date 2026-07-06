@@ -112,9 +112,8 @@ func TestApplyRunnerEvent(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			sess := Session{
-				State:               session.State{ID: "test-session"},
-				DashStatus:          tc.initialStatus,
-				PendingPermissionID: tc.initialPermID,
+				State:            session.State{ID: "test-session"},
+				sessionReadModel: sessionReadModel{DashStatus: tc.initialStatus, PendingPermissionID: tc.initialPermID},
 			}
 			changed := ApplyRunnerEvent(&sess, tc.ev)
 			if changed != tc.wantChanged {
@@ -147,9 +146,14 @@ func mkEvent(typ session.EventType, payload interface{}) session.Event {
 func TestApplyRunnerEventPatchesOneSession(t *testing.T) {
 	m := New(nil) // nil backend -- driven manually
 	m.sessions = []Session{
-		{State: session.State{ID: "sess-a", Status: session.StatusRunning}, DashStatus: StatusIdle},
-		{State: session.State{ID: "sess-b", Status: session.StatusRunning}, DashStatus: StatusIdle},
-	}
+		{
+			State:            session.State{ID: "sess-a", Status: session.StatusRunning},
+			sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+		},
+		{
+			State:            session.State{ID: "sess-b", Status: session.StatusRunning},
+			sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+		}}
 
 	// Apply a turn.started event to sess-a only.
 	msg := RunnerEventMsg{
@@ -181,8 +185,8 @@ func TestApplyRunnerEventPatchesOneSession(t *testing.T) {
 
 func TestPermissionIDCaptureAndClear(t *testing.T) {
 	sess := Session{
-		State:      session.State{ID: "sess-perm"},
-		DashStatus: StatusBusy,
+		State:            session.State{ID: "sess-perm"},
+		sessionReadModel: sessionReadModel{DashStatus: StatusBusy},
 	}
 
 	// A permission request sets the ID and tool.
@@ -231,10 +235,9 @@ func TestLiveSSEStartFailsDegrades(t *testing.T) {
 	m.connector = failingConnector
 	m.sessions = []Session{
 		{
-			State:      session.State{ID: "sess-down", Status: session.StatusRunning, PodReady: true},
-			DashStatus: StatusIdle,
-		},
-	}
+			State:            session.State{ID: "sess-down", Status: session.StatusRunning, PodReady: true},
+			sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+		}}
 
 	// Running startLiveSSECmd returns a tea.Cmd and synchronously marks the
 	// connect in flight so a racing guard can't launch a duplicate.
@@ -276,10 +279,9 @@ func TestRunnerEventStreamEndedRetries(t *testing.T) {
 	m := New(nil)
 	m.sessions = []Session{
 		{
-			State:      session.State{ID: "sess-drop", Status: session.StatusRunning},
-			DashStatus: StatusBusy,
-		},
-	}
+			State:            session.State{ID: "sess-drop", Status: session.StatusRunning},
+			sessionReadModel: sessionReadModel{DashStatus: StatusBusy},
+		}}
 	// Manually mark an SSE stream as open (already closed channel).
 	ch := make(chan session.Event)
 	close(ch)
@@ -364,8 +366,8 @@ func TestApplyRunnerEventStateMachine(t *testing.T) {
 		name := string(tc.evType) + "_from_" + tc.from.String()
 		t.Run(name, func(t *testing.T) {
 			sess := Session{
-				State:      session.State{ID: "state-machine"},
-				DashStatus: tc.from,
+				State:            session.State{ID: "state-machine"},
+				sessionReadModel: sessionReadModel{DashStatus: tc.from},
 			}
 			changed := ApplyRunnerEvent(&sess, mkEvent(tc.evType, nil))
 			if sess.DashStatus != tc.to {
@@ -607,29 +609,29 @@ func TestReasoningEventsProduceBlock(t *testing.T) {
 	}
 }
 
-// ORACLE: EventSessionStatusChanged updates m.status. [B8]
+// ORACLE: EventSessionStatusChanged updates m.DashStatus. [B8]
 func TestSessionStatusChangedUpdatesStatus(t *testing.T) {
 	sess := Session{State: session.State{ID: "s1"}}
 	m := NewTranscript(&fakeRunnerClient{}, sess, nil)
 
 	sendEvent(m, session.EventSessionStatusChanged, session.SessionStatusPayload{Status: "busy"})
-	if m.status != StatusBusy {
-		t.Errorf("status after busy: got %v, want StatusBusy", m.status)
+	if m.DashStatus != StatusBusy {
+		t.Errorf("status after busy: got %v, want StatusBusy", m.DashStatus)
 	}
 
 	sendEvent(m, session.EventSessionStatusChanged, session.SessionStatusPayload{Status: "idle"})
-	if m.status != StatusNeedsInput {
-		t.Errorf("status after idle: got %v, want StatusNeedsInput", m.status)
+	if m.DashStatus != StatusNeedsInput {
+		t.Errorf("status after idle: got %v, want StatusNeedsInput", m.DashStatus)
 	}
 
 	sendEvent(m, session.EventSessionStatusChanged, session.SessionStatusPayload{Status: "error"})
-	if m.status != StatusFailed {
-		t.Errorf("status after error: got %v, want StatusFailed", m.status)
+	if m.DashStatus != StatusFailed {
+		t.Errorf("status after error: got %v, want StatusFailed", m.DashStatus)
 	}
 
 	sendEvent(m, session.EventSessionStatusChanged, session.SessionStatusPayload{Status: "idle"})
-	if m.status != StatusFailed {
-		t.Errorf("idle after error should not mask failure: got %v, want StatusFailed", m.status)
+	if m.DashStatus != StatusFailed {
+		t.Errorf("idle after error should not mask failure: got %v, want StatusFailed", m.DashStatus)
 	}
 }
 

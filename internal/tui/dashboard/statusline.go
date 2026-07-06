@@ -355,7 +355,7 @@ func (m *TranscriptModel) statusCwd() string {
 // ctxTokens is the current request's context size: input + cache-read +
 // cache-write tokens from the latest usage event. This is the ctx% numerator.
 func (m *TranscriptModel) ctxTokens() int {
-	return m.inTok + m.cacheReadTok + m.cacheWriteTok
+	return m.InputTokens + m.CacheReadTokens + m.CacheWriteTokens
 }
 
 // activeModelWindow returns the per-model weekly usage window (Opus or Sonnet)
@@ -365,7 +365,7 @@ func (m *TranscriptModel) ctxTokens() int {
 // future /usage view). Haiku, unknown, or unset models have no per-model cap, so
 // ok is false. label is "opus"/"sonnet" for the row.
 func (m *TranscriptModel) activeModelWindow() (util float64, reset time.Time, label string, ok bool) {
-	id := strings.ToLower(m.model)
+	id := strings.ToLower(m.Model)
 	switch {
 	case strings.Contains(id, "opus") && m.rlOpusSeen:
 		return m.rlOpusUtil, m.rlOpusReset, "opus", true
@@ -384,22 +384,22 @@ func (m *TranscriptModel) renderStatusLine() string {
 
 	// Row 1: model ─ cwd ─ branch* ─ used/limit pct ●bar · $cost.
 	segs := []string{
-		styleSLBright.Render(shortModelName(m.model)),
+		styleSLBright.Render(shortModelName(m.Model)),
 		styleSLBody.Render(m.statusCwd()),
 	}
-	if m.branch != "" {
-		b := m.branch
-		if m.dirty {
+	if m.Branch != "" {
+		b := m.Branch
+		if m.Dirty {
 			b += "*"
 		}
 		branch := styleSLBranch.Render(b)
-		if m.ahead > 0 || m.behind > 0 {
-			branch += muted.Render(fmt.Sprintf(" ↑%d↓%d", m.ahead, m.behind))
+		if m.Ahead > 0 || m.Behind > 0 {
+			branch += muted.Render(fmt.Sprintf(" ↑%d↓%d", m.Ahead, m.Behind))
 		}
 		segs = append(segs, branch)
 	}
 
-	limit := m.ctxLimit
+	limit := m.CtxLimit
 	if limit <= 0 {
 		limit = 200000
 	}
@@ -428,7 +428,7 @@ func (m *TranscriptModel) renderStatusLine() string {
 		// Suppressed under the global off switch (NO_COLOR / SANDBOX_REDUCE_MOTION)
 		// so output degrades to the block bar (D2/D4).
 		bar = m.ctxGaugeKitty(frac)
-	case m.caps.TrueColor && !m.caps.ReduceMotion && m.status == StatusBusy:
+	case m.caps.TrueColor && !m.caps.ReduceMotion && m.DashStatus == StatusBusy:
 		bar = shimmerBlockBar(frac, 10, m.workFrame, pct >= 80)
 	}
 	ctx := styleSLBody.Render(fmt.Sprintf("%s/%s ", fmtTokenLimit(used), fmtTokenLimit(limit))) +
@@ -438,8 +438,8 @@ func (m *TranscriptModel) renderStatusLine() string {
 	segs = append(segs, ctx)
 
 	row1 := strings.Join(segs, sep)
-	if m.costUSD > 0 {
-		row1 += muted.Render(" · ") + styleSLCost.Render(fmt.Sprintf("$%.4f", m.costUSD))
+	if m.TotalCostUSD > 0 {
+		row1 += muted.Render(" · ") + styleSLCost.Render(fmt.Sprintf("$%.4f", m.TotalCostUSD))
 	}
 	// Mode moves onto row 1 as a compact trailing tag (was the separate row 4).
 	row1 += muted.Render(" · ") + m.mode.modeTag()

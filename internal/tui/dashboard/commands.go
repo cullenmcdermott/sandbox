@@ -155,11 +155,11 @@ func setModelCmd(id, label string) func(*TranscriptModel) tea.Cmd {
 		// /model-default (empty id) restores the captured account default; a named
 		// alias ("opus") shows as-is until session.started reports the full id.
 		if id == "" {
-			m.model = m.defaultModel
+			m.Model = m.defaultModel
 		} else {
-			m.model = id
+			m.Model = id
 		}
-		m.ctxLimit = models.Limit(m.model).ContextLimit
+		m.CtxLimit = models.Limit(m.Model).ContextLimit
 		m.appendBlock(blockInfo, "model → "+label)
 		return nil
 	}

@@ -86,8 +86,10 @@ func TestHandleRunnerEventPersistsSnapshot(t *testing.T) {
 	store := newFakeSnapshotStore()
 	m := New(nil).WithSnapshotStore(store)
 	m.sessions = []Session{
-		{State: session.State{ID: "s1", Status: session.StatusRunning}, DashStatus: StatusIdle},
-	}
+		{
+			State:            session.State{ID: "s1", Status: session.StatusRunning},
+			sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+		}}
 
 	m.handleRunnerEvent(RunnerEventMsg{
 		ID:    "s1",
@@ -116,8 +118,10 @@ func TestUsageEventsThrottleSnapshotSaves(t *testing.T) {
 	store := newFakeSnapshotStore()
 	m := New(nil).WithSnapshotStore(store)
 	m.sessions = []Session{
-		{State: session.State{ID: "s1", Status: session.StatusRunning}, DashStatus: StatusBusy},
-	}
+		{
+			State:            session.State{ID: "s1", Status: session.StatusRunning},
+			sessionReadModel: sessionReadModel{DashStatus: StatusBusy},
+		}}
 
 	usage := func(seq uint64) RunnerEventMsg {
 		return RunnerEventMsg{ID: "s1", Event: mkEventSeq(seq, session.EventUsageUpdated, session.UsagePayload{InputTokens: int(seq)})}

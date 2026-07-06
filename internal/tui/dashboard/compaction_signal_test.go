@@ -76,9 +76,9 @@ func TestContextCompacted_ReducerNoPostTokensPreservesBaseline(t *testing.T) {
 // one-line "context compacted · N→M tokens" marker into scrollback.
 func TestContextCompacted_TranscriptResetsAndMarks(t *testing.T) {
 	m := NewTranscript(&fakeRunnerClient{}, transcriptSession(), nil)
-	m.inTok = 40_000
-	m.cacheReadTok = 120_000
-	m.cacheWriteTok = 20_000
+	m.InputTokens = 40_000
+	m.CacheReadTokens = 120_000
+	m.CacheWriteTokens = 20_000
 
 	m.handleEvent(mkEvent(session.EventContextCompacted, session.ContextCompactedPayload{
 		Trigger:    "auto",
@@ -86,9 +86,9 @@ func TestContextCompacted_TranscriptResetsAndMarks(t *testing.T) {
 		PostTokens: 30_000,
 	}))
 
-	if m.inTok != 30_000 || m.cacheReadTok != 0 || m.cacheWriteTok != 0 {
+	if m.InputTokens != 30_000 || m.CacheReadTokens != 0 || m.CacheWriteTokens != 0 {
 		t.Errorf("transcript baseline must reset to PostTokens with cache zeroed, got in=%d read=%d write=%d",
-			m.inTok, m.cacheReadTok, m.cacheWriteTok)
+			m.InputTokens, m.CacheReadTokens, m.CacheWriteTokens)
 	}
 	got, ok := lastBlockOfKind(m, blockInfo)
 	if !ok {
@@ -104,9 +104,9 @@ func TestContextCompacted_TranscriptResetsAndMarks(t *testing.T) {
 // and the baseline must reset — guards the third arm of the marker switch.
 func TestContextCompacted_TranscriptPostTokensOnlyMarks(t *testing.T) {
 	m := NewTranscript(&fakeRunnerClient{}, transcriptSession(), nil)
-	m.inTok = 40_000
-	m.cacheReadTok = 120_000
-	m.cacheWriteTok = 20_000
+	m.InputTokens = 40_000
+	m.CacheReadTokens = 120_000
+	m.CacheWriteTokens = 20_000
 
 	m.handleEvent(mkEvent(session.EventContextCompacted, session.ContextCompactedPayload{
 		Trigger:    "auto",
@@ -114,9 +114,9 @@ func TestContextCompacted_TranscriptPostTokensOnlyMarks(t *testing.T) {
 		// PreTokens omitted.
 	}))
 
-	if m.inTok != 30_000 || m.cacheReadTok != 0 || m.cacheWriteTok != 0 {
+	if m.InputTokens != 30_000 || m.CacheReadTokens != 0 || m.CacheWriteTokens != 0 {
 		t.Errorf("PostTokens-only must still reset baseline, got in=%d read=%d write=%d",
-			m.inTok, m.cacheReadTok, m.cacheWriteTok)
+			m.InputTokens, m.CacheReadTokens, m.CacheWriteTokens)
 	}
 	got, ok := lastBlockOfKind(m, blockInfo)
 	if !ok {
@@ -131,18 +131,18 @@ func TestContextCompacted_TranscriptPostTokensOnlyMarks(t *testing.T) {
 // compaction stays visible) but must not touch the header token baseline.
 func TestContextCompacted_TranscriptNoPostTokensStillMarks(t *testing.T) {
 	m := NewTranscript(&fakeRunnerClient{}, transcriptSession(), nil)
-	m.inTok = 40_000
-	m.cacheReadTok = 120_000
-	m.cacheWriteTok = 20_000
+	m.InputTokens = 40_000
+	m.CacheReadTokens = 120_000
+	m.CacheWriteTokens = 20_000
 
 	m.handleEvent(mkEvent(session.EventContextCompacted, session.ContextCompactedPayload{
 		Trigger:   "manual",
 		PreTokens: 180_000,
 	}))
 
-	if m.inTok != 40_000 || m.cacheReadTok != 120_000 || m.cacheWriteTok != 20_000 {
+	if m.InputTokens != 40_000 || m.CacheReadTokens != 120_000 || m.CacheWriteTokens != 20_000 {
 		t.Errorf("absent PostTokens must not touch header baseline, got in=%d read=%d write=%d",
-			m.inTok, m.cacheReadTok, m.cacheWriteTok)
+			m.InputTokens, m.CacheReadTokens, m.CacheWriteTokens)
 	}
 	got, ok := lastBlockOfKind(m, blockInfo)
 	if !ok {

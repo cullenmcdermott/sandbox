@@ -42,9 +42,9 @@ func TestSortStableUnderRepeatedResort(t *testing.T) {
 	base := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
 	mk := func(id string) Session {
 		return Session{
-			Title:      "same",
-			DashStatus: StatusIdle,
-			State:      session.State{ID: session.ID(id), LastActivity: base},
+			Title:            "same",
+			State:            session.State{ID: session.ID(id), LastActivity: base},
+			sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
 		}
 	}
 

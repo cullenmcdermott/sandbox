@@ -32,8 +32,8 @@ func TestShortIDUsesTrailingSuffix(t *testing.T) {
 func TestSublineNotConfusingClau(t *testing.T) {
 	m := triageModel(t)
 	s := Session{
-		State:      session.State{ID: "claude-sdk-df80e6-75908cbf", Backend: session.BackendClaudeSDK},
-		DashStatus: StatusIdle,
+		State:            session.State{ID: "claude-sdk-df80e6-75908cbf", Backend: session.BackendClaudeSDK},
+		sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
 	}
 	row := stripANSI(m.renderSessionRow(s, false, 80))
 	if strings.Contains(row, "clau ") || strings.Contains(row, " clau") {
@@ -49,8 +49,8 @@ func TestSublineNotConfusingClau(t *testing.T) {
 func TestWorkspaceStatusFeedsBranchOntoRow(t *testing.T) {
 	m := triageModel(t)
 	s := Session{
-		State:      session.State{ID: "s1", Backend: session.BackendClaudeSDK, ProjectPath: "/work/proj"},
-		DashStatus: StatusIdle,
+		State:            session.State{ID: "s1", Backend: session.BackendClaudeSDK, ProjectPath: "/work/proj"},
+		sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
 	}
 	ApplyRunnerEvent(&s, mkEvent(session.EventWorkspaceStatus,
 		session.WorkspaceStatusPayload{Branch: "feat/x", Dirty: true}))
@@ -71,9 +71,8 @@ func TestWorkspaceStatusFeedsBranchOntoRow(t *testing.T) {
 func TestSublineStatusWordAndPermSubstate(t *testing.T) {
 	m := triageModel(t)
 	waiting := Session{
-		State:                 session.State{ID: "s1", Backend: session.BackendClaudeSDK},
-		DashStatus:            StatusWaiting,
-		PendingPermissionTool: "Bash",
+		State:            session.State{ID: "s1", Backend: session.BackendClaudeSDK},
+		sessionReadModel: sessionReadModel{DashStatus: StatusWaiting, PendingPermissionTool: "Bash"},
 	}
 	row := stripANSI(m.renderSessionRow(waiting, false, 80))
 	if !strings.Contains(row, "waiting") {
@@ -84,9 +83,9 @@ func TestSublineStatusWordAndPermSubstate(t *testing.T) {
 	}
 
 	working := Session{
-		State:       session.State{ID: "s2", Backend: session.BackendClaudeSDK},
-		DashStatus:  StatusBusy,
-		RecentTools: []ToolRef{{Tool: "Edit", Arg: "main.go"}},
+		State:            session.State{ID: "s2", Backend: session.BackendClaudeSDK},
+		RecentTools:      []ToolRef{{Tool: "Edit", Arg: "main.go"}},
+		sessionReadModel: sessionReadModel{DashStatus: StatusBusy},
 	}
 	wrow := stripANSI(m.renderSessionRow(working, false, 80))
 	if !strings.Contains(wrow, "working") {

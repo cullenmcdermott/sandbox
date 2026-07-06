@@ -38,8 +38,8 @@ func TestSessionStatusErrorReasonSurfaced(t *testing.T) {
 
 	m.handleEvent(session.Event{Type: session.EventSessionStatusChanged, Payload: json.RawMessage(`{"status":"error","reason":"model overloaded"}`)})
 
-	if m.status != StatusFailed {
-		t.Errorf("status should be Failed, got %v", m.status)
+	if m.DashStatus != StatusFailed {
+		t.Errorf("status should be Failed, got %v", m.DashStatus)
 	}
 	found := false
 	for _, b := range m.blocks {

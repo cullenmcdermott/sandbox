@@ -172,7 +172,7 @@ func (m *TranscriptModel) resolvePermission(allow bool) tea.Cmd {
 	m.pending = nil
 	m.showDiff = false
 	if m.turnActive {
-		m.status = StatusBusy
+		m.DashStatus = StatusBusy
 	}
 	m.layout()
 

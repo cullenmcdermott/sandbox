@@ -13,10 +13,21 @@ import (
 func TestPermQueueCursorNavigation(t *testing.T) {
 	m := &Model{
 		sessions: []Session{
-			{State: session.State{ID: "s1", Backend: "claude-sdk"}, DashStatus: StatusWaiting, PendingPermissionID: "p1", Title: "first"},
-			{State: session.State{ID: "s2", Backend: "claude-sdk"}, DashStatus: StatusWaiting, PendingPermissionID: "p2", Title: "second"},
-			{State: session.State{ID: "s3", Backend: "claude-sdk"}, DashStatus: StatusWaiting, PendingPermissionID: "p3", Title: "third"},
-		},
+			{
+				State:            session.State{ID: "s1", Backend: "claude-sdk"},
+				Title:            "first",
+				sessionReadModel: sessionReadModel{DashStatus: StatusWaiting, PendingPermissionID: "p1"},
+			},
+			{
+				State:            session.State{ID: "s2", Backend: "claude-sdk"},
+				Title:            "second",
+				sessionReadModel: sessionReadModel{DashStatus: StatusWaiting, PendingPermissionID: "p2"},
+			},
+			{
+				State:            session.State{ID: "s3", Backend: "claude-sdk"},
+				Title:            "third",
+				sessionReadModel: sessionReadModel{DashStatus: StatusWaiting, PendingPermissionID: "p3"},
+			}},
 	}
 	m.openPermQueue()
 
@@ -55,9 +66,16 @@ func TestPermQueueCursorNavigation(t *testing.T) {
 func TestPermQueueResolveSelectedItem(t *testing.T) {
 	m := &Model{
 		sessions: []Session{
-			{State: session.State{ID: "s1", Backend: "claude-sdk"}, DashStatus: StatusWaiting, PendingPermissionID: "p1", Title: "first"},
-			{State: session.State{ID: "s2", Backend: "claude-sdk"}, DashStatus: StatusWaiting, PendingPermissionID: "p2", Title: "second"},
-		},
+			{
+				State:            session.State{ID: "s1", Backend: "claude-sdk"},
+				Title:            "first",
+				sessionReadModel: sessionReadModel{DashStatus: StatusWaiting, PendingPermissionID: "p1"},
+			},
+			{
+				State:            session.State{ID: "s2", Backend: "claude-sdk"},
+				Title:            "second",
+				sessionReadModel: sessionReadModel{DashStatus: StatusWaiting, PendingPermissionID: "p2"},
+			}},
 	}
 	m.openPermQueue()
 	m.permQueue.sel = 1 // select second item
@@ -73,9 +91,16 @@ func TestPermQueueResolveSelectedItem(t *testing.T) {
 func TestPermQueueArrowNavigation(t *testing.T) {
 	m := &Model{
 		sessions: []Session{
-			{State: session.State{ID: "s1", Backend: "claude-sdk"}, DashStatus: StatusWaiting, PendingPermissionID: "p1", Title: "first"},
-			{State: session.State{ID: "s2", Backend: "claude-sdk"}, DashStatus: StatusWaiting, PendingPermissionID: "p2", Title: "second"},
-		},
+			{
+				State:            session.State{ID: "s1", Backend: "claude-sdk"},
+				Title:            "first",
+				sessionReadModel: sessionReadModel{DashStatus: StatusWaiting, PendingPermissionID: "p1"},
+			},
+			{
+				State:            session.State{ID: "s2", Backend: "claude-sdk"},
+				Title:            "second",
+				sessionReadModel: sessionReadModel{DashStatus: StatusWaiting, PendingPermissionID: "p2"},
+			}},
 	}
 	m.openPermQueue()
 

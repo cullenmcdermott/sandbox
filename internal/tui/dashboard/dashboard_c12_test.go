@@ -16,12 +16,9 @@ func TestApplySeedClearsStalePermissionOnSuspend(t *testing.T) {
 	m := New(nil)
 	m.sessions = []Session{
 		{
-			State:                 session.State{ID: "s", Status: session.StatusRunning},
-			DashStatus:            StatusWaiting,
-			PendingPermissionID:   "perm1",
-			PendingPermissionTool: "Edit",
-		},
-	}
+			State:            session.State{ID: "s", Status: session.StatusRunning},
+			sessionReadModel: sessionReadModel{DashStatus: StatusWaiting, PendingPermissionID: "perm1", PendingPermissionTool: "Edit"},
+		}}
 
 	seed := []session.State{{ID: "s", Status: session.StatusSuspended}}
 	next, _ := m.applySeed(seed)
@@ -45,12 +42,9 @@ func TestApplySeedStillPreservesRunningWaiting(t *testing.T) {
 	m := New(nil)
 	m.sessions = []Session{
 		{
-			State:                 session.State{ID: "s", Status: session.StatusRunning},
-			DashStatus:            StatusWaiting,
-			PendingPermissionID:   "perm1",
-			PendingPermissionTool: "Edit",
-		},
-	}
+			State:            session.State{ID: "s", Status: session.StatusRunning},
+			sessionReadModel: sessionReadModel{DashStatus: StatusWaiting, PendingPermissionID: "perm1", PendingPermissionTool: "Edit"},
+		}}
 
 	seed := []session.State{{ID: "s", Status: session.StatusRunning}}
 	next, _ := m.applySeed(seed)

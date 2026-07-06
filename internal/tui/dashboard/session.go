@@ -90,22 +90,21 @@ func (s SessionStatus) Glyph() string {
 // Session is the dashboard read-model for a single agent session. It wraps
 // session.State with the derived SessionStatus and display-ready fields.
 type Session struct {
+	// sessionReadModel holds the shared SSE-derived read-model state
+	// (DashStatus, Model/CtxLimit, usage tokens/cost, git Branch/Dirty, the
+	// pending-permission descriptor, ClaudeSessionID) reduced by ApplyEvent. It is
+	// embedded so the existing s.DashStatus / s.InputTokens / … field accesses and
+	// the SessionSnapshot serialization stay unchanged. The same struct is embedded
+	// in TranscriptModel, so both surfaces reduce one identical read-model.
+	sessionReadModel
+
 	// State is the authoritative cluster state (Status, PodReady, etc.).
 	State session.State
-
-	// DashStatus is the six-state view-model status derived from State.Status
-	// and (Phase B) live runner events.
-	DashStatus SessionStatus
 
 	// Title is the derived display name: the project path basename. It is the
 	// final fallback in DisplayTitle, behind RenamedTitle and AutoTitle (the
 	// runner-generated summary lives in AutoTitle, not here).
 	Title string
-
-	// Model is the active model id reported by the backend (e.g. "opus-4.8" or
-	// "kimi-k2"). Surfaced in the list/detail and the external pane status row;
-	// populated from State.Model (Seam C).
-	Model string
 
 	// RenamedTitle is a user-supplied human label. When non-empty it overrides
 	// Title for display.
@@ -116,11 +115,6 @@ type Session struct {
 	// from the session.title SSE event and restored on seed from the index.
 	AutoTitle string
 
-	// ClaudeSessionID is the Claude Agent SDK session UUID from the session.started
-	// event. Persisted to the index so the CLI can write a local history.jsonl
-	// entry (making the session resumable from the laptop's `claude --resume`).
-	ClaudeSessionID string
-
 	// BusyFrame is the current spinner frame index for busy sessions.
 	BusyFrame int
 
@@ -128,20 +122,6 @@ type Session struct {
 	// optimistically when the user triggers it and cleared on actionResultMsg.
 	// Non-empty means the row should show an animated "suspending…" label.
 	PendingAction string
-
-	// PendingPermissionID is the permissionId from the most recent
-	// permission.requested event. It is cleared on permission.resolved or
-	// when the turn ends. Non-empty only when DashStatus == StatusWaiting.
-	PendingPermissionID string
-
-	// PendingPermissionTool is the tool name from the pending permission event,
-	// used for the detail pane "allow X?" prompt.
-	PendingPermissionTool string
-
-	// PendingPermissionArg is the pending permission's headline argument (Bash
-	// command, file path, URL, …) so the detail pane and permission queue show
-	// what is being approved, not just the tool name.
-	PendingPermissionArg string
 
 	// statusChangedAt is when DashStatus last changed, used to fade the row's
 	// glyph in over a short window (the fresh-data charm touch). Zero means no
@@ -170,17 +150,6 @@ type Session struct {
 	// to throttle the high-frequency usage stream (see Model.saveSnapshot).
 	lastSnapSave time.Time
 
-	// --- Live usage metrics (Phase 3) ------------------------------------
-	// Updated from usage.updated SSE events. Drive the row/detail ctx% and the
-	// detail cost line. CtxLimit is the model's context window (cached from
-	// models.Limit on session.started / seed) so CtxPercent needs no lookup.
-	InputTokens      int
-	OutputTokens     int
-	CacheReadTokens  int
-	CacheWriteTokens int
-	TotalCostUSD     float64
-	CtxLimit         int
-
 	// RecentTools is the main-thread tool ring (Phase 4), oldest→newest. Capped
 	// at recentToolsCap; the detail pane renders the last few newest-first.
 	RecentTools []ToolRef
@@ -192,13 +161,6 @@ type Session struct {
 	// IdleSince is when the runner started counting this session idle (zero = not
 	// idle-counting, e.g. a turn is active). Drives the "suspends in ~X" hint.
 	IdleSince time.Time
-
-	// Branch and Dirty are the workspace git state reported by the runner
-	// (workspace.status events; see WorkspaceStatusPayload). Empty Branch means
-	// not-a-git-repo or not-yet-reported. Surfaced on the list row's sub-line and
-	// persisted in the snapshot so the branch shows for cold sessions on relaunch.
-	Branch string
-	Dirty  bool
 }
 
 // CtxPercent returns the rounded context-window utilization (0–100) for the
@@ -505,14 +467,6 @@ func ParseStatus(label string) (SessionStatus, bool) {
 // The cluster-derived State and titles are left untouched — they come from the
 // seed. Callers must gate this on the cluster status (see applySeed): a stale
 // running-status must not override a suspended/failed pod.
-// clearPendingPermission resets the pending-permission read-model fields (on
-// resolution or turn end).
-func (s *Session) clearPendingPermission() {
-	s.PendingPermissionID = ""
-	s.PendingPermissionTool = ""
-	s.PendingPermissionArg = ""
-}
-
 func (s *Session) applySnapshot(snap SessionSnapshot) {
 	s.DashStatus = snap.DashStatus
 	s.PendingPermissionID = snap.PendingPermissionID
@@ -541,10 +495,9 @@ func (s *Session) applySnapshot(snap SessionSnapshot) {
 // SessionFromState converts a session.State into a dashboard Session.
 func SessionFromState(st session.State) Session {
 	s := Session{
-		State:      st,
-		DashStatus: DeriveStatus(st),
-		Title:      deriveTitle(st),
-		Model:      st.Model,
+		State:            st,
+		Title:            deriveTitle(st),
+		sessionReadModel: sessionReadModel{DashStatus: DeriveStatus(st), Model: st.Model},
 	}
 	if st.Model != "" {
 		s.CtxLimit = models.Limit(st.Model).ContextLimit
@@ -571,166 +524,64 @@ func SessionFromState(st session.State) Session {
 // arrives; this function only refines it.
 //
 // It returns true if the status changed (so the caller can re-sort if needed).
+//
+// The status/usage/git/model/permission state lives in the shared sessionReadModel
+// reducer (ApplyEvent), which this delegates to — so a new read-model event type is
+// added there ONCE, not here and in the transcript's handleEvent. What stays here is
+// the dashboard-only read-model: the auto title, the recent-tool ring, and the
+// event-time-stamped glyph-flash bookkeeping.
 func ApplyRunnerEvent(sess *Session, ev session.Event) bool {
 	prev := sess.DashStatus
 	switch ev.Type {
-	case session.EventSessionStarted:
-		// Capture the model id for the list/detail + external pane status row.
-		// Does not change the six-state status.
-		var p session.SessionStartedPayload
-		_ = json.Unmarshal(ev.Payload, &p) // malformed payload → zero value → no-op
-		if p.Model != "" {
-			sess.Model = p.Model
-			// Cache the context-window limit so the row/detail ctx% needs no
-			// per-render lookup (Phase 3).
-			sess.CtxLimit = models.Limit(p.Model).ContextLimit
-		}
-		// Capture the Claude SDK session id so it can be persisted to the index
-		// (drives local resume — history.jsonl entry + `claude --resume <id>`).
-		if p.ClaudeSessionID != "" {
-			sess.ClaudeSessionID = p.ClaudeSessionID
-		}
-		return false
-
-	case session.EventWorkspaceStatus:
-		// Git branch + dirty marker for the list row's sub-line. Reported by the
-		// runner at session start and after each turn; does not change the
-		// six-state status. An empty branch (cwd not a git repo) leaves the slot
-		// blank rather than clobbering a previously-known branch.
-		var p session.WorkspaceStatusPayload
-		_ = json.Unmarshal(ev.Payload, &p) // malformed payload → zero value → no-op
-		if p.Branch != "" {
-			sess.Branch = p.Branch
-			sess.Dirty = p.Dirty
-		}
-		return false
+	case session.EventSessionStarted,
+		session.EventWorkspaceStatus,
+		session.EventSessionStatusChanged,
+		session.EventTurnStarted,
+		session.EventPermissionRequested,
+		session.EventPermissionResolved,
+		session.EventTurnCompleted,
+		session.EventTurnInterrupted,
+		session.EventTurnFailed,
+		session.EventUsageUpdated,
+		session.EventContextCompacted:
+		// Shared read-model reducer (the embedded sessionReadModel.ApplyEvent):
+		// six-state status, model/ctx-limit, usage/cost, git branch,
+		// pending-permission descriptor, and (from session.started) the Claude SDK
+		// session id the dashboard persists.
+		sess.ApplyEvent(ev)
 
 	case session.EventSessionTitle:
-		// Runner-generated auto title (T6). Updates the display label only; does
-		// not change the six-state status. Empty titles are ignored so a failed
-		// summarization can't blank the derived basename.
+		// Runner-generated auto title (T6). Dashboard-only — the transcript has no
+		// title concept. Updates the display label only; empty titles are ignored
+		// so a failed summarization can't blank the derived basename.
 		var p session.SessionTitlePayload
 		_ = json.Unmarshal(ev.Payload, &p) // malformed payload → zero value → no-op
 		if p.Title != "" {
 			sess.AutoTitle = p.Title
 		}
-		return false
-
-	case session.EventSessionStatusChanged:
-		// Runner-level status is the only terminal signal emitted when the opencode
-		// observer abandons a synthetic turn on stream drop. Mirror the transcript's
-		// mapping so list rows and the external pane do not stay stale.
-		var p session.SessionStatusPayload
-		_ = json.Unmarshal(ev.Payload, &p) // malformed payload → zero value → no-op
-		switch p.Status {
-		case "busy":
-			sess.DashStatus = StatusBusy
-			sess.clearPendingPermission()
-		case "idle":
-			if sess.DashStatus == StatusFailed {
-				return false
-			}
-			sess.DashStatus = StatusNeedsInput
-			sess.clearPendingPermission()
-		case "error":
-			sess.DashStatus = StatusFailed
-			sess.clearPendingPermission()
-		default:
-			return false
-		}
-
-	case session.EventTurnStarted:
-		sess.DashStatus = StatusBusy
-		// Clear any stale permission state from a previous turn.
-		sess.clearPendingPermission()
-
-	case session.EventPermissionRequested:
-		var p session.PermissionPayload
-		_ = json.Unmarshal(ev.Payload, &p) // malformed payload → zero value → no-op
-		sess.DashStatus = StatusWaiting
-		sess.PendingPermissionID = p.PermissionID
-		sess.PendingPermissionTool = p.Tool
-		sess.PendingPermissionArg = toolArg(p.Tool, p.Input)
-
-	case session.EventPermissionResolved:
-		// Turn is still active; revert to busy (the turn continues).
-		sess.DashStatus = StatusBusy
-		sess.clearPendingPermission()
-
-	case session.EventTurnCompleted:
-		sess.DashStatus = StatusNeedsInput
-		sess.clearPendingPermission()
-
-	case session.EventTurnInterrupted:
-		sess.DashStatus = StatusNeedsInput
-		sess.clearPendingPermission()
-
-	case session.EventTurnFailed:
-		sess.DashStatus = StatusFailed
-		sess.clearPendingPermission()
-
-	case session.EventUsageUpdated:
-		// Live token/cost accounting (Phase 3). Does not change the six-state
-		// status — it only refreshes the metrics the row/detail surface.
-		var p session.UsagePayload
-		_ = json.Unmarshal(ev.Payload, &p) // malformed payload → zero value → no-op
-		// >0 guards mirror the transcript's usage handler: partial usage events
-		// (e.g. an output-only update) must not clobber known counters with zeros.
-		if p.InputTokens > 0 {
-			sess.InputTokens = p.InputTokens
-			sess.CacheReadTokens = p.CacheReadTokens
-			sess.CacheWriteTokens = p.CacheWriteTokens
-		}
-		if p.OutputTokens > 0 {
-			sess.OutputTokens = p.OutputTokens
-		}
-		if p.TotalCostUSD > 0 {
-			sess.TotalCostUSD = p.TotalCostUSD
-		}
-		return false
 
 	case session.EventToolStarted:
-		// Recent main-thread tool activity (Phase 4). Subagent-child tools
-		// (ParentToolUseID set) are skipped so the ring reflects the main thread.
+		// Recent main-thread tool activity (Phase 4). Dashboard-only ring (the
+		// transcript renders tool cards from the same event, a separate concern).
+		// Subagent-child tools (ParentToolUseID set) are skipped so the ring
+		// reflects the main thread.
 		var p session.ToolPayload
 		_ = json.Unmarshal(ev.Payload, &p) // malformed payload → zero value → no-op
 		if p.ParentToolUseID != "" || p.Tool == "" {
-			return false
+			break
 		}
 		sess.RecentTools = append(sess.RecentTools, ToolRef{Tool: p.Tool, Arg: toolArg(p.Tool, p.Input)})
 		if len(sess.RecentTools) > recentToolsCap {
 			sess.RecentTools = sess.RecentTools[len(sess.RecentTools)-recentToolsCap:]
 		}
-		return false
-
-	case session.EventContextCompacted:
-		// The SDK compacted (summarized) the conversation to fit the context
-		// window. Reset the ctx% baseline to the post-compaction size so the
-		// gauge reflects the smaller conversation instead of the stale
-		// pre-compaction count. PostTokens is optional on the wire; when it is
-		// absent (0) we leave the counters untouched — a usage.updated event
-		// will refresh them on the next turn. Does not change the six-state
-		// status.
-		var p session.ContextCompactedPayload
-		_ = json.Unmarshal(ev.Payload, &p) // malformed payload → zero value → no-op
-		if p.PostTokens > 0 {
-			sess.InputTokens = p.PostTokens
-			sess.CacheReadTokens = 0
-			sess.CacheWriteTokens = 0
-		}
-		return false
 
 	default:
-		// All other known events (message deltas, tool events, etc.) do not
-		// change the six-state status — AND this is also the safety net for
-		// protocol/version skew: a session.EventType this build doesn't know
-		// about (a newer runner emitting a type this CLI predates, or a stale
-		// CLI against a runner that dropped one) lands here too and is a
-		// deliberate, explicit no-op rather than a panic or a silently-wrong
-		// state transition. See the protocol-version handshake
-		// (session.ProtocolVersion, internal/runner.Client.Health) for the
-		// CLI-side warning this complements.
-		return false
+		// All other known events (message deltas, reasoning, etc.) do not touch
+		// the dashboard read-model — AND this is the safety net for protocol/version
+		// skew: a session.EventType this build doesn't know about lands here and is
+		// a deliberate no-op rather than a panic or a silently-wrong transition. See
+		// the protocol-version handshake (session.ProtocolVersion,
+		// internal/runner.Client.Health) for the CLI-side warning this complements.
 	}
 	if sess.DashStatus != prev {
 		// Stamp from the event's OWN time, not wall-clock, so a replayed /

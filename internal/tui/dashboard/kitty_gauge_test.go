@@ -59,8 +59,8 @@ func TestCtxGaugeKittyTransmitOnChange(t *testing.T) {
 // today. App.View must not prepend any APC for a non-Kitty transcript.
 func TestCtxGaugeDegradesWithoutKitty(t *testing.T) {
 	m := &TranscriptModel{} // zero caps
-	m.model = "claude-opus-4-8"
-	m.ctxLimit = 200000
+	m.Model = "claude-opus-4-8"
+	m.CtxLimit = 200000
 	line := m.renderStatusLine()
 	if strings.Contains(line, "\U0010EEEE") {
 		t.Fatal("non-Kitty status line must not contain placeholder cells")
@@ -77,8 +77,8 @@ func TestCtxGaugeDegradesWithoutKitty(t *testing.T) {
 // Kitty-capable terminal: the block-bar path is taken and nothing is queued.
 func TestCtxGaugeKittySuppressedByReduceMotion(t *testing.T) {
 	m := &TranscriptModel{caps: terminal.Caps{KittyGraphics: true, ReduceMotion: true}}
-	m.model = "claude-opus-4-8"
-	m.ctxLimit = 200000
+	m.Model = "claude-opus-4-8"
+	m.CtxLimit = 200000
 	line := m.renderStatusLine()
 	if strings.Contains(line, "\U0010EEEE") {
 		t.Fatal("ReduceMotion must suppress placeholder cells")

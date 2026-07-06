@@ -106,7 +106,10 @@ func TestToastNotSheared(t *testing.T) {
 // must re-toast only after leaving and re-entering attention.
 func TestNotifyEdgeDedupes(t *testing.T) {
 	m := New(nil)
-	m.sessions = []Session{{State: session.State{ID: "s1", Status: session.StatusRunning}, DashStatus: StatusWaiting}}
+	m.sessions = []Session{{
+		State:            session.State{ID: "s1", Status: session.StatusRunning},
+		sessionReadModel: sessionReadModel{DashStatus: StatusWaiting},
+	}}
 
 	if cmd := m.notifyIfBackgroundAttention(""); cmd == nil {
 		t.Fatal("first entry into attention should toast")
@@ -126,9 +129,14 @@ func TestNotifyEdgeDedupes(t *testing.T) {
 func TestJumpToNextAttentionIncludesFailed(t *testing.T) {
 	m := New(nil)
 	m.sessions = []Session{
-		{State: session.State{ID: "idle", Status: session.StatusRunning}, DashStatus: StatusIdle},
-		{State: session.State{ID: "failed", Status: session.StatusRunning}, DashStatus: StatusFailed},
-	}
+		{
+			State:            session.State{ID: "idle", Status: session.StatusRunning},
+			sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+		},
+		{
+			State:            session.State{ID: "failed", Status: session.StatusRunning},
+			sessionReadModel: sessionReadModel{DashStatus: StatusFailed},
+		}}
 	got := m.jumpToNextNeedingAttention()
 	if got == nil || got.ID() != "failed" {
 		t.Fatalf("jump target = %v, want failed session", got)
@@ -140,9 +148,14 @@ func TestJumpToNextAttentionUsesRowsInGroupView(t *testing.T) {
 	m.groupView.open = true
 	m.groupView.repos = map[string]bool{"repo-a": true, "repo-b": true}
 	m.sessions = []Session{
-		{State: session.State{ID: "idle", Status: session.StatusRunning, ProjectPath: "/repo-a"}, DashStatus: StatusIdle},
-		{State: session.State{ID: "failed", Status: session.StatusRunning, ProjectPath: "/repo-b"}, DashStatus: StatusFailed},
-	}
+		{
+			State:            session.State{ID: "idle", Status: session.StatusRunning, ProjectPath: "/repo-a"},
+			sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+		},
+		{
+			State:            session.State{ID: "failed", Status: session.StatusRunning, ProjectPath: "/repo-b"},
+			sessionReadModel: sessionReadModel{DashStatus: StatusFailed},
+		}}
 	got := m.jumpToNextNeedingAttention()
 	if got == nil || got.ID() != "failed" {
 		t.Fatalf("jump target = %v, want failed session", got)
@@ -158,9 +171,14 @@ func TestJumpToNextAttentionExpandsCollapsedGroup(t *testing.T) {
 	m.groupView.open = true
 	m.groupView.repos = map[string]bool{"repo-a": true, "repo-b": false}
 	m.sessions = []Session{
-		{State: session.State{ID: "idle", Status: session.StatusRunning, ProjectPath: "/repo-a"}, DashStatus: StatusIdle},
-		{State: session.State{ID: "failed", Status: session.StatusRunning, ProjectPath: "/repo-b"}, DashStatus: StatusFailed},
-	}
+		{
+			State:            session.State{ID: "idle", Status: session.StatusRunning, ProjectPath: "/repo-a"},
+			sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+		},
+		{
+			State:            session.State{ID: "failed", Status: session.StatusRunning, ProjectPath: "/repo-b"},
+			sessionReadModel: sessionReadModel{DashStatus: StatusFailed},
+		}}
 	got := m.jumpToNextNeedingAttention()
 	if got == nil || got.ID() != "failed" {
 		t.Fatalf("jump target = %v, want failed session", got)

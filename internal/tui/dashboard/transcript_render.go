@@ -557,7 +557,7 @@ func (m *TranscriptModel) renderHeader() string {
 		}
 		right = styleTError.Render(label)
 	} else {
-		glyph := glyphStyle(m.status).Render(m.status.Glyph() + " " + chatStatusLabel(m.status))
+		glyph := glyphStyle(m.DashStatus).Render(m.DashStatus.Glyph() + " " + chatStatusLabel(m.DashStatus))
 		meta := styleTInfo.Render(m.agent + " · " + filepath.Base(m.projectPath))
 		right = meta + "  " + glyph
 	}
@@ -698,12 +698,12 @@ func (m *TranscriptModel) workingStatus() string {
 	working := styleSLBusy.Render("working" + ell)
 	out := spin + " " + working + "  " +
 		styleSLLabel.Render(fmtElapsed(nowFunc().Sub(m.turnStart)))
-	if m.inTok > 0 || m.outTok > 0 {
+	if m.InputTokens > 0 || m.OutputTokens > 0 {
 		out += styleSLMuted.
-			Render(fmt.Sprintf("  ↑%s ↓%s", kit.FormatTokens(m.inTok), kit.FormatTokens(m.outTok)))
+			Render(fmt.Sprintf("  ↑%s ↓%s", kit.FormatTokens(m.InputTokens), kit.FormatTokens(m.OutputTokens)))
 	}
-	if m.costUSD > 0 {
-		out += styleSLCost.Render("  " + kit.FormatCost(m.costUSD))
+	if m.TotalCostUSD > 0 {
+		out += styleSLCost.Render("  " + kit.FormatCost(m.TotalCostUSD))
 	}
 	return out
 }
@@ -716,8 +716,8 @@ func (m *TranscriptModel) turnFooter() string {
 	var parts []string
 	// Skip the model segment entirely before session.started delivers it — a
 	// literal "◇ —" placeholder reads as a glitch.
-	if m.model != "" {
-		parts = append(parts, shortModelName(m.model))
+	if m.Model != "" {
+		parts = append(parts, shortModelName(m.Model))
 	}
 	if m.agent != "" {
 		parts = append(parts, "via "+MarkedClientLabel(m.agent))
@@ -725,11 +725,11 @@ func (m *TranscriptModel) turnFooter() string {
 	if !m.turnStart.IsZero() {
 		parts = append(parts, fmtElapsed(nowFunc().Sub(m.turnStart)))
 	}
-	if m.inTok > 0 || m.outTok > 0 {
-		parts = append(parts, fmt.Sprintf("↑%s ↓%s", kit.FormatTokens(m.inTok), kit.FormatTokens(m.outTok)))
+	if m.InputTokens > 0 || m.OutputTokens > 0 {
+		parts = append(parts, fmt.Sprintf("↑%s ↓%s", kit.FormatTokens(m.InputTokens), kit.FormatTokens(m.OutputTokens)))
 	}
-	if m.costUSD > 0 {
-		parts = append(parts, kit.FormatCost(m.costUSD))
+	if m.TotalCostUSD > 0 {
+		parts = append(parts, kit.FormatCost(m.TotalCostUSD))
 	}
 	if len(parts) == 0 {
 		return ""

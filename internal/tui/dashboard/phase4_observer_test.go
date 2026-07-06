@@ -107,16 +107,15 @@ func TestPhase4_IdleStatusChangedDoesNotMaskFailedTurn(t *testing.T) {
 // and strips the "provider/" prefix from the model id.
 func TestPhase4_ExternalPaneLiveStatusRow(t *testing.T) {
 	live := Session{
-		State:        session.State{ID: "opencode-xyz", Backend: session.BackendOpenCode},
-		DashStatus:   StatusBusy,
-		AutoTitle:    "Refactor the lexer",
-		Model:        "opencode/big-pickle",
-		CtxLimit:     200000,
-		InputTokens:  40000,
-		TotalCostUSD: 0.0123,
+		State:            session.State{ID: "opencode-xyz", Backend: session.BackendOpenCode},
+		AutoTitle:        "Refactor the lexer",
+		sessionReadModel: sessionReadModel{DashStatus: StatusBusy, Model: "opencode/big-pickle", CtxLimit: 200000, InputTokens: 40000, TotalCostUSD: 0.0123},
 	}
 	// Static snapshot is stale on purpose; the live accessor must win.
-	pane := NewExternalPane(Session{Title: "proj", Model: "stale"}, OpencodeCreds{}, func() Session { return live })
+	pane := NewExternalPane(Session{
+		Title:            "proj",
+		sessionReadModel: sessionReadModel{Model: "stale"},
+	}, OpencodeCreds{}, func() Session { return live })
 	pane.w, pane.h = 120, 30
 
 	row := pane.statusRow()

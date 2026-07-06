@@ -51,7 +51,7 @@ func TestStatusLineGaugeDegradesWithoutCaps(t *testing.T) {
 	// status defaults to the zero SessionStatus (not StatusBusy), and caps is
 	// zero — both gates fail, so the static path is taken. This mirrors the
 	// renderStatusLine gate; if either default changes this test catches it.
-	if m.caps.TrueColor && !m.caps.ReduceMotion && m.status == StatusBusy {
+	if m.caps.TrueColor && !m.caps.ReduceMotion && m.DashStatus == StatusBusy {
 		t.Fatal("zero-value transcript must not take the animated gauge path")
 	}
 }

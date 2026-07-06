@@ -7,7 +7,10 @@ import (
 )
 
 func runningSession(id string) Session {
-	return Session{State: session.State{ID: session.ID(id), Status: session.StatusRunning}, DashStatus: StatusIdle}
+	return Session{
+		State:            session.State{ID: session.ID(id), Status: session.StatusRunning},
+		sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+	}
 }
 
 // TestReconcileDropsPhantomAfterTwoMisses is the T5 fix: a session the cluster no

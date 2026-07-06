@@ -11,8 +11,8 @@ import (
 
 func newStatusModel(limit, used int) *TranscriptModel {
 	m := &TranscriptModel{}
-	m.ctxLimit = limit
-	m.inTok = used // ctxTokens() = inTok + cacheReadTok + cacheWriteTok
+	m.CtxLimit = limit
+	m.InputTokens = used // ctxTokens() = inTok + cacheReadTok + cacheWriteTok
 	return m
 }
 

@@ -131,7 +131,10 @@ func keyMsg(s string) tea.KeyPressMsg {
 func TestSuspendActionDispatch(t *testing.T) {
 	fb := &fakeBackend{}
 	m := New(fb)
-	m.sessions = []Session{{State: session.State{ID: "s1", Status: session.StatusRunning}, DashStatus: StatusIdle}}
+	m.sessions = []Session{{
+		State:            session.State{ID: "s1", Status: session.StatusRunning},
+		sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+	}}
 
 	_, cmd := m.handleKey(keyMsg("x"))
 	if cmd == nil {
@@ -152,7 +155,10 @@ func TestSuspendActionDispatch(t *testing.T) {
 func TestResumeActionDispatch(t *testing.T) {
 	fb := &fakeBackend{}
 	m := New(fb)
-	m.sessions = []Session{{State: session.State{ID: "s1", Status: session.StatusSuspended}, DashStatus: StatusSuspended}}
+	m.sessions = []Session{{
+		State:            session.State{ID: "s1", Status: session.StatusSuspended},
+		sessionReadModel: sessionReadModel{DashStatus: StatusSuspended},
+	}}
 
 	_, cmd := m.handleKey(keyMsg("r"))
 	if cmd == nil {
@@ -169,7 +175,10 @@ func TestResumeActionDispatch(t *testing.T) {
 func TestSuspendSkippedWhenAlreadySuspended(t *testing.T) {
 	fb := &fakeBackend{}
 	m := New(fb)
-	m.sessions = []Session{{State: session.State{ID: "s1", Status: session.StatusSuspended}, DashStatus: StatusSuspended}}
+	m.sessions = []Session{{
+		State:            session.State{ID: "s1", Status: session.StatusSuspended},
+		sessionReadModel: sessionReadModel{DashStatus: StatusSuspended},
+	}}
 
 	_, cmd := m.handleKey(keyMsg("x"))
 	if cmd != nil {
@@ -182,7 +191,10 @@ func TestSuspendSkippedWhenAlreadySuspended(t *testing.T) {
 
 func TestNewSessionEmitsCreateMsg(t *testing.T) {
 	m := New(&fakeBackend{})
-	m.sessions = []Session{{State: session.State{ID: "s1"}, DashStatus: StatusIdle}}
+	m.sessions = []Session{{
+		State:            session.State{ID: "s1"},
+		sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+	}}
 
 	_, cmd := m.handleKey(keyMsg("n"))
 	if cmd == nil {
@@ -200,7 +212,11 @@ func TestNewSessionEmitsCreateMsg(t *testing.T) {
 func TestConfirmGatesDestroy(t *testing.T) {
 	fb := &fakeBackend{}
 	m := New(fb)
-	m.sessions = []Session{{State: session.State{ID: "s1"}, Title: "proj", DashStatus: StatusIdle}}
+	m.sessions = []Session{{
+		State:            session.State{ID: "s1"},
+		Title:            "proj",
+		sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+	}}
 
 	// ! opens the confirm dialog but does NOT destroy yet.
 	if _, cmd := m.handleKey(keyMsg("!")); cmd != nil {
@@ -259,7 +275,10 @@ func TestActionErrorSurfaced(t *testing.T) {
 
 func TestSuspendSetsPendingAction(t *testing.T) {
 	m := New(&fakeBackend{})
-	m.sessions = []Session{{State: session.State{ID: "s1", Status: session.StatusRunning}, DashStatus: StatusIdle}}
+	m.sessions = []Session{{
+		State:            session.State{ID: "s1", Status: session.StatusRunning},
+		sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+	}}
 
 	m.handleKey(keyMsg("x"))
 	if m.sessions[0].PendingAction != "suspend" {
@@ -269,7 +288,10 @@ func TestSuspendSetsPendingAction(t *testing.T) {
 
 func TestResumeSetsPendingAction(t *testing.T) {
 	m := New(&fakeBackend{})
-	m.sessions = []Session{{State: session.State{ID: "s1", Status: session.StatusSuspended}, DashStatus: StatusSuspended}}
+	m.sessions = []Session{{
+		State:            session.State{ID: "s1", Status: session.StatusSuspended},
+		sessionReadModel: sessionReadModel{DashStatus: StatusSuspended},
+	}}
 
 	m.handleKey(keyMsg("r"))
 	if m.sessions[0].PendingAction != "resume" {
@@ -279,7 +301,10 @@ func TestResumeSetsPendingAction(t *testing.T) {
 
 func TestDestroyConfirmSetsPendingAction(t *testing.T) {
 	m := New(&fakeBackend{})
-	m.sessions = []Session{{State: session.State{ID: "s1"}, DashStatus: StatusIdle}}
+	m.sessions = []Session{{
+		State:            session.State{ID: "s1"},
+		sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+	}}
 
 	m.handleKey(keyMsg("!"))
 	m.handleKey(keyMsg("y"))
@@ -290,7 +315,10 @@ func TestDestroyConfirmSetsPendingAction(t *testing.T) {
 
 func TestDestroyCancelClearsPendingAction(t *testing.T) {
 	m := New(&fakeBackend{})
-	m.sessions = []Session{{State: session.State{ID: "s1"}, DashStatus: StatusIdle}}
+	m.sessions = []Session{{
+		State:            session.State{ID: "s1"},
+		sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+	}}
 
 	m.handleKey(keyMsg("!"))
 	// Manually set PendingAction to simulate an earlier state (should be cleared on cancel)
@@ -303,7 +331,11 @@ func TestDestroyCancelClearsPendingAction(t *testing.T) {
 
 func TestActionResultMsgClearsPendingAction(t *testing.T) {
 	m := New(&fakeBackend{})
-	m.sessions = []Session{{State: session.State{ID: "s1"}, DashStatus: StatusIdle, PendingAction: "suspend"}}
+	m.sessions = []Session{{
+		State:            session.State{ID: "s1"},
+		PendingAction:    "suspend",
+		sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+	}}
 
 	m.Update(actionResultMsg{action: "suspend", id: "s1"})
 	if m.sessions[0].PendingAction != "" {
@@ -322,9 +354,9 @@ func TestAppAttachSizeDetach(t *testing.T) {
 	app.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
 
 	sess := Session{
-		State:      session.State{ID: "s1", ProjectPath: "/x/proj", Backend: "claude-sdk"},
-		Title:      "proj",
-		DashStatus: StatusNeedsInput,
+		State:            session.State{ID: "s1", ProjectPath: "/x/proj", Backend: "claude-sdk"},
+		Title:            "proj",
+		sessionReadModel: sessionReadModel{DashStatus: StatusNeedsInput},
 	}
 	// attachReadyMsg drives the transition without a real connector.
 	_, cmd := app.Update(attachReadyMsg{sess: sess, client: &fakeRunnerClient{}})

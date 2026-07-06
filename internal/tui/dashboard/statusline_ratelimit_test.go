@@ -175,7 +175,7 @@ func TestStatusLineShowsActiveModelWindow(t *testing.T) {
 	base := time.Date(2030, 6, 21, 12, 0, 0, 0, time.UTC)
 	withFixedNow(t, base, func() {
 		m := &TranscriptModel{}
-		m.model = "claude-opus-4-8"
+		m.Model = "claude-opus-4-8"
 		m.rlSeen, m.rlAvailable = true, true
 		m.rl5hUtil, m.rl7dUtil = 42, 18
 		m.rlOpusSeen, m.rlOpusUtil = true, 62
@@ -194,7 +194,7 @@ func TestStatusLineShowsActiveModelWindow(t *testing.T) {
 		}
 
 		// A model with no per-model cap (Haiku) hides the per-model row entirely.
-		m.model = "claude-haiku-4-5"
+		m.Model = "claude-haiku-4-5"
 		out = stripANSI(m.renderStatusLine())
 		if strings.Contains(out, "opus:") || strings.Contains(out, "sonnet:") {
 			t.Errorf("Haiku session must not show any per-model window: %q", out)
@@ -211,7 +211,7 @@ func TestStatusLineShowsSonnetActiveWindow(t *testing.T) {
 	base := time.Date(2030, 6, 21, 12, 0, 0, 0, time.UTC)
 	withFixedNow(t, base, func() {
 		m := &TranscriptModel{}
-		m.model = "claude-sonnet-4-6"
+		m.Model = "claude-sonnet-4-6"
 		m.rlSeen, m.rlAvailable = true, true
 		m.rl5hUtil, m.rl7dUtil = 42, 18
 		m.rlOpusSeen, m.rlOpusUtil = true, 62          // present but must NOT show for a Sonnet session

@@ -21,28 +21,28 @@ func TestModelSwitchUpdatesStatuslineImmediately(t *testing.T) {
 	if m.defaultModel != "claude-haiku-4-5" {
 		t.Fatalf("defaultModel = %q, want claude-haiku-4-5", m.defaultModel)
 	}
-	if m.ctxLimit != 200_000 {
-		t.Fatalf("default ctxLimit = %d, want 200000", m.ctxLimit)
+	if m.CtxLimit != 200_000 {
+		t.Fatalf("default ctxLimit = %d, want 200000", m.CtxLimit)
 	}
 
 	// /opus updates the displayed model + ctx window immediately (200k → 1M).
 	m.input.SetValue("/opus")
 	m.handleKey(keyMsg("enter"))
-	if m.model != "opus" {
-		t.Errorf("after /opus, model = %q, want opus", m.model)
+	if m.Model != "opus" {
+		t.Errorf("after /opus, model = %q, want opus", m.Model)
 	}
-	if m.ctxLimit != 1_000_000 {
-		t.Errorf("after /opus, ctxLimit = %d, want 1000000 (window must track the switch)", m.ctxLimit)
+	if m.CtxLimit != 1_000_000 {
+		t.Errorf("after /opus, ctxLimit = %d, want 1000000 (window must track the switch)", m.CtxLimit)
 	}
 
 	// /model-default restores the captured default and its window (1M → 200k).
 	m.input.SetValue("/model-default")
 	m.handleKey(keyMsg("enter"))
-	if m.model != "claude-haiku-4-5" {
-		t.Errorf("after /model-default, model = %q, want claude-haiku-4-5", m.model)
+	if m.Model != "claude-haiku-4-5" {
+		t.Errorf("after /model-default, model = %q, want claude-haiku-4-5", m.Model)
 	}
-	if m.ctxLimit != 200_000 {
-		t.Errorf("after /model-default, ctxLimit = %d, want 200000", m.ctxLimit)
+	if m.CtxLimit != 200_000 {
+		t.Errorf("after /model-default, ctxLimit = %d, want 200000", m.CtxLimit)
 	}
 }
 

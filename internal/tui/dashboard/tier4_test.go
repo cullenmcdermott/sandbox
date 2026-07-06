@@ -207,9 +207,14 @@ func TestSkeletonRows(t *testing.T) {
 // COUNTER: with attentionFirst=false the input order is preserved. [D4]
 func TestAttentionFirstOrdering(t *testing.T) {
 	sessions := []Session{
-		{State: session.State{ID: "idle"}, DashStatus: StatusIdle},
-		{State: session.State{ID: "wait"}, DashStatus: StatusWaiting},
-	}
+		{
+			State:            session.State{ID: "idle"},
+			sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+		},
+		{
+			State:            session.State{ID: "wait"},
+			sessionReadModel: sessionReadModel{DashStatus: StatusWaiting},
+		}}
 	got := sortByAttention(sessions, true)
 	if got[0].ID() != "wait" {
 		t.Fatalf("attention-first did not float waiting to top: %q", got[0].ID())
@@ -222,9 +227,14 @@ func TestAttentionFirstOrdering(t *testing.T) {
 
 func TestAttentionFirstFloatsFailedSessions(t *testing.T) {
 	sessions := []Session{
-		{State: session.State{ID: "idle"}, DashStatus: StatusIdle},
-		{State: session.State{ID: "failed"}, DashStatus: StatusFailed},
-	}
+		{
+			State:            session.State{ID: "idle"},
+			sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+		},
+		{
+			State:            session.State{ID: "failed"},
+			sessionReadModel: sessionReadModel{DashStatus: StatusFailed},
+		}}
 	got := sortByAttention(sessions, true)
 	if got[0].ID() != "failed" {
 		t.Fatalf("attention-first did not float failed session to top: %q", got[0].ID())
@@ -235,17 +245,28 @@ func TestAttentionFirstFloatsFailedSessions(t *testing.T) {
 // nothing waiting it is the empty string (no chrome for zero). [D4]
 func TestAttentionSummary(t *testing.T) {
 	sessions := []Session{
-		{DashStatus: StatusWaiting},
-		{DashStatus: StatusWaiting},
-		{DashStatus: StatusNeedsInput},
-		{DashStatus: StatusFailed},
-		{DashStatus: StatusIdle},
-	}
+		{
+			sessionReadModel: sessionReadModel{DashStatus: StatusWaiting},
+		},
+		{
+			sessionReadModel: sessionReadModel{DashStatus: StatusWaiting},
+		},
+		{
+			sessionReadModel: sessionReadModel{DashStatus: StatusNeedsInput},
+		},
+		{
+			sessionReadModel: sessionReadModel{DashStatus: StatusFailed},
+		},
+		{
+			sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+		}}
 	out := attentionSummary(sessions)
 	if !strings.Contains(out, "2 waiting") || !strings.Contains(out, "1 needs input") || !strings.Contains(out, "1 failed") {
 		t.Fatalf("attention summary wrong: %q", out)
 	}
-	if got := attentionSummary([]Session{{DashStatus: StatusIdle}}); got != "" {
+	if got := attentionSummary([]Session{{
+		sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+	}}); got != "" {
 		t.Fatalf("attention summary should be empty when nothing waits, got %q", got)
 	}
 }
@@ -254,12 +275,21 @@ func TestAttentionSummary(t *testing.T) {
 // nothing hidden → empty string. [D4]
 func TestOverflowSummary(t *testing.T) {
 	hidden := []Session{
-		{DashStatus: StatusBusy},
-		{DashStatus: StatusWaiting},
-		{DashStatus: StatusNeedsInput},
-		{DashStatus: StatusFailed},
-		{DashStatus: StatusIdle},
-	}
+		{
+			sessionReadModel: sessionReadModel{DashStatus: StatusBusy},
+		},
+		{
+			sessionReadModel: sessionReadModel{DashStatus: StatusWaiting},
+		},
+		{
+			sessionReadModel: sessionReadModel{DashStatus: StatusNeedsInput},
+		},
+		{
+			sessionReadModel: sessionReadModel{DashStatus: StatusFailed},
+		},
+		{
+			sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+		}}
 	out := overflowSummary(hidden)
 	if !strings.Contains(out, "+5 more") {
 		t.Fatalf("overflow summary missing count: %q", out)
@@ -281,10 +311,14 @@ func TestOverflowSummary(t *testing.T) {
 // ORACLE: a session needing attention gets a dot; COUNTER: an idle, unchanged
 // session gets none. [D4]
 func TestAttentionDot(t *testing.T) {
-	if attentionDot(Session{DashStatus: StatusWaiting}) == "" {
+	if attentionDot(Session{
+		sessionReadModel: sessionReadModel{DashStatus: StatusWaiting},
+	}) == "" {
 		t.Fatalf("waiting session has no attention dot")
 	}
-	if got := attentionDot(Session{DashStatus: StatusIdle}); got != "" {
+	if got := attentionDot(Session{
+		sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+	}); got != "" {
 		t.Fatalf("idle session drew a dot: %q", got)
 	}
 }
@@ -293,11 +327,18 @@ func TestAttentionDot(t *testing.T) {
 // a collapsed header still signals. [D4]
 func TestGroupAttentionRollup(t *testing.T) {
 	g := []Session{
-		{DashStatus: StatusWaiting},
-		{DashStatus: StatusNeedsInput},
-		{DashStatus: StatusFailed},
-		{DashStatus: StatusIdle},
-	}
+		{
+			sessionReadModel: sessionReadModel{DashStatus: StatusWaiting},
+		},
+		{
+			sessionReadModel: sessionReadModel{DashStatus: StatusNeedsInput},
+		},
+		{
+			sessionReadModel: sessionReadModel{DashStatus: StatusFailed},
+		},
+		{
+			sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+		}}
 	if got := groupAttentionCount(g); got != 3 {
 		t.Fatalf("group rollup = %d, want 3", got)
 	}
@@ -482,9 +523,9 @@ func TestConnectCancelOnKeyPress(t *testing.T) {
 // makeSession is a convenience constructor for unit tests.
 func makeSession(id string, status SessionStatus) Session {
 	return Session{
-		State:      session.State{ID: session.ID(id), Status: session.StatusRunning},
-		Title:      id,
-		DashStatus: status,
+		State:            session.State{ID: session.ID(id), Status: session.StatusRunning},
+		Title:            id,
+		sessionReadModel: sessionReadModel{DashStatus: status},
 	}
 }
 
@@ -604,9 +645,8 @@ func TestDetailPanePermHintUsesKitKbdRow(t *testing.T) {
 	m.seeded = true
 	m.width, m.height = 80, 24
 	waiting := Session{
-		State:                 session.State{ID: "w1", Status: session.StatusRunning},
-		DashStatus:            StatusWaiting,
-		PendingPermissionTool: "Write(main.go)",
+		State:            session.State{ID: "w1", Status: session.StatusRunning},
+		sessionReadModel: sessionReadModel{DashStatus: StatusWaiting, PendingPermissionTool: "Write(main.go)"},
 	}
 	m.sessions = []Session{waiting}
 

@@ -55,8 +55,8 @@ func TestTurnErrMsgRollsBackOptimisticBusyState(t *testing.T) {
 	if m.turnActive {
 		t.Error("turnActive must be cleared after a failed turn start (wedge bug)")
 	}
-	if m.status != StatusNeedsInput {
-		t.Errorf("status after failed start = %v, want StatusNeedsInput", m.status)
+	if m.DashStatus != StatusNeedsInput {
+		t.Errorf("status after failed start = %v, want StatusNeedsInput", m.DashStatus)
 	}
 	if m.working {
 		t.Error("working spinner must stop after a failed turn start")

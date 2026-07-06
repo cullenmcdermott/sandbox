@@ -14,9 +14,14 @@ import (
 func TestCtrlGJumpsToAttentionOnDashboard(t *testing.T) {
 	m := New(nil)
 	m.sessions = []Session{
-		{State: session.State{ID: "idle", Status: session.StatusRunning}, DashStatus: StatusIdle},
-		{State: session.State{ID: "failed", Status: session.StatusRunning}, DashStatus: StatusFailed},
-	}
+		{
+			State:            session.State{ID: "idle", Status: session.StatusRunning},
+			sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+		},
+		{
+			State:            session.State{ID: "failed", Status: session.StatusRunning},
+			sessionReadModel: sessionReadModel{DashStatus: StatusFailed},
+		}}
 	m.cursor = 0
 
 	m.handleKey(tea.KeyPressMsg{Code: 'g', Mod: tea.ModCtrl})
@@ -35,10 +40,18 @@ func TestCtrlGJumpsToAttentionOnDashboard(t *testing.T) {
 func TestCtrlGGroupViewLandsOnRowAndExpands(t *testing.T) {
 	m := New(nil)
 	m.sessions = []Session{
-		{State: session.State{ID: "a1", Status: session.StatusRunning, ProjectPath: "/r/alpha"}, DashStatus: StatusIdle},
-		{State: session.State{ID: "b1", Status: session.StatusRunning, ProjectPath: "/r/beta"}, DashStatus: StatusIdle},
-		{State: session.State{ID: "b2", Status: session.StatusRunning, ProjectPath: "/r/beta"}, DashStatus: StatusFailed},
-	}
+		{
+			State:            session.State{ID: "a1", Status: session.StatusRunning, ProjectPath: "/r/alpha"},
+			sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+		},
+		{
+			State:            session.State{ID: "b1", Status: session.StatusRunning, ProjectPath: "/r/beta"},
+			sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+		},
+		{
+			State:            session.State{ID: "b2", Status: session.StatusRunning, ProjectPath: "/r/beta"},
+			sessionReadModel: sessionReadModel{DashStatus: StatusFailed},
+		}}
 	m.toggleGroupView()
 	// Collapse the beta group so the attention session (b2) is off-screen.
 	m.groupView.repos["beta"] = false

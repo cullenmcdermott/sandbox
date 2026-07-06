@@ -110,6 +110,15 @@ type permResolveErrMsg struct{ err error }
 
 // TranscriptModel is the Bubble Tea model for a single attached session.
 type TranscriptModel struct {
+	// sessionReadModel holds the shared SSE-derived read-model state
+	// (DashStatus, Model/CtxLimit, usage tokens/cost, git Branch/Dirty/Ahead/Behind,
+	// cwd, defaultModel, the pending-permission descriptor) reduced by the single
+	// ApplyEvent reducer that the dashboard Session embeds too. handleEvent
+	// delegates that state to it and keeps only presentation (blocks, streaming,
+	// the rich transcriptPermission UI). Its exported fields (m.DashStatus,
+	// m.InputTokens, …) are promoted, so the transcript refers to them directly.
+	sessionReadModel
+
 	client      RunnerClient
 	ref         session.Ref
 	projectPath string
@@ -164,7 +173,6 @@ type TranscriptModel struct {
 	// message) collapses onto one card (C2) instead of rendering twice.
 	flatTools map[string]int
 
-	status     SessionStatus
 	turnActive bool
 	// activeTurnID is the runner's id for the in-flight turn, captured from the
 	// turn.started event. It is the precise target for an interrupt; when it is
@@ -174,25 +182,14 @@ type TranscriptModel struct {
 	lastSeq      uint64
 
 	// Live working indicator (#4): set while a turn runs.
-	turnStart     time.Time
-	workFrame     int
-	working       bool // the work-tick loop is scheduled
-	inTok         int
-	outTok        int
-	costUSD       float64
-	cacheReadTok  int
-	cacheWriteTok int
+	turnStart time.Time
+	workFrame int
+	working   bool // the work-tick loop is scheduled
 
 	// Status-line state (slice 1): model + cwd from session.started; branch +
-	// dirty/ahead/behind from workspace.status; ctxLimit from models.Limit; and
-	// the per-attach permission mode cycled with shift+tab.
-	model    string
-	cwd      string
-	ctxLimit int
-	branch   string
-	dirty    bool
-	ahead    int
-	behind   int
+	// dirty/ahead/behind from workspace.status; ctxLimit from models.Limit — all
+	// now on the embedded sessionReadModel — plus the per-attach permission mode
+	// cycled with shift+tab and the inline permission card.
 	mode     permMode
 	pending  *transcriptPermission
 	showDiff bool
@@ -255,14 +252,12 @@ type TranscriptModel struct {
 
 	// modelOverride is the in-session /model selection, sent as TurnInput.Model
 	// on the next turn (empty => session/account default). Kept separate from
-	// `model` (the SDK-reported active id used for display) so the status line
-	// doesn't flicker between the requested alias and the resolved id.
+	// `Model` (the SDK-reported active id used for display, on the embedded
+	// sessionReadModel) so the status line doesn't flicker between the requested
+	// alias and the resolved id. (defaultModel, the account/session default
+	// captured from the first session.started for /model-default, lives on the
+	// embedded read-model.)
 	modelOverride string
-	// defaultModel is the account/session default model id, captured from the
-	// first session.started (before any /model override). /model-default restores
-	// the status line to it optimistically; it self-heals to the SDK-resolved id
-	// on the next session.started.
-	defaultModel string
 
 	// effortOverride is the in-session /effort selection, sent as
 	// TurnInput.Effort on the next turn (empty => the SDK's adaptive-thinking
@@ -426,15 +421,15 @@ func NewTranscript(client RunnerClient, sess Session, reconnect ReconnectFunc) *
 	// the modal NORMAL/INSERT register.
 
 	return &TranscriptModel{
-		client:      client,
-		ref:         session.Ref{ID: sess.ID()},
-		projectPath: sess.State.ProjectPath,
-		agent:       sess.State.Backend,
-		title:       sess.Title,
-		status:      sess.DashStatus,
-		body:        list.New(),
-		input:       in,
-		imode:       modeInsert, // vim off by default → always-focused INSERT
+		sessionReadModel: sessionReadModel{DashStatus: sess.DashStatus},
+		client:           client,
+		ref:              session.Ref{ID: sess.ID()},
+		projectPath:      sess.State.ProjectPath,
+		agent:            sess.State.Backend,
+		title:            sess.Title,
+		body:             list.New(),
+		input:            in,
+		imode:            modeInsert, // vim off by default → always-focused INSERT
 		// Sessions start in bypassPermissions (yolo) by default — the agent runs
 		// without per-tool permission prompts. Relies on the IS_SANDBOX root-guard
 		// fix (k8s buildEnv + runner spawn env); without it the first turn would
@@ -683,7 +678,7 @@ func (m *TranscriptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// and the next prompt actually sends instead of being silently queued
 		// behind a phantom active turn (recoverable only by detach/reattach).
 		m.finalizeStreaming()
-		m.status = StatusNeedsInput
+		m.DashStatus = StatusNeedsInput
 		m.turnActive = false
 		m.working = false
 		m.appendBlock(blockError, "✗ "+msg.err.Error())

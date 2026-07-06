@@ -14,9 +14,9 @@ import (
 
 func transcriptSession() Session {
 	return Session{
-		State:      session.State{ID: "s1", ProjectPath: "/x/proj", Backend: "claude-sdk"},
-		Title:      "proj",
-		DashStatus: StatusNeedsInput,
+		State:            session.State{ID: "s1", ProjectPath: "/x/proj", Backend: "claude-sdk"},
+		Title:            "proj",
+		sessionReadModel: sessionReadModel{DashStatus: StatusNeedsInput},
 	}
 }
 
@@ -79,8 +79,8 @@ func TestTranscriptPermissionFlow(t *testing.T) {
 	if m.pending.adds != 1 || m.pending.dels != 0 {
 		t.Errorf("diff stat = +%d −%d, want +1 −0", m.pending.adds, m.pending.dels)
 	}
-	if m.status != StatusWaiting {
-		t.Errorf("status = %v, want StatusWaiting", m.status)
+	if m.DashStatus != StatusWaiting {
+		t.Errorf("status = %v, want StatusWaiting", m.DashStatus)
 	}
 
 	// Approve: pending clears and the decision is dispatched to the client.
@@ -134,8 +134,8 @@ func TestTranscriptSubmitStartsTurn(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("submit returned no command")
 	}
-	if m.status != StatusBusy {
-		t.Errorf("status = %v, want StatusBusy after submit", m.status)
+	if m.DashStatus != StatusBusy {
+		t.Errorf("status = %v, want StatusBusy after submit", m.DashStatus)
 	}
 	if got := m.input.Value(); got != "" {
 		t.Errorf("input not cleared after submit: %q", got)
