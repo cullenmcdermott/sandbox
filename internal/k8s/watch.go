@@ -282,8 +282,28 @@ func sandboxStale(sb *agentv1alpha1.Sandbox, now time.Time) bool {
 	}
 	for _, cond := range sb.Status.Conditions {
 		if cond.Type == string(agentv1alpha1.SandboxConditionReady) {
+			if cond.Status != metav1.ConditionTrue && sandboxNeverReady(sb, cond) {
+				return false
+			}
 			return readyStale(string(cond.Status), cond.LastTransitionTime, now)
 		}
 	}
 	return false
+}
+
+// sandboxNeverReady reports whether the Ready condition is plausibly still the
+// one stamped by the controller's first reconcile, i.e. the Sandbox has never
+// been Ready. meta.SetStatusCondition only bumps LastTransitionTime when the
+// condition's Status changes (message/reason edits don't), so a slow first
+// start — a long image pull on a cold node — holds the initial Ready=False
+// with a creation-time stamp well past stalenessThreshold. That is CREATING,
+// not a stall we should degrade to UNKNOWN. A session that became Ready and
+// lost it within stalenessThreshold of creation is misread as still-starting;
+// that window is narrow and the pod-holding Status/List path still
+// cross-checks the pod itself.
+func sandboxNeverReady(sb *agentv1alpha1.Sandbox, cond metav1.Condition) bool {
+	if cond.LastTransitionTime.IsZero() || sb.CreationTimestamp.IsZero() {
+		return false
+	}
+	return cond.LastTransitionTime.Sub(sb.CreationTimestamp.Time) < stalenessThreshold
 }

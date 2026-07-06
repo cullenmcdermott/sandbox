@@ -126,6 +126,16 @@ func TestSandboxStale(t *testing.T) {
 		return sb
 	}
 
+	// slowStart: Ready=False still carrying its first-reconcile stamp (just
+	// after creation) while the pod pulls an image for >stalenessThreshold —
+	// must stay non-stale (CREATING), not degrade to UNKNOWN.
+	slowStart := sbWith(metav1.ConditionFalse, metav1.NewTime(now.Add(-10*time.Minute).Add(2*time.Second)), false)
+	slowStart.CreationTimestamp = metav1.NewTime(now.Add(-10 * time.Minute))
+	// lostReady: was Ready once (created long before the False transition), so
+	// a long-held False IS a stall.
+	lostReady := sbWith(metav1.ConditionFalse, longAgo, false)
+	lostReady.CreationTimestamp = metav1.NewTime(now.Add(-time.Hour))
+
 	tests := []struct {
 		name string
 		sb   *agentv1alpha1.Sandbox
@@ -135,6 +145,8 @@ func TestSandboxStale(t *testing.T) {
 		{"terminating is stale even while Ready=True", sbWith(metav1.ConditionTrue, longAgo, true), true},
 		{"Ready Unknown long ago is stale", sbWith(metav1.ConditionUnknown, longAgo, false), true},
 		{"Ready recently False is not yet stale", sbWith(metav1.ConditionFalse, fresh, false), false},
+		{"never-Ready slow first start is not stale", slowStart, false},
+		{"Ready lost long after creation is stale", lostReady, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -228,6 +240,20 @@ func TestSandboxToStateCrossChecksStaleness(t *testing.T) {
 		Type: string(agentv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, LastTransitionTime: longAgo,
 	}}
 
+	// A Sandbox whose Ready=False still carries its first-reconcile stamp is a
+	// slow first start (long image pull), not a stall — it must stay CREATING.
+	slowStart := &agentv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "s-slow",
+			CreationTimestamp: metav1.NewTime(now.Add(-10 * time.Minute)),
+		},
+		Spec: agentv1alpha1.SandboxSpec{Replicas: &one},
+	}
+	slowStart.Status.Conditions = []metav1.Condition{{
+		Type: string(agentv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse,
+		LastTransitionTime: metav1.NewTime(now.Add(-10 * time.Minute).Add(2 * time.Second)),
+	}}
+
 	tests := []struct {
 		name string
 		sb   *agentv1alpha1.Sandbox
@@ -236,6 +262,7 @@ func TestSandboxToStateCrossChecksStaleness(t *testing.T) {
 		{"ready sandbox is RUNNING", ready, session.StatusRunning},
 		{"Ready Unknown long ago is UNKNOWN not CREATING", staleReady, session.StatusUnknown},
 		{"terminating Ready=True is UNKNOWN not RUNNING", terminatingReady, session.StatusUnknown},
+		{"never-Ready slow start stays CREATING", slowStart, session.StatusCreating},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
