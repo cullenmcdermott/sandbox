@@ -95,12 +95,12 @@ for render+nav+actions subsumes them (`groups.go:57`). Prefer that fix.
   it; `clampLines` clips); Fable-approved 2026-07-06. STILL OPEN: the
   `statusline.go` row-1 segment-join tail is not a `spread` fix — folds into
   the §2c statusline collapse.
-- [ ] **renderToolCard budgets overflow by construction (LOW).** arg≤width/2 +
-  summary≤width/3 + icon/name/separators ≈ (5/6)·width + len(name) + 8, then
-  placeIndent adds 3 — clip cuts the result text ("· old_string not found")
-  with no ellipsis. Fix: budget summary from measured remaining width.
-  `transcript.go:1209`. (The §2c two-line ⏺/⎿ card redesign fixes this by
-  construction — prefer doing them together.)
+- [x] **renderToolCard budget overflow** — fixed by construction in the §2c
+  two-line card redesign (ANSI-aware measured budgets + per-line truncate
+  backstop; tested at widths 20/30/40). Fable-verified 2026-07-06. STILL
+  OPEN (same latent pattern, LOW): subagent child tool lines
+  (`renderChildTool`, `subagent.go`) still use the old arg≤w/2+summary≤w/3
+  budgeting.
 - [x] **Theme change render-cache invalidation** — `theme.Epoch()` folds +
   epoch-changed forced reconcile; chain traced end-to-end in review (fp →
   version bump → list cache miss → glamour pool reset), force-path test
@@ -111,22 +111,27 @@ for render+nav+actions subsumes them (`groups.go:57`). Prefer that fix.
 
 ### 1d. System reliability (2026-07-01 whole-system review; HIGHs all fixed — see done log)
 
-- [ ] **O(sessions) laptop cost with no steady-state cap (MED-HIGH).**
-  `connectSem` (cap 4) throttles the connect *burst* only. Steady state: N warm
-  sessions = N SPDY port-forwards through one kube-apiserver + N SSE streams +
-  ~2N goroutines + N heartbeat timers, no LRU eviction. First breakage:
-  API-server port-forward pressure (~30 sessions). Cap
-  concurrently-*established* observer forwards, evict the coldest.
-  `internal/tui/dashboard/model.go:1166`.
+- [x] **O(sessions) steady-state cap** — observer streams capped at 16
+  (`WithMaxObserverStreams`), coldest-evicted on `nowFunc` recency
+  (attached/needs-attention never evicted; admission gate stops over-cap
+  launches; eviction tears down forward+SSE+goroutines+warm model);
+  reconnect-on-focus; launch-burst observers yield to foreground attach via
+  `attachGate`. Evicted rows stay lifecycle-accurate via the cluster watch;
+  attention is SSE-derived so it can go stale on a cold row — acceptable
+  because active turns keep sessions warm (recorded tradeoff).
+  Fable-verified 2026-07-06. Done log. Possible future: cluster-side
+  attention signal if caps ever tighten.
 - [x] **SSE consumer backpressure** — scanner/forwarder split with an internal
   FIFO; watchdog liveness now measures wire reads, not consumer drain
   (`c72f0c7`); Fable-verified 2026-07-06. Done log.
 - [~] **Port-forward retries a dead pod forever** — terminal state landed
-  (`c191c85`): Sandbox-NotFound stops the loop and surfaces via
-  `ForwardHandle.Done()`/`Err()`; Fable-verified 2026-07-06. STILL OPEN
-  (SMALL): nothing consumes the terminal seam yet — wire the dashboard
-  observer manager to `handle.Done()` so a destroyed session's forward is
-  dropped promptly instead of via SSE-reconnect exhaustion.
+  (`c191c85`); dashboard now consumes the equivalent signal: reconnect
+  errors thread into `liveSSEReconnectFailedMsg.err`, and
+  `session.ErrSessionGone` aborts the retry loop immediately (teardown in
+  ~2s, not the ~14s budget). Fable-verified 2026-07-06. STILL OPEN
+  (SMALL, optional): consuming the literal `ForwardHandle.Done()` channel
+  needs a `ConnectResult.ForwardDone` seam through client/cli — only worth
+  it if mid-stream (non-reconnect) death detection matters.
 - [x] **Dead-node pods read as Running** — shared staleness cross-check on
   both paths (`fe259d6`); Fable review 2026-07-06 found + fixed one watch-path
   defect (never-Ready slow start read UNKNOWN after 90s — now gated by
@@ -354,16 +359,16 @@ changes go through `schema/events.json` + `just gen` (never hand-edit `*.gen.*`)
 Deduped against `docs/ux-polish-plan.md` — nothing below is already committed
 there. HIGH items are the at-a-glance tells; most are renderer-local.
 
-- [ ] **Tool cards: adopt the ⏺-head + ⎿-elbow two-line idiom (HIGH).** Today
-  one packed line (`⏵ Bash  npm test  · exit 0`). Claude Code's most
-  recognizable element: line 1 `⏺ Bash(npm test)` (bullet colored by status),
-  line 2 indented `⎿  exit 0 · 42 lines` (+ dim `(ctrl+o to expand)` when
-  collapsed). Elbow column makes results scannable + anchors expansion. Fixes
-  the §1c budget-overflow bug by construction. `transcript.go:1185`. Pairs
-  with: **tool-card output expansion** ("slice 5i" — Bash output collapses to
-  "N lines" with no way to view it; post-approval diffs vanish from
-  scrollback, only the permission box ever renders the diff;
-  `transcript.go:1258`).
+- [x] **Tool cards: ⏺-head + ⎿-elbow two-line idiom + ctrl+o expansion** —
+  status-toned bullet, `Bash(arg)` head, dim elbow line with expand hint;
+  ctrl+o (composer-empty) toggles the latest card: diffs for edit tools
+  (post-approval diffs preserved via the permission_diff machinery), capped
+  output for output tools (runner caps at 64KB head+tail in `capToolOutput`;
+  display clamps further), full arg fallback only when truncated.
+  `ToolPayload.output` already existed — no schema change. 4 golden files
+  updated (enumerated in done log). Fable-verified 2026-07-06. Follow-ups:
+  per-card focus/expand for older cards (space/toggleSubagents has the same
+  gap); `⎿ exit 0 · 42 lines` combo needs exit-code plumbing (§2b gap 5).
 - [ ] **Kill the full-height `▌` role gutter bars; quiet user prompts (HIGH).**
   Colored bars down every message line + bold-green user text is the largest
   departure from CC's look. Assistant: single `⏺ ` bullet + 2-space hanging
@@ -568,12 +573,11 @@ Outcome: **not happening; invest in §2 instead.** Kept here so nobody re-treads
   cancel+close siblings on failure). Fable-verified 2026-07-06. Done log.
 - [x] Tightened `waitForPodReady` poll 2s→1s (1s not 500ms — gentle on the
   API server).
-- [~] **Deferred `ensureReaper`** (3-attempt backoff in the background task,
+- [x] **Deferred `ensureReaper`** (3-attempt backoff in the background task,
   failure surfaces via AwaitSync) + dropped the redundant connect-time Status
-  Get and re-`ensureSSHKey` on the freshly-created path (Create stamps
-  fresh/privPath onto the Session; consumed by first Connect). Fable-verified
-  2026-07-06. STILL OPEN: the launch-burst *observer connects* half — fold
-  into the §1d O(sessions) cap/evict item (same mechanism).
+  Get and re-`ensureSSHKey` on the freshly-created path. Launch-burst
+  observer half landed with the §1d cap (`attachGate`: observers yield to
+  foreground attach/create). Fable-verified 2026-07-06.
 - [ ] **Mutagen sync GC follow-ups** (core landed — see done log): **MF3**
   cross-context over-reap (stamp `--label sandbox-context=<ctx>` in CreateAll,
   scope List/gc to current context); **MF5** mid-session sync loss doesn't
@@ -944,10 +948,14 @@ update `sdktest/` pins in the same change.
   support. Short ADR only; no code until decided. **Draft exists** —
   [`docs/kro-composite-adr.md`](docs/kro-composite-adr.md) (Opus,
   2026-07-05); awaiting maintainer read.
-- [ ] **Observability for startup + steady state (promoted from inbox
-  2026-07-04; unowned).** Metrics/tracing to analyze cold-start (feeds §5)
-  and runtime fan-out cost (feeds §1d). Minimal first cut: timing spans in
-  the CLI connect path + runner turn lifecycle.
+- [~] **Observability first cut landed** — dependency-free spans behind
+  `SANDBOX_TRACE=1` / `sandbox --trace`: connect/create phases incl. the
+  backgrounded flush/inputs/reaper under one correlation id (`client/trace.go`);
+  runner turn lifecycle (first message / first delta / settled + msg count,
+  `runner/src/trace.ts`). Fable-verified 2026-07-06. NEXT (not done):
+  correlate CLI connect id ↔ runner turn id across the HTTP seam; runner
+  startup spans (index.ts); pod-ready sub-phases (schedule vs pull vs ready
+  — the big §5 unknown); SSE first-event latency.
 
 ## Open caveats (carry-forward)
 

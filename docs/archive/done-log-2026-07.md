@@ -604,3 +604,63 @@ real defect found and fixed in-tree.
   `RunnerToken` for the `/idle` poll auth). k8s/README already consistent.
 - **README:** OpenCode credentials section (keys→env table, fail-closed,
   rotation-requires-restart, scoping, persistence).
+
+## Fable-coordinated batch 4 (2026-07-06) — §1d scaling + §2c tool cards + §10 tracing
+
+### §1d — connection-scaling cluster (Opus build, Fable-verified)
+
+- **Steady-state cap:** observer forwards capped at 16 (`WithMaxObserverStreams`;
+  below the ~30-forward API-server pressure point, above warmSoftLimit 12).
+  Recency on `nowFunc` (stream-ready, every applied live event, focus);
+  coldest evicted at stream-ready; attached + needs-attention rows are never
+  victims; admission gate stops over-cap launches; eviction tears down
+  forward+SSE+reader+idle-timer+warm model. Reconnect-on-focus via cursor
+  movement. Recorded tradeoff: evicted rows keep watch-driven lifecycle
+  status but SSE-derived attention can go stale — mitigated because active
+  turns keep sessions warm; a cluster-side attention signal is the escape
+  hatch if caps tighten.
+- **Terminal-forward teardown:** reconnect errors thread into
+  `liveSSEReconnectFailedMsg.err`; `session.ErrSessionGone` (the c191c85
+  terminal condition, surfaced through the reconnect path) aborts retries
+  immediately (~2s vs ~14s budget) and drops the warm model. The literal
+  `ForwardHandle.Done()` channel remains unexposed through client/cli —
+  optional `ConnectResult.ForwardDone` seam noted in TODO.
+- **attachGate:** foreground attach/create shuts a gate observers wait on
+  before taking a connectSem slot — foreground never blocks, observers yield.
+- 11 new tests (cap/evict/protect/admit/focus/gone/gate); suite deterministic
+  under -count=3 -race.
+
+### §2c — tool-card two-line redesign + expansion (Opus build, Fable-verified)
+
+- `⏺ Bash(npm test)` head (bullet toned by status: Malibu/Guac/Coral) +
+  `  ⎿  exit 0  (ctrl+o to expand)` elbow. ctrl+o (composer empty) toggles
+  the latest card: edit tools re-render their +/− diff from retained input
+  via the permission_diff machinery (post-approval diffs no longer vanish);
+  output tools show captured output (runner `capToolOutput` bounds it at
+  64KB head+tail at BOTH tool.completed and tool.failed emits — verified;
+  display further clamps 20+6 lines); arg fallback only when head truncated.
+  With a draft in the composer ctrl+o keeps its $EDITOR role (slice 5g).
+- `ToolPayload.output` already existed in the schema — no schema/gen change;
+  gen verified drift-free.
+- §1c budget overflow fixed by construction (measured ANSI-aware budgets,
+  per-line truncate backstop; width 20/30/40 tests).
+- Golden diffs (4, each reviewed): TestGoldenToolCard,
+  TestGoldenTranscriptStream, TestGoldenTranscriptByBackend/{claude,opencode}
+  — all exactly the head/elbow re-skin. Permission/plan/dashboard goldens
+  byte-identical (shared styleDiffLine refactor verified no-op there).
+- Follow-ups recorded in TODO: subagent child-tool lines still on the old
+  budgeting; per-card focus for older cards; exit-code-in-elbow needs §2b
+  gap 5.
+
+### §10 — tracing first cut (Opus build, Fable-verified)
+
+- `client/trace.go` (89 lines, unexported, nil-safe no-op when off):
+  `SANDBOX_TRACE=1` or `sandbox --trace` (flag sets the env var in
+  PersistentPreRun). Spans: connect.{total,status,pod_ready,port_forward,
+  runner_health,project_sync,opencode_ready} + background
+  {first_flush,create_inputs,reaper} under one 4-byte correlation id;
+  create.{total,ssh_key,session}. Envelope: `trace: <id> <name> <ms>`.
+- `runner/src/trace.ts` (56 lines, injectable now/log):
+  turn.first_message / turn.first_delta / turn.settled + msgs= count.
+- `sandbox trace` (event replay) deliberately untouched. SDK surface
+  unchanged. Next-instrumentation list recorded in TODO.
