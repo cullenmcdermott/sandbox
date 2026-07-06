@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
-import { mapMessage, todoUpdatedPayload, type EmitFn } from '../src/mapping.js';
+import { mapMessage, todoUpdatedPayload, capToolOutput, type EmitFn } from '../src/mapping.js';
 import { assertMapperInvariants } from './backend-contract.js';
 
 /** Collect emitted events into a list for assertions. */
@@ -236,6 +236,44 @@ test('user tool_result (error) → tool.failed with error populated', () => {
   assert.equal(events[0].type, 'tool.failed');
   assert.equal(events[0].payload.output, 'boom: file not found');
   assert.equal(events[0].payload.error, 'boom: file not found');
+});
+
+// ORACLE: capToolOutput leaves within-cap output untouched, and truncates an
+// oversized output to a bounded head+tail with a byte-count marker.
+test('capToolOutput leaves small output unchanged', () => {
+  const s = 'a'.repeat(1000);
+  assert.equal(capToolOutput(s), s);
+});
+
+test('capToolOutput truncates oversized output to a bounded head+tail', () => {
+  const cap = 64 * 1024;
+  const s = 'x'.repeat(cap * 3);
+  const capped = capToolOutput(s);
+  // Bounded: never larger than the cap plus the short marker line.
+  assert.ok(capped.length <= cap + 64, `capped length ${capped.length} exceeds cap+marker`);
+  assert.match(capped, /… \d+ bytes truncated …/);
+  // Both ends survive.
+  assert.ok(capped.startsWith('x'));
+  assert.ok(capped.endsWith('x'));
+});
+
+// ORACLE: an oversized tool_result carries the capped output on tool.completed.
+test('user tool_result caps an oversized output', () => {
+  const { events, emit } = collector();
+  const big = 'y'.repeat(64 * 1024 * 2);
+  mapMessage(
+    asMsg({
+      type: 'user',
+      message: {
+        content: [{ type: 'tool_result', tool_use_id: 'toolu_big', content: big }],
+      },
+    }),
+    emit,
+  );
+  assert.equal(events[0].type, 'tool.completed');
+  const out = events[0].payload.output as string;
+  assert.ok(out.length < big.length, 'output was not capped');
+  assert.match(out, /… \d+ bytes truncated …/);
 });
 
 // ORACLE: a successful result message → turn.completed + usage.updated (x2:

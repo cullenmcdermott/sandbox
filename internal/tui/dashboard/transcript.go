@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -55,16 +56,22 @@ const (
 	toolErr
 )
 
-// toolCard is a compact, Crush-style tool-call: tool name + key argument
-// (path/command/pattern) + a result summary, rendered as one line whose icon
-// and color reflect its status. It is mutated in place when the matching
-// tool.completed / tool.failed event arrives.
+// toolCard is a tool-call rendered as the two-line ⏺-head + ⎿-elbow idiom: line
+// one is "⏺ Name(arg)" with the bullet colored by status, line two is the
+// indented "⎿  <result>" elbow. It is mutated in place when the matching
+// tool.completed / tool.failed event arrives, and ctrl+o toggles its expanded
+// state to reveal the edit diff / captured output.
 type toolCard struct {
 	tool    string
 	arg     string
-	rawJSON string // accumulated tool.delta input fragments (parsed into arg, never shown raw)
+	rawJSON string          // accumulated tool.delta input fragments (parsed into arg, never shown raw)
+	input   json.RawMessage // tool input, retained so ctrl+o expansion can reconstruct the edit diff (permission_diff) post-approval
 	status  toolStatus
 	summary string
+	output  string // captured (runner-capped) tool output, revealed on ctrl+o expansion
+	// expanded is the ctrl+o expansion state: when set the card renders its
+	// available content (arg / edit diff / captured output) under the elbow.
+	expanded bool
 	// card is the list card that renders this tool. For a flat tool it is the
 	// tool's own card; for a subagent child it is the parent Task's card (children
 	// render inside that card). Mutating the tool bumps card's version so the list

@@ -390,47 +390,205 @@ func renderTodos(todos []session.TodoItem) string {
 	return b.String()
 }
 
-// renderToolCard formats a tool card as a single compact line:
-//
-//	⏵ Read   path/to/file.go
-//	✓ Bash   npm test            · exit 0
-//	✗ Edit   main.go             · old_string not found
-func (m *TranscriptModel) renderToolCard(c *toolCard, width int) string {
-	var icon string
-	var iconColor = theme.Malibu
-	switch c.status {
-	case toolRunning:
-		// Static marker (not the spinner) so running cards don't force a full
-		// transcript re-render on every work tick — only the prompt-line
-		// indicator animates.
-		icon = "⏵"
-		iconColor = theme.Malibu
-	case toolOK:
-		icon = "✓"
-		iconColor = theme.Guac
-	case toolErr:
-		icon = "✗"
-		iconColor = theme.Coral
-	}
-	// A2.4 (Calm): mute the tool card — name in TextSecondary (not bold Malibu)
-	// and arg in TextMuted; only the status icon keeps its color. Quiets the
-	// densest, most-repeated transcript element without losing the at-a-glance
-	// pass/fail/running signal.
-	iconR := lipgloss.NewStyle().Foreground(iconColor).Render(icon)
-	name := lipgloss.NewStyle().Foreground(theme.TextSecondary).Render(c.tool)
+// Tool-card glyph vocabulary: the ⏺ status head bullet and the ⎿ result elbow.
+// The bullet's color carries the running/ok/error signal; the elbow anchors the
+// result column so a scan down the transcript reads results in one place.
+const (
+	toolHeadBullet = "⏺"
+	toolElbow      = "⎿"
+	// elbowChromeW is the display width of the "  ⎿  " elbow prefix (2-space
+	// indent aligning the elbow under the tool name, elbow glyph, two spaces).
+	elbowChromeW = 5
+)
 
-	line := iconR + " " + name
+// toolBulletColor maps a tool card's status to its ⏺ head-bullet color via theme
+// tokens (running=Malibu, ok=Guac, error=Coral), so a /theme swap re-skins it.
+func toolBulletColor(s toolStatus) color.Color {
+	switch s {
+	case toolOK:
+		return theme.Guac
+	case toolErr:
+		return theme.Coral
+	default: // toolRunning
+		return theme.Malibu
+	}
+}
+
+// renderToolCard formats a tool call as the two-line ⏺-head + ⎿-elbow idiom:
+//
+//	⏺ Bash(npm test)
+//	  ⎿  exit 0 · 42 lines (ctrl+o to expand)
+//
+// The head bullet is colored by status; the elbow shows the result summary (plus
+// a dim ctrl+o hint when collapsed content exists), and when expanded the card
+// reveals its available content (arg / edit diff / captured output). Every line
+// is budgeted from the measured remaining width (ANSI-aware) and truncated as a
+// backstop, so the card never overflows even at very narrow widths (§1c).
+func (m *TranscriptModel) renderToolCard(c *toolCard, width int) string {
+	if width < 4 {
+		width = 4
+	}
+
+	// Line 1 — head: "⏺ Name(arg)". Bullet colored by status (A2.4: name muted,
+	// arg dim; only the bullet keeps its color). The name takes what it needs and
+	// the arg gets whatever remains, ellipsized.
+	bullet := lipgloss.NewStyle().Foreground(toolBulletColor(c.status)).Render(toolHeadBullet)
+	nameStr := c.tool
+	if nameStr == "" {
+		nameStr = "tool"
+	}
+	avail := width - 2 // "⏺ "
+	name := truncate(nameStr, max(1, avail))
+	head := lipgloss.NewStyle().Foreground(theme.TextSecondary).Render(name)
+	// argTruncated records whether the head could not show the argument in full,
+	// so expansion only offers to reveal it when there is actually more to see.
+	argTruncated := false
 	if c.arg != "" {
-		line += "  " + lipgloss.NewStyle().Foreground(theme.TextMuted).Render(truncate(c.arg, max(8, width/2)))
-	}
-	if c.summary != "" {
-		sumColor := theme.TextMuted
-		if c.status == toolErr {
-			sumColor = theme.Coral
+		fullArg := collapseSpaces(c.arg)
+		if argBudget := avail - lipgloss.Width(name) - 2; argBudget >= 3 {
+			shown := truncate(fullArg, argBudget)
+			head += lipgloss.NewStyle().Foreground(theme.TextMuted).Render("(" + shown + ")")
+			argTruncated = shown != fullArg
+		} else {
+			argTruncated = true // no room to show the arg at all
 		}
-		line += lipgloss.NewStyle().Foreground(sumColor).Render("  · " + truncate(c.summary, max(8, width/3)))
 	}
-	return line
+	headLine := bullet + " " + head
+	if lipgloss.Width(headLine) > width {
+		headLine = truncate(headLine, width)
+	}
+
+	// Line 2 — elbow: "  ⎿  <result> (ctrl+o hint)".
+	elbowText := c.summary
+	if elbowText == "" {
+		switch c.status {
+		case toolRunning:
+			elbowText = "running…"
+		case toolErr:
+			elbowText = "failed"
+		default:
+			elbowText = "done"
+		}
+	}
+	elbowColor := theme.TextMuted
+	if c.status == toolErr {
+		elbowColor = theme.Coral
+	}
+	body := m.toolExpandBody(c, width-elbowChromeW, argTruncated)
+	hint := ""
+	if len(body) > 0 {
+		if c.expanded {
+			hint = "  (ctrl+o to collapse)"
+		} else {
+			hint = "  (ctrl+o to expand)"
+		}
+	}
+	elbowAvail := width - elbowChromeW
+	// Fit "<result> + hint" into elbowAvail: prefer the result, drop the hint if
+	// it won't fit, then ellipsize the result as a last resort.
+	if lipgloss.Width(elbowText)+lipgloss.Width(hint) > elbowAvail {
+		hint = ""
+	}
+	if lipgloss.Width(elbowText) > elbowAvail {
+		elbowText = truncate(elbowText, elbowAvail)
+	}
+	elbowLine := lipgloss.NewStyle().Foreground(theme.TextDim).Render("  "+toolElbow+"  ") +
+		lipgloss.NewStyle().Foreground(elbowColor).Render(elbowText) +
+		lipgloss.NewStyle().Foreground(theme.TextDim).Render(hint)
+	if lipgloss.Width(elbowLine) > width {
+		elbowLine = truncate(elbowLine, width)
+	}
+
+	lines := []string{headLine, elbowLine}
+	if c.expanded {
+		lines = append(lines, body...)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// tool-card expansion caps: the condensed edit-diff line cap, and the head/tail
+// line window for captured output so a huge dump can't blow up a single card.
+const (
+	toolExpandDiffMax   = 16
+	toolExpandHeadLines = 20
+	toolExpandTailLines = 6
+)
+
+// toolExpandBody builds the expanded content lines for a tool card, aligned under
+// the elbow's result column. It shows the edit diff for edit-like tools (reusing
+// the permission_diff machinery so a post-approval diff stays viewable), the
+// captured output for output-producing tools (display-capped head+tail), or the
+// full argument as a fallback. width is the content width available after the
+// elbow chrome; every line is truncated to it so a narrow terminal never
+// overflows. Returns nil when there is nothing to expand.
+func (m *TranscriptModel) toolExpandBody(c *toolCard, width int, argTruncated bool) []string {
+	if width < 4 {
+		width = 4
+	}
+	var content []string
+	// Edit-like tools (Edit/Write/MultiEdit): reuse permissionDiffStat for a
+	// colored +/− diff, so the diff survives past the permission box that showed it.
+	if _, _, dl := permissionDiffStat(c.tool, c.input); len(dl) > 0 {
+		for _, l := range condenseDiff(dl, toolExpandDiffMax) {
+			content = append(content, styleDiffLine(l))
+		}
+	}
+	// Captured output (Bash/Read/…): capped head+tail, ANSI remapped to the palette.
+	if c.output != "" {
+		for _, l := range clampOutputLines(c.output) {
+			content = append(content, kit.RemapANSI(l))
+		}
+	}
+	// Nothing structured to show, but the head truncated the argument — reveal it
+	// in full so expansion isn't a no-op.
+	if len(content) == 0 && argTruncated && c.arg != "" {
+		content = append(content, collapseSpaces(c.arg))
+	}
+	if len(content) == 0 {
+		return nil
+	}
+	out := make([]string, len(content))
+	for i, l := range content {
+		out[i] = strings.Repeat(" ", elbowChromeW) + truncate(l, width)
+	}
+	return out
+}
+
+// clampOutputLines splits captured tool output into display lines, keeping the
+// first toolExpandHeadLines and last toolExpandTailLines with a "… N lines
+// hidden …" marker between them when longer. Trailing blank lines are trimmed.
+func clampOutputLines(out string) []string {
+	out = strings.TrimRight(out, "\n")
+	if out == "" {
+		return nil
+	}
+	lines := strings.Split(out, "\n")
+	if len(lines) <= toolExpandHeadLines+toolExpandTailLines+1 {
+		return lines
+	}
+	hidden := len(lines) - toolExpandHeadLines - toolExpandTailLines
+	res := make([]string, 0, toolExpandHeadLines+toolExpandTailLines+1)
+	res = append(res, lines[:toolExpandHeadLines]...)
+	res = append(res, "… "+formatInt(hidden)+" lines hidden …")
+	res = append(res, lines[len(lines)-toolExpandTailLines:]...)
+	return res
+}
+
+// styleDiffLine colors a unified-diff line by its prefix ("+" add, "−" del, "…"
+// elision, " " context). Shared by the permission box and the expanded tool card.
+func styleDiffLine(l string) string {
+	var c color.Color
+	switch {
+	case strings.HasPrefix(l, "+"):
+		c = theme.Guac
+	case strings.HasPrefix(l, "−"):
+		c = theme.Coral
+	case strings.HasPrefix(l, "…"):
+		c = theme.TextDim
+	default: // context (" " prefix)
+		c = theme.TextMuted
+	}
+	return lipgloss.NewStyle().Foreground(c).Render(l)
 }
 
 // toolArg extracts the most informative single argument from a tool's input

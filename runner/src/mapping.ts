@@ -39,6 +39,32 @@ export interface MapResult {
 }
 
 /**
+ * TOOL_OUTPUT_CAP bounds the captured tool output carried on tool.completed /
+ * tool.failed events. A tool result can be arbitrarily large (a Bash command
+ * dumping a whole file), and that output now flows through the SQLite event log,
+ * the SSE stream, and the TUI's ctrl+o expansion — so it is capped here, at the
+ * source, rather than letting a pathological result bloat all three. Normal
+ * outputs are untouched; the summary (line count / first line) the TUI derives is
+ * unaffected for them.
+ */
+const TOOL_OUTPUT_CAP = 64 * 1024;
+
+/**
+ * capToolOutput returns s unchanged when within TOOL_OUTPUT_CAP, otherwise keeps
+ * the first and last half of the cap with a "… N bytes truncated …" marker so
+ * both the start (the command echo / headers) and the end (the exit / error
+ * tail) survive.
+ */
+export function capToolOutput(s: string): string {
+  if (s.length <= TOOL_OUTPUT_CAP) return s;
+  const half = Math.floor(TOOL_OUTPUT_CAP / 2);
+  const head = s.slice(0, half);
+  const tail = s.slice(s.length - half);
+  const omitted = s.length - head.length - tail.length;
+  return `${head}\n… ${omitted} bytes truncated …\n${tail}`;
+}
+
+/**
  * Map a single SDKMessage to normalized events via `emit`. Pure aside from the
  * emit callback: no I/O, no registry access, no sqlite. Returns the registry
  * observations the caller must apply (model, claude session id, init/completed).
@@ -193,12 +219,13 @@ function handleUserMessage(
     is_error?: boolean;
   }>) {
     if (block.type === 'tool_result') {
-      const outputStr =
+      const outputStr = capToolOutput(
         typeof block.content === 'string'
           ? block.content
           : Array.isArray(block.content)
             ? (block.content as Array<{ text?: string }>).map((c) => c?.text ?? '').join('')
-            : '';
+            : '',
+      );
       if (block.is_error) {
         // Populate `error` (not just `output`) so the documented
         // ToolPayload.Error field carries the failure reason. A consumer that

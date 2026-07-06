@@ -47,18 +47,9 @@ func (m *TranscriptModel) buildPermissionBox(width int) string {
 		const maxDiff = 16
 		shown := condenseDiff(p.diffLines, maxDiff)
 		for _, l := range shown {
-			var st lipgloss.Style
-			switch {
-			case strings.HasPrefix(l, "+"):
-				st = lipgloss.NewStyle().Foreground(theme.Guac)
-			case strings.HasPrefix(l, "−"):
-				st = lipgloss.NewStyle().Foreground(theme.Coral)
-			case strings.HasPrefix(l, "…"):
-				st = lipgloss.NewStyle().Foreground(theme.TextDim)
-			default: // context (" " prefix)
-				st = lipgloss.NewStyle().Foreground(theme.TextMuted)
-			}
-			lines = append(lines, st.Render(truncate(l, max(4, width-6))))
+			// styleDiffLine (transcript_render.go) is shared with the expanded tool
+			// card so both surfaces color the diff identically.
+			lines = append(lines, styleDiffLine(truncate(l, max(4, width-6))))
 		}
 	}
 

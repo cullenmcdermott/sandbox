@@ -36,8 +36,18 @@ func (m *TranscriptModel) startOrUpdateToolCard(p session.ToolPayload) {
 	arg := toolArg(p.Tool, p.Input)
 	if p.ToolUseID != "" {
 		if idx, ok := m.flatTools[p.ToolUseID]; ok && idx >= 0 && idx < len(m.blocks) && m.blocks[idx].tool != nil {
+			// The fuller (later) tool.started payload carries the complete input;
+			// retain it so ctrl+o expansion can rebuild the edit diff post-approval.
+			changed := false
 			if arg != "" {
 				m.blocks[idx].tool.arg = arg
+				changed = true
+			}
+			if len(p.Input) > 0 {
+				m.blocks[idx].tool.input = p.Input
+				changed = true
+			}
+			if changed {
 				m.blocks[idx].Bump()
 			}
 			m.syncItems()
@@ -45,6 +55,9 @@ func (m *TranscriptModel) startOrUpdateToolCard(p session.ToolPayload) {
 		}
 	}
 	m.startToolCard(p.Tool, arg)
+	if last := len(m.blocks) - 1; last >= 0 && m.blocks[last].tool != nil {
+		m.blocks[last].tool.input = p.Input
+	}
 	if p.ToolUseID != "" {
 		if m.flatTools == nil {
 			m.flatTools = map[string]int{}
@@ -56,7 +69,7 @@ func (m *TranscriptModel) startOrUpdateToolCard(p session.ToolPayload) {
 // finishToolCard resolves the oldest pending tool card with a result. tool.
 // completed/failed payloads carry no tool name, so cards are matched in start
 // order; toolName (if present, e.g. on failure) is a label fallback.
-func (m *TranscriptModel) finishToolCard(status toolStatus, summary, toolName string) {
+func (m *TranscriptModel) finishToolCard(status toolStatus, summary, toolName, output string) {
 	// Remap any ANSI the tool emitted in its result onto the theme palette (§A.2).
 	summary = kit.RemapANSI(summary)
 	if len(m.pendingTools) > 0 {
@@ -65,6 +78,7 @@ func (m *TranscriptModel) finishToolCard(status toolStatus, summary, toolName st
 		if idx >= 0 && idx < len(m.blocks) && m.blocks[idx].tool != nil {
 			m.blocks[idx].tool.status = status
 			m.blocks[idx].tool.summary = summary
+			m.blocks[idx].tool.output = output
 			m.blocks[idx].Bump()
 			m.syncItems()
 			return
@@ -72,9 +86,29 @@ func (m *TranscriptModel) finishToolCard(status toolStatus, summary, toolName st
 	}
 	// Orphan result (no matching start): render a standalone finished card.
 	card := m.newBlockCard(blockToolCard, "")
-	card.tool = &toolCard{tool: toolName, status: status, summary: summary, card: card}
+	card.tool = &toolCard{tool: toolName, status: status, summary: summary, output: output, card: card}
 	m.blocks = append(m.blocks, card)
 	m.syncItems()
+}
+
+// toggleLatestToolCard flips the expansion of the most recent flat tool card
+// (ctrl+o on an empty composer). Expanding reveals the card's available content —
+// the edit diff, the captured output, or the full argument — under the elbow.
+// Bumps the card's version so the list re-renders, and returns whether a card was
+// toggled (false when there is no tool card to expand, so ctrl+o falls through to
+// $EDITOR composition). Per-card focus navigation is a follow-up; toggling the
+// latest card is the smallest correct affordance.
+func (m *TranscriptModel) toggleLatestToolCard() bool {
+	for i := len(m.blocks) - 1; i >= 0; i-- {
+		b := m.blocks[i]
+		if b.kind == blockToolCard && b.tool != nil {
+			b.tool.expanded = !b.tool.expanded
+			b.Bump()
+			m.syncItems()
+			return true
+		}
+	}
+	return false
 }
 
 // dropTrailingFooter removes the previous turn's footer block when a new turn
@@ -390,7 +424,7 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		var p session.ToolPayload
 		_ = json.Unmarshal(ev.Payload, &p)
 		if !m.finishNested(p, toolOK, toolSummary(p.Output)) {
-			m.finishToolCard(toolOK, toolSummary(p.Output), p.Tool)
+			m.finishToolCard(toolOK, toolSummary(p.Output), p.Tool, p.Output)
 		}
 
 	case session.EventToolFailed:
@@ -405,7 +439,7 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 			summary = toolSummary(p.Output)
 		}
 		if !m.finishNested(p, toolErr, summary) {
-			m.finishToolCard(toolErr, summary, p.Tool)
+			m.finishToolCard(toolErr, summary, p.Tool, p.Output)
 		}
 
 	case session.EventPermissionRequested:

@@ -233,8 +233,15 @@ func (m *TranscriptModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// $EDITOR composition: ctrl+o opens the editor with the current prompt.
+	// ctrl+o toggles the most recent tool card's output expansion when the
+	// composer is empty (the Claude-Code idiom, and consistent with the other
+	// prompt-empty-gated keys `?` and space) — you're reading the transcript, not
+	// drafting. With text in the composer it keeps its $EDITOR-composition role, so
+	// ctrl+o on a draft opens it in your editor (slice 5g).
 	if key == "ctrl+o" {
+		if m.input.Value() == "" && m.toggleLatestToolCard() {
+			return m, nil
+		}
 		return m, m.openEditorPrompt()
 	}
 
