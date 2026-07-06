@@ -29,7 +29,8 @@ check: gen fmt-check lint build vet test typecheck sdk-conformance verify e2e
     @skipped=""; \
     command -v golangci-lint >/dev/null 2>&1 || skipped="$skipped golangci-lint"; \
     [ -x runner/node_modules/.bin/eslint ] || skipped="$skipped runner-eslint"; \
-    [ -d runner/node_modules ] || skipped="$skipped runner-tests runner-typecheck"; \
+    [ -d runner/node_modules ] || skipped="$skipped runner-tests"; \
+    [ -x runner/node_modules/.bin/tsc ] || skipped="$skipped runner-typecheck"; \
     if [ -n "$skipped" ]; then \
         n=$(printf '%s' "$skipped" | wc -w | tr -d ' '); \
         printf '\033[33m%s\033[0m\n' "just check: passed ($n gate(s) skipped — CI enforces them:$skipped)"; \
