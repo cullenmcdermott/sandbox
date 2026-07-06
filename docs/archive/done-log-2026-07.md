@@ -500,3 +500,57 @@ real defect found and fixed in-tree.
   clear the flag; `SetFollow` flushes under the old intent first. API
   unchanged (public §8 surface). New tests: drag coalescing, width
   oscillation zero-rerender, stacked-shrink repin.
+
+## Fable-coordinated batch 2 (2026-07-06) — §2a block unification + §5 startup
+
+### §2a — unify the dual block representations (Opus build, Fable-verified)
+
+- `blockCard` (embeds `*list.Versioned`, implements `list.Item`) replaces the
+  `blocks []tblock` + `items []*blockItem` + fingerprint-reconcile triple;
+  `m.blocks` is now `[]*blockCard` — the cards ARE the list items. Deleted:
+  `tblock`, `blockItem`, `blockFP`, `reconcileItems`, `markBlockDirty`,
+  `syncBody` (→ `commitItems` + SetItems/pin), `renderBlockRaw`
+  (→ `renderBlockBody(*blockCard)`), `bumpStreamItem`, `fpComputes`.
+- Mutations bump versions at the mutation site: tool/subagent cards hold a
+  `card *blockCard` back-reference (O(1) status/summary/child updates);
+  per-commit display flags (`unread`, `turnGap`) memoized in `setDisplay`;
+  the streaming tail refreshes one card gated on `streamFP`; theme epoch
+  bumps every card once (seeded at NewTranscript so first commit is quiet).
+- Verification: bump-site audit (every `.tool.`/subagent mutation adjacent to
+  a `Bump()`), 9 test files ported off deleted internals with assertions
+  preserved (incl. `transcript_blockfp_test.go` re-anchored to versions and
+  the untouched replay-perf O(N) contract), full suite + `-race` green.
+- Retires §4 "reconcile is O(n) per event". Unlocks per-block expanded/focus/
+  copy state (a field + a bump now, not a new fingerprint dimension).
+
+### §5 — startup speed cluster (Opus build, Fable-verified + gate wired by Fable)
+
+- **Parallel creates:** Secret+PVC via `errgroup.WithContext`, Sandbox after
+  both; rollback still enumerates all three NotFound-tolerantly under partial
+  parallel failure (`TestCreateSessionRollsBackPVCOnSecretFailure`).
+- **Lazy syncs:** `CreateAll` split into `CreateProject` (foreground,
+  load-bearing) + `CreateInputs` (7 config/transcript syncs, backgrounded,
+  kept serial for deterministic GC labels); failures surface via the
+  advisory, never dropped.
+- **Parallel port-forwards:** concurrent establishment, order-preserving
+  handle slice, siblings cancelled+closed on any failure.
+- **Deferred reaper:** `ensureReaperWithRetry` (3 attempts, exponential
+  backoff) inside the background task; persistent failure surfaces via
+  AwaitSync. Fresh-path skips the redundant Status Get + `ensureSSHKey`
+  (Create stamps them onto the Session; consumed by first Connect).
+- **Prompt un-gated from the flush:** Connect returns at runner-health +
+  project-sync-create; the bounded 12s first flush (or detached reconnect
+  flush) + CreateInputs + reaper run in `startBackgroundSync`, rooted at a
+  ctx `closeHandles` cancels; `task.finish` always runs so `AwaitSync` never
+  deadlocks. `waitForPodReady` poll 2s→1s.
+- **Turn-staging gate (Fable):** `stagedRunner` wraps both `Connection.Runner`
+  and `Session.Runner()` — `StartTurn` awaits `AwaitSync` (instant once
+  settled; ctx-cancellable; other methods pass through), restoring the
+  "no turn before the workspace is staged" invariant for every consumer.
+  `sandbox turn` (DialRunner, no sync lifecycle) correctly ungated.
+- **Late advisory surfacing (Fable):** `ConnectResult/CreateResult.AwaitWarning`
+  → connector populates with `sess.AwaitSync` → App polls once per attach and
+  appends `⚠ …` to the session's transcript (attached or retained-warm) via
+  `syncAdvisoryMsg`; opencode external-pane drops it, matching the existing
+  Warning behavior on that path.
+- Public SDK impact: one added method (`Session.AwaitSync`); sdktest green.

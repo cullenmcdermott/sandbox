@@ -232,17 +232,14 @@ resume.
 
 ### 2a. Structural enablers (transcript/model decomposition)
 
-- [ ] **Unify the dual block representations (HIGH — the biggest blocker).**
-  `blocks []tblock` + parallel `items []*blockItem` reconciled by hand-rolled
-  fingerprints (`reconcileItems`/`blockFP`), while `chat/` already has per-role
-  item types — and `renderBlockRaw` shadow-renders tool/reasoning/notice blocks
-  outside them. Every mutation must remember markBlockDirty/syncBody (the RV9
-  trap, `transcript.go:2325`). Expandable tool cards / per-block focus / copy
-  need per-block state with nowhere to live. Fix: chat items become THE block
-  representation implementing `list.Item`, owning render + version + expanded
-  state; delete tblock/blockItem/blockFP; syncBody → SetItems + pin.
-  `transcript.go:121`, `transcript_list.go:180-285`. (Also retires the
-  "reconcile is O(n) per event" perf item.)
+- [x] **Unify the dual block representations** — `blockCard` (embeds
+  `list.Versioned`, implements `list.Item`) is the single source of truth;
+  `m.blocks` is `[]*blockCard`; mutations bump versions at the site (tool/
+  subagent cards carry a card back-ref); `syncBody`/`reconcileItems`/`tblock`/
+  `blockItem`/`blockFP`/`markBlockDirty`/`renderBlockRaw` deleted; streamed
+  deltas refresh only the tail card (O(1)). Per-block state (unread/turnGap/
+  future expanded) lives on the card. Fable-verified 2026-07-06 (bump-site
+  audit + ported parity/golden/T1 suites). Done log.
 - [ ] **One event reducer, not two drifting switches (HIGH).** `handleEvent`
   (~25 cases, `transcript.go:2118`) and `ApplyRunnerEvent` (`session.go:565`)
   both unmarshal the same payloads into duplicated state (status/usage/git/
@@ -542,8 +539,8 @@ Outcome: **not happening; invest in §2 instead.** Kept here so nobody re-treads
   Done log.
 - [ ] Glamour pads wrapped lines with per-space SGR runs (bytes; upstream
   glamour style; inflates parse work).
-- Reconcile-is-O(n)-per-event: retired by the §2a block unification — don't
-  fix separately.
+- [x] Reconcile-is-O(n)-per-event: retired by the §2a block unification
+  (2026-07-06) — streamed deltas now touch only the tail card.
 
 ## 5) New-session startup speed (ordered by likely win)
 
@@ -557,23 +554,26 @@ Outcome: **not happening; invest in §2 instead.** Kept here so nobody re-treads
   Decide image naming in the same change — the
   "claude-runner" name is a misnomer today (one shared image serves every
   backend; inbox 2026-07).
-- [ ] **Stop gating the visible prompt on the 12s blocking first-sync flush** —
-  open the transcript as soon as the runner is healthy; background the bounded
-  flush (reuse the reconnect pattern). Keep *turn submission* gated on staging.
-  (Pointers re-verified 2026-07-04: the connect orchestration lives in
-  `client/`, not `internal/cli/connect.go`.) `client/session.go` Connect
-  (~:190-320), `internal/sync/sync.go:224` (`FlushAll`).
-- [ ] **Parallelize independent serial steps** — Secret+PVC creates (errgroup,
-  then Sandbox); the 8 serial `mutagen sync create` execs (only the project
-  sync is load-bearing; create the 7 config/transcript syncs lazily); the two
-  serial port-forwards (HTTP+SSH). `backend.go:226-260`, `sync.go:85-124`
-  (`CreateAll`), `portforward.go:47`.
-- [ ] Tighten `waitForPodReady` poll 2s→~500ms-1s (pod-phase detail to the
-  stepper already landed, Phase 2).
-- [ ] Defer `ensureReaper` + launch-burst observer connects off the foreground
-  connect path; drop the redundant connect-time Status Get + re-`ensureSSHKey`
-  on the freshly-created path. `client/session.go:256` (`ensureSSHKey`),
-  `:290` (`ensureReaper` call; impl `client/sync.go:184`).
+- [x] **Prompt no longer gated on the first-sync flush** — Connect returns at
+  runner-health + project-sync-create; flush/CreateInputs/reaper run in
+  `startBackgroundSync` (ctx-rooted, no leaks); `Session.AwaitSync` is the
+  advisory seam; turn submission stays gated via `stagedRunner` (StartTurn
+  awaits staging — every consumer); dashboard polls `AwaitWarning` and
+  surfaces late advisories as transcript blocks. Fable-verified 2026-07-06.
+  Done log.
+- [x] **Parallelized independent serial steps** — Secret+PVC via errgroup
+  (rollback-safe, race-verified), then Sandbox; only the project sync created
+  foreground (7 config/transcript syncs backgrounded, serial for GC-label
+  determinism); port-forwards established concurrently (order-preserving,
+  cancel+close siblings on failure). Fable-verified 2026-07-06. Done log.
+- [x] Tightened `waitForPodReady` poll 2s→1s (1s not 500ms — gentle on the
+  API server).
+- [~] **Deferred `ensureReaper`** (3-attempt backoff in the background task,
+  failure surfaces via AwaitSync) + dropped the redundant connect-time Status
+  Get and re-`ensureSSHKey` on the freshly-created path (Create stamps
+  fresh/privPath onto the Session; consumed by first Connect). Fable-verified
+  2026-07-06. STILL OPEN: the launch-burst *observer connects* half — fold
+  into the §1d O(sessions) cap/evict item (same mechanism).
 - [ ] **Mutagen sync GC follow-ups** (core landed — see done log): **MF3**
   cross-context over-reap (stamp `--label sandbox-context=<ctx>` in CreateAll,
   scope List/gc to current context); **MF5** mid-session sync loss doesn't
