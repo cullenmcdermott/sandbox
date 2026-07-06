@@ -408,6 +408,16 @@ type TranscriptModel struct {
 	// fpComputes counts blockFP() calls — a behavioral counter proving that
 	// immutable text blocks are fingerprinted once, not re-hashed every reconcile.
 	fpComputes int
+
+	// lastThemeEpoch is the theme.Epoch() observed at the previous reconcile. A
+	// /theme swap bumps the global epoch but leaves every immutable block's
+	// (fresh|dirty|unread|mutable) gate false, so their cached ANSI — with the old
+	// palette baked in — would never be re-fingerprinted (the epoch is folded into
+	// blockFP but that only helps if blockFP is actually recomputed). When the
+	// epoch differs from this, reconcile forces a fingerprint recompute for every
+	// item so the version bumps and tui/list re-serves fresh-palette renders
+	// without waiting for a width change (§1c).
+	lastThemeEpoch uint64
 }
 
 // cacheableEvent reports whether an event belongs in the host-side transcript

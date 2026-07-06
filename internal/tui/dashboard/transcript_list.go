@@ -201,13 +201,20 @@ func (m *TranscriptModel) reconcileItems() {
 		m.items = append(m.items, m.newBlockItem(i))
 	}
 
+	// A /theme swap bumps the global epoch; immutable blocks otherwise never
+	// re-fingerprint (their gate below stays false), so force a recompute for
+	// every item this reconcile so the folded-in epoch actually invalidates the
+	// cached old-palette ANSI (§1c).
+	epoch := theme.Epoch()
+	themeChanged := epoch != m.lastThemeEpoch
+	m.lastThemeEpoch = epoch
 	for i, it := range m.items {
 		unread := i == m.unreadIndex && m.unreadIndex > 0
 		// Recompute the fingerprint only when it could have changed. Immutable
 		// text blocks (the bulk of a long transcript, and the expensive ones —
 		// full assistant message text) are hashed once and reused, so a live turn
 		// appending block M+1 no longer re-hashes blocks 1..M every event.
-		needFP := it.fresh || it.dirty || unread != it.unread || blockKindMutable(m.blocks[i].kind)
+		needFP := themeChanged || it.fresh || it.dirty || unread != it.unread || blockKindMutable(m.blocks[i].kind)
 		it.unread = unread
 		if !needFP {
 			continue
@@ -258,12 +265,14 @@ func (m *TranscriptModel) bumpStreamItem() {
 	}
 	// Fingerprint the live buffer for the tail's current mode. The mode is folded
 	// in so a thinking→text handoff (reasoning tail replaced by the assistant tail)
-	// can't collide fingerprints even at identical text.
+	// can't collide fingerprints even at identical text. The theme epoch is folded
+	// in too so a /theme swap mid-stall re-renders the live tail with the new
+	// palette (§1c, streaming-tail analog of blockFP's epoch fold).
 	var fp uint64
 	if m.streamItem.streamReasoning {
-		fp = fnvStr("think", m.reasoningBuf.String())
+		fp = fnvStr(fmt.Sprintf("think\x00e%d", theme.Epoch()), m.reasoningBuf.String())
 	} else {
-		fp = fnvStr("stream", m.assistantBuf.String())
+		fp = fnvStr(fmt.Sprintf("stream\x00e%d", theme.Epoch()), m.assistantBuf.String())
 	}
 	if fp != m.streamItem.fp {
 		m.streamItem.fp = fp
