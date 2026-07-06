@@ -13,18 +13,17 @@ import (
 )
 
 func (m *TranscriptModel) appendBlock(kind tblockKind, text string) {
-	m.blocks = append(m.blocks, tblock{kind: kind, text: text})
-	m.syncBody()
+	m.blocks = append(m.blocks, m.newBlockCard(kind, text))
+	m.syncItems()
 }
 
 // startToolCard appends a running tool card and queues it for result matching.
 func (m *TranscriptModel) startToolCard(tool, arg string) {
-	m.blocks = append(m.blocks, tblock{
-		kind: blockToolCard,
-		tool: &toolCard{tool: tool, arg: arg, status: toolRunning},
-	})
+	card := m.newBlockCard(blockToolCard, "")
+	card.tool = &toolCard{tool: tool, arg: arg, status: toolRunning, card: card}
+	m.blocks = append(m.blocks, card)
 	m.pendingTools = append(m.pendingTools, len(m.blocks)-1)
-	m.syncBody()
+	m.syncItems()
 }
 
 // startOrUpdateToolCard handles a tool.started for a flat (non-subagent) tool.
@@ -40,8 +39,9 @@ func (m *TranscriptModel) startOrUpdateToolCard(p session.ToolPayload) {
 		if idx, ok := m.flatTools[p.ToolUseID]; ok && idx >= 0 && idx < len(m.blocks) && m.blocks[idx].tool != nil {
 			if arg != "" {
 				m.blocks[idx].tool.arg = arg
+				m.blocks[idx].Bump()
 			}
-			m.syncBody()
+			m.syncItems()
 			return
 		}
 	}
@@ -66,16 +66,16 @@ func (m *TranscriptModel) finishToolCard(status toolStatus, summary, toolName st
 		if idx >= 0 && idx < len(m.blocks) && m.blocks[idx].tool != nil {
 			m.blocks[idx].tool.status = status
 			m.blocks[idx].tool.summary = summary
-			m.syncBody()
+			m.blocks[idx].Bump()
+			m.syncItems()
 			return
 		}
 	}
 	// Orphan result (no matching start): render a standalone finished card.
-	m.blocks = append(m.blocks, tblock{
-		kind: blockToolCard,
-		tool: &toolCard{tool: toolName, status: status, summary: summary},
-	})
-	m.syncBody()
+	card := m.newBlockCard(blockToolCard, "")
+	card.tool = &toolCard{tool: toolName, status: status, summary: summary, card: card}
+	m.blocks = append(m.blocks, card)
+	m.syncItems()
 }
 
 // dropTrailingFooter removes the previous turn's footer block when a new turn
@@ -91,7 +91,7 @@ func (m *TranscriptModel) finishToolCard(status toolStatus, summary, toolName st
 func (m *TranscriptModel) dropTrailingFooter() {
 	if n := len(m.blocks); n > 0 && m.blocks[n-1].kind == blockFooter {
 		m.blocks = m.blocks[:n-1]
-		m.syncBody()
+		m.syncItems()
 	}
 }
 
@@ -378,12 +378,12 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 			if t := strings.TrimSpace(p.Content); t != "" {
 				if n := len(m.blocks); n > 0 && m.blocks[n-1].kind == blockUser &&
 					strings.TrimSpace(m.blocks[n-1].text) == t {
-					m.syncBody() // duplicate of the optimistic block — skip
+					m.syncItems() // duplicate of the optimistic block — skip
 				} else {
 					m.appendBlock(blockUser, p.Content)
 				}
 			} else {
-				m.syncBody()
+				m.syncItems()
 			}
 			break
 		}
@@ -400,16 +400,16 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 			// of appending a second copy of the same reply.
 			if strings.TrimSpace(text) != "" {
 				m.blocks[m.droppedPartialIdx].text = text
-				// In-place text mutation of an immutable-kind block: force its
-				// fingerprint to recompute so the memoized reconcile re-renders it.
-				m.markBlockDirty(m.droppedPartialIdx)
+				// In-place text mutation of a committed block: bump its version so
+				// tui/list re-renders it with the replayed full text.
+				m.blocks[m.droppedPartialIdx].Bump()
 			}
 			m.droppedPartialIdx = -1
-			m.syncBody()
+			m.syncItems()
 		case strings.TrimSpace(text) != "":
 			m.appendBlock(blockAssistant, text)
 		default:
-			m.syncBody()
+			m.syncItems()
 		}
 
 	case session.EventToolStarted:
@@ -522,10 +522,10 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 	case session.EventReasoningStarted:
 		// A reasoning/thinking block is beginning. Initialize the buffer and show
 		// the live "∴ Thinking" tail immediately (§2b gap 3) instead of a bare
-		// spinner — syncBody reconciles the ephemeral reasoning tail into the list.
+		// spinner — syncItems reconciles the ephemeral reasoning tail into the list.
 		m.reasoning = true
 		m.reasoningBuf.Reset()
-		m.syncBody()
+		m.syncItems()
 
 	case session.EventReasoningDelta:
 		// Incremental chunk of thinking text — stream it into the live tail as it
@@ -555,8 +555,8 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		} else {
 			// Nothing to commit, but the live "∴ Thinking" tail must still be torn
 			// down now that reasoning has ended (§2b gap 3) — appendBlock's implicit
-			// syncBody didn't run.
-			m.syncBody()
+			// syncItems didn't run.
+			m.syncItems()
 		}
 
 	case session.EventToolDelta:
@@ -582,7 +582,8 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 				} else if arg := toolArg(c.tool, json.RawMessage(c.rawJSON+`"}`)); arg != "" {
 					c.arg = collapseSpaces(arg)
 				}
-				m.syncBody()
+				m.blocks[idx].Bump()
+				m.syncItems()
 			}
 		}
 

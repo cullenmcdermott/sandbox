@@ -9,6 +9,16 @@ import (
 	"github.com/cullenmcdermott/sandbox/internal/session"
 )
 
+// infoCards builds a slice of blockInfo cards wired to m, a test convenience for
+// seeding m.blocks directly (the cards are the list items now).
+func infoCards(m *TranscriptModel, texts ...string) []*blockCard {
+	cards := make([]*blockCard, len(texts))
+	for i, t := range texts {
+		cards[i] = m.newBlockCard(blockInfo, t)
+	}
+	return cards
+}
+
 func TestDiffOfMinimalContext(t *testing.T) {
 	// Changing one line of three keeps the other two as context (" " prefix).
 	adds, dels, lines := diffOf("a\nb\nc", "a\nB\nc")

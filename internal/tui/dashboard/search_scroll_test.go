@@ -15,12 +15,8 @@ func TestScrollToMatchUsesRenderedHeight(t *testing.T) {
 	m.height = 24
 
 	// Add three blocks: first is 5 lines, second is 3 lines, third is 1 line.
-	m.blocks = []tblock{
-		{kind: blockInfo, text: "block0"},
-		{kind: blockInfo, text: "block1"},
-		{kind: blockInfo, text: "block2"},
-	}
-	m.syncBody()
+	m.blocks = infoCards(m, "block0", "block1", "block2")
+	m.syncItems()
 
 	// Manually set up matches: target block 2.
 	m.search = searchModel{
@@ -46,10 +42,8 @@ func TestScrollToMatchUsesRuneOffset(t *testing.T) {
 	m.width = 80
 	m.height = 24
 
-	m.blocks = []tblock{
-		{kind: blockInfo, text: strings.Repeat("a", 100)}, // 1 line at width 80
-	}
-	m.syncBody()
+	m.blocks = infoCards(m, strings.Repeat("a", 100)) // 1 line at width 80
+	m.syncItems()
 
 	// Match at rune offset 50 (halfway through the 100-char block).
 	m.search = searchModel{

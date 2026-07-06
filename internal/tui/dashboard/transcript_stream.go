@@ -79,11 +79,10 @@ func (m *TranscriptModel) loadCachedTranscript() {
 	// Replay the cache synchronously (no UI shown yet); startEventStream then sets
 	// the replay/loading state from the watermark for the remaining delta.
 	//
-	// Bulk mode: apply every event to m.blocks WITHOUT reconciling the list per
-	// event — a naive replay calls syncBody→reconcileItems once per event, and
-	// each reconcile re-fingerprints all prior items (hashing each block's full
-	// text) and rebuilds the item set, making the cold load O(N^2). Suppress that,
-	// then reconcile exactly once after the loop, so replay is O(N).
+	// Bulk mode: apply every event to m.blocks WITHOUT committing the list per
+	// event — a naive replay calls syncItems→commitItems once per event, and each
+	// commit rebuilds the item set, making the cold load O(N^2). Suppress that, then
+	// commit exactly once after the loop, so replay is O(N).
 	m.bulkReplay = true
 	for i := range events {
 		_ = m.handleEvent(events[i])
@@ -92,7 +91,7 @@ func (m *TranscriptModel) loadCachedTranscript() {
 		}
 	}
 	m.bulkReplay = false
-	m.syncBody()
+	m.syncItems()
 }
 
 func (m *TranscriptModel) startEventStream() tea.Cmd {

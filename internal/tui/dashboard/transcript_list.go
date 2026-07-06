@@ -1,12 +1,15 @@
 package dashboard
 
-// transcript_list.go — the list-backed transcript body. The transcript is no
-// longer one monolithic string rebuilt on every event (the old rebuild()).
-// Instead each tblock is fronted by a blockItem implementing list.Item, and a
-// *list.List virtualizes them: Render() is O(viewport) and an item only
-// re-renders when its version bumps. A streaming assistant turn is a single
-// ephemeral trailing item that grows via deltas, so a streamed chunk re-renders
-// just that one item rather than re-running glamour over all history.
+// transcript_list.go — the list-backed transcript body. The transcript is a
+// slice of *blockCard, each of which IS a list.Item: one unified representation
+// that owns both the block's data AND its render + version + per-block display
+// state. There is no parallel item slice and no fingerprint pass — a mutation
+// bumps its card's version directly at the mutation site, and *list.List keys its
+// render cache on (item, width, version) so only a changed card re-renders.
+//
+// A streaming assistant turn is a single ephemeral trailing card (m.streamItem)
+// fed from m.assistantBuf, so a streamed chunk re-renders just that one card
+// rather than re-running glamour over all history.
 
 import (
 	"fmt"
@@ -22,7 +25,7 @@ import (
 )
 
 // fnvStr hashes its parts (NUL-separated for unambiguous framing) into a 64-bit
-// fingerprint used as a render-cache key.
+// value used as the streaming tail's change key.
 func fnvStr(parts ...string) uint64 {
 	h := fnv.New64a()
 	for i, p := range parts {
@@ -34,121 +37,115 @@ func fnvStr(parts ...string) uint64 {
 	return h.Sum64()
 }
 
-// blockItem fronts one transcript block (or the ephemeral streaming tail) as a
-// list.Item. idx indexes into m.blocks; for the streaming tail idx is -1 and the
-// body is rendered from m.assistantBuf. fp is the last-computed fingerprint of
-// the render-affecting state, used to decide when to Bump the version.
-type blockItem struct {
+// blockCard is THE single representation of a transcript block: it holds the
+// block's data (former tblock) AND is the list.Item that renders it (former
+// blockItem), owning its own version and per-block display state. Mutating a
+// card's data bumps its version directly — no external fingerprint pass, no
+// parallel slice. The ephemeral streaming tail is a blockCard with streaming
+// set, fed from the model's live buffers rather than its own text field.
+type blockCard struct {
 	*list.Versioned
-	m         *TranscriptModel
-	idx       int
-	streaming bool
-	// streamReasoning marks the ephemeral tail as the live THINKING tail (fed from
-	// m.reasoningBuf) rather than the assistant-message tail (m.assistantBuf). Only
-	// one is ever live at a time — a message's thinking block completes before its
-	// text block starts — so the single streamItem serves both (§2b gap 3).
+	m *TranscriptModel
+
+	kind tblockKind
+	text string // raw (markdown for assistant blocks) so it re-wraps on resize
+	tool *toolCard
+	sub  *subagentCard // non-nil only for blockSubagent
+
+	// Per-commit display state, recomputed by commitItems; a change bumps the
+	// version so the "new since you left" divider / turn gap re-render.
+	unread  bool
+	turnGap bool // a blank line before a user block that begins a non-first turn
+
+	// Streaming tail only (kind is unused then): streamReasoning selects the live
+	// THINKING tail (m.reasoningBuf) over the assistant-message tail (m.assistantBuf).
+	streaming       bool
 	streamReasoning bool
-	unread          bool
-	fp              uint64
-	// fresh marks an item whose fingerprint has never been computed (just
-	// created); dirty marks an immutable-kind block whose content was mutated in
-	// place (the only such case is the RV9 dropped-partial text replacement).
-	// Both force a fingerprint recompute on the next reconcile; otherwise an
-	// immutable text block is never re-hashed (the live-append O(M·textlen) cost).
-	fresh bool
-	dirty bool
+	streamFP        uint64 // last-rendered buffer key; gates the tail's version bump
 }
 
-func (m *TranscriptModel) newBlockItem(idx int) *blockItem {
-	return &blockItem{Versioned: list.NewVersioned(), m: m, idx: idx, fresh: true}
+// newBlockCard builds a committed card owning a fresh version counter.
+func (m *TranscriptModel) newBlockCard(kind tblockKind, text string) *blockCard {
+	return &blockCard{Versioned: list.NewVersioned(), m: m, kind: kind, text: text}
 }
 
-// blockKindMutable reports whether a block's render-affecting state can change
-// after creation. Tool and subagent cards mutate in place (status/summary/arg,
-// child cards, the running-spinner work-frame), so their fingerprint must be
-// recomputed every reconcile — but they carry only short fields, so it is cheap.
-// Every other kind is an immutable text block: hashed once, then reused.
-func blockKindMutable(k tblockKind) bool {
-	return k == blockToolCard || k == blockSubagent
-}
-
-// markBlockDirty forces item[idx]'s fingerprint to be recomputed on the next
-// reconcile. Used for the rare in-place text mutation of an immutable block.
-func (m *TranscriptModel) markBlockDirty(idx int) {
-	if idx >= 0 && idx < len(m.items) {
-		m.items[idx].dirty = true
+// setDisplay updates the per-commit display flags, bumping the version only when
+// they actually change so an immutable committed block is never needlessly
+// re-rendered (the memoization the old fingerprint gate provided).
+func (b *blockCard) setDisplay(unread, turnGap bool) {
+	if b.unread == unread && b.turnGap == turnGap {
+		return
 	}
+	b.unread = unread
+	b.turnGap = turnGap
+	b.Bump()
 }
 
-func (it *blockItem) Render(width int) string {
-	var body string
-	if it.streaming && it.streamReasoning {
-		// Live THINKING tail (§2b gap 3): stream the reasoning text as it arrives,
-		// muted+italic under a "∴ Thinking" header, instead of buffering silently
-		// until reasoning.completed. It collapses to the compact "∴ Thought (N
-		// lines): …" summary (renderBlock's blockReasoning) when the block commits.
-		if it.unread {
-			return it.m.renderUnreadDivider() + "\n" + it.m.renderLiveReasoning(it.m.reasoningBuf.String())
-		}
-		return it.m.renderLiveReasoning(it.m.reasoningBuf.String())
+func (b *blockCard) Render(width int) string {
+	if b.streaming {
+		return b.renderStreamTail()
 	}
-	if it.streaming {
-		// A2: use persistent AssistantItem + StreamingMarkdown for incremental
-		// rendering of the live tail instead of creating a new item per delta.
-		// The live tail wears the same Charple role gutter as the finalized
-		// assistant block (renderBlock) so it doesn't shift left when the turn
-		// completes. It MUST wrap at the same width as the finalized block
-		// (assistantWrapWidth) — keyed off m.width, not the list-provided width —
-		// or the block reflows at message.completed and the view lurches (T1).
-		w := it.m.assistantWrapWidth()
-		if it.m.streamAI != nil {
-			it.m.streamAI.SetMessage(&chat.AssistantMessage{Content: it.m.assistantBuf.String(), Streaming: true})
-			body = it.m.streamAI.RawRender(w)
-		} else {
-			body = it.m.renderBlockRaw(tblock{kind: blockAssistant, text: it.m.assistantBuf.String()})
-		}
-		// Match the finalized block's trailing-newline handling. renderBlockRaw
-		// strips ALL trailing newlines (TrimRight), but the streaming renderer only
-		// trims one (TrimSuffix), so glamour's trailing blank line survives as an
-		// empty gutter row that disappears at message.completed — shifting the view
-		// up a line (T1 drift). Trim it here so the tail and the finalized block are
-		// the same height.
-		body = strings.TrimRight(body, "\n")
-		if body != "" {
-			body = gutterPrefix(body, theme.Charple)
-		}
-	} else {
-		body = it.m.renderBlock(it.m.blocks[it.idx])
-		// A2.3 (Calm) turn gap: a blank line before each user turn after the
-		// first, so turns read as distinct without a heavy divider.
-		if it.m.blocks[it.idx].kind == blockUser && it.m.hasEarlierUser(it.idx) {
-			body = "\n" + body
-		}
+	body := b.m.renderBlock(b)
+	// A2.3 (Calm) turn gap: a blank line before each user turn after the first,
+	// so turns read as distinct without a heavy divider.
+	if b.kind == blockUser && b.turnGap {
+		body = "\n" + body
 	}
-	if it.unread {
-		return it.m.renderUnreadDivider() + "\n" + body
+	if b.unread {
+		return b.m.renderUnreadDivider() + "\n" + body
 	}
 	return body
 }
 
-// hasEarlierUser reports whether any block before idx is a user block — i.e.
-// the block at idx begins a turn other than the first. Drives the turn-gap.
-func (m *TranscriptModel) hasEarlierUser(idx int) bool {
-	for i := 0; i < idx && i < len(m.blocks); i++ {
-		if m.blocks[i].kind == blockUser {
-			return true
+// renderStreamTail renders the ephemeral live tail from the model's buffers.
+func (b *blockCard) renderStreamTail() string {
+	m := b.m
+	if b.streamReasoning {
+		// Live THINKING tail (§2b gap 3): stream the reasoning text as it arrives,
+		// muted+italic under a "∴ Thinking" header, instead of buffering silently
+		// until reasoning.completed. It collapses to the compact "∴ Thought (N
+		// lines): …" summary (renderBlockBody's blockReasoning) when the block commits.
+		if b.unread {
+			return m.renderUnreadDivider() + "\n" + m.renderLiveReasoning(m.reasoningBuf.String())
 		}
+		return m.renderLiveReasoning(m.reasoningBuf.String())
 	}
-	return false
+	// A2: use persistent AssistantItem + StreamingMarkdown for incremental rendering
+	// of the live tail instead of creating a new item per delta. The live tail wears
+	// the same Charple role gutter as the finalized assistant block (renderBlock) so
+	// it doesn't shift left when the turn completes. It MUST wrap at the same width as
+	// the finalized block (assistantWrapWidth) — keyed off m.width, not the
+	// list-provided width — or the block reflows at message.completed and the view
+	// lurches (T1).
+	w := m.assistantWrapWidth()
+	var body string
+	if m.streamAI != nil {
+		m.streamAI.SetMessage(&chat.AssistantMessage{Content: m.assistantBuf.String(), Streaming: true})
+		body = m.streamAI.RawRender(w)
+	} else {
+		body = m.renderBlockBody(&blockCard{m: m, kind: blockAssistant, text: m.assistantBuf.String()})
+	}
+	// Match the finalized block's trailing-newline handling. renderBlockBody strips
+	// ALL trailing newlines (TrimRight), but the streaming renderer only trims one
+	// (TrimSuffix), so glamour's trailing blank line survives as an empty gutter row
+	// that disappears at message.completed — shifting the view up a line (T1 drift).
+	// Trim it here so the tail and the finalized block are the same height.
+	body = strings.TrimRight(body, "\n")
+	if body != "" {
+		body = gutterPrefix(body, theme.Charple)
+	}
+	if b.unread {
+		return m.renderUnreadDivider() + "\n" + body
+	}
+	return body
 }
 
-// Finished reports whether the block's output is terminal (advisory for the
+// Finished reports whether the card's output is terminal (advisory for the
 // list). A running tool/subagent or the live streaming tail is not finished.
-func (it *blockItem) Finished() bool {
-	if it.streaming {
+func (b *blockCard) Finished() bool {
+	if b.streaming {
 		return false
 	}
-	b := it.m.blocks[it.idx]
 	switch b.kind {
 	case blockToolCard:
 		return b.tool == nil || b.tool.status != toolRunning
@@ -169,87 +166,64 @@ func (it *blockItem) Finished() bool {
 	return true
 }
 
-// syncBody reconciles the list items with m.blocks and the streaming buffer,
-// preserving the bottom pin when the view was already at the bottom. It replaces
-// the old rebuild(): no monolithic string, no SetContent — only changed items
-// re-render.
-func (m *TranscriptModel) syncBody() {
-	// During a bulk cache replay the caller appends every block first and
-	// reconciles once at the end, so skip the per-event reconcile here — it would
-	// otherwise re-fingerprint and rebuild the whole list on every replayed event
-	// (the O(N^2) cold-load path).
+// syncItems rebuilds the list's item set from m.blocks (+ the ephemeral streaming
+// tail) while preserving the bottom pin when the view was already at the bottom.
+// It replaces the old syncBody + reconcileItems: there is no fingerprint pass and
+// no parallel item slice — each card owns its version and bumps it at its mutation
+// site, so SetItems only reshuffles pointers (the expensive render is lazy, per
+// card, only on a version change). During a bulk cache replay it is a no-op; the
+// caller commits once at the end.
+func (m *TranscriptModel) syncItems() {
 	if m.bulkReplay {
 		return
 	}
 	wasBottom := m.body.AtBottom()
-	m.reconcileItems()
+	m.commitItems()
 	if wasBottom {
 		m.body.GotoBottom()
 	}
 }
 
-// reconcileItems makes m.items mirror m.blocks (growing or, after /clear,
-// shrinking), bumps the version of any item whose render-affecting state
-// changed, appends the ephemeral streaming tail when a turn is streaming, and
-// hands the resulting item set to the list.
-func (m *TranscriptModel) reconcileItems() {
+// commitItems recomputes each card's per-commit display flags (unread divider,
+// turn gap) and hands the card set (+ the ephemeral streaming tail) to the list.
+func (m *TranscriptModel) commitItems() {
 	m.reconciles++
-	if len(m.items) > len(m.blocks) {
-		m.items = m.items[:len(m.blocks)]
-	}
-	for i := len(m.items); i < len(m.blocks); i++ {
-		m.items = append(m.items, m.newBlockItem(i))
+	// A /theme swap bumps the global epoch; a committed card otherwise never
+	// re-renders (its version is stable), so its cached old-palette ANSI would
+	// survive until an unrelated change. Force every card to re-render once on an
+	// epoch change so the new palette takes immediately (§1c). The streaming tail
+	// folds the epoch into its own key (ensureStreamTail).
+	if e := theme.Epoch(); e != m.lastThemeEpoch {
+		m.lastThemeEpoch = e
+		for _, b := range m.blocks {
+			b.Bump()
+		}
 	}
 
-	// A /theme swap bumps the global epoch; immutable blocks otherwise never
-	// re-fingerprint (their gate below stays false), so force a recompute for
-	// every item this reconcile so the folded-in epoch actually invalidates the
-	// cached old-palette ANSI (§1c).
-	epoch := theme.Epoch()
-	themeChanged := epoch != m.lastThemeEpoch
-	m.lastThemeEpoch = epoch
-	for i, it := range m.items {
+	sawUser := false
+	for i, b := range m.blocks {
 		unread := i == m.unreadIndex && m.unreadIndex > 0
-		// Recompute the fingerprint only when it could have changed. Immutable
-		// text blocks (the bulk of a long transcript, and the expensive ones —
-		// full assistant message text) are hashed once and reused, so a live turn
-		// appending block M+1 no longer re-hashes blocks 1..M every event.
-		needFP := themeChanged || it.fresh || it.dirty || unread != it.unread || blockKindMutable(m.blocks[i].kind)
-		it.unread = unread
-		if !needFP {
-			continue
+		turnGap := b.kind == blockUser && sawUser
+		if b.kind == blockUser {
+			sawUser = true
 		}
-		it.fresh = false
-		it.dirty = false
-		fp := m.blockFP(m.blocks[i], unread)
-		if fp != it.fp {
-			it.fp = fp
-			it.Bump()
-		}
+		b.setDisplay(unread, turnGap)
 	}
 
-	items := make([]list.Item, 0, len(m.items)+1)
-	for _, it := range m.items {
-		items = append(items, it)
+	items := make([]list.Item, 0, len(m.blocks)+1)
+	for _, b := range m.blocks {
+		items = append(items, b)
 	}
 	// Append the ephemeral live tail: the streaming assistant message, or — when a
 	// thinking block is in flight before any text — the live reasoning (§2b gap 3).
-	// Assistant wins if both flags are somehow set (a text block supersedes an
-	// unfinished think). Exactly one tail, reusing the single streamItem.
+	// Assistant wins if both are somehow set (a text block supersedes an unfinished
+	// think). Exactly one tail, reusing the single m.streamItem.
 	switch {
 	case m.streaming && m.assistantBuf.Len() > 0:
-		if m.streamItem == nil {
-			m.streamItem = &blockItem{Versioned: list.NewVersioned(), m: m, idx: -1, streaming: true}
-		}
-		m.streamItem.streamReasoning = false
-		m.bumpStreamItem()
+		m.ensureStreamTail(false)
 		items = append(items, m.streamItem)
 	case m.reasoning:
-		if m.streamItem == nil {
-			m.streamItem = &blockItem{Versioned: list.NewVersioned(), m: m, idx: -1, streaming: true}
-		}
-		m.streamItem.streamReasoning = true
-		m.bumpStreamItem()
+		m.ensureStreamTail(true)
 		items = append(items, m.streamItem)
 	default:
 		m.streamItem = nil
@@ -257,79 +231,66 @@ func (m *TranscriptModel) reconcileItems() {
 	m.body.SetItems(items...)
 }
 
-// bumpStreamItem refingerprints the streaming tail and bumps it if its text
-// changed. Cheap: it hashes only the live buffer, never history.
-func (m *TranscriptModel) bumpStreamItem() {
+// ensureStreamTail creates (once) and refreshes the ephemeral streaming tail for
+// the given mode, bumping its version only when the live buffer (or the theme
+// epoch, or the mode) changed. Cheap: it hashes only the live buffer, never
+// history. The mode is folded in so a thinking→text handoff can't collide keys at
+// identical text; the epoch is folded in so a /theme swap mid-stall re-renders the
+// tail with the new palette (§1c).
+func (m *TranscriptModel) ensureStreamTail(reasoning bool) {
 	if m.streamItem == nil {
-		return
+		m.streamItem = &blockCard{Versioned: list.NewVersioned(), m: m, streaming: true}
 	}
-	// Fingerprint the live buffer for the tail's current mode. The mode is folded
-	// in so a thinking→text handoff (reasoning tail replaced by the assistant tail)
-	// can't collide fingerprints even at identical text. The theme epoch is folded
-	// in too so a /theme swap mid-stall re-renders the live tail with the new
-	// palette (§1c, streaming-tail analog of blockFP's epoch fold).
-	var fp uint64
-	if m.streamItem.streamReasoning {
-		fp = fnvStr(fmt.Sprintf("think\x00e%d", theme.Epoch()), m.reasoningBuf.String())
-	} else {
-		fp = fnvStr(fmt.Sprintf("stream\x00e%d", theme.Epoch()), m.assistantBuf.String())
+	m.streamItem.streamReasoning = reasoning
+	mode, buf := "stream", m.assistantBuf.String()
+	if reasoning {
+		mode, buf = "think", m.reasoningBuf.String()
 	}
-	if fp != m.streamItem.fp {
-		m.streamItem.fp = fp
+	fp := fnvStr(fmt.Sprintf("%s\x00e%d", mode, theme.Epoch()), buf)
+	if fp != m.streamItem.streamFP {
+		m.streamItem.streamFP = fp
 		m.streamItem.Bump()
 	}
 }
 
-// streamDelta is the hot path for a streamed chunk: it bumps only the streaming
-// tail (or, on the first chunk, reconciles to create it), avoiding any walk over
-// prior blocks. This is what makes a streamed turn O(deltas), not O(deltas×M).
+// streamDelta is the hot path for a streamed chunk: it refreshes only the
+// streaming tail (or, on the first chunk, commits to create it), avoiding any walk
+// over prior blocks. This is what makes a streamed turn O(deltas), not O(deltas×M).
 func (m *TranscriptModel) streamDelta() {
 	wasBottom := m.body.AtBottom()
 	if m.streamItem == nil {
-		m.reconcileItems()
+		m.commitItems() // first chunk: the tail enters the item set
 	} else {
-		m.bumpStreamItem()
+		// The tail is already in the list; refresh it in place (O(1)).
+		m.ensureStreamTail(m.streamItem.streamReasoning)
 	}
 	if wasBottom {
 		m.body.GotoBottom()
 	}
 }
 
-// blockFP fingerprints every render-affecting field of a block so reconcile can
-// bump exactly the items that changed. The work-frame is folded in only for a
-// running subagent (whose header/child spinner animates), matching the old
-// rebuild's "re-render only when a subagent is in flight" rule; flat running
-// tool cards use a static marker and so omit it.
-func (m *TranscriptModel) blockFP(b tblock, unread bool) uint64 {
-	m.fpComputes++
-	var sb strings.Builder
-	// Fold the theme epoch in so a /theme swap invalidates every block's cached
-	// render (the palette baked into the ANSI would otherwise persist).
-	fmt.Fprintf(&sb, "e%d\x00", theme.Epoch())
-	fmt.Fprintf(&sb, "k%d\x00", b.kind)
-	sb.WriteString(b.text)
-	sb.WriteByte(0)
-	if b.tool != nil {
-		fmt.Fprintf(&sb, "t\x00%s\x00%s\x00%d\x00%s\x00", b.tool.tool, b.tool.arg, b.tool.status, b.tool.summary)
-	}
-	if b.sub != nil {
-		s := b.sub
-		running := s.status == toolRunning
-		fmt.Fprintf(&sb, "s\x00%s\x00%s\x00%d\x00%t\x00", s.agentName, s.prompt, s.status, s.collapsed)
-		for _, c := range s.children {
-			fmt.Fprintf(&sb, "c\x00%s\x00%s\x00%d\x00%s\x00", c.tool, c.arg, c.status, c.summary)
+// bumpRunningSubagents re-renders every in-flight subagent card (its header/child
+// spinner animates on the work tick). Flat running tool cards use a static marker,
+// so they are deliberately excluded — they must not force a re-render each tick.
+// Returns whether any card was bumped.
+func (m *TranscriptModel) bumpRunningSubagents() bool {
+	bumped := false
+	for _, b := range m.blocks {
+		if b.kind != blockSubagent || b.sub == nil {
+			continue
+		}
+		running := b.sub.status == toolRunning
+		for _, c := range b.sub.children {
 			if c.status == toolRunning {
 				running = true
 			}
 		}
 		if running {
-			fmt.Fprintf(&sb, "wf%d\x00", m.workFrame)
+			b.Bump()
+			bumped = true
 		}
 	}
-	if unread {
-		sb.WriteString("U")
-	}
-	return fnvStr(sb.String())
+	return bumped
 }
 
 // transcriptEmpty reports whether there is nothing to show in the body yet — a

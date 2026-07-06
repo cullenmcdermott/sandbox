@@ -20,7 +20,7 @@ func TestAssistantBlockRoutesThroughChat(t *testing.T) {
 	// No m.md setup, no layout() call — renderBlock must work standalone,
 	// sourcing its renderer from the chat pool.
 	const body = "Here is **bold** text and a list:\n\n- one\n- two\n"
-	got := m.renderBlock(tblock{kind: blockAssistant, text: body})
+	got := m.renderBlock(m.newBlockCard(blockAssistant, body))
 
 	// Oracle: the same pool renderer chat.MarkdownRenderer at the gutter-reduced
 	// width, then wrapped in the A2.1 Charple role gutter — exactly what
@@ -70,7 +70,7 @@ func TestAssistantBlockChatPoolMemoized(t *testing.T) {
 
 	// Rendering twice must not panic and must be stable. (Capture into separate
 	// vars: comparing the same call expression to itself is a no-op — SA4000.)
-	b := tblock{kind: blockAssistant, text: "**hi**"}
+	b := m.newBlockCard(blockAssistant, "**hi**")
 	first := m.renderBlock(b)
 	second := m.renderBlock(b)
 	if first != second {
@@ -84,7 +84,7 @@ func TestAssistantBlockChatPoolMemoized(t *testing.T) {
 func TestAssistantBlockEmptyRendersEmpty(t *testing.T) {
 	m := NewTranscript(&fakeRunnerClient{}, transcriptSession(), nil)
 	m.width, m.height = 80, 200
-	if got := m.renderBlock(tblock{kind: blockAssistant, text: ""}); got != "" {
+	if got := m.renderBlock(m.newBlockCard(blockAssistant, "")); got != "" {
 		t.Fatalf("empty assistant block should render empty, got %q", got)
 	}
 }

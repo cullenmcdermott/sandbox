@@ -58,7 +58,7 @@ func commandGroups(m *TranscriptModel) []cmdGroup {
 				m.childIndex = nil
 				m.unreadIndex = 0        // re-clamp after shrink (B16)
 				m.droppedPartialIdx = -1 // stale index would mis-target after rebuild (RV9)
-				m.syncBody()
+				m.syncItems()
 				return nil
 			}},
 		}},
@@ -402,8 +402,8 @@ func (m *TranscriptModel) appendShellBlock(command string, res session.ExecResul
 	b.WriteString(lipgloss.NewStyle().Foreground(theme.Peach).Bold(true).Render("! " + command))
 	if err != nil {
 		b.WriteString("\n" + styleTError.Render("  "+err.Error()))
-		m.blocks = append(m.blocks, tblock{kind: blockShell, text: b.String()})
-		m.syncBody()
+		m.blocks = append(m.blocks, m.newBlockCard(blockShell, b.String()))
+		m.syncItems()
 		return
 	}
 	body := strings.TrimRight(res.Stdout, "\n")
@@ -426,6 +426,6 @@ func (m *TranscriptModel) appendShellBlock(command string, res session.ExecResul
 	if res.ExitCode != 0 {
 		b.WriteString("\n" + lipgloss.NewStyle().Foreground(theme.Coral).Render(fmt.Sprintf("  · exit %d", res.ExitCode)))
 	}
-	m.blocks = append(m.blocks, tblock{kind: blockShell, text: b.String()})
-	m.syncBody()
+	m.blocks = append(m.blocks, m.newBlockCard(blockShell, b.String()))
+	m.syncItems()
 }

@@ -7,14 +7,15 @@ import (
 
 // parityFixture is a fixed, representative transcript: a user turn, a markdown
 // assistant reply, a resolved tool card, and an info notice. It exercises every
-// single- and multi-line block kind the body assembles.
-func parityFixture() []tblock {
-	return []tblock{
-		{kind: blockUser, text: "Hello, world!"},
-		{kind: blockAssistant, text: "Here is **bold** text and a list:\n\n- one\n- two\n"},
-		{kind: blockToolCard, tool: &toolCard{tool: "Read", arg: "main.go", status: toolOK, summary: "10 lines"}},
-		{kind: blockInfo, text: "[reconnected]"},
-	}
+// single- and multi-line block kind the body assembles. Each card is wired to m
+// (its render back-reference).
+func parityFixture(m *TranscriptModel) []*blockCard {
+	user := m.newBlockCard(blockUser, "Hello, world!")
+	asst := m.newBlockCard(blockAssistant, "Here is **bold** text and a list:\n\n- one\n- two\n")
+	tool := m.newBlockCard(blockToolCard, "")
+	tool.tool = &toolCard{tool: "Read", arg: "main.go", status: toolOK, summary: "10 lines", card: tool}
+	info := m.newBlockCard(blockInfo, "[reconnected]")
+	return []*blockCard{user, asst, tool, info}
 }
 
 // TestTranscriptParitySnapshot is the parity oracle for the list rewrite: the
@@ -25,7 +26,7 @@ func parityFixture() []tblock {
 func TestTranscriptParitySnapshot(t *testing.T) {
 	m := NewTranscript(&fakeRunnerClient{}, transcriptSession(), nil)
 	m.width, m.height = 80, 200 // tall enough that the whole fixture is on-screen
-	m.blocks = parityFixture()
+	m.blocks = parityFixture(m)
 	m.layout()
 
 	// Independent oracle: the pre-rewrite assembly (join of per-block renders).
@@ -47,7 +48,7 @@ func TestTranscriptParitySnapshot(t *testing.T) {
 func TestTranscriptParityWithUnread(t *testing.T) {
 	m := NewTranscript(&fakeRunnerClient{}, transcriptSession(), nil)
 	m.width, m.height = 80, 200
-	m.blocks = parityFixture()
+	m.blocks = parityFixture(m)
 	m.unreadIndex = 2
 	m.layout()
 
@@ -72,7 +73,7 @@ func TestTranscriptParityWithUnread(t *testing.T) {
 func TestTranscriptBodyWindowed(t *testing.T) {
 	m := NewTranscript(&fakeRunnerClient{}, transcriptSession(), nil)
 	m.width, m.height = 80, 200
-	m.blocks = parityFixture()
+	m.blocks = parityFixture(m)
 	m.layout()
 
 	full := m.body.Render()

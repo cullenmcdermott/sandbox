@@ -28,6 +28,10 @@ type subagentCard struct {
 	children  []*toolCard
 	collapsed bool
 	status    toolStatus
+	// card is the list card that renders this subagent (the Task header + its child
+	// tree). Mutating the subagent (a new child, a status change, collapse) bumps
+	// card's version so the list re-renders.
+	card *blockCard
 }
 
 // startSubagent creates (once) a subagent card for a Task dispatch. tool.started
@@ -46,8 +50,11 @@ func (m *TranscriptModel) startSubagent(p session.ToolPayload) {
 		m.subagents = map[string]*subagentCard{}
 	}
 	m.subagents[p.ToolUseID] = sub
-	m.blocks = append(m.blocks, tblock{kind: blockSubagent, sub: sub})
-	m.syncBody()
+	card := m.newBlockCard(blockSubagent, "")
+	card.sub = sub
+	sub.card = card
+	m.blocks = append(m.blocks, card)
+	m.syncItems()
 }
 
 // startSubagentChild nests a child tool under its parent Task card (deduped).
@@ -62,12 +69,13 @@ func (m *TranscriptModel) startSubagentChild(p session.ToolPayload) {
 	if p.ToolUseID != "" && m.childIndex[p.ToolUseID] != nil {
 		return
 	}
-	child := &toolCard{tool: p.Tool, arg: toolArg(p.Tool, p.Input), status: toolRunning}
+	child := &toolCard{tool: p.Tool, arg: toolArg(p.Tool, p.Input), status: toolRunning, card: sub.card}
 	sub.children = append(sub.children, child)
 	if p.ToolUseID != "" {
 		m.childIndex[p.ToolUseID] = child
 	}
-	m.syncBody()
+	sub.card.Bump()
+	m.syncItems()
 }
 
 // finishNested resolves a Task completion or a subagent child completion. It
@@ -76,13 +84,17 @@ func (m *TranscriptModel) finishNested(p session.ToolPayload, status toolStatus,
 	if p.ToolUseID != "" {
 		if sub := m.subagents[p.ToolUseID]; sub != nil {
 			sub.status = status
-			m.syncBody()
+			sub.card.Bump()
+			m.syncItems()
 			return true
 		}
 		if child := m.childIndex[p.ToolUseID]; child != nil {
 			child.status = status
 			child.summary = summary
-			m.syncBody()
+			if child.card != nil {
+				child.card.Bump()
+			}
+			m.syncItems()
 			return true
 		}
 	}
@@ -97,24 +109,9 @@ func (m *TranscriptModel) finishNested(p session.ToolPayload, status toolStatus,
 					break
 				}
 			}
-			m.syncBody()
+			sub.card.Bump()
+			m.syncItems()
 			return true
-		}
-	}
-	return false
-}
-
-// hasRunningSubagent reports whether any subagent (or in-flight child) is still
-// running, so the work-tick loop knows to re-render the animated spinner.
-func (m *TranscriptModel) hasRunningSubagent() bool {
-	for _, sub := range m.subagents {
-		if sub.status == toolRunning {
-			return true
-		}
-		for _, c := range sub.children {
-			if c.status == toolRunning {
-				return true
-			}
 		}
 	}
 	return false
@@ -137,11 +134,12 @@ func (m *TranscriptModel) toggleSubagents() bool {
 		}
 	}
 	for _, b := range m.blocks {
-		if b.kind == blockSubagent && b.sub != nil {
+		if b.kind == blockSubagent && b.sub != nil && b.sub.collapsed != anyExpanded {
 			b.sub.collapsed = anyExpanded
+			b.Bump()
 		}
 	}
-	m.syncBody()
+	m.syncItems()
 	return true
 }
 

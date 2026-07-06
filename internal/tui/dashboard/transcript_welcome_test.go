@@ -25,7 +25,7 @@ func TestFreshTranscriptShowsWelcome(t *testing.T) {
 	}
 
 	// Once a block lands, the transcript is no longer empty and the welcome is gone.
-	m.blocks = append(m.blocks, tblock{kind: blockUser, text: "hi"})
+	m.blocks = append(m.blocks, m.newBlockCard(blockUser, "hi"))
 	if m.transcriptEmpty() {
 		t.Fatal("transcript with a committed block should not be empty")
 	}

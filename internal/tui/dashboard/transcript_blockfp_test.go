@@ -5,10 +5,12 @@ import (
 	"testing"
 )
 
-// Fix F-blockFP: appending a block to a long transcript must fingerprint only
-// the new block, not re-hash every prior (immutable) block. Before memoization,
-// reconcileItems recomputed blockFP for all M items on every append — O(M) full
-// re-hashes per event, the live-append cost behind general sluggishness.
+// Appending a block to a long transcript must reprocess only the new block, not
+// every prior (committed) one. In the unified representation each card owns its
+// version, and a plain append bumps nothing on the existing cards — so committed
+// blocks keep a stable version (a tui/list cache hit) no matter how long the
+// transcript grows. (Previously reconcileItems re-hashed blockFP for all M items
+// on every append — O(M) per event, the live-append cost behind sluggishness.)
 func TestReconcileMemoizesImmutableBlocks(t *testing.T) {
 	m := NewTranscript(&fakeRunnerClient{}, transcriptSession(), nil)
 	m.width, m.height = 80, 200
@@ -18,34 +20,42 @@ func TestReconcileMemoizesImmutableBlocks(t *testing.T) {
 		m.appendBlock(blockAssistant, fmt.Sprintf("msg %d", i))
 	}
 
-	// One more append should recompute exactly one fingerprint (the new block).
-	before := m.fpComputes
+	// Snapshot every committed card's version, append one more, and assert none of
+	// the prior cards bumped — the new card is the only thing reprocessed.
+	before := make([]uint64, len(m.blocks))
+	for i, b := range m.blocks {
+		before[i] = b.Version()
+	}
 	m.appendBlock(blockAssistant, "newest")
-	if got := m.fpComputes - before; got != 1 {
-		t.Fatalf("appending one block recomputed %d fingerprints, want 1 (immutable blocks memoized)", got)
+	for i := range before {
+		if got := m.blocks[i].Version(); got != before[i] {
+			t.Fatalf("appending one block bumped prior block %d (version %d→%d) — committed blocks not memoized", i, before[i], got)
+		}
 	}
 
-	// Seeding all M blocks must also have been linear, not quadratic: each block
-	// is fingerprinted once as it is appended.
-	if m.fpComputes > M+1 {
-		t.Fatalf("seeding %d blocks took %d fingerprint computes, want <= %d (linear)", M, m.fpComputes, M+1)
+	// The committed blocks must all sit at version 0: they were never mutated after
+	// creation, so no bump ever fired (linear seeding, not quadratic re-hashing).
+	for i := 0; i < M; i++ {
+		if got := m.blocks[i].Version(); got != 0 {
+			t.Fatalf("committed block %d has version %d, want 0 (was reprocessed after creation)", i, got)
+		}
 	}
 }
 
 // A mutable card (tool) must still re-render when its status flips, even though
-// immutable neighbors are memoized.
+// committed neighbors are memoized.
 func TestReconcileStillUpdatesMutableToolCard(t *testing.T) {
 	m := NewTranscript(&fakeRunnerClient{}, transcriptSession(), nil)
 	m.width, m.height = 80, 200
 	m.appendBlock(blockAssistant, "before the tool")
 	m.startToolCard("Bash", "go test")
 
-	// The running card's item version before completion.
+	// The running card's version before completion.
 	toolIdx := len(m.blocks) - 1
-	verBefore := m.items[toolIdx].Version()
+	verBefore := m.blocks[toolIdx].Version()
 
 	m.finishToolCard(toolOK, "exit 0", "Bash")
-	if m.items[toolIdx].Version() == verBefore {
-		t.Fatal("tool card version did not bump on completion — mutable card not re-fingerprinted")
+	if m.blocks[toolIdx].Version() == verBefore {
+		t.Fatal("tool card version did not bump on completion — mutable card not re-rendered")
 	}
 }

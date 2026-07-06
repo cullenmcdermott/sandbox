@@ -122,8 +122,8 @@ func TestSearchCtrlNextPrevNavigates(t *testing.T) {
 	m := NewTranscript(&fakeRunnerClient{}, Session{State: session.State{ID: "s1"}}, nil)
 	m.width = 80
 	m.height = 24
-	m.blocks = []tblock{{kind: blockInfo, text: "alpha"}, {kind: blockInfo, text: "beta"}, {kind: blockInfo, text: "gamma"}}
-	m.syncBody()
+	m.blocks = infoCards(m, "alpha", "beta", "gamma")
+	m.syncItems()
 	m.openSearch()
 	// Three matches across blocks; offset 0 keeps scrollToMatch simple.
 	m.search.matches = [][2]int{{0, 0}, {1, 0}, {2, 0}}
@@ -176,7 +176,7 @@ func TestSearchCtrlNextPrevNavigates(t *testing.T) {
 // two bytes). The fuzzy matcher records the first matched rune's position.
 func TestSearchMatchOffsetIsRuneIndex(t *testing.T) {
 	m := &TranscriptModel{}
-	m.blocks = []tblock{{kind: blockInfo, text: "café foo"}}
+	m.blocks = infoCards(m, "café foo")
 	m.openSearch()
 	m.search.query = "oo"
 	m.updateSearchMatches()
@@ -193,10 +193,7 @@ func TestSearchMatchOffsetIsRuneIndex(t *testing.T) {
 // "README.md" even though those characters aren't adjacent.
 func TestSearchFuzzySubsequence(t *testing.T) {
 	m := &TranscriptModel{}
-	m.blocks = []tblock{
-		{kind: blockInfo, text: "README.md"},
-		{kind: blockInfo, text: "unrelated text"},
-	}
+	m.blocks = infoCards(m, "README.md", "unrelated text")
 	m.openSearch()
 	m.search.query = "rdme"
 	m.updateSearchMatches()

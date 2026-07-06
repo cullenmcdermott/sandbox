@@ -265,8 +265,8 @@ func TestStreamingTailUsesIncrementalRender(t *testing.T) {
 		t.Errorf("assistantBuf = %q, want 'Hello world'", m.assistantBuf.String())
 	}
 
-	// Render the streaming tail via blockItem (mirrors what the list does).
-	it := &blockItem{m: m, idx: -1, streaming: true}
+	// Render the streaming tail via blockCard (mirrors what the list does).
+	it := &blockCard{Versioned: list.NewVersioned(), m: m, streaming: true}
 	out := it.Render(80)
 	if !strings.Contains(out, "Hello") || !strings.Contains(out, "world") {
 		t.Errorf("stream render missing content: %q", out)

@@ -13,9 +13,9 @@ import (
 // --- T1: bottom-drift (wrap-width unification) ----------------------------
 
 // TestAssistantWrapWidthUnified locks the shared wrap width: the finalized block
-// (renderBlockRaw) and the streaming tail (blockItem.Render) both call this, so a
-// completed message can't reflow to a different line count and lurch off the
-// bottom.
+// (renderBlockBody) and the streaming tail (blockCard.renderStreamTail) both call
+// this, so a completed message can't reflow to a different line count and lurch
+// off the bottom.
 func TestAssistantWrapWidthUnified(t *testing.T) {
 	m := NewTranscript(&fakeRunnerClient{}, transcriptSession(), nil)
 	m.width = 50
@@ -45,13 +45,13 @@ func TestStreamTailAndFinalizedSameHeight(t *testing.T) {
 	m.assistantBuf.Reset()
 	m.assistantBuf.WriteString(text)
 	m.streaming = true
-	m.reconcileItems()
+	m.commitItems()
 	if m.streamItem == nil {
 		t.Fatal("streaming tail item was not created")
 	}
 	streamH := lipgloss.Height(m.streamItem.Render(m.width - 1))
 
-	finalH := lipgloss.Height(m.renderBlock(tblock{kind: blockAssistant, text: text}))
+	finalH := lipgloss.Height(m.renderBlock(m.newBlockCard(blockAssistant, text)))
 
 	if streamH != finalH {
 		t.Fatalf("streaming tail height %d != finalized height %d (reflow on completion → bottom drift)", streamH, finalH)
@@ -109,7 +109,7 @@ func TestScrollbarDragMapsToOffset(t *testing.T) {
 		m.appendBlock(blockInfo, fmt.Sprintf("line %d", i))
 	}
 	m.layout()
-	m.syncBody()
+	m.syncItems()
 
 	bodyH := m.body.Height()
 	maxOffset := m.body.TotalHeight() - bodyH

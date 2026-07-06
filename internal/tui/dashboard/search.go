@@ -134,7 +134,7 @@ func fuzzyMatchOffset(query, text string) (offset int, ok bool) {
 }
 
 // blockSearchText returns the searchable text for a block.
-func blockSearchText(b tblock) string {
+func blockSearchText(b *blockCard) string {
 	switch b.kind {
 	case blockUser:
 		return b.text

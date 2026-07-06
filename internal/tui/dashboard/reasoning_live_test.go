@@ -97,7 +97,7 @@ func TestReasoningTailClearsAndCommitsOnCompleted(t *testing.T) {
 
 // An empty reasoning.completed (no text on the wire and an empty buffer) must
 // still tear the live tail down — it takes the no-appendBlock path, so the
-// handler's explicit syncBody is what clears it.
+// handler's explicit syncItems is what clears it.
 func TestReasoningEmptyCompletedClearsTail(t *testing.T) {
 	m := reasoningModel(t)
 	sendEvent(m, session.EventReasoningStarted, nil)

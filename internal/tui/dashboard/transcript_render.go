@@ -64,7 +64,7 @@ func (m *TranscriptModel) previewView(w, h int, banner string) string {
 		bodyH = 1
 	}
 	m.body.SetSize(max(1, w-1), bodyH)
-	m.syncBody()
+	m.syncItems()
 	m.body.GotoBottom()
 	parts := []string{
 		m.renderHeader(),
@@ -157,7 +157,7 @@ func (m *TranscriptModel) layout() {
 	}
 	// Reserve one column on the right for the transcript scrollbar (§D).
 	m.body.SetSize(max(1, m.width-1), vpH)
-	m.syncBody()
+	m.syncItems()
 }
 
 // maxInputRows caps how tall the composer grows before it scrolls internally.
@@ -235,10 +235,10 @@ func placeIndent(s string) string {
 
 // renderBlock renders a transcript block with its Calm chrome: user/assistant
 // blocks get the role gutter bar; every other (subordinate) kind is indented to
-// the message column. The raw content is produced by renderBlockRaw; an empty
-// raw render stays empty (no stray bar/indent on a blank line).
-func (m *TranscriptModel) renderBlock(b tblock) string {
-	raw := m.renderBlockRaw(b)
+// the message column. The bare content is produced by renderBlockBody; an empty
+// body stays empty (no stray bar/indent on a blank line).
+func (m *TranscriptModel) renderBlock(b *blockCard) string {
+	raw := m.renderBlockBody(b)
 	if raw == "" {
 		return ""
 	}
@@ -266,11 +266,11 @@ func (m *TranscriptModel) assistantWrapWidth() int {
 	return w
 }
 
-// renderBlockRaw renders a block's bare content (no gutter/indent). Wrapping
+// renderBlockBody renders a block's bare content (no gutter/indent). Wrapping
 // kinds reserve gutterInset columns so the chrome added by renderBlock fits.
 // renderAssistantMD renders assistant markdown through the pooled glamour
 // renderer, falling back to a plainly-styled render when the renderer is
-// unavailable or errors. The finalized-block path (renderBlockRaw) and the live
+// unavailable or errors. The finalized-block path (renderBlockBody) and the live
 // streaming path (streamAI) MUST share this so their output can't drift — a
 // difference here reflows the block at message.completed and lurches the view
 // (T1). Matches AssistantItem.SetRenderContentMD's signature.
@@ -286,7 +286,7 @@ func renderAssistantMD(text string, width int) string {
 	return strings.TrimRight(out, "\n")
 }
 
-func (m *TranscriptModel) renderBlockRaw(b tblock) string {
+func (m *TranscriptModel) renderBlockBody(b *blockCard) string {
 	switch b.kind {
 	case blockUser:
 		return styleTUser.Render(b.text)

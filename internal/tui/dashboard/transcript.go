@@ -15,6 +15,7 @@ import (
 	"github.com/cullenmcdermott/sandbox/internal/tui/dashboard/chat"
 	"github.com/cullenmcdermott/sandbox/tui/list"
 	"github.com/cullenmcdermott/sandbox/tui/terminal"
+	"github.com/cullenmcdermott/sandbox/tui/theme"
 )
 
 // --------------------------------------------------------------------------
@@ -64,17 +65,16 @@ type toolCard struct {
 	rawJSON string // accumulated tool.delta input fragments (parsed into arg, never shown raw)
 	status  toolStatus
 	summary string
+	// card is the list card that renders this tool. For a flat tool it is the
+	// tool's own card; for a subagent child it is the parent Task's card (children
+	// render inside that card). Mutating the tool bumps card's version so the list
+	// re-renders. May be nil for throwaway/test cards.
+	card *blockCard
 }
 
-// tblock is one rendered unit of the transcript. text is raw (markdown for
-// assistant blocks) so blocks can be re-rendered at a new width on resize.
-// tool is non-nil only for blockToolCard.
-type tblock struct {
-	kind tblockKind
-	text string
-	tool *toolCard
-	sub  *subagentCard // non-nil only for blockSubagent
-}
+// The per-block data (kind/text/tool/sub) lives on *blockCard (transcript_list.go),
+// which is both the block's data and the list.Item that renders it — one unified
+// representation, not a data struct plus a parallel item wrapper.
 
 type transcriptPermission struct {
 	id        string
@@ -119,8 +119,7 @@ type TranscriptModel struct {
 	width, height int
 
 	body       *list.List          // virtualized transcript body (replaces viewport)
-	items      []*blockItem        // one per m.blocks entry, parallel and index-stable
-	streamItem *blockItem          // ephemeral trailing item for the live streaming turn
+	streamItem *blockCard          // ephemeral trailing card for the live streaming turn
 	streamAI   *chat.AssistantItem // persistent AI for live tail (A2 incremental render)
 	input      textarea.Model      // multi-line composer (boxed; shift+enter inserts a newline)
 	permBox    string              // cached rendered permission box (recomputed in layout)
@@ -131,7 +130,7 @@ type TranscriptModel struct {
 	showHelp bool
 	helpUI   helpModel
 
-	blocks       []tblock
+	blocks       []*blockCard // the transcript blocks; each IS a list.Item
 	assistantBuf strings.Builder
 	streaming    bool
 
@@ -388,25 +387,19 @@ type TranscriptModel struct {
 	lastCachedSeq uint64
 
 	// bulkReplay is set while loadCachedTranscript applies a batch of cached
-	// events. It makes syncBody a no-op so the per-event reconcile (which
-	// re-fingerprints every prior item and rebuilds the list) is skipped during
-	// the replay; the caller reconciles exactly once at the end, turning an
-	// O(N^2) cold load into O(N).
+	// events. It makes syncItems a no-op so the per-event commit (which rebuilds
+	// the list item set) is skipped during the replay; the caller commits exactly
+	// once at the end, turning an O(N^2) cold load into O(N).
 	bulkReplay bool
-	// reconciles counts reconcileItems() calls — a behavioral counter the bulk
-	// replay test asserts on to prove the replay collapses to a single reconcile.
+	// reconciles counts commitItems() calls — a behavioral counter the bulk
+	// replay test asserts on to prove the replay collapses to a single commit.
 	reconciles int
-	// fpComputes counts blockFP() calls — a behavioral counter proving that
-	// immutable text blocks are fingerprinted once, not re-hashed every reconcile.
-	fpComputes int
 
-	// lastThemeEpoch is the theme.Epoch() observed at the previous reconcile. A
-	// /theme swap bumps the global epoch but leaves every immutable block's
-	// (fresh|dirty|unread|mutable) gate false, so their cached ANSI — with the old
-	// palette baked in — would never be re-fingerprinted (the epoch is folded into
-	// blockFP but that only helps if blockFP is actually recomputed). When the
-	// epoch differs from this, reconcile forces a fingerprint recompute for every
-	// item so the version bumps and tui/list re-serves fresh-palette renders
+	// lastThemeEpoch is the theme.Epoch() observed at the previous commit. A
+	// /theme swap bumps the global epoch but leaves every committed card's version
+	// stable, so their cached ANSI — with the old palette baked in — would survive
+	// until an unrelated change. When the epoch differs from this, commitItems
+	// bumps every card's version so tui/list re-serves fresh-palette renders
 	// without waiting for a width change (§1c).
 	lastThemeEpoch uint64
 }
@@ -455,6 +448,10 @@ func NewTranscript(client RunnerClient, sess Session, reconnect ReconnectFunc) *
 		attachSeq: sess.lastSeq,
 
 		droppedPartialIdx: -1,
+		// Seed the epoch so the first commit doesn't spuriously force-bump every
+		// card: a fresh model's cards render fresh (version 0, no cache entry), so
+		// the §1c force is only needed on a genuine later /theme swap.
+		lastThemeEpoch: theme.Epoch(),
 	}
 }
 
@@ -571,10 +568,10 @@ func (m *TranscriptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case workTickMsg:
 		m.workFrame++
-		// Re-render only when a subagent is in flight, so its header/child
+		// Re-render only the in-flight subagent cards, so their header/child
 		// spinner animates without forcing a re-render for flat cards.
-		if m.hasRunningSubagent() {
-			m.syncBody()
+		if m.bumpRunningSubagents() {
+			m.syncItems()
 		}
 		// Keep the 150ms work-tick loop running only while a turn is genuinely
 		// live. An UNGRACEFUL stream drop (half-open socket from a suspended or

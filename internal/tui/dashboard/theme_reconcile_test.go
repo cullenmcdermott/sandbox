@@ -7,12 +7,11 @@ import (
 )
 
 // §1c theme cache invalidation, force-path guard: a /theme swap bumps the
-// global epoch, but an immutable committed block's (fresh|dirty|unread|mutable)
-// reconcile gate is false, so without the epoch-changed force its cached
-// old-palette ANSI would survive until an unrelated width change. This locks
-// the full chain WITHOUT a width change: epoch bump → forced fingerprint
-// recompute (epoch is folded into blockFP, so the fp differs) → version bump →
-// tui/list cache miss → fresh-palette re-render.
+// global epoch, but a committed block's version is otherwise stable, so without
+// the epoch-changed force its cached old-palette ANSI would survive until an
+// unrelated width change. This locks the full chain WITHOUT a width change:
+// epoch bump → forced version bump on every card → tui/list cache miss →
+// fresh-palette re-render.
 func TestThemeSwapForcesReconcileRerender(t *testing.T) {
 	t.Cleanup(func() { theme.ApplyForBackground(true) })
 	theme.ApplyForBackground(true)
@@ -21,26 +20,22 @@ func TestThemeSwapForcesReconcileRerender(t *testing.T) {
 	m.width, m.height = 60, 24
 	m.layout()
 	m.appendBlock(blockAssistant, "hello **world**")
-	m.reconcileItems()
-	if len(m.items) == 0 {
-		t.Fatal("expected a reconciled item for the committed block")
+	m.commitItems()
+	if len(m.blocks) == 0 {
+		t.Fatal("expected a committed card")
 	}
-	it := m.items[0]
-	v1, fp1 := it.Version(), it.fp
+	v1 := m.blocks[0].Version()
 
-	// No-op reconcile: the immutable block must NOT re-fingerprint or bump.
-	m.reconcileItems()
-	if m.items[0].Version() != v1 {
-		t.Fatalf("no-op reconcile bumped version %d→%d (immutable block should be gated)", v1, m.items[0].Version())
+	// No-op commit: a committed block must NOT bump (stable version → cache hit).
+	m.commitItems()
+	if m.blocks[0].Version() != v1 {
+		t.Fatalf("no-op commit bumped version %d→%d (committed block should be gated)", v1, m.blocks[0].Version())
 	}
 
 	theme.ApplyForBackground(false) // swap → bumps the epoch
 
-	m.reconcileItems()
-	if m.items[0].fp == fp1 {
-		t.Fatal("theme swap must force a fingerprint recompute (epoch folded into blockFP)")
-	}
-	if m.items[0].Version() == v1 {
-		t.Fatal("theme swap must bump the item version so tui/list re-serves a fresh-palette render")
+	m.commitItems()
+	if m.blocks[0].Version() == v1 {
+		t.Fatal("theme swap must bump the card version so tui/list re-serves a fresh-palette render")
 	}
 }
