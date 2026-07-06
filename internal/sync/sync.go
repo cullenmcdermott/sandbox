@@ -61,28 +61,57 @@ var ConfigInputsSubs = []struct {
 // from remote to host (transcripts of agent activity).
 var TranscriptSubs = []string{"projects", "todos", "tasks"}
 
-// CreateAll creates all three sync session groups for a remote session.
+// CreateAll creates all three sync session groups for a remote session: the
+// load-bearing project sync first, then the config-input and transcript groups.
 // It is idempotent: existing sessions are not recreated. It reports whether the
 // load-bearing project sync session was newly created (created=true) versus
 // already existing (created=false). Callers use this to decide whether to block
 // on an initial flush — needed only for a session's first-ever sync — or let an
 // existing session reconcile in the background on reconnect.
+//
+// The connect path (client) does NOT call CreateAll: it splits it into
+// CreateProject (foreground, load-bearing for the first prompt) and CreateInputs
+// (backgrounded, §5) so the visible prompt is not gated on the 7 non-load-bearing
+// config/transcript sync-create execs. CreateAll remains the single-shot form for
+// callers that want the whole set synchronously.
 func (m *Manager) CreateAll(ctx context.Context, spec Spec) (created bool, err error) {
+	created, err = m.CreateProject(ctx, spec)
+	if err != nil {
+		return false, err
+	}
+	if err := m.CreateInputs(ctx, spec); err != nil {
+		return false, err
+	}
+	return created, nil
+}
+
+// CreateProject creates ONLY the load-bearing two-way-safe project sync — the
+// one the agent needs staged before it can work on the repo. Split out of
+// CreateAll so the connect path can create it in the foreground and defer the
+// config/transcript groups to the background (§5). Reports created=true only on
+// a fresh create (created=false when the session already exists, the reconnect
+// signal). A blank ProjectPath (e.g. attaching to a session whose State lacks
+// the local repo path) is a no-op reporting created=false — there is nothing
+// load-bearing to stage, and a blank alpha URL would fail with "unable to parse
+// alpha URL: empty URL" (MF4).
+func (m *Manager) CreateProject(ctx context.Context, spec Spec) (created bool, err error) {
+	if spec.ProjectPath == "" {
+		return false, nil
+	}
+	return m.createProjectSync(ctx, spec, sessionLabel(spec.SessionID))
+}
+
+// CreateInputs creates the config-input (one-way host -> remote) and transcript
+// (one-way remote -> host) sync groups — the 7 non-load-bearing syncs. Split out
+// of CreateAll so the connect path can run it off the foreground (§5). It is
+// idempotent (an existing session is left as-is) and, like CreateAll, surfaces
+// any real create failure so a backgrounding caller can observe it rather than
+// have it vanish. The syncs carry the same session label as the project sync, so
+// the GC and pause/resume/terminate-by-label continue to reach them unchanged.
+func (m *Manager) CreateInputs(ctx context.Context, spec Spec) error {
 	label := sessionLabel(spec.SessionID)
 
-	// 1. Project sync (two-way-safe). Skip ONLY the project sync when ProjectPath is
-	// empty (e.g. attaching to a session whose State lacks the local repo path) —
-	// the config-input + transcript groups below need no project path, so aborting
-	// here would needlessly freeze agent-activity sync too. A blank alpha URL would
-	// otherwise fail with "unable to parse alpha URL: empty URL" (MF4).
-	if spec.ProjectPath != "" {
-		created, err = m.createProjectSync(ctx, spec, label)
-		if err != nil {
-			return false, err
-		}
-	}
-
-	// 2. Config inputs (one-way host -> remote)
+	// 1. Config inputs (one-way host -> remote)
 	for _, sub := range ConfigInputsSubs {
 		name := "sandbox-" + spec.SessionID + "-config-" + sub.Local
 		localPath := path.Join(spec.HomeDir, ".claude", sub.Local)
@@ -96,12 +125,12 @@ func (m *Manager) CreateAll(ctx context.Context, spec Spec) (created bool, err e
 		}
 		if _, err := m.r.Output(ctx, nil, args...); err != nil {
 			if !isMutagenAlreadyExists(err) {
-				return false, fmt.Errorf("sync: create config-%s session: %w", sub.Local, err)
+				return fmt.Errorf("sync: create config-%s session: %w", sub.Local, err)
 			}
 		}
 	}
 
-	// 3. Transcripts (one-way remote -> host)
+	// 2. Transcripts (one-way remote -> host)
 	for _, sub := range TranscriptSubs {
 		name := "sandbox-" + spec.SessionID + "-transcripts-" + sub
 		localPath := path.Join(spec.HomeDir, ".claude", sub)
@@ -115,12 +144,12 @@ func (m *Manager) CreateAll(ctx context.Context, spec Spec) (created bool, err e
 		}
 		if _, err := m.r.Output(ctx, nil, args...); err != nil {
 			if !isMutagenAlreadyExists(err) {
-				return false, fmt.Errorf("sync: create transcripts-%s session: %w", sub, err)
+				return fmt.Errorf("sync: create transcripts-%s session: %w", sub, err)
 			}
 		}
 	}
 
-	return created, nil
+	return nil
 }
 
 // buildTreeIgnores excludes large build/dependency trees that belong on each

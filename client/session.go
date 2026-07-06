@@ -10,6 +10,7 @@ import (
 	"github.com/cullenmcdermott/sandbox/internal/k8s"
 	"github.com/cullenmcdermott/sandbox/internal/runner"
 	"github.com/cullenmcdermott/sandbox/internal/session"
+	syncpkg "github.com/cullenmcdermott/sandbox/internal/sync"
 )
 
 // Stage is a coarse connect phase, reported via ConnectOptions.OnPhase so a
@@ -103,6 +104,46 @@ type Session struct {
 	mu      sync.Mutex
 	handles []session.ForwardHandle
 	runner  *runner.Client
+
+	// fresh/freshBackend/sshPrivPath are shortcuts stamped by Client.Create for a
+	// just-created session so its first Connect can skip the redundant cluster
+	// Status Get and SSH-key regeneration Create already performed (§5). fresh is
+	// consumed (cleared) on the first Connect; a later reconnect re-Statuses like
+	// any attach.
+	fresh        bool
+	freshBackend string
+	sshPrivPath  string
+
+	// bgCancel cancels the context rooting Connect's post-health background work
+	// (config/transcript sync creation, the bounded first-sync flush, the idle
+	// reaper); closeHandles cancels it so the goroutine can't outlive the session.
+	// syncTask is the observable handle to that work (see AwaitSync).
+	bgCancel context.CancelFunc
+	syncTask *syncTask
+}
+
+// syncTask is the handle to Connect's background file-sync + idle-reaper work.
+// Connect returns before it finishes (so the transcript opens as soon as the
+// runner is healthy, §5); a caller gates the first turn on it and collects any
+// late advisory via Session.AwaitSync. done closes when the work settles; warning
+// holds the joined advisory (empty on clean success).
+type syncTask struct {
+	done    chan struct{}
+	mu      sync.Mutex
+	warning string
+}
+
+func (t *syncTask) finish(warning string) {
+	t.mu.Lock()
+	t.warning = warning
+	t.mu.Unlock()
+	close(t.done)
+}
+
+func (t *syncTask) result() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.warning
 }
 
 // ID returns the session id.
@@ -117,14 +158,37 @@ func (s *Session) ProjectPath() string { return s.projectPath }
 
 // Runner returns the live runner client from the last successful Connect, or nil
 // if not connected (or after Close). The explicit nil return avoids handing back
-// a typed-nil interface.
+// a typed-nil interface. The returned client gates StartTurn on the background
+// first-sync staging (see stagedRunner).
 func (s *Session) Runner() RunnerClient {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.runner == nil {
 		return nil
 	}
-	return s.runner
+	return &stagedRunner{RunnerClient: s.runner, s: s}
+}
+
+// stagedRunner wraps the connected runner client so StartTurn waits for the
+// session's background sync/staging work (AwaitSync) before submitting a turn:
+// Connect no longer blocks on the initial project flush (§5), but a turn must
+// not reach the agent before the workspace is staged. Every other method —
+// health, interrupts, permission decisions, SSE streams — passes through
+// ungated. AwaitSync returns immediately once the background work has settled
+// (and when none is in flight), so the gate costs nothing in steady state.
+type stagedRunner struct {
+	RunnerClient
+	s *Session
+}
+
+func (g *stagedRunner) StartTurn(ctx context.Context, ref Ref, in TurnInput) (TurnRef, error) {
+	// The advisory is intentionally dropped here — warnings surface via the
+	// caller's own AwaitSync (e.g. the dashboard connector); the gate only
+	// cares that staging has settled.
+	if _, err := g.s.AwaitSync(ctx); err != nil {
+		return TurnRef{}, err
+	}
+	return g.RunnerClient.StartTurn(ctx, ref, in)
 }
 
 // Connect establishes (or re-establishes) a live runner connection: resume the
@@ -144,10 +208,31 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 	stage := func(st Stage) { onPhase(st, "") }
 	full := !opt.Observer
 
+	// Consume the freshly-created shortcuts (see Session.fresh): a session
+	// straight out of Client.Create is known to exist, be non-suspended, and
+	// carry a known backend + project path + SSH key, so its first Connect can
+	// skip the redundant Status Get and SSH-key regeneration Create already paid
+	// (§5). A reconnect finds fresh already cleared and takes the normal path.
+	s.mu.Lock()
+	fresh := s.fresh && full
+	s.fresh = false
+	freshBackend := s.freshBackend
+	freshPrivPath := s.sshPrivPath
+	s.mu.Unlock()
+
 	stage(StageCheck)
-	st, err := s.c.backend.Status(ctx, s.ref)
-	if err != nil {
-		return nil, err
+	var st session.State
+	if fresh {
+		// Synthesize the state Create already established rather than round-trip to
+		// the API server. waitForPodReady below still blocks on genuine pod
+		// readiness, so this only elides the status probe, not the readiness gate.
+		st = session.State{ID: s.ref.ID, Status: session.StatusCreating, Backend: freshBackend, ProjectPath: s.projectPath}
+	} else {
+		var serr error
+		st, serr = s.c.backend.Status(ctx, s.ref)
+		if serr != nil {
+			return nil, serr
+		}
 	}
 	if opt.ProjectPath != "" {
 		s.projectPath = opt.ProjectPath
@@ -186,6 +271,7 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 	stage(StageForward)
 	opencode := st.Backend == session.BackendOpenCode
 	var handles []session.ForwardHandle
+	var err error
 	switch {
 	case opencode:
 		handles, err = s.c.backend.PortForward(ctx, s.ref, k8s.ForwardSpecsWithOpencode(0, 0, 0))
@@ -253,47 +339,37 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 			idleTimeout = DefaultIdleTimeout
 		}
 
-		privPath, _, kerr := s.c.ensureSSHKey(string(s.ref.ID))
-		if kerr != nil {
-			syncWarning = appendWarning(syncWarning, fmt.Sprintf("file sync unavailable (ssh key): %v", kerr))
-		} else if created, serr := s.c.startMutagen(ctx, string(s.ref.ID), s.projectPath, privPath, handles[1].LocalPort()); serr != nil {
-			syncWarning = appendWarning(syncWarning, fmt.Sprintf("file sync unavailable: %v", serr))
-		} else if created {
-			// First-ever sync: `mutagen sync create` returns before the transport
-			// is proven or files have staged, so block on a bounded flush. A broken
-			// transport errors fast (surfaced as a warning); a healthy-but-large
-			// first sync may time out (just "still uploading in the background").
-			flushCtx, cancelFlush := context.WithTimeout(ctx, 12*time.Second)
-			ferr := s.flushWithProgress(flushCtx, onPhase)
-			timedOut := flushCtx.Err() == context.DeadlineExceeded
-			cancelFlush()
-			switch {
-			case ferr != nil && timedOut:
-				syncWarning = appendWarning(syncWarning, "initial file sync still in progress (continuing in the background)")
-			case ferr != nil:
-				syncWarning = appendWarning(syncWarning, fmt.Sprintf("file sync error: %v", ferr))
-			}
-		} else {
-			// Reconnect to an already-synced session: the mutagen session persists
-			// and reconciles on its own, so don't block on a full flush. Kick a
-			// detached flush so mutagen re-establishes the transport on the new
-			// port-forward promptly.
-			go func() {
-				bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				defer cancel()
-				_ = s.c.syncManager().FlushAll(bgCtx, string(s.ref.ID))
-			}()
+		// Foreground: only the load-bearing project sync — the one the agent needs
+		// staged before it can work on the repo. The 7 non-load-bearing
+		// config/transcript syncs, the bounded first-sync flush, and the idle
+		// reaper all move off the foreground into startBackgroundSync so the
+		// visible prompt is not gated on them (§5). Reuse the SSH key Create
+		// prepared on the fresh path rather than re-reading it.
+		privPath := freshPrivPath
+		var kerr error
+		if privPath == "" {
+			privPath, _, kerr = s.c.ensureSSHKey(string(s.ref.ID))
 		}
-
-		// Make sure the idle reaper is watching (a prior one may have completed
-		// when the session was suspended).
-		if w := s.c.ensureReaper(ctx, s.ref, reaperImage, reaperPullPolicy, idleTimeout); w != "" {
-			syncWarning = appendWarning(syncWarning, w)
+		switch {
+		case kerr != nil:
+			// No usable SSH key → no file sync at all, but the reaper must still run.
+			syncWarning = appendWarning(syncWarning, fmt.Sprintf("file sync unavailable (ssh key): %v", kerr))
+			s.startBackgroundSync(syncpkg.Spec{}, false, false, reaperImage, reaperPullPolicy, idleTimeout)
+		default:
+			created, spec, serr := s.c.startProjectSync(ctx, string(s.ref.ID), s.projectPath, privPath, handles[1].LocalPort())
+			if serr != nil {
+				syncWarning = appendWarning(syncWarning, fmt.Sprintf("file sync unavailable: %v", serr))
+				s.startBackgroundSync(syncpkg.Spec{}, false, false, reaperImage, reaperPullPolicy, idleTimeout)
+			} else {
+				s.startBackgroundSync(spec, created, true, reaperImage, reaperPullPolicy, idleTimeout)
+			}
 		}
 	}
 
 	conn := &Connection{
-		Runner:   rc,
+		// Same staging gate as Session.Runner(): a turn submitted through the
+		// connection must not beat the background project-sync flush.
+		Runner:   &stagedRunner{RunnerClient: rc, s: s},
 		Endpoint: endpoint,
 		Backend:  st.Backend,
 		Warning:  syncWarning,
@@ -350,26 +426,92 @@ func protocolVersionWarning(rc *runner.Client) string {
 	return runner.ProtocolMismatchWarning(rc.ProtocolVersion())
 }
 
-// flushWithProgress runs the bounded initial sync flush while polling mutagen for
-// a live staging phase, reporting it as a StageSync sub-detail. Returns the
-// flush's own result (a timeout surfaces via ctx).
-func (s *Session) flushWithProgress(ctx context.Context, onPhase func(Stage, string)) error {
-	mgr := s.c.syncManager()
-	id := string(s.ref.ID)
-	done := make(chan error, 1)
-	go func() { done <- mgr.FlushAll(ctx, id) }()
+// startBackgroundSync launches Connect's post-health background work off the
+// foreground (§5): the bounded first-sync flush (or a detached reconnect flush),
+// creation of the 7 non-load-bearing config/transcript syncs, and the idle-reaper
+// ensure. It records the resulting advisory on a syncTask observable via
+// AwaitSync and roots the goroutine at a context closeHandles cancels, so it
+// can't outlive the session. When doSync is false (SSH key or project sync failed
+// upstream) only the reaper is ensured; created marks this session's first-ever
+// sync (gate the flush) versus a reconnect (detached flush).
+func (s *Session) startBackgroundSync(spec syncpkg.Spec, created, doSync bool, reaperImage, reaperPullPolicy string, idleTimeout time.Duration) {
+	bgCtx, cancel := context.WithCancel(context.Background())
+	task := &syncTask{done: make(chan struct{})}
+	s.mu.Lock()
+	s.bgCancel = cancel
+	s.syncTask = task
+	s.mu.Unlock()
 
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case err := <-done:
-			return err
-		case <-ticker.C:
-			if phase := mgr.StagingPhase(ctx, id); phase != "" {
-				onPhase(StageSync, phase)
+	go func() {
+		var warn string
+		id := string(s.ref.ID)
+		mgr := s.c.syncManager()
+		if doSync {
+			if created {
+				// First-ever sync: `mutagen sync create` returns before the transport
+				// is proven or files have staged, so flush to settle the initial
+				// project upload and surface a broken transport (RV20/RV21). Bounded:
+				// a healthy-but-large first sync just keeps uploading in the
+				// background. This is the step AwaitSync gates the first turn on.
+				flushCtx, fc := context.WithTimeout(bgCtx, 12*time.Second)
+				ferr := mgr.FlushAll(flushCtx, id)
+				timedOut := flushCtx.Err() == context.DeadlineExceeded
+				fc()
+				switch {
+				case ferr != nil && timedOut:
+					warn = appendWarning(warn, "initial file sync still in progress (continuing in the background)")
+				case ferr != nil && bgCtx.Err() == nil:
+					warn = appendWarning(warn, fmt.Sprintf("file sync error: %v", ferr))
+				}
+			} else {
+				// Reconnect to an already-synced session: the mutagen session persists
+				// and reconciles on its own, so don't hold the gate on a full flush —
+				// kick a detached one so mutagen re-establishes the transport on the
+				// new port-forward promptly.
+				go func() {
+					fctx, fc := context.WithTimeout(bgCtx, 30*time.Second)
+					defer fc()
+					_ = mgr.FlushAll(fctx, id)
+				}()
+			}
+			// Create the config/transcript syncs now, off the foreground. A real
+			// failure is surfaced via the advisory (AwaitSync), never dropped.
+			if ierr := mgr.CreateInputs(bgCtx, spec); ierr != nil && bgCtx.Err() == nil {
+				warn = appendWarning(warn, fmt.Sprintf("config/transcript sync setup failed: %v", ierr))
 			}
 		}
+		// Ensure the idle reaper (with bounded retry): it caps runaway pod cost, so
+		// it must run reliably even off the foreground — a transient blip must not
+		// silently leave a session with no auto-suspend.
+		if bgCtx.Err() == nil {
+			if w := s.c.ensureReaperWithRetry(bgCtx, s.ref, reaperImage, reaperPullPolicy, idleTimeout); w != "" {
+				warn = appendWarning(warn, w)
+			}
+		}
+		task.finish(warn)
+	}()
+}
+
+// AwaitSync blocks until Connect's background file-sync + idle-reaper work (see
+// startBackgroundSync) has settled, returning any non-fatal advisory to surface
+// (empty on clean success). It is the seam a caller uses to gate the first turn
+// submission on the initial project-sync staging: Connect no longer blocks on
+// that flush itself (§5), so a caller that needs the workspace staged before the
+// agent acts must AwaitSync first. Returns immediately with no warning when there
+// is no background work in flight (an Observer connect, or before the first
+// Connect). Safe to call repeatedly and from multiple goroutines.
+func (s *Session) AwaitSync(ctx context.Context) (warning string, err error) {
+	s.mu.Lock()
+	t := s.syncTask
+	s.mu.Unlock()
+	if t == nil {
+		return "", nil
+	}
+	select {
+	case <-t.done:
+		return t.result(), nil
+	case <-ctx.Done():
+		return "", ctx.Err()
 	}
 }
 
@@ -399,6 +541,16 @@ func (s *Session) closeHandles() {
 	// ErrNotConnected after Close (or a failed reconnect) instead of handing back
 	// a client whose port-forward is gone.
 	s.runner = nil
+	// Cancel any in-flight background sync/reaper work so it can't outlive the
+	// session (or leak past a reconnect, which re-runs it). A caller that already
+	// captured the prior syncTask via AwaitSync still observes its completion —
+	// the goroutine unblocks via the cancelled context and closes done — but new
+	// AwaitSync callers see the fresh (or absent) task.
+	if s.bgCancel != nil {
+		s.bgCancel()
+		s.bgCancel = nil
+	}
+	s.syncTask = nil
 	s.mu.Unlock()
 	for _, h := range handles {
 		h.Close()

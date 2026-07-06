@@ -325,8 +325,10 @@ func (c *Client) Create(ctx context.Context, opt CreateOptions) (*Session, error
 	}
 
 	// Prepare the per-session SSH key for Mutagen before creating the pod, since
-	// its public half is baked into the session Secret.
-	_, authKey, err := c.ensureSSHKey(string(sid))
+	// its public half is baked into the session Secret. The private-key path is
+	// stamped onto the returned Session so the first Connect can reuse it instead
+	// of re-deriving the key (§5).
+	privPath, authKey, err := c.ensureSSHKey(string(sid))
 	if err != nil {
 		return nil, fmt.Errorf("prepare ssh key: %w", err)
 	}
@@ -364,7 +366,13 @@ func (c *Client) Create(ctx context.Context, opt CreateOptions) (*Session, error
 		LastActivity:     now,
 	})
 
-	return c.newSession(ref, opt.ProjectPath), nil
+	// Stamp the fresh-path shortcuts so the first Connect skips the redundant
+	// cluster Status Get and SSH-key regeneration this call already performed (§5).
+	sess := c.newSession(ref, opt.ProjectPath)
+	sess.fresh = true
+	sess.freshBackend = backendName
+	sess.sshPrivPath = privPath
+	return sess, nil
 }
 
 // Open returns a Session handle for an existing session id. It performs no I/O;

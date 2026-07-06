@@ -231,6 +231,98 @@ func TestCreateProjectSyncIgnoreLayering(t *testing.T) {
 	}
 }
 
+// CreateProject creates ONLY the load-bearing project sync — the one the connect
+// path stages in the foreground before the first prompt (§5). Exactly one
+// `mutagen sync create`, and it is the two-way-safe project session.
+func TestCreateProjectCreatesOnlyProject(t *testing.T) {
+	r := &fakeRunner{}
+	m := New(r)
+	spec := Spec{
+		SessionID:    "test-session",
+		ProjectPath:  t.TempDir(),
+		RemotePath:   "/session/workspace/proj",
+		HomeDir:      "/Users/cullen",
+		SSHHost:      "sandbox-test-session",
+		RemoteClaude: "/session/state/claude",
+	}
+	created, err := m.CreateProject(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	if !created {
+		t.Fatal("CreateProject should report created=true for a fresh project sync")
+	}
+	if len(r.calls) != 1 {
+		t.Fatalf("CreateProject should issue exactly 1 create, got %d: %v", len(r.calls), r.calls)
+	}
+	call := strings.Join(r.calls[0], " ")
+	if !strings.Contains(call, "two-way-safe") || !strings.Contains(call, "test-session-project") {
+		t.Errorf("CreateProject did not create the two-way-safe project sync: %s", call)
+	}
+}
+
+// A blank ProjectPath is a no-op for CreateProject (nothing load-bearing to
+// stage) — no create call, created=false (MF4).
+func TestCreateProjectNoProjectPath(t *testing.T) {
+	r := &fakeRunner{}
+	m := New(r)
+	created, err := m.CreateProject(context.Background(), Spec{SessionID: "s", HomeDir: "/Users/cullen", SSHHost: "sandbox-s", RemoteClaude: "/session/state/claude"})
+	if err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	if created {
+		t.Error("CreateProject with blank ProjectPath should report created=false")
+	}
+	if len(r.calls) != 0 {
+		t.Errorf("CreateProject with blank ProjectPath should issue no creates, got %v", r.calls)
+	}
+}
+
+// CreateInputs creates the 7 non-load-bearing config/transcript syncs (4+3) and
+// nothing else — never the project sync — so the connect path can run it off the
+// foreground (§5).
+func TestCreateInputsCreatesSeven(t *testing.T) {
+	r := &fakeRunner{}
+	m := New(r)
+	spec := Spec{
+		SessionID:    "test-session",
+		ProjectPath:  t.TempDir(),
+		RemotePath:   "/session/workspace/proj",
+		HomeDir:      "/Users/cullen",
+		SSHHost:      "sandbox-test-session",
+		RemoteClaude: "/session/state/claude",
+	}
+	if err := m.CreateInputs(context.Background(), spec); err != nil {
+		t.Fatalf("CreateInputs: %v", err)
+	}
+	if len(r.calls) != len(ConfigInputsSubs)+len(TranscriptSubs) {
+		t.Fatalf("CreateInputs should issue %d creates, got %d", len(ConfigInputsSubs)+len(TranscriptSubs), len(r.calls))
+	}
+	for i, call := range r.calls {
+		joined := strings.Join(call, " ")
+		// two-way-safe uniquely identifies the load-bearing project sync; the
+		// inputs are all one-way-safe.
+		if strings.Contains(joined, "two-way-safe") || strings.Contains(joined, "--name=sandbox-test-session-project ") {
+			t.Errorf("CreateInputs must not create the project sync (call %d): %s", i, joined)
+		}
+		if !strings.Contains(joined, "one-way-safe") {
+			t.Errorf("input sync %d should be one-way-safe: %s", i, joined)
+		}
+	}
+}
+
+// CreateInputs surfaces a real create failure (it must not vanish when run in
+// the background) but swallows an idempotent "already exists".
+func TestCreateInputsErrorHandling(t *testing.T) {
+	spec := Spec{SessionID: "s", ProjectPath: t.TempDir(), HomeDir: "/Users/cullen", SSHHost: "sandbox-s", RemoteClaude: "/session/state/claude"}
+	if err := New(&errorRunner{msg: "connection refused"}).CreateInputs(context.Background(), spec); err == nil {
+		t.Error("CreateInputs should surface a real create error")
+	}
+	if err := New(&errorRunner{msg: "session already exists"}).CreateInputs(context.Background(), spec); err != nil {
+		t.Errorf("CreateInputs should swallow already-exists, got %v", err)
+	}
+}
+
 func TestCreateAllIdempotent(t *testing.T) {
 	r := &errorRunner{msg: "session already exists"}
 	m := New(r)

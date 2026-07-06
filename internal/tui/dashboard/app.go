@@ -58,6 +58,17 @@ type attachReadyMsg struct {
 	// warning is a non-fatal advisory (e.g. sync failure) to surface in the
 	// transcript as an info block so it is visible in the alt-screen TUI (C9).
 	warning string
+	// awaitWarning, when non-nil, blocks until the connect's background
+	// sync/reaper work settles and returns its late advisory (§5). The App
+	// polls it once via a Cmd and surfaces the result as a syncAdvisoryMsg.
+	awaitWarning func(context.Context) (string, error)
+}
+
+// syncAdvisoryMsg carries a late background-sync/reaper advisory (see
+// attachReadyMsg.awaitWarning) to the session's transcript.
+type syncAdvisoryMsg struct {
+	id      session.ID
+	warning string
 }
 
 // attachFailedMsg is returned when the connector fails. The App stays on (or
@@ -552,6 +563,21 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.warning != "" {
 			m.appendBlock(blockInfo, "⚠ "+msg.warning)
 		}
+		// §5: connect's sync/reaper work now settles in the background; poll its
+		// late advisory once and surface it like msg.warning. The Cmd blocks in
+		// its own goroutine, and the background task always finishes (even on
+		// cancellation), so this cannot leak.
+		var advisoryCmd tea.Cmd
+		if msg.awaitWarning != nil {
+			aw, id := msg.awaitWarning, msg.sess.ID()
+			advisoryCmd = func() tea.Msg {
+				w, err := aw(context.Background())
+				if err != nil || w == "" {
+					return nil
+				}
+				return syncAdvisoryMsg{id: id, warning: w}
+			}
+		}
 		// Mark everything seen for the session we're now viewing so its unread
 		// badge clears the moment it comes to the foreground.
 		for i := range a.dashboard.sessions {
@@ -566,9 +592,21 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// child built mid-run never learns the size on its own. Seed it with
 		// the size the App already knows so the transcript paints immediately
 		// instead of rendering blank until the next resize.
-		return a, tea.Batch(m.Init(), func() tea.Msg {
+		return a, tea.Batch(m.Init(), advisoryCmd, func() tea.Msg {
 			return tea.WindowSizeMsg{Width: a.width, Height: a.height}
 		})
+
+	case syncAdvisoryMsg:
+		// Late background-sync/reaper advisory: append to the session's
+		// transcript wherever it lives now (attached or retained-warm). A
+		// session with no transcript (opencode external pane) drops it, matching
+		// how attachReadyMsg.warning behaves on that path.
+		if msg.warning != "" {
+			if m, ok := a.dashboard.retainedTranscript(msg.id); ok {
+				m.appendBlock(blockInfo, "⚠ "+msg.warning)
+			}
+		}
+		return a, nil
 
 	case attachFailedMsg:
 		// Connector failed: stay on the dashboard and show the error inline.
@@ -1207,6 +1245,7 @@ func (a *App) connectCmd(sess Session) tea.Cmd {
 				endpoint:      res.Endpoint,
 				opencodeCreds: res.OpencodeCreds,
 				warning:       res.Warning,
+				awaitWarning:  res.AwaitWarning,
 			}
 			ch <- connectUpdateMsg{gen: gen, ready: &ready}
 		}
@@ -1261,6 +1300,7 @@ func (a *App) createCmd(params CreateParams) tea.Cmd {
 				endpoint:      res.Endpoint,
 				opencodeCreds: res.OpencodeCreds,
 				warning:       res.Warning, // RV23: surface new-session sync warnings
+				awaitWarning:  res.AwaitWarning,
 			}
 			ch <- connectUpdateMsg{gen: gen, ready: &ready}
 		}

@@ -86,6 +86,9 @@ func newDashboardConnector(c *client.Client, reaperImage string) dashboard.Conne
 			Endpoint:      conn.Endpoint,
 			OpencodeCreds: mapOpencode(conn.Opencode),
 			Warning:       conn.Warning,
+			// §5: sync/reaper advisories settle in the background now; the
+			// dashboard polls this seam so they surface instead of vanishing.
+			AwaitWarning: sess.AwaitSync,
 		}, nil
 	}
 }
@@ -190,6 +193,7 @@ func newDashboardCreator(c *client.Client, runnerImage, reaperImage string) dash
 			Endpoint:      conn.Endpoint,
 			OpencodeCreds: mapOpencode(conn.Opencode),
 			Warning:       conn.Warning,
+			AwaitWarning:  sess.AwaitSync,
 		}, nil
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sync/errgroup"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -326,26 +327,6 @@ func (b *Backend) CreateSession(ctx context.Context, spec session.Spec) (_ sessi
 		secret.Data[secretKeyAnthropicCredential] = spec.AnthropicCredential
 		secret.Labels[labelAnthropicAccount] = spec.AnthropicAccountID
 	}
-	if _, err := b.core.CoreV1().Secrets(spec.Namespace).Create(ctx, secret, metav1.CreateOptions{}); err != nil {
-		if !k8serrors.IsAlreadyExists(err) {
-			return session.Ref{}, fmt.Errorf("k8s: create Secret %s: %w", secret.Name, err)
-		}
-		// Idempotent re-create: the Secret already exists (runner-token etc. are
-		// reused as-is), and from here on the session's resources belong to a
-		// prior CreateSession call — the rollback defer must not delete them.
-		secretPreexisted = true
-		// A re-create must not keep a stale account state: with a credential in
-		// the spec, patch its key + account label onto the existing Secret
-		// (re-creating with a DIFFERENT account must win); with none, strip any
-		// old key + label (otherwise logout/rotation label enumeration would
-		// false-positive on a session that no longer uses the account, and a
-		// stale credential copy would linger). Other keys are left untouched.
-		if err := b.syncSessionCredential(ctx, spec); err != nil {
-			return session.Ref{}, err
-		}
-	}
-
-	// Create the PVC first so it exists when the pod starts.
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -365,13 +346,52 @@ func (b *Backend) CreateSession(ctx context.Context, spec session.Spec) (_ sessi
 			},
 		},
 	}
-	if _, err := b.core.CoreV1().PersistentVolumeClaims(spec.Namespace).Create(ctx, pvc, metav1.CreateOptions{}); err != nil {
-		if !k8serrors.IsAlreadyExists(err) {
-			return session.Ref{}, fmt.Errorf("k8s: create PVC %s: %w", name, err)
+
+	// The Secret and PVC have no ordering dependency on each other — only the
+	// Sandbox (whose pod mounts both) depends on them — so create them
+	// concurrently to save one API round-trip on every new session (§5). The
+	// errgroup's derived context cancels the sibling create the moment either
+	// fails; whatever did land is still reachable by the rollback defer below,
+	// which enumerates all three resources NotFound-tolerantly. secretPreexisted
+	// is written only in the Secret goroutine and read only after g.Wait()
+	// returns (which establishes the happens-before), so the defer sees it
+	// race-free.
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		if _, cerr := b.core.CoreV1().Secrets(spec.Namespace).Create(gctx, secret, metav1.CreateOptions{}); cerr != nil {
+			if !k8serrors.IsAlreadyExists(cerr) {
+				return fmt.Errorf("k8s: create Secret %s: %w", secret.Name, cerr)
+			}
+			// Idempotent re-create: the Secret already exists (runner-token etc. are
+			// reused as-is), and from here on the session's resources belong to a
+			// prior CreateSession call — the rollback defer must not delete them.
+			secretPreexisted = true
+			// A re-create must not keep a stale account state: with a credential in
+			// the spec, patch its key + account label onto the existing Secret
+			// (re-creating with a DIFFERENT account must win); with none, strip any
+			// old key + label (otherwise logout/rotation label enumeration would
+			// false-positive on a session that no longer uses the account, and a
+			// stale credential copy would linger). Other keys are left untouched.
+			if serr := b.syncSessionCredential(gctx, spec); serr != nil {
+				return serr
+			}
 		}
+		return nil
+	})
+	g.Go(func() error {
+		if _, cerr := b.core.CoreV1().PersistentVolumeClaims(spec.Namespace).Create(gctx, pvc, metav1.CreateOptions{}); cerr != nil {
+			if !k8serrors.IsAlreadyExists(cerr) {
+				return fmt.Errorf("k8s: create PVC %s: %w", name, cerr)
+			}
+		}
+		return nil
+	})
+	if werr := g.Wait(); werr != nil {
+		return session.Ref{}, werr
 	}
 
-	// Create the Sandbox.
+	// Create the Sandbox last: its pod mounts both the Secret and the PVC, so it
+	// must not exist before they do.
 	sb := buildSandbox(spec)
 	if _, err := b.agents.AgentsV1alpha1().Sandboxes(spec.Namespace).Create(ctx, sb, metav1.CreateOptions{}); err != nil {
 		if !k8serrors.IsAlreadyExists(err) {
@@ -908,7 +928,11 @@ func (b *Backend) waitForPodReady(ctx context.Context, ref session.Ref, onPhase 
 			onPhase(d)
 		}
 	}
-	return wait.PollUntilContextCancel(ctx, 2*time.Second, true, func(ctx context.Context) (bool, error) {
+	// Poll at 1s (was 2s): the tail wait after the pod actually becomes ready is
+	// bounded by the poll interval, so halving it shaves up to ~1s off every
+	// cold start / resume for one extra lightweight Sandbox+pod Get per second
+	// (§5). Kept at 1s rather than 500ms to stay gentle on the API server.
+	return wait.PollUntilContextCancel(ctx, 1*time.Second, true, func(ctx context.Context) (bool, error) {
 		sb, err := b.agents.AgentsV1alpha1().Sandboxes(b.namespace).Get(ctx, string(ref.ID), metav1.GetOptions{})
 		if err != nil {
 			return false, err

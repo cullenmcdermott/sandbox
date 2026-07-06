@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/errgroup"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -44,17 +45,33 @@ func (b *Backend) PortForward(ctx context.Context, ref session.Ref, ports []sess
 		return nil, fmt.Errorf("k8s: no pod found for sandbox %s", ref.ID)
 	}
 
-	handles := make([]session.ForwardHandle, 0, len(ports))
-	for _, ps := range ports {
-		h, err := b.forwardPort(ctx, pod, ps)
-		if err != nil {
-			// Close already-established forwards before returning the error.
-			for _, h := range handles {
+	// Establish every forward concurrently rather than serially: each forwardPort
+	// blocks up to ~5s waiting for its listener to bind, so the runner-HTTP and
+	// SSH forwards done in parallel collapse two serial ready-waits into one (§5).
+	// Results land in a fixed-index slice so the returned handles keep their
+	// caller-visible order (handles[0]=HTTP, [1]=SSH, …) regardless of which
+	// finishes first. On any failure the derived context cancels the siblings'
+	// establishment and every handle that did come up is closed before returning.
+	handles := make([]session.ForwardHandle, len(ports))
+	g, gctx := errgroup.WithContext(ctx)
+	for i, ps := range ports {
+		i, ps := i, ps
+		g.Go(func() error {
+			h, err := b.forwardPort(gctx, pod, ps)
+			if err != nil {
+				return fmt.Errorf("k8s: port-forward %d->%d: %w", ps.Local, ps.Remote, err)
+			}
+			handles[i] = h
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		for _, h := range handles {
+			if h != nil {
 				h.Close()
 			}
-			return nil, fmt.Errorf("k8s: port-forward %d->%d: %w", ps.Local, ps.Remote, err)
 		}
-		handles = append(handles, h)
+		return nil, err
 	}
 	return handles, nil
 }

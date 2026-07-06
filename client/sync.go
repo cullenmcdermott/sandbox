@@ -141,28 +141,28 @@ func (c *Client) sshConfig() (*syncpkg.SSHConfig, error) {
 	return syncpkg.NewSSHConfig(include, userCfg), nil
 }
 
-// startMutagen writes the SSH alias for the current port-forward and (re)creates
-// the session's Mutagen sync sessions. Idempotent across reconnects; reports
-// whether the load-bearing project sync was freshly created (this session's
-// first-ever sync) so the caller can skip a blocking initial flush on reconnect.
-func (c *Client) startMutagen(ctx context.Context, id, projectPath, privPath string, sshLocalPort int) (created bool, err error) {
+// startProjectSync writes the SSH alias for the current port-forward and creates
+// ONLY the load-bearing project sync — the one the agent needs staged before it
+// can work on the repo. It also resumes any syncs a prior suspend paused. The 7
+// non-load-bearing config/transcript syncs are created off the foreground by the
+// caller (see Session.Connect / CreateInputs) so the visible prompt is not gated
+// on them (§5). Idempotent across reconnects; reports whether the project sync
+// was freshly created (this session's first-ever sync) so the caller can skip a
+// blocking initial flush on reconnect. The built Spec is returned so the caller
+// can hand it to the background CreateInputs without rebuilding it.
+func (c *Client) startProjectSync(ctx context.Context, id, projectPath, privPath string, sshLocalPort int) (created bool, spec syncpkg.Spec, err error) {
 	cfg, err := c.sshConfig()
 	if err != nil {
-		return false, err
+		return false, syncpkg.Spec{}, err
 	}
 	if err := cfg.Upsert(id, sshLocalPort, privPath); err != nil {
-		return false, err
+		return false, syncpkg.Spec{}, err
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return false, err
+		return false, syncpkg.Spec{}, err
 	}
-	mgr := c.syncManager()
-	// Resume any syncs paused by a prior suspend BEFORE CreateAll: CreateAll is
-	// idempotent and reports "already exists" without un-pausing, so without this
-	// a plain re-attach would leave files frozen with no error. Best-effort.
-	_ = mgr.ResumeAll(ctx, id)
-	return mgr.CreateAll(ctx, syncpkg.Spec{
+	spec = syncpkg.Spec{
 		SessionID: id,
 		// The pod bind-mounts the workspace at the real host project path, so both
 		// sync endpoints use the same absolute path (keeps the SDK cwd
@@ -172,7 +172,15 @@ func (c *Client) startMutagen(ctx context.Context, id, projectPath, privPath str
 		HomeDir:      home,
 		SSHHost:      syncpkg.Alias(id),
 		RemoteClaude: remoteClaudeDir,
-	})
+	}
+	mgr := c.syncManager()
+	// Resume any syncs paused by a prior suspend BEFORE creating: CreateProject/
+	// CreateInputs are idempotent and report "already exists" without un-pausing,
+	// so without this a plain re-attach would leave files frozen with no error.
+	// Best-effort.
+	_ = mgr.ResumeAll(ctx, id)
+	created, err = mgr.CreateProject(ctx, spec)
+	return created, spec, err
 }
 
 // ensureReaper starts (or confirms) the per-session idle reaper. A failure is
@@ -195,6 +203,32 @@ func (c *Client) ensureReaper(ctx context.Context, ref Ref, image, pullPolicy st
 		return fmt.Sprintf("idle reaper not started (session won't auto-suspend): %v", err)
 	}
 	return ""
+}
+
+// ensureReaperWithRetry runs ensureReaper with a few bounded retries. The reaper
+// is what caps runaway pod cost, so when it is ensured off the foreground connect
+// path (§5) a single transient API-server blip must not silently leave a session
+// with no auto-suspend. Retries stop early if ctx is cancelled (session closed).
+// Returns the last warning (empty on success) for the caller to surface.
+func (c *Client) ensureReaperWithRetry(ctx context.Context, ref Ref, image, pullPolicy string, idleTimeout time.Duration) string {
+	const attempts = 3
+	backoff := 500 * time.Millisecond
+	var warn string
+	for i := 0; i < attempts; i++ {
+		if warn = c.ensureReaper(ctx, ref, image, pullPolicy, idleTimeout); warn == "" {
+			return ""
+		}
+		if i == attempts-1 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return warn
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+	}
+	return warn
 }
 
 // waitHealthy polls the runner /healthz until it responds OK or ctx is done. A
