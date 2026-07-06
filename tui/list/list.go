@@ -36,6 +36,16 @@ type List struct {
 	// false against the unchanged offset and auto-scroll silently stopped.
 	// Defaults false: a fresh list sits at the top until something pins it.
 	follow bool
+
+	// needReflow coalesces resizes. SetSize is O(1): it records the new
+	// width/height and, when following, sets this flag instead of re-pinning to
+	// the bottom (which walks + re-renders the tail) then and there. A burst of
+	// WindowSizeMsg during a terminal drag therefore does the expensive re-pin
+	// once — on the next offset read (via normalize) — at the final size, not
+	// once per intermediate size. Stale-width cache entries are recomputed lazily
+	// by renderItemEntry on access, so the cache is never eagerly dropped; a width
+	// that oscillates back to a previously-rendered value even re-hits the cache.
+	needReflow bool
 }
 
 // Following reports whether the list is pinned to the bottom (auto-scrolling).
@@ -46,6 +56,9 @@ func (l *List) Following() bool { return l.follow }
 // viewport where it is. Used for programmatic positioning (e.g. a search jump)
 // that must not be mistaken for the user choosing to follow the live tail.
 func (l *List) SetFollow(follow bool) {
+	// Settle any deferred resize re-pin under the current follow intent before
+	// changing it, so clearing follow can't strand a pending bottom-pin.
+	l.applyReflow()
 	l.follow = follow
 	if follow {
 		l.GotoBottom()
@@ -72,14 +85,28 @@ func New(items ...Item) *List {
 }
 
 func (l *List) SetSize(width, height int) {
-	if width != l.width {
-		l.cache = make(map[Item]*entry)
-	}
 	l.width = width
 	l.height = height
-	// Re-pin to the new bottom when following, so a shrinking viewport (composer
-	// growing, palette/permission box opening) keeps the latest content in view
-	// instead of stranding the offset above the fold.
+	// Defer the follow re-pin to the next offset read (normalize) so a burst of
+	// resizes coalesces into one re-pin at the final size. When following, a
+	// shrinking viewport (composer growing, palette/permission box opening) must
+	// still keep the latest content in view — needReflow guarantees that on the
+	// next read. Stale-width cache entries are refreshed lazily on access, so no
+	// eager cache drop is needed.
+	if l.follow {
+		l.needReflow = true
+	}
+}
+
+// applyReflow performs the resize re-pin deferred by SetSize, if any. It runs at
+// the start of normalize() so every offset-dependent read settles a pending
+// re-pin before answering — collapsing a drag's worth of SetSize calls into a
+// single GotoBottom at the final size.
+func (l *List) applyReflow() {
+	if !l.needReflow {
+		return
+	}
+	l.needReflow = false
 	if l.follow {
 		l.GotoBottom()
 	}
@@ -145,6 +172,9 @@ func (l *List) HeightAt(idx int) int {
 // then skip the item entirely, Offset() could exceed TotalHeight(), and
 // AtBottom() could flip true spuriously. Every anchor read goes through here.
 func (l *List) normalize() {
+	// Settle a deferred resize re-pin (SetSize while following) before reading the
+	// anchor, so callers observe the coalesced final position.
+	l.applyReflow()
 	if len(l.items) == 0 {
 		l.offsetIdx, l.offsetLine = 0, 0
 		return
@@ -286,11 +316,13 @@ func (l *List) GotoTop() {
 	l.offsetIdx = 0
 	l.offsetLine = 0
 	l.follow = false
+	l.needReflow = false // explicit top overrides any deferred bottom re-pin
 }
 
 func (l *List) GotoBottom() {
 	l.offsetIdx, l.offsetLine = l.lastOffsetItem()
 	l.follow = true
+	l.needReflow = false // the re-pin this defers is now satisfied
 }
 
 func (l *List) Invalidate(it Item) {
