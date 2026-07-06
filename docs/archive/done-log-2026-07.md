@@ -255,3 +255,158 @@ sweep (commit pending at time of writing).
 - **"Match claude code UX"** → became TODO §2 (the program). **"Expose CLI as
   a go library"** → shipped as the public `client/` SDK; remaining API-shape
   work is TODO §8.
+
+## Fable review pass (2026-07-06) — the 2026-07-05 "PENDING FABLE REVIEW" batch
+
+Every item stamped PENDING FABLE REVIEW (2026-07-05) across §1a–§1e, §2a–§2d,
+§4 and §10 was re-verified — three parallel adversarial Opus reviews (per-item
+verdicts, mechanisms traced against source, tests checked for vacuity) plus a
+direct Fable pass on the docs/harness items. Outcome: **27 of 28 approved
+as-shipped; one confirmed defect (fixed same day, below); full `just check`
+green with zero skipped gates.** Working-tree hardening that rode along:
+§1a `catchingUp` hydrate-arm + re-seed carry, §1c theme-epoch forced
+reconcile, the justfile per-gate skip detection, ADR H1–H4, README
+`--resume` section.
+
+### §1a SSE / state-machine cluster (6 items, all approved)
+
+- **Replay-treated-as-live 7-step fix**: per-session `catchingUp` armed on
+  stream install, cleared ONLY at `EventStreamLive`; notify suppressed during
+  catch-up with one honest flip-to-live toast; `statusChangedAt` from
+  `ev.Time`; seq dedup (`Seq!=0 && Seq<=lastSeq`); quit flush via `Cancel()`;
+  hydration folds. Tests incl. the launch-storm and resolved-in-replay
+  scenarios (`sse_catchup_test.go`).
+- **Duplicate background connects**: `liveSSEConnecting` in-flight map +
+  `hasLiveSSE` guard on all three launch paths, cancel-incoming-on-existing,
+  per-stream generation tokens with a stale-gen guard atop
+  `handleRunnerEvent`; failed initial connect surfaces as
+  `liveSSEConnectFailedMsg`. `connect_side_test.go` (11 cases).
+- **StreamEnded**: preserves pending permission + attention on a
+  still-Running-pod blip and schedules reconnect; clears + degrades only when
+  the cluster says not-running; `degradeUnreachable` only after retry budget.
+- **Watch-beats-seed**: `applyPodEvent` insert path hydrates titles +
+  snapshot (lastSeq/seenSeq) BEFORE starting the stream, so informer-first
+  inserts resume from head, not `after=0`.
+- **seenSeq**: carried across re-seeds (with usage/cost/model/branch/tools);
+  `applySnapshot` marks restored history seen; detach syncs the dashboard
+  cursor from the transcript (`syncCursorFromTranscript`).
+- **liveSSEReadyMsg attachedID guard** + `applyPodEvent` skip for the
+  attached session (no start-then-cancel churn).
+- **Review finding (MEDIUM, fixed 2026-07-06):** the uncommitted hydrate-arm
+  of `catchingUp` had exactly ONE clear path (`EventStreamLive`), so a session
+  whose background connect never succeeds (cluster says Running, pod
+  unreachable — the fe259d6/c191c85 condition family) kept the flag forever
+  and permanently suppressed toasts for a genuinely-pending hydrated
+  attention state; the comment claimed a degrade/teardown clear that did not
+  exist. Fixed: released on ALL no-stream-coming paths —
+  `liveSSEConnectFailedMsg` (which now also runs the notify scan),
+  `degradeUnreachable`, and the StreamEnded not-running branch. Tests:
+  `TestConnectFailedReleasesCatchUpAndToasts`,
+  `TestDegradeUnreachableReleasesCatchUp`,
+  `TestStreamEndedNotRunningReleasesCatchUp`.
+
+### §1b group view / pickers (3 items, approved)
+
+- Group view builds from `visibleSessions()` (filter + attention-order carry
+  through; collapsed badge counts filtered); filter-mode nav arrows-only
+  clamped to `visibleRows()`. `group_filter_test.go`.
+- ctrl+g jump in group view verified row-cursor-correct + expands the target
+  group; fail-closed if the row can't be resolved.
+  `TestCtrlGGroupViewLandsOnRowAndExpands`.
+- Archive dead binding fully removed (`A`/`archiveSelected`/`Archived`);
+  the S15 archived-section design pointer lives in the `groups.go` header
+  comment, deferred to the §2a row-model consolidation.
+
+### §1c rendering (3 items, approved)
+
+- `spread()` hardened (right segment always survives, total exactly width);
+  `clampLines` clips to its w×h contract; external-pane statusRow +
+  attached-header + composer hint all routed through `spread`. Only the
+  statusline row-1 segment-join tail remains, folded into the §2c collapse.
+- **Theme cache invalidation**: `theme.Epoch()` folded into `blockFP`,
+  AssistantItem section keys, and `StreamingMarkdown`; the follow-up forced
+  reconcile (epoch-changed ⇒ recompute every fingerprint; epoch folded into
+  the streaming-tail fp) closes the "stale palette until a width change"
+  window the key-only fold left. Review traced the full chain (fp → version
+  bump → tui/list cache miss → glamour pool invalidated via `theme.OnChange`)
+  and found no remaining stale-palette path. Force-path test added
+  2026-07-06: `TestThemeSwapForcesReconcileRerender`.
+- Composer width helpers (`composerBoxWidth`/`composerInnerWidth`) unify
+  `layout()` and `renderInput()`; behavior identical at width ≥ 21.
+
+### §1d system reliability (2 items, approved)
+
+- `SyncConflicted` state: conflicts win over transport stalls in `classify` +
+  the worst-of reducer; both TUI glyph maps render `⇄ conflicted`; Gold
+  (needs-you) vs Coral (transport, may self-heal). Per-file conflict detail
+  remains a follow-up (still in §1d).
+- `destroy` now runs suspend's best-effort active-turn probe (5s bound)
+  before the confirmation gate; warn to stderr, non-fatal.
+
+### §1e.6 server-side loop ADR (approved with fixes)
+
+`docs/server-side-loop-adr.md` reviewed incl. the H1–H4 hardening (explicit
+`state` lifecycle field; boot re-arm anchored on `last_completed_at`;
+409-defers / bounded-retry / stopped(error) failure ladder; version-skew
+accepted-risk note). Fable fixes: the `autopilot.state` event's `reason` enum
+was missing H2's `"error"`; the Q1 staleness-clock wording contradicted H1
+(now explicitly `max(last_completed_at, boot time)`). Implementation remains
+gated on maintainer sign-off of the listed open items.
+
+### §2a structural enablers (3 items, approved)
+
+- Clock-injection sweep: all in-package animation/timing reads on `nowFunc`
+  (grace gate, turn elapsed, toast lifecycle, motion loop, transitions);
+  deferred halves (statusChangedAt assignments → §1a territory,
+  `tui/theme.FadeColor` → §8, test-counter observer) stay in TODO.
+- Markdown-renderer dedup: single package-level `renderAssistantMD` feeds
+  both the finalized and streaming paths.
+- status→label "drift" retriage: divergence is by design (user-seat phrasing
+  in chat); locked with exhaustive enum-walk tests instead of merging.
+
+### §2b event-model (2 items, approved)
+
+- **context.compacted** (7270c6c): schema + regen'd files verified no-drift;
+  mapping verified against the vendored SDK's `SDKCompactBoundaryMessage`
+  (`compact_metadata.pre_tokens` required / `post_tokens` optional ⇒ the
+  `?? 0` default and preserve-baseline-when-absent path are both correct);
+  both reducers reset the ctx% baseline only when `PostTokens>0`; transcript
+  marker is replay-safe under the seq-dedup guard. 5 Go + 2 runner tests.
+- `MessagePayload.Role`: user echoes render as `blockUser`, stay out of
+  `lastAssistantText` (goal-sentinel safe), dedup the optimistic block,
+  strict `p.Content`. `message_role_test.go`.
+
+### §2d UX (2 items, approved)
+
+- ctrl+g `NextAttention` binding on the dashboard, surfaced via `FullHelp`;
+  the external-pane key-reservation half stays open in §2d (maintainer
+  decision).
+- Fresh-session welcome: `transcriptEmpty()` gate, live attached view only,
+  `fitModal`-exact at widths 20–80.
+
+### §4 perf (2 items, approved)
+
+- `partition()` computed once per `renderZoned` and passed to both bands.
+- Runner SSE `broadcast()` serializes the frame once + zero-client early
+  return; verified behavior-preserving (frame is a pure function of the
+  event; per-client `afterSeq` filtering untouched).
+
+### §10 harness (4 items, approved)
+
+- `just check` skip report re-derives each optional gate from the SAME
+  condition its recipe uses (incl. the separate `tsc` check for typecheck);
+  amber summary lists what CI will still enforce.
+- `sdktest/tui_surface_test.go` compile-pins all five public tui packages
+  (method expressions fail on any signature change; `consumerListItem` locks
+  the `Item` interface).
+- `consumerRunnerClient` pins `client.RunnerClient` at exactly 9 methods —
+  widening breaks the sdktest compile first.
+- PTY-test in-sandbox caveat documented in CLAUDE.md.
+
+### Rode along (same pass)
+
+- README gained the supported `claude --resume` escape-hatch section (§3's
+  open doc item) — field name `claudeSession` verified against the status
+  API + local index.
+- `notify.go` staticcheck QF1003 (tagged switch) fixed to keep
+  `golangci-lint` green now that it's on the Flox host.
