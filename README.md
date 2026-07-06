@@ -60,6 +60,29 @@ you left it, follow-up and all.
 See `docs/architecture.md` for the component design, lifecycle, and security
 model (with diagrams), and `docs/runner-api.md` for the HTTP+SSE contract.
 
+### Continue a session locally with `claude --resume`
+
+A sandbox Claude session can be picked up on your laptop with full history. This
+is deliberate: the runner mounts the workspace at the session's **real host path**
+(e.g. `/Users/you/git/project`, via a PVC `subPath` bind-mount), so the Claude SDK
+keys its transcript directory by that path — exactly the path a local `claude`
+would use. Transcripts sync one-way remote→host (into `~/.claude/projects/…`), so
+once a session has synced you can:
+
+```bash
+cd <project>            # the same directory you launched the session from
+claude --resume         # pick the session from claude's list, or:
+claude --resume <claudeSession>
+```
+
+`<claudeSession>` is the Claude SDK session UUID, surfaced by the runner status
+API (`GET /sessions/:id/status`, field `claudeSession`) and recorded in the local
+session index; `claude --resume` with no id also lists it for that project.
+
+This is a **one-way fork**: local turns run entirely on your laptop and never flow
+back to the sandbox — the pod, its guards, and the audit log see none of them. Use
+it to keep working offline or hand off to the local CLI, not as a two-way bridge.
+
 ## Quickstart
 
 ```bash
