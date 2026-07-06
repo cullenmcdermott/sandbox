@@ -47,6 +47,13 @@ type StreamingMarkdown struct {
 	// of its trimmed standalone render (the strip offset when folding deltas).
 	junctionCtx    string
 	junctionCtxLen int
+	// scan is the incremental safe-boundary/link-ref scanner. It processes each
+	// newly-arrived complete line exactly once across the turn instead of
+	// rescanning the whole growing buffer per delta (the O(N²) the boundary
+	// predicates otherwise cost). It is content-driven and independent of the
+	// render cache: a width or theme swap leaves it untouched (content is the
+	// same); only a non-prefix content rewrite resets it (handled inside sync).
+	scan mdScanner
 }
 
 // Reset drops all cached state.
@@ -111,6 +118,10 @@ func (s *StreamingMarkdown) Render(content string, width int, r Renderer) string
 	if !strings.HasPrefix(content, s.stableSource) {
 		s.resetCache()
 	}
+	// Advance the incremental scanner to reflect content (resets itself on a
+	// non-prefix rewrite). It feeds both the link-ref-def and safe-boundary
+	// predicates below without rescanning the whole buffer.
+	s.scan.sync(content)
 	if content == "" {
 		if out, ok := trimmedRender(r, ""); ok {
 			return out
@@ -121,7 +132,7 @@ func (s *StreamingMarkdown) Render(content string, width int, r Renderer) string
 	// retroactively turn an earlier paragraph's [label] into a hyperlink, which
 	// breaks the append-only invariant the cache relies on. They are rare, so
 	// fall back to a full render whenever one is present.
-	if hasLinkRefDef(content) {
+	if s.scan.hasLinkRef(content) {
 		s.resetCache()
 		if out, ok := trimmedRender(r, content); ok {
 			return out
@@ -131,7 +142,7 @@ func (s *StreamingMarkdown) Render(content string, width int, r Renderer) string
 
 	// Split into the stable boundary-aligned prefix and the trailing partial.
 	stable, tail := "", content
-	if b := findSafeBoundary(content); b >= 0 {
+	if b := s.scan.findSafeBoundary(content); b >= 0 {
 		stable, tail = content[:b], content[b:]
 	}
 
@@ -183,6 +194,151 @@ func (s *StreamingMarkdown) Render(content string, width int, r Renderer) string
 		return content
 	}
 	return s.stableRender + combined[s.junctionCtxLen:]
+}
+
+// mdScanner is an incremental, line-oriented scan of the streamed content that
+// answers the same safe-boundary and link-reference-definition predicates as the
+// from-scratch free functions below, but processes each complete line exactly
+// once across the turn. Content is append-only within a turn, so content[:p] for
+// a fixed line-boundary p is immutable: the follow-independent checks (open
+// fence, open hazard, last-line-opens-a-construct) are computed once per boundary
+// and cached forever. Only the setext-underline "what follows" check depends on
+// later content, so it is (re)evaluated per query against the current tail.
+//
+// The scanner is validated line-for-line against the reference free functions by
+// TestIncrementalScannerMatchesReference across 1-byte, whole, and random
+// chunkings, so any divergence — including partial-line deltas — fails the build.
+type mdScanner struct {
+	// committed is content up to (and including) the last consumed '\n'; it is a
+	// slice of content (shared backing array, O(1) to keep) and doubles as the
+	// continuity key: if a new content no longer has it as a prefix, the content
+	// was rewritten and the scanner resets.
+	committed string
+	// fence tracking, identical to isInsideOpenFence/fenceInfo semantics.
+	fenceChar byte
+	fenceLen  int
+	// hazardSeen mirrors prefixHasOpenHazard: monotonic once any non-fenced list
+	// marker / HTML-block opener / link-ref-def line appears.
+	hazardSeen bool
+	// linkRefSeen mirrors hasLinkRefDef over committed lines (monotonic); the
+	// trailing partial line is re-checked per query (hasLinkRef).
+	linkRefSeen bool
+	// lastNonBlank is the last committed line with non-whitespace content
+	// (fence-agnostic, matching lastNonBlankLine).
+	lastNonBlank string
+	// bounds are the blank-line boundaries with their follow-independent safety
+	// snapshot, in ascending offset order.
+	bounds []scanBound
+}
+
+type scanBound struct {
+	off  int  // start of the line after a blank-line separator
+	safe bool // checks (1) fence, (2) hazard, (3) last-line-opens — from content[:off]
+}
+
+func (sc *mdScanner) reset() { *sc = mdScanner{} }
+
+// sync advances the scanner to reflect content. Content is append-only within a
+// turn; a content that no longer extends the committed prefix is a rewrite and
+// resets the scanner. Only newly-arrived complete lines are processed.
+func (sc *mdScanner) sync(content string) {
+	if !strings.HasPrefix(content, sc.committed) {
+		sc.reset()
+	}
+	for {
+		start := len(sc.committed)
+		nl := strings.IndexByte(content[start:], '\n')
+		if nl < 0 {
+			break // the rest is a partial trailing line, not yet committed
+		}
+		nlIdx := start + nl
+		sc.commitLine(content[start:nlIdx], start, nlIdx)
+		sc.committed = content[:nlIdx+1]
+	}
+}
+
+// commitLine folds one complete line (without its trailing '\n') into the scan
+// state. start is the line's offset in content; nlIdx is the offset of its '\n'.
+func (sc *mdScanner) commitLine(line string, start, nlIdx int) {
+	inFence := sc.fenceChar != 0
+	if fc, fl := fenceInfo(line); fc != 0 {
+		if sc.fenceChar == 0 {
+			sc.fenceChar, sc.fenceLen = fc, fl // open
+		} else if cc, cl := closingFenceInfo(line); cc == sc.fenceChar && cl >= sc.fenceLen {
+			sc.fenceChar, sc.fenceLen = 0, 0 // close
+		}
+		// wrong char or insufficient length: literal content inside the fence.
+	} else if !inFence {
+		// Outside any open fence: detect open hazards and link-ref definitions
+		// exactly as prefixHasOpenHazard / hasLinkRefDef do per line.
+		if t := strings.TrimLeft(line, " \t"); t != "" {
+			if isListItemMarker(t) || isHTMLBlockOpener(line) || isLinkRefDefinition(line) {
+				sc.hazardSeen = true
+			}
+		}
+		if isLinkRefDefinition(line) {
+			sc.linkRefSeen = true
+		}
+	}
+	// lastNonBlankLine is fence-agnostic — every non-whitespace line counts.
+	if strings.TrimSpace(line) != "" {
+		sc.lastNonBlank = line
+	}
+	// A blank (space/tab-only) complete line preceded by a newline opens a
+	// boundary at the next line — the blank line itself changes none of the
+	// state above, so the safety snapshot is taken as-is.
+	if start > 0 && isSpaceTabLine(line) {
+		safe := sc.fenceChar == 0 && !sc.hazardSeen &&
+			(sc.lastNonBlank == "" || !lineOpensConstruct(sc.lastNonBlank))
+		sc.bounds = append(sc.bounds, scanBound{off: nlIdx + 1, safe: safe})
+	}
+}
+
+// findSafeBoundary returns the byte offset of the latest safe boundary in
+// content, or -1 — the incremental equivalent of the free findSafeBoundary.
+func (sc *mdScanner) findSafeBoundary(content string) int {
+	for i := len(sc.bounds) - 1; i >= 0; i-- {
+		b := sc.bounds[i]
+		if !b.safe {
+			continue
+		}
+		// (4) What follows must not be a setext underline (would retro-headerify
+		// the prefix). This depends on the current tail, so it is evaluated here.
+		if rest := content[b.off:]; rest != "" && isSetextUnderline(firstNonBlankLine(rest)) {
+			continue
+		}
+		return b.off
+	}
+	return -1
+}
+
+// hasLinkRef reports whether content contains a link reference definition —
+// the incremental equivalent of the free hasLinkRefDef. Committed lines are
+// tracked in linkRefSeen; the trailing partial line is checked here with the
+// current fence state (a delta can land mid link-ref-def line).
+func (sc *mdScanner) hasLinkRef(content string) bool {
+	if sc.linkRefSeen {
+		return true
+	}
+	tail := content[len(sc.committed):]
+	if tail == "" || sc.fenceChar != 0 {
+		return false // no partial line, or inside an open fence
+	}
+	if c, _ := fenceInfo(tail); c != 0 {
+		return false // a fence line is never a link-ref definition
+	}
+	return isLinkRefDefinition(tail)
+}
+
+// isSpaceTabLine reports whether line is empty or only spaces/tabs, matching the
+// blank-line separator blankLineBoundaries recognizes.
+func isSpaceTabLine(line string) bool {
+	for i := 0; i < len(line); i++ {
+		if line[i] != ' ' && line[i] != '\t' {
+			return false
+		}
+	}
+	return true
 }
 
 // findSafeBoundary returns the byte offset of the latest safe boundary, or -1.
