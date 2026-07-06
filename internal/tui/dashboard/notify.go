@@ -148,9 +148,10 @@ func (m *Model) renderToast(w int) (string, int) {
 	t := m.toast
 	pulse := []string{"·", "•", "●", "•"}[m.spinnerFrame%4]
 	glyph := theme.GlyphWaiting
-	if t.status == StatusNeedsInput {
+	switch t.status {
+	case StatusNeedsInput:
 		glyph = theme.GlyphNeedsInput
-	} else if t.status == StatusFailed {
+	case StatusFailed:
 		glyph = theme.GlyphFailed
 	}
 

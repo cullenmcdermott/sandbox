@@ -206,3 +206,72 @@ func TestCatchUpFreshEpisodeAfterResolveInReplay(t *testing.T) {
 		t.Fatalf("expected toastMsg for P2, got %#v", cmd())
 	}
 }
+
+// §1a Fable-review fix: catchingUp armed at HYDRATE time has no
+// EventStreamLive coming if the initial background connect FAILS (an
+// unreachable-but-Running pod). The failure must release the suppression —
+// and the handler's own notify scan must be able to toast the
+// genuinely-pending hydrated attention state — instead of the flag sticking
+// true and muting the session for the lifetime of the condition.
+func TestConnectFailedReleasesCatchUpAndToasts(t *testing.T) {
+	m := New(nil)
+	id := session.ID("bg")
+	s := SessionFromState(session.State{ID: id, Status: session.StatusRunning})
+	s.catchingUp = true // hydrate-armed (applySeed/applyPodEvent snapshot path)
+	s.DashStatus = StatusWaiting
+	s.PendingPermissionID = "p1"
+	s.PendingPermissionTool = "Bash"
+	m.sessions = []Session{s}
+
+	_, cmd := m.Update(liveSSEConnectFailedMsg{id: id, gen: 1})
+
+	if m.sessionByID(id).catchingUp {
+		t.Fatal("a failed initial connect must release catchingUp — no EventStreamLive is coming to clear it")
+	}
+	if cmd == nil {
+		t.Fatal("the hydrated waiting session must toast once suppression is released")
+	}
+	if _, ok := cmd().(toastMsg); !ok {
+		t.Fatalf("expected toastMsg after connect failure released suppression, got %#v", cmd())
+	}
+}
+
+// Reconnect exhaustion (degradeUnreachable) is the second no-stream-coming
+// terminal: it must release catch-up suppression so the degraded Failed state
+// stays toastable like any other attention transition.
+func TestDegradeUnreachableReleasesCatchUp(t *testing.T) {
+	m := New(nil)
+	id := session.ID("bg")
+	s := SessionFromState(session.State{ID: id, Status: session.StatusRunning})
+	s.catchingUp = true
+	s.DashStatus = StatusBusy
+	m.sessions = []Session{s}
+
+	m.degradeUnreachable(id)
+
+	got := m.sessionByID(id)
+	if got.catchingUp {
+		t.Fatal("degradeUnreachable must release catchingUp")
+	}
+	if got.DashStatus != StatusFailed {
+		t.Fatalf("mid-turn degrade should be Failed, got %v", got.DashStatus)
+	}
+}
+
+// StreamEnded with a not-running pod tears the stream down for good — the
+// third no-stream-coming terminal. It must release the suppression alongside
+// the permission clear so a later Failed derivation isn't muted.
+func TestStreamEndedNotRunningReleasesCatchUp(t *testing.T) {
+	m := New(nil)
+	id := session.ID("bg")
+	s := SessionFromState(session.State{ID: id, Status: session.StatusSuspended})
+	s.catchingUp = true
+	s.DashStatus = StatusWaiting
+	m.sessions = []Session{s}
+
+	m.handleRunnerEvent(RunnerEventMsg{ID: id, StreamEnded: true})
+
+	if m.sessionByID(id).catchingUp {
+		t.Fatal("StreamEnded on a not-running pod must release catchingUp")
+	}
+}

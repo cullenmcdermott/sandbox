@@ -1085,9 +1085,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case liveSSEConnectFailedMsg:
 		// An initial background connect failed; clear its in-flight marker so a
 		// later guard can retry. The session keeps its cluster-derived status
-		// (graceful degradation) — no status change here.
+		// (graceful degradation) — no status change here. Also release the
+		// hydrate-armed catch-up suppression: no stream means no EventStreamLive
+		// boundary is coming to clear it, and a stuck flag would suppress the
+		// toast for a genuinely-pending hydrated attention state for as long as
+		// the pod stays unreachable-but-Running. A later successful connect
+		// re-arms it at liveSSEReadyMsg.
 		delete(m.liveSSEConnecting, msg.id)
-		return m, nil
+		for i := range m.sessions {
+			if m.sessions[i].ID() == msg.id {
+				m.sessions[i].catchingUp = false
+				break
+			}
+		}
+		return m, m.notifyIfBackgroundAttention(m.attachedID)
 
 	case liveSSEReconnectFailedMsg:
 		// A reconnect attempt couldn't open the stream — clear its in-flight
@@ -1440,6 +1451,10 @@ func (m *Model) degradeUnreachable(id session.ID) {
 		default:
 			m.sessions[i].DashStatus = DeriveStatus(m.sessions[i].State)
 		}
+		// Reconnects are exhausted — no EventStreamLive is coming, so release
+		// the catch-up suppression; the degraded state (e.g. Failed) must be
+		// able to toast like any other attention transition.
+		m.sessions[i].catchingUp = false
 		return
 	}
 }
@@ -1557,8 +1572,12 @@ func (m *Model) handleRunnerEvent(msg RunnerEventMsg) (tea.Model, tea.Cmd) {
 				} else {
 					// Cluster says not-running (suspended/gone) — degrade to the
 					// authoritative status and clear any now-unresolvable permission.
+					// Release catch-up suppression too: the stream is gone for good,
+					// so no EventStreamLive boundary will clear it, and a Failed
+					// derived status must stay toastable.
 					m.sessions[i].DashStatus = DeriveStatus(m.sessions[i].State)
 					m.sessions[i].clearPendingPermission()
+					m.sessions[i].catchingUp = false
 				}
 				// Persist the final state so a relaunch reflects it (and resumes
 				// from the last seq we saw) rather than replaying from zero. A
@@ -1789,6 +1808,11 @@ func (m *Model) applySeed(states []session.State) (*Model, []tea.Cmd) {
 				s.PendingPermissionID = prev.PendingPermissionID
 				s.PendingPermissionTool = prev.PendingPermissionTool
 				s.PendingPermissionArg = prev.PendingPermissionArg
+				// Carry catch-up suppression forward (§1a fix 2): a seed arriving
+				// mid-replay-burst must not silently disarm the flag and let a
+				// replayed attention state toast. It still clears at the same
+				// EventStreamLive boundary (or on degrade/teardown).
+				s.catchingUp = prev.catchingUp
 			}
 			// Carry the SSE resume cursor + save throttle across re-seeds so a
 			// later reconnect resumes from head, not 0 (which would replay).
@@ -1830,6 +1854,16 @@ func (m *Model) applySeed(states []session.State) (*Model, []tea.Cmd) {
 				// C12). We still keep lastSeq so any later stream resumes cleanly.
 				if cs := DeriveStatus(st); cs != StatusSuspended && cs != StatusFailed {
 					s.applySnapshot(snap)
+					// Arm catch-up suppression from hydrate time (§1a fix 1): the
+					// snapshot may restore a stale StatusWaiting + pending permission
+					// seconds before the connectSem-throttled background connect is
+					// ready, and a PodEventMsg in that window would otherwise toast it.
+					// Released on every path where the stream's replay boundary can
+					// no longer arrive: EventStreamLive itself, a failed initial
+					// connect (liveSSEConnectFailedMsg), reconnect exhaustion
+					// (degradeUnreachable), and the StreamEnded not-running branch —
+					// so it can't stick on a session that never gets a stream.
+					s.catchingUp = true
 				}
 			}
 		}
@@ -1970,6 +2004,12 @@ func (m *Model) applyPodEvent(ev k8s.StateEvent) tea.Cmd {
 			// pod is up (a suspended/failed pod's status is authoritative).
 			if cs := DeriveStatus(ev.State); cs != StatusSuspended && cs != StatusFailed {
 				sess.applySnapshot(snap)
+				// Arm catch-up suppression from hydrate time (§1a fix 1): mirror
+				// applySeed so an informer-first insert that restores a stale
+				// attention state can't toast before its background stream reaches
+				// the EventStreamLive boundary. Same release paths as applySeed's
+				// arm (connect-failed / degrade / not-running teardown).
+				sess.catchingUp = true
 			}
 		}
 	}
