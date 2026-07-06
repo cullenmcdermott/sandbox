@@ -394,6 +394,132 @@ func TestBuildEnvNoCredentialInline(t *testing.T) {
 	}
 }
 
+// TestOpencodeEnvSingleProviderFailClosed (item 3): an opencode-server pod is
+// injected EXACTLY ONE provider key — the one selected by spec.OpencodeProvider
+// (empty defaults to Anthropic) — from the shared opencode-credentials Secret,
+// and that SecretKeyRef is NOT Optional (fail-closed). The other two providers'
+// env vars must be entirely absent.
+func TestOpencodeEnvSingleProviderFailClosed(t *testing.T) {
+	all := []string{"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENCODE_API_KEY"}
+	cases := []struct {
+		name     string
+		provider string
+		wantEnv  string
+		wantKey  string
+	}{
+		{"default-anthropic", "", "ANTHROPIC_API_KEY", opencodeSecretKeyAnthropic},
+		{"explicit-anthropic", session.OpencodeProviderAnthropic, "ANTHROPIC_API_KEY", opencodeSecretKeyAnthropic},
+		{"openai", session.OpencodeProviderOpenAI, "OPENAI_API_KEY", opencodeSecretKeyOpenAI},
+		{"zen", session.OpencodeProviderZen, "OPENCODE_API_KEY", opencodeSecretKeyZen},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := buildEnv(session.Spec{Backend: session.BackendOpenCode, OpencodeProvider: tc.provider}, "oc")
+
+			got := envVar(env, tc.wantEnv)
+			if got == nil || got.ValueFrom == nil || got.ValueFrom.SecretKeyRef == nil {
+				t.Fatalf("%s should reference a secret key", tc.wantEnv)
+			}
+			ref := got.ValueFrom.SecretKeyRef
+			if ref.Name != opencodeSecretName {
+				t.Errorf("%s secret name: got %q, want %q", tc.wantEnv, ref.Name, opencodeSecretName)
+			}
+			if ref.Key != tc.wantKey {
+				t.Errorf("%s secret key: got %q, want %q", tc.wantEnv, ref.Key, tc.wantKey)
+			}
+			if ref.Optional != nil && *ref.Optional {
+				t.Errorf("%s must NOT be Optional (fail-closed: a missing key must stall the pod)", tc.wantEnv)
+			}
+			for _, other := range all {
+				if other == tc.wantEnv {
+					continue
+				}
+				if envVar(env, other) != nil {
+					t.Errorf("%s must be absent — only the selected provider is injected", other)
+				}
+			}
+			// The serve basic-auth password is still injected regardless of provider.
+			if envVar(env, "OPENCODE_SERVER_PASSWORD") == nil {
+				t.Error("OPENCODE_SERVER_PASSWORD should always be injected for opencode sessions")
+			}
+		})
+	}
+}
+
+// TestCreateSessionStampsOpencodeCredsFreshness (item 4): creating an opencode
+// session stamps the Sandbox with a short fingerprint of the selected provider's
+// live Secret key and the provider key name, so a later reconcile can detect
+// rotation. Claude sessions are not stamped.
+func TestCreateSessionStampsOpencodeCredsFreshness(t *testing.T) {
+	ctx := context.Background()
+	b := newTestBackend(t)
+	// Seed the shared provider Secret the stamp is computed against.
+	if _, err := b.core.CoreV1().Secrets("agent-sessions").Create(ctx, &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: opencodeSecretName, Namespace: "agent-sessions"},
+		Data:       map[string][]byte{opencodeSecretKeyAnthropic: []byte("sk-ant-provider-key")},
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("seed secret: %v", err)
+	}
+
+	if _, err := b.CreateSession(ctx, session.Spec{ID: "opencode-server-fresh", ProjectPath: "/tmp", Backend: session.BackendOpenCode, RunnerImage: "test:latest"}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	sb, err := b.agents.AgentsV1alpha1().Sandboxes("agent-sessions").Get(ctx, "opencode-server-fresh", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get sandbox: %v", err)
+	}
+	want := opencodeCredsHash(map[string][]byte{opencodeSecretKeyAnthropic: []byte("sk-ant-provider-key")}, "")
+	if want == "" {
+		t.Fatal("test setup: hash should be non-empty")
+	}
+	if got := sb.Annotations[annotationOpencodeCredsHash]; got != want {
+		t.Errorf("creds-hash annotation: got %q, want %q", got, want)
+	}
+	if got := sb.Annotations[annotationOpencodeProvider]; got != opencodeSecretKeyAnthropic {
+		t.Errorf("provider annotation: got %q, want %q", got, opencodeSecretKeyAnthropic)
+	}
+	// The stamp must never contain the raw key bytes.
+	raw, _ := json.Marshal(sb)
+	if strings.Contains(string(raw), "sk-ant-provider-key") {
+		t.Fatal("provider key bytes leaked into the Sandbox object")
+	}
+
+	// A claude session with the same Secret present is NOT stamped.
+	if _, err := b.CreateSession(ctx, session.Spec{ID: "claude-sdk-nostamp", ProjectPath: "/tmp", Backend: "claude-sdk", RunnerImage: "test:latest"}); err != nil {
+		t.Fatalf("create claude: %v", err)
+	}
+	csb, err := b.agents.AgentsV1alpha1().Sandboxes("agent-sessions").Get(ctx, "claude-sdk-nostamp", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get claude sandbox: %v", err)
+	}
+	if _, ok := csb.Annotations[annotationOpencodeCredsHash]; ok {
+		t.Error("claude sessions must not carry an opencode creds stamp")
+	}
+}
+
+// TestOpencodeCredsHash: the fingerprint is a stable 8-hex prefix of sha256 of
+// the SELECTED provider's key, and empty when that key is absent.
+func TestOpencodeCredsHash(t *testing.T) {
+	data := map[string][]byte{
+		opencodeSecretKeyAnthropic: []byte("anthropic-key"),
+		opencodeSecretKeyOpenAI:    []byte("openai-key"),
+	}
+	a := opencodeCredsHash(data, session.OpencodeProviderAnthropic)
+	o := opencodeCredsHash(data, session.OpencodeProviderOpenAI)
+	if len(a) != 8 || len(o) != 8 {
+		t.Fatalf("hash length: anthropic=%d openai=%d, want 8", len(a), len(o))
+	}
+	if a == o {
+		t.Error("different provider keys must fingerprint differently")
+	}
+	if a != opencodeCredsHash(data, session.OpencodeProviderAnthropic) {
+		t.Error("hash must be stable for the same input")
+	}
+	if got := opencodeCredsHash(data, session.OpencodeProviderZen); got != "" {
+		t.Errorf("absent provider key should hash to empty, got %q", got)
+	}
+}
+
 func envVar(env []corev1.EnvVar, name string) *corev1.EnvVar {
 	for i := range env {
 		if env[i].Name == name {

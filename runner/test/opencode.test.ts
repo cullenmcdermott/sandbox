@@ -99,6 +99,24 @@ test('buildOpencodeConfig enables only providers present in env', () => {
   assert.equal(cfg.model, 'kimi');
 });
 
+// Item 3 (auth hardening): the k8s backend now injects EXACTLY ONE provider key
+// per opencode pod (the selected provider, fail-closed), so buildOpencodeConfig
+// sees a single provider env var in production. Assert each provider, present
+// alone, enables that provider and no other.
+test('buildOpencodeConfig enables exactly the single injected provider', () => {
+  const cases: Array<[string, string]> = [
+    ['ANTHROPIC_API_KEY', 'anthropic'],
+    ['OPENAI_API_KEY', 'openai'],
+    ['OPENCODE_API_KEY', 'opencode'],
+  ];
+  for (const [envVar, id] of cases) {
+    const cfg = buildOpencodeConfig({ [envVar]: 'k' } as NodeJS.ProcessEnv);
+    const provider = cfg.provider as Record<string, unknown>;
+    assert.deepEqual(Object.keys(provider), [id], `${envVar} should enable only ${id}`);
+    assert.deepEqual(provider[id], { options: { apiKey: `{env:${envVar}}` } });
+  }
+});
+
 // REGRESSION (O3): the supervisor must FAIL CLOSED rather than bind an
 // unauthenticated agent-with-shell to 0.0.0.0. Without OPENCODE_SERVER_PASSWORD
 // it must throw before spawning; with it, it spawns `opencode serve` bound to

@@ -8,8 +8,16 @@
 #
 # This is DEFENSIVE for the local dev env: the turn-loop integration tests never trigger
 # the reaper, but EnsureReaper must have a home and these RBAC objects must apply
-# cleanly. A ClusterRole + ClusterRoleBinding is the simplest correct grant for a
-# single-tenant dev cluster (scope is the whole cluster, which here is just this local dev env).
+# cleanly.
+#
+# Least-privilege for Secrets: the reaper reads exactly ONE Secret per session —
+# the per-session runner-token Secret in agent-sessions (backend.go RunnerToken) —
+# to authenticate its /idle poll. That read is granted by a NAMESPACED Role
+# (secrets: get) bound only in agent-sessions, NOT a cluster-wide `secrets: get`
+# (which would let a compromised reaper read every Secret in every namespace). The
+# remaining Sandbox/pod grants stay in the ClusterRole for now (they target
+# agent-sessions today but the reaper takes --namespace; tightening those to a Role
+# is a follow-up).
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -48,10 +56,8 @@ rules:
   - apiGroups: [""]
     resources: ["pods/portforward"]
     verbs: ["create"]
-  # Read the per-session runner bearer token Secret.
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["get"]
+  # NOTE: `secrets: get` deliberately LIVES NOT HERE — see the namespaced Role
+  # below. A cluster-wide secrets:get on the reaper is over-broad.
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -63,6 +69,38 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: sandbox-reaper
+subjects:
+  - kind: ServiceAccount
+    name: sandbox-reaper
+    namespace: agent-reaper
+---
+# Namespaced grant for the ONE thing the reaper reads from Secrets: the
+# per-session runner bearer-token Secret (backend.go RunnerToken), used to
+# authenticate the /idle poll. Scoped to agent-sessions so the reaper cannot read
+# Secrets anywhere else. Bound to the reaper SA that lives in agent-reaper.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sandbox-reaper-secrets
+  namespace: agent-sessions
+  labels:
+    app.kubernetes.io/part-of: sandbox
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sandbox-reaper-secrets
+  namespace: agent-sessions
+  labels:
+    app.kubernetes.io/part-of: sandbox
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sandbox-reaper-secrets
 subjects:
   - kind: ServiceAccount
     name: sandbox-reaper

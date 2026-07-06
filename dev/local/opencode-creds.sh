@@ -23,17 +23,52 @@
 #   check          Non-invasive: report (to stderr) whether a key SOURCE is
 #                  available, WITHOUT reading the secret. Always exits 0.
 #   status         Actively resolve the key (may prompt 1Password) and report its
-#                  source + a redacted preview. Never prints the secret body.
+#                  source + length only. NEVER prints any bytes of the secret
+#                  (not even a prefix — a prefix is still key material).
 set -uo pipefail
 
 OP_REF="${SANDBOX_OPENCODE_OP_REF:-op://k8s-secrets/opencode-credentials/opencode-api-key}"
-NS="agent-sessions"
+# Namespace: overridable via $SANDBOX_NAMESPACE, else the kubeconfig context's
+# default namespace, else agent-sessions (the backend default). No hardcoded
+# assumption — this must match wherever the session pods actually run.
+NS="${SANDBOX_NAMESPACE:-}"
+if [ -z "$NS" ] && command -v kubectl >/dev/null 2>&1; then
+    NS="$(kubectl config view --minify -o 'jsonpath={..namespace}' 2>/dev/null || true)"
+fi
+NS="${NS:-agent-sessions}"
 SECRET="opencode-credentials"
 KEY="opencode-api-key"
+
+# Local overlay file that may hold a plaintext key; warn if world/group-readable.
+OVERLAY="${SANDBOX_SECRET_OVERLAY:-dev/local/secret.local.yaml}"
 
 err()  { printf '%s\n' "$*" >&2; }
 warn() { printf '\033[33m%s\033[0m\n' "$*" >&2; }
 ok()   { printf '\033[32m%s\033[0m\n' "$*" >&2; }
+
+# check_overlay_perms warns (and tightens to 0600) if the local overlay file that
+# may contain a plaintext provider key is group/world-readable. Best-effort: a
+# missing file or a stat/chmod failure is silent (nothing to protect).
+check_overlay_perms() {
+    [ -f "$OVERLAY" ] || return 0
+    local mode
+    # BSD stat (macOS) uses -f '%Lp'; GNU stat uses -c '%a'. Try both.
+    mode="$(stat -f '%Lp' "$OVERLAY" 2>/dev/null || stat -c '%a' "$OVERLAY" 2>/dev/null || true)"
+    [ -n "$mode" ] || return 0
+    # Owner-only when the last two octal digits (group, other) are both 0.
+    # Length-agnostic so it handles "600" and "0600"/special-bit "2600" alike.
+    case "$mode" in
+    *00) return 0 ;; # e.g. 600/700/0600: group+other have no bits, fine
+    *)
+        warn "opencode-creds: $OVERLAY is mode $mode (group/other-readable) — it may hold a plaintext key."
+        if chmod 600 "$OVERLAY" 2>/dev/null; then
+            warn "  tightened to 0600."
+        else
+            warn "  run: chmod 600 $OVERLAY"
+        fi
+        ;;
+    esac
+}
 
 TOKEN=""
 TOKEN_SOURCE=""
@@ -76,6 +111,7 @@ cmd_ensure_secret() {
         err "opencode-creds: kubectl not found on PATH; cannot provision $NS/$SECRET."
         return 1
     fi
+    check_overlay_perms
     if resolve_token; then
         if apply_secret "$TOKEN"; then
             ok "opencode-creds: provisioned Secret $NS/$SECRET (key: $KEY) from $TOKEN_SOURCE"
@@ -84,11 +120,16 @@ cmd_ensure_secret() {
         err "opencode-creds: failed to apply Secret $NS/$SECRET (is the local cluster up?)"
         return 1
     fi
-    # No op/env key. Respect an existing Secret instead of wiping it.
+    # No op/env key. Respect an existing Secret instead of wiping it — but say so
+    # LOUDLY: a kept Secret may be STALE, and session pods resolve provider keys
+    # only at pod start, so even a fresh value here won't reach a running pod
+    # without a restart (suspend/resume or destroy+recreate).
     local existing
     if existing="$(kubectl -n "$NS" get secret "$SECRET" -o "jsonpath={.data['$KEY']}" 2>/dev/null)" \
         && [ -n "$existing" ]; then
-        ok "opencode-creds: $NS/$SECRET already populated — kept (no op/env key to override it)"
+        warn "opencode-creds: $NS/$SECRET already populated but NO op/env key resolved to verify/refresh it."
+        warn "  Keeping the existing (possibly STALE) Secret unchanged."
+        warn "  Provide a source (op/env, below) to rotate it, and restart affected pods to adopt a new key."
         return 0
     fi
     warn "opencode-creds: no OpenCode Zen API key found — opencode Zen provider stays unconfigured."
@@ -117,9 +158,11 @@ cmd_check() {
 }
 
 cmd_status() {
+    check_overlay_perms
     if resolve_token; then
-        ok "opencode-creds: key resolves from $TOKEN_SOURCE"
-        printf '  preview: %s… (length %d)\n' "${TOKEN:0:8}" "${#TOKEN}" >&2
+        # Report only that a key resolves + its length. NEVER print any bytes of
+        # the secret (not even a prefix) — a prefix is still key material.
+        ok "opencode-creds: key resolves from $TOKEN_SOURCE (length ${#TOKEN})"
         return 0
     fi
     warn "opencode-creds: no OpenCode Zen API key resolves from 1Password ($OP_REF) or \$OPENCODE_API_KEY."

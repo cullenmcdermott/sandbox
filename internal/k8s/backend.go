@@ -5,10 +5,12 @@ package k8s
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -61,6 +63,19 @@ const (
 	// otherwise swap the runner under the session's persisted events.db /
 	// session.json state (2026-07-01 review HIGH).
 	annotationPinnedRunnerImage = "sandbox.cullen.dev/pinned-runner-image"
+
+	// annotationOpencodeCredsHash records a short, non-reversible fingerprint
+	// (first 8 hex of sha256) of the SELECTED provider key in the shared
+	// opencode-credentials Secret AT THE TIME the session's pod was started, and
+	// annotationOpencodeProvider records which provider that was (so a later
+	// reconcile can recompute the live hash without re-deriving it from the pod
+	// env). Env SecretKeyRefs are resolved once at pod start, so rotating the
+	// cluster Secret does NOT reach a running pod — the create/resume reconcile
+	// paths compare the live Secret's hash against this stamp and warn when they
+	// drift, pointing the operator at a suspend/resume (pod restart) to adopt the
+	// new key. Only stamped for opencode-server sessions.
+	annotationOpencodeCredsHash = "sandbox.cullen.dev/opencode-creds-hash"
+	annotationOpencodeProvider  = "sandbox.cullen.dev/opencode-provider"
 
 	// runnerContainerName is the runner container in the session pod spec.
 	runnerContainerName = "runner"
@@ -122,10 +137,11 @@ const (
 	anthropicAPISecretKey = "console-api-key"
 
 	// opencodeSecretName is the cluster Secret supplying provider API keys to
-	// opencode-server session pods. Keys are optional and referenced optionally
-	// so pods start before they exist; the runner's config generator enables
-	// only the providers whose env vars are present. These are real API keys
-	// (distinct from the Claude subscription OAuth token in anthropicSecret).
+	// opencode-server session pods. A session references exactly ONE key from it
+	// (the provider selected by spec.OpencodeProvider), fail-closed (NOT Optional):
+	// a pod whose selected key is absent stalls in CreateContainerConfigError
+	// rather than starting uncredentialed. These are real API keys (distinct from
+	// the Claude subscription OAuth token in anthropicSecret).
 	opencodeSecretName = "opencode-credentials"
 	// opencodeSecretKeyAnthropic / OpenAI / Zen map cluster Secret keys to the
 	// provider env vars opencode reads (ANTHROPIC_API_KEY, OPENAI_API_KEY,
@@ -393,9 +409,21 @@ func (b *Backend) CreateSession(ctx context.Context, spec session.Spec) (_ sessi
 	// Create the Sandbox last: its pod mounts both the Secret and the PVC, so it
 	// must not exist before they do.
 	sb := buildSandbox(spec)
+	// Stamp the provider-key fingerprint the pod is starting against so a later
+	// create/resume reconcile can detect the cluster Secret was rotated out from
+	// under the running pod (opencode sessions only; best-effort).
+	b.stampOpencodeCredsFreshness(ctx, sb, spec)
 	if _, err := b.agents.AgentsV1alpha1().Sandboxes(spec.Namespace).Create(ctx, sb, metav1.CreateOptions{}); err != nil {
 		if !k8serrors.IsAlreadyExists(err) {
 			return session.Ref{}, fmt.Errorf("k8s: create Sandbox %s: %w", name, err)
+		}
+		// Idempotent re-create against a session whose pod is already running: the
+		// existing Sandbox keeps its original creds stamp, so warn if the live
+		// Secret has since rotated (the running pod still holds the old key).
+		if spec.Backend == session.BackendOpenCode {
+			if existing, gerr := b.agents.AgentsV1alpha1().Sandboxes(spec.Namespace).Get(ctx, name, metav1.GetOptions{}); gerr == nil {
+				b.warnIfOpencodeCredsRotated(ctx, existing)
+			}
 		}
 	}
 
@@ -606,6 +634,10 @@ func (b *Backend) Resume(ctx context.Context, ref session.Ref) error {
 			return getErr
 		}
 		applyPinnedRunnerImage(sb)
+		// The resumed pod resolves provider keys from the CURRENT opencode-
+		// credentials Secret, so refresh the freshness stamp to match (a no-op for
+		// non-opencode sessions). Keeps later drift detection accurate.
+		b.refreshOpencodeCredsStamp(ctx, sb)
 		sb.Spec.Replicas = &one
 		_, updateErr := sandboxes.Update(ctx, sb, metav1.UpdateOptions{})
 		return updateErr
@@ -1336,7 +1368,8 @@ func runnerVolumeMounts(spec session.Spec) []corev1.VolumeMount {
 // credential is populated per pod (OAuth token vs Console API key), selected by
 // spec.AnthropicAuth — never both, since Claude Code would reject the OAuth
 // token if a real x-api-key were also present (see the claude-sdk branch below).
-// For opencode, ANTHROPIC_API_KEY is a provider key set independently.
+// For opencode, exactly one provider key (selected by spec.OpencodeProvider) is
+// injected fail-closed from the shared opencode-credentials Secret.
 func buildEnv(spec session.Spec, name string) []corev1.EnvVar {
 	env := []corev1.EnvVar{
 		{Name: "CLAUDE_CONFIG_DIR", Value: "/session/state/claude"},
@@ -1372,7 +1405,7 @@ func buildEnv(spec session.Spec, name string) []corev1.EnvVar {
 	}
 
 	if spec.Backend == session.BackendOpenCode {
-		return append(env, opencodeEnv(name)...)
+		return append(env, opencodeEnv(spec, name)...)
 	}
 
 	// Default (claude-sdk): exactly ONE Anthropic credential env is populated per
@@ -1428,23 +1461,144 @@ func buildEnv(spec session.Spec, name string) []corev1.EnvVar {
 	})
 }
 
+// opencodeProviderRef maps a session's selected opencode provider to the env var
+// opencode reads for it and the opencode-credentials Secret key holding it.
+type opencodeProviderRef struct {
+	envName   string
+	secretKey string
+}
+
+// resolveOpencodeProvider maps Spec.OpencodeProvider to its (env var, Secret key)
+// pair. Empty or unrecognized defaults to Anthropic — the documented opencode
+// default and the only provider currently reachable, since the user-facing
+// provider selector is deferred to the client/cred generalization item.
+func resolveOpencodeProvider(provider string) opencodeProviderRef {
+	switch provider {
+	case session.OpencodeProviderOpenAI:
+		return opencodeProviderRef{"OPENAI_API_KEY", opencodeSecretKeyOpenAI}
+	case session.OpencodeProviderZen:
+		return opencodeProviderRef{"OPENCODE_API_KEY", opencodeSecretKeyZen}
+	default: // "" or session.OpencodeProviderAnthropic
+		return opencodeProviderRef{"ANTHROPIC_API_KEY", opencodeSecretKeyAnthropic}
+	}
+}
+
+// opencodeCredsHash returns a short, non-reversible fingerprint (first 8 hex of
+// sha256) of the SELECTED provider's key bytes in the opencode-credentials
+// Secret, or "" when that key is absent/empty. Used to stamp the Sandbox at
+// create time (annotationOpencodeCredsHash) and to detect drift on the reconcile
+// paths. Deliberately truncated: it identifies a rotation, it does not reconstruct
+// the key.
+func opencodeCredsHash(data map[string][]byte, provider string) string {
+	ref := resolveOpencodeProvider(provider)
+	v, ok := data[ref.secretKey]
+	if !ok || len(v) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256(v)
+	return hex.EncodeToString(sum[:])[:8]
+}
+
+// stampOpencodeCredsFreshness records, on the Sandbox being created, the provider
+// the opencode session was started against and a fingerprint of that provider's
+// key in the live opencode-credentials Secret. Best-effort: a read failure or an
+// absent key leaves the Sandbox unstamped (the fail-closed SecretKeyRef already
+// surfaces a missing key at pod start), so this never fails CreateSession. Only
+// meaningful for opencode-server sessions.
+func (b *Backend) stampOpencodeCredsFreshness(ctx context.Context, sb *agentv1alpha1.Sandbox, spec session.Spec) {
+	if spec.Backend != session.BackendOpenCode {
+		return
+	}
+	sec, err := b.core.CoreV1().Secrets(spec.Namespace).Get(ctx, opencodeSecretName, metav1.GetOptions{})
+	if err != nil {
+		return // secret not readable yet; the fail-closed env ref will surface it
+	}
+	hash := opencodeCredsHash(sec.Data, spec.OpencodeProvider)
+	if hash == "" {
+		return
+	}
+	if sb.Annotations == nil {
+		sb.Annotations = map[string]string{}
+	}
+	sb.Annotations[annotationOpencodeCredsHash] = hash
+	sb.Annotations[annotationOpencodeProvider] = resolveOpencodeProvider(spec.OpencodeProvider).secretKey
+}
+
+// liveOpencodeCredHash reads the shared opencode-credentials Secret and returns
+// the current fingerprint of the given provider key plus the Secret's
+// resourceVersion. ok is false on any read error or absent/empty key.
+func (b *Backend) liveOpencodeCredHash(ctx context.Context, secretKey string) (hash, resourceVersion string, ok bool) {
+	sec, err := b.core.CoreV1().Secrets(b.namespace).Get(ctx, opencodeSecretName, metav1.GetOptions{})
+	if err != nil {
+		return "", "", false
+	}
+	v, present := sec.Data[secretKey]
+	if !present || len(v) == 0 {
+		return "", "", false
+	}
+	sum := sha256.Sum256(v)
+	return hex.EncodeToString(sum[:])[:8], sec.ResourceVersion, true
+}
+
+// warnIfOpencodeCredsRotated compares an existing Sandbox's create-time creds
+// stamp against the live opencode-credentials Secret and prints a warning to
+// stderr when they differ: the running pod resolved its provider key ONCE at pod
+// start, so a rotated cluster Secret is not reaching it. Adopting the new key
+// requires a pod restart (suspend/resume, or destroy + recreate). Best-effort:
+// any read error or missing stamp is a silent no-op.
+func (b *Backend) warnIfOpencodeCredsRotated(ctx context.Context, sb *agentv1alpha1.Sandbox) {
+	stamp := sb.Annotations[annotationOpencodeCredsHash]
+	secretKey := sb.Annotations[annotationOpencodeProvider]
+	if stamp == "" || secretKey == "" {
+		return
+	}
+	live, rv, ok := b.liveOpencodeCredHash(ctx, secretKey)
+	if !ok || live == stamp {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"warning: opencode-credentials (key %q) for session %s was rotated since the pod started "+
+			"(stamped %s, live %s, secret resourceVersion %s). The running pod still authenticates with the "+
+			"OLD key — provider keys are resolved from the Secret only at pod start. Restart the pod to adopt "+
+			"the new key: `sandbox suspend %s && sandbox resume %s` (or destroy + recreate).\n",
+		secretKey, sb.Name, stamp, live, rv, sb.Name, sb.Name)
+}
+
+// refreshOpencodeCredsStamp rewrites the Sandbox's creds fingerprint to the live
+// Secret's value in place, so a pod that is about to (re)start against the
+// current Secret carries an accurate stamp. No-op unless the Sandbox already
+// carries a provider stamp (i.e. an opencode session) and the live key resolves.
+func (b *Backend) refreshOpencodeCredsStamp(ctx context.Context, sb *agentv1alpha1.Sandbox) {
+	secretKey := sb.Annotations[annotationOpencodeProvider]
+	if secretKey == "" {
+		return
+	}
+	live, _, ok := b.liveOpencodeCredHash(ctx, secretKey)
+	if !ok {
+		return
+	}
+	if sb.Annotations == nil {
+		sb.Annotations = map[string]string{}
+	}
+	sb.Annotations[annotationOpencodeCredsHash] = live
+}
+
 // opencodeEnv returns the env vars specific to opencode-server sessions: the
 // serve basic-auth credentials, the data dir + config path on the PVC, and the
-// provider API keys (all optional so a pod starts before the cluster Secret
-// exists; the runner enables only providers whose keys are present).
-func opencodeEnv(name string) []corev1.EnvVar {
-	providerKey := func(envName, secretKey string) corev1.EnvVar {
-		return corev1.EnvVar{
-			Name: envName,
-			ValueFrom: &corev1.EnvVarSource{
-				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: opencodeSecretName},
-					Key:                  secretKey,
-					Optional:             boolPtr(true),
-				},
-			},
-		}
-	}
+// SINGLE selected provider's API key.
+//
+// Only the selected provider's key is injected (resolveOpencodeProvider), and its
+// SecretKeyRef is NOT Optional — a fail-closed hardening change from the prior
+// all-providers, all-optional fan-out. If the opencode-credentials Secret is
+// absent, or present but missing the selected key, the kubelet cannot populate
+// the env var and the container never starts: the pod stalls in
+// CreateContainerConfigError with a "couldn't find key <key> in Secret
+// agent-sessions/opencode-credentials" (or "secret ... not found") event, rather
+// than silently starting an agent with no provider credential. The runner still
+// drives opencode config generation off which provider env vars are present
+// (buildOpencodeConfig) — it now sees exactly one.
+func opencodeEnv(spec session.Spec, name string) []corev1.EnvVar {
+	prov := resolveOpencodeProvider(spec.OpencodeProvider)
 	return []corev1.EnvVar{
 		{Name: "OPENCODE_PORT", Value: fmt.Sprintf("%d", portOpencode)},
 		{Name: "OPENCODE_SERVER_USERNAME", Value: opencodeServerUsername},
@@ -1461,9 +1615,16 @@ func opencodeEnv(name string) []corev1.EnvVar {
 		// survive suspend/resume (mirrors claude state at /session/state/claude).
 		{Name: "XDG_DATA_HOME", Value: "/session/state/opencode/data"},
 		{Name: "OPENCODE_CONFIG", Value: "/session/state/opencode/opencode.json"},
-		providerKey("ANTHROPIC_API_KEY", opencodeSecretKeyAnthropic),
-		providerKey("OPENAI_API_KEY", opencodeSecretKeyOpenAI),
-		providerKey("OPENCODE_API_KEY", opencodeSecretKeyZen),
+		{
+			Name: prov.envName,
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: opencodeSecretName},
+					Key:                  prov.secretKey,
+					// NOT Optional: fail closed if the selected provider key is absent.
+				},
+			},
+		},
 	}
 }
 

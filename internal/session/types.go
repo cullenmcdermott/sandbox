@@ -26,6 +26,17 @@ const (
 	BackendOpenCode  = "opencode-server"
 )
 
+// OpenCode provider identifiers selecting which SINGLE model-provider API key an
+// opencode-server session is provisioned with (Spec.OpencodeProvider). The k8s
+// backend injects only the selected provider's key from the shared
+// opencode-credentials Secret; unselected providers are not mounted at all.
+// Empty defaults to OpencodeProviderAnthropic.
+const (
+	OpencodeProviderAnthropic = "anthropic"
+	OpencodeProviderOpenAI    = "openai"
+	OpencodeProviderZen       = "opencode-zen"
+)
+
 // ID is a sandbox session identifier, e.g. "claude-sdk-7f3a".
 type ID string
 
@@ -110,6 +121,18 @@ type Spec struct {
 	// Keychain/file store); the client layer just carries and writes them.
 	// Ignored by non-claude backends.
 	AnthropicCredential []byte `json:"-"`
+
+	// OpencodeProvider selects which SINGLE model-provider API key an
+	// opencode-server session is provisioned with, injected fail-closed from the
+	// shared opencode-credentials Secret. One of OpencodeProviderAnthropic
+	// (default), OpencodeProviderOpenAI, OpencodeProviderZen; empty means
+	// Anthropic. Only that provider's key is mounted — unselected providers are
+	// not injected at all (a hardening change from the prior all-optional,
+	// fail-open fan-out). Choosing a non-default provider is not yet wired through
+	// the client CreateOptions surface (that generalization is a separate item);
+	// until then opencode sessions always resolve to Anthropic. Ignored by
+	// non-opencode backends.
+	OpencodeProvider string `json:"opencodeProvider,omitempty"`
 
 	// Namespace is the Kubernetes namespace for the Sandbox/PVC. Defaults to
 	// "agent-sessions".
