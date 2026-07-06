@@ -273,6 +273,12 @@ type RunOptions struct {
 	// nil, background streams use Connector.
 	ObserverConnector Connector
 
+	// MaxObserverStreams caps the number of concurrently-established background
+	// observer forwards (§1d). Zero uses the built-in default
+	// (defaultMaxObserverStreams). Beyond the cap the coldest streams are evicted
+	// and their rows fall back to watch-driven lifecycle status.
+	MaxObserverStreams int
+
 	// SyncProber reports per-session sync health for the dashboard indicator.
 	SyncProber SyncProber
 
@@ -316,6 +322,9 @@ func (a *App) applyOpts(opts []RunOptions) {
 	}
 	if opts[0].ObserverConnector != nil {
 		a.dashboard = a.dashboard.WithObserverConnector(opts[0].ObserverConnector)
+	}
+	if opts[0].MaxObserverStreams > 0 {
+		a.dashboard = a.dashboard.WithMaxObserverStreams(opts[0].MaxObserverStreams)
 	}
 	if opts[0].SyncProber != nil {
 		a.dashboard = a.dashboard.WithSyncProber(opts[0].SyncProber)
@@ -1226,8 +1235,14 @@ func (a *App) connectCmd(sess Session) tea.Cmd {
 	a.connectStage = StageCheck
 	a.connectDetail = ""
 	a.connectStartedAt = nowFunc()
+	// Preempt the background observer connect burst for the duration of this
+	// foreground attach (§5 leftover): observers pause on the gate so the attach
+	// the user is waiting on wins the kube-apiserver.
+	gate := a.dashboard.attachGate
 	go func() {
 		defer cancel()
+		gate.enter()
+		defer gate.exit()
 		onStage := func(s ConnectStage, detail string) {
 			select {
 			case ch <- connectUpdateMsg{gen: gen, stage: &s, detail: detail}:
@@ -1281,8 +1296,12 @@ func (a *App) createCmd(params CreateParams) tea.Cmd {
 	a.connectDetail = ""
 	a.connectStartedAt = nowFunc()
 	a.connectingOpencode = backend == session.BackendOpenCode
+	// Preempt the observer connect burst while the new session provisions (§5).
+	gate := a.dashboard.attachGate
 	go func() {
 		defer cancel()
+		gate.enter()
+		defer gate.exit()
 		onStage := func(s ConnectStage, detail string) {
 			select {
 			case ch <- connectUpdateMsg{gen: gen, stage: &s, detail: detail}:

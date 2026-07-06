@@ -324,6 +324,12 @@ type liveSSEReconnectFailedMsg struct {
 	// gen is the generation of the failed reconnect connect, so the handler can
 	// clear the in-flight marker it set at launch.
 	gen uint64
+	// err is the connector error. A terminal session.ErrSessionGone (the Sandbox
+	// was destroyed — surfaced by the port-forward's NotFound stop, c191c85) makes
+	// the handler give up the retry loop AT ONCE and tear the observer down,
+	// instead of burning the full backoff budget before degradeUnreachable (§1d
+	// Done()-wiring). Any other (transient) error retries with backoff as before.
+	err error
 }
 
 // liveSSEConnectFailedMsg reports that an initial background connect (not a
@@ -464,8 +470,13 @@ func (m *Model) startLiveSSECmd(sess Session) tea.Cmd {
 	// (the source of the launch-time notification flashing and usage count-up).
 	afterSeq := sess.lastSeq
 	sem := m.connectSem
+	gate := m.attachGate
 
 	return func() tea.Msg {
+		// Yield to any in-flight foreground attach/create connect (§5 leftover):
+		// during the launch burst the user's attach must win the kube-apiserver,
+		// so an observer connect pauses here until no foreground connect is active.
+		gate.wait()
 		// Throttle the connect burst (FU2): hold a slot only for the expensive
 		// setup, then release it so the long-lived stream below doesn't occupy the
 		// cap.
@@ -547,21 +558,23 @@ func (m *Model) reconnectLiveSSECmd(sess Session, attempt int) tea.Cmd {
 	// after a port-forward blip must not replay the whole stream either.
 	afterSeq := sess.lastSeq
 	sem := m.connectSem
+	gate := m.attachGate
 
 	return func() tea.Msg {
+		gate.wait()
 		release := acquireConnectSlot(sem)
 		ctx, cancel := context.WithCancel(context.Background())
 		res, err := connector(ctx, ref, projectPath, func(ConnectStage, string) {})
 		if err != nil {
 			release()
 			cancel()
-			return liveSSEReconnectFailedMsg{id: id, attempt: attempt, gen: gen}
+			return liveSSEReconnectFailedMsg{id: id, attempt: attempt, gen: gen, err: err}
 		}
 		ch, err := res.Client.EventsPassive(ctx, ref, afterSeq)
 		release()
 		if err != nil {
 			cancel()
-			return liveSSEReconnectFailedMsg{id: id, attempt: attempt, gen: gen}
+			return liveSSEReconnectFailedMsg{id: id, attempt: attempt, gen: gen, err: err}
 		}
 		return liveSSEReadyMsg{id: id, ch: ch, cancel: cancel, client: res.Client, gen: gen}
 	}
@@ -604,6 +617,10 @@ func (m *Model) cancelLiveSSE(id session.ID) {
 	// cancelled stream (whose goroutine may still deliver a buffered event or the
 	// channel-close StreamEnded) is treated as stale and ignored.
 	delete(m.liveSSEStreamGen, id)
+	// Drop the LRU recency entry here (the single stream-teardown choke point) so
+	// observerActiveAt tracks only live observer streams and can't accumulate
+	// entries for cancelled/suspended/evicted sessions (§1d).
+	delete(m.observerActiveAt, id)
 }
 
 // liveSSENextCmd reads one event from the channel and re-issues itself.

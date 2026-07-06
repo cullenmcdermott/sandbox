@@ -144,6 +144,11 @@ func (m *Model) handleRunnerEvent(msg RunnerEventMsg) (tea.Model, tea.Cmd) {
 			dup := msg.Event.Seq != 0 && msg.Event.Seq <= m.sessions[i].lastSeq
 			var changed bool
 			if !dup {
+				// Live activity keeps this observer stream warm for the LRU cap
+				// (§1d): a session mid-turn is the last one we want to evict, and a
+				// session heading toward attention is busy first, so it stays warm
+				// and never becomes the coldest victim before it goes Waiting.
+				m.touchObserver(msg.ID)
 				changed = ApplyRunnerEvent(&m.sessions[i], msg.Event)
 				// Advance the resume cursor so a relaunch resumes from here
 				// instead of replaying history.
@@ -361,7 +366,11 @@ func (m *Model) applySeed(states []session.State) (*Model, []tea.Cmd) {
 		for i := range m.sessions {
 			if m.sessions[i].State.Status == session.StatusRunning {
 				id := m.sessions[i].ID()
-				if !m.hasLiveSSE(id) {
+				// admitObserver holds the steady-state cap on the launch burst
+				// (§1d): once at the cap, cold sessions stay on their watch-derived
+				// row and reconnect on demand when focused/attended, instead of
+				// establishing N>cap forwards.
+				if !m.hasLiveSSE(id) && m.admitObserver(id) {
 					cmds = append(cmds, m.startLiveSSECmd(m.sessions[i]))
 				}
 			}
@@ -449,7 +458,7 @@ func (m *Model) applyPodEvent(ev k8s.StateEvent) tea.Cmd {
 			// start-then-cancel connect/port-forward churn on every pod event.
 			if ev.State.Status == session.StatusRunning && m.connector != nil &&
 				id != m.attachedID {
-				if !m.hasLiveSSE(id) {
+				if !m.hasLiveSSE(id) && m.admitObserver(id) {
 					return m.startLiveSSECmd(m.sessions[i])
 				}
 			}
@@ -494,7 +503,8 @@ func (m *Model) applyPodEvent(ev k8s.StateEvent) tea.Cmd {
 	m.sessions = append(m.sessions, sess)
 	m.sortSessions()
 	m.clampCursor()
-	if ev.State.Status == session.StatusRunning && m.connector != nil && !m.hasLiveSSE(sess.ID()) {
+	if ev.State.Status == session.StatusRunning && m.connector != nil &&
+		!m.hasLiveSSE(sess.ID()) && m.admitObserver(sess.ID()) {
 		return m.startLiveSSECmd(sess)
 	}
 	return nil

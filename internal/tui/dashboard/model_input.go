@@ -152,7 +152,7 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.ggPending = true
 			m.toggleGroupView()
 		}
-		return m, nil
+		return m, m.focusObserverSelected()
 	}
 	if ks == "G" {
 		m.ggPending = false
@@ -160,21 +160,23 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if len(rows) > 0 {
 			m.cursor = len(rows) - 1
 		}
-		return m, nil
+		return m, m.focusObserverSelected()
 	}
 	// Navigation: in group view, up/down move over rows in grouped order.
+	// Moving the cursor onto a cold (evicted) session reconnects its observer on
+	// demand so its live status returns (§1d reconnect-on-focus).
 	if key.Matches(msg, m.keys.Up) {
 		if m.cursor > 0 {
 			m.cursor--
 		}
-		return m, nil
+		return m, m.focusObserverSelected()
 	}
 	if key.Matches(msg, m.keys.Down) {
 		visible := m.visibleRows()
 		if m.cursor < len(visible)-1 {
 			m.cursor++
 		}
-		return m, nil
+		return m, m.focusObserverSelected()
 	}
 
 	// Filter start

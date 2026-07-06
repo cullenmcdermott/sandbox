@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -169,6 +170,24 @@ type Model struct {
 	// destroyed while its pod runs, so showing it is an O(1) swap (see warm.go).
 	retained map[session.ID]*TranscriptModel
 
+	// maxObserverStreams caps the number of concurrently-established background
+	// observer forwards (§1d). Zero uses defaultMaxObserverStreams. Set via
+	// WithMaxObserverStreams / RunOptions.MaxObserverStreams. See observerCap.
+	maxObserverStreams int
+
+	// observerActiveAt is the LRU recency clock for established observer streams:
+	// session → last time it was active (a live event applied) or visible
+	// (focused/attached). The coldest entry is the eviction victim once the
+	// established set exceeds observerCap. Pruned as streams are cancelled/evicted
+	// so it tracks only live observers. See warm.go's observer manager.
+	observerActiveAt map[session.ID]time.Time
+
+	// attachGate lets a foreground attach/create connect preempt the background
+	// observer connect burst: observer connect goroutines pause on it while a
+	// foreground connect is in flight (§5 leftover). Foreground connects never
+	// block on it. See attachGate in warm.go.
+	attachGate *attachGate
+
 	// reconcileMisses counts how many consecutive periodic cluster re-lists a
 	// session has been absent from. The watch informer can miss a delete that
 	// happened before its cache synced, leaving a phantom session in the list
@@ -294,9 +313,21 @@ func New(backend Backend) *Model {
 		syncProbedAt:      make(map[session.ID]time.Time),
 		retained:          make(map[session.ID]*TranscriptModel),
 		connectSem:        make(chan struct{}, maxConcurrentBackgroundConnects),
+		observerActiveAt:  make(map[session.ID]time.Time),
+		attachGate:        newAttachGate(),
 		engine:            anim.NewEngine(),
 		caps:              terminal.Detect(),
 	}
+}
+
+// WithMaxObserverStreams overrides the steady-state cap on concurrently-
+// established background observer forwards (§1d). Zero/negative keeps the
+// default (defaultMaxObserverStreams). Call before Init.
+func (m *Model) WithMaxObserverStreams(n int) *Model {
+	if n > 0 {
+		m.maxObserverStreams = n
+	}
+	return m
 }
 
 // WithConnector sets the Connector for live per-session SSE status updates.
@@ -616,6 +647,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.liveSSEChannels[msg.id] = msg.ch
 		m.liveSSEClients[msg.id] = msg.client
 		m.liveSSEStreamGen[msg.id] = msg.gen
+		// The just-established stream is the warmest (LRU); stamp it so it is never
+		// the victim of the cap enforcement it may trigger, then evict the coldest
+		// unprotected stream(s) if this registration pushed us over the cap (§1d).
+		m.touchObserver(msg.id)
+		m.enforceObserverCap(msg.id)
 		// Mark the session catching-up (§1a step 3): the after=<seq> replay burst
 		// that follows mutates state but must not toast/flash. Cleared at the
 		// EventStreamLive boundary in handleRunnerEvent.
@@ -688,6 +724,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Running and we have budget left; otherwise declare it unreachable and
 		// show its honest status.
 		delete(m.liveSSEConnecting, msg.id)
+		// Terminal forward (§1d Done()-wiring): the connect failed because the
+		// Sandbox is gone (the port-forward's NotFound stop, c191c85, surfaces as
+		// session.ErrSessionGone through the connector). Retrying can only fail the
+		// same way, so drop the observer NOW rather than exhaust the backoff budget,
+		// and let the watch/reconcile path prune the row. dropRetained releases the
+		// warm model; degradeUnreachable shows the honest end-state meanwhile.
+		if errors.Is(msg.err, session.ErrSessionGone) {
+			m.dropRetained(msg.id)
+			delete(m.observerActiveAt, msg.id)
+			m.degradeUnreachable(msg.id)
+			return m, m.notifyIfBackgroundAttention(m.attachedID)
+		}
 		next := msg.attempt + 1
 		sess := m.sessionByID(msg.id)
 		if sess.ID() != "" && sess.State.Status == session.StatusRunning && next < liveSSEMaxRetries {
