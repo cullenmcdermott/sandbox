@@ -298,6 +298,56 @@ there. HIGH items are the at-a-glance tells; most are renderer-local.
   Cross-ref §8's mode-enum abstraction (6.2) — flip the default now, don't
   wait for the enum.
 
+### 2e. Premium-feel program (2026-07-07 Crush/ecosystem research)
+
+Design detail lives in [`docs/tui-premium-plan.md`](docs/tui-premium-plan.md)
+(draft, awaiting sign-off) — five-agent comparative study of Crush
+(FSL: **ideas only, never copy code**), ultraviolet, gh-dash, huh (all MIT).
+Items below are the plan's workstreams; the doc carries mechanics, license
+rules, and sequencing. Complements — does not supersede — §2a/§2c.
+
+- [ ] **A. Dialog stack manager + async grace period + huh for form dialogs**
+  — one `Dialog` interface + stack on App replaces ~8 bespoke overlays and 4
+  copies of center/shadow math (`model_render.go:122-166`, `app.go:1009`,
+  `app.go:1137`, `backend_picker.go:211`); 200ms/1.5s/500ms grace kills the
+  async-permission blind-approve class. Plan §A.
+- [ ] **A4. Input coalescing** — no `tea.WithFilter` today; 16ms wheel/motion
+  throttle with sign-aware delta summation. Plan §A4.
+- [ ] **B. Transcript depth** — per-tool body dispatch (grow
+  `toolExpandBody`, `transcript_render.go:524`), per-card
+  selection/expansion (today global-latest only,
+  `transcript_input.go:236-241`; unlocks per-subagent collapse + per-item
+  copy), three-state thinking view (slice AFTER glamour render), go-udiff +
+  chroma diffview replacing the hand-rolled LCS
+  (`permission_diff.go:228-277`), lipgloss/tree subagent cards (also retires
+  the §1c child-line budget residual). Plan §B.
+- [ ] **C. gh-dash lifts (MIT, same charm v2 stack)** — async action task
+  queue (start/finish/error + `[⟳ N]` badge + 2s auto-clear in the
+  statusline) and the fixed+Grow table/column engine for the session list.
+  Plan §C.
+- [ ] **D. Motion & chrome** — scrambled-glyph gradient thinking shimmer
+  (deterministic staggered fade-in, frame cache; honor
+  `SANDBOX_REDUCE_MOTION`), `v.WindowTitle` + `ReportFocus` + native
+  progress bar (ghostty keep-alive quirk), composer micro-UX (prompt
+  history ↑/↓ with draft preservation, paste-to-attachment, randomized
+  placeholders). Plan §D.
+- [ ] **E. Theming: iTerm scheme import + /theme picker** — vendor ~12
+  curated schemes from mbadolato/iTerm2-Color-Schemes (MIT) in the ghostty
+  `key=value` export format, `just gen-themes` → `schemes.gen.go`,
+  `Derive()` maps 22 scheme colors → semantic tokens (perceptual blends +
+  contrast-floor CI test; imported themes keep their own ANSI-16 for
+  authentic tool output), `/theme` picker with live preview + persisted
+  choice (`SANDBOX_THEME` env > saved > auto). `tui/theme/theme.go:290-317`
+  already stubs the hooks. Plan §E.
+- [ ] **F. Ultraviolet phase 1–2 (ADR first)** — bubbletea v2 already
+  renders through uv; composing cells ourselves deletes the
+  `withBackground`/`bgSeq`/`clampLines` opacity machinery
+  (`zones.go:50-105`) and collapses the dual overlay systems. Does NOT fix
+  tea.Raw/Kitty (already correct) or child resize seeding. Plan §F.
+- [ ] **G. Capability probing + notification backend selection (LOW)** —
+  allowlist-gated DA1/XTVERSION/pixel/Kitty/OSC99 probe burst; notification
+  escalation (native/OSC99/OSC777/bell) with focus suppression. Plan §G.
+
 ## 3) Decision record — Claude Code as the local client (SETTLED 2026-07-04)
 
 Three-track research (official surface, community art, repo feasibility) into
