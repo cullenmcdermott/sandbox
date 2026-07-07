@@ -9,7 +9,7 @@ import (
 )
 
 // golden_multiturn_test.go — the FRONTEND half of the backend-parity matrix
-// (docs/testing-parity-plan.md, Phases A/E). Because every backend now emits the
+// (docs/archive/testing-parity-plan.md, Phases A/E). Because every backend now emits the
 // SAME normalized events through the runner, the dashboard renders them through
 // ONE transcript renderer — so frontend parity is a shared, parameterized golden:
 // replay one scripted multi-turn conversation as EACH backend's transcript and

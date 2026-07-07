@@ -4,7 +4,7 @@
 // the pure token-parsing helpers the CLI and TUI share. SDK consumers pair it
 // with the parent client package (CreateOptions.UseAnthropicAccount /
 // SelectAnthropicAccount) to run sessions on a stored account. See Store and
-// docs/anthropic-account-auth-plan.md.
+// docs/archive/anthropic-account-auth-plan.md.
 //
 // The store reads and writes token material by necessity, but one logging
 // invariant holds throughout the package: secret bytes are never printed,

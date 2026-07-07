@@ -9,7 +9,7 @@ import (
 )
 
 // golden_adverse_test.go — Phase E adverse-state frames for the shared transcript
-// renderer (docs/testing-parity-plan.md). The happy path is golden'd per-backend in
+// renderer (docs/archive/testing-parity-plan.md). The happy path is golden'd per-backend in
 // golden_multiturn_test.go; this extends the golden set to the adverse states a turn
 // can enter: a permission box, an ExitPlanMode plan card, an error block, and a
 // mid-stream (un-completed) assistant message.

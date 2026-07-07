@@ -2,7 +2,7 @@
 
 The canonical, testable definition of "a backend is at parity." Every agent
 backend (claude-sdk, opencode, Codex) must satisfy **both** surfaces below. This is
-the spec the shared harnesses enforce; see `docs/testing-parity-plan.md` for the
+the spec the shared harnesses enforce; see `docs/archive/testing-parity-plan.md` for the
 rollout plan and the current status matrix.
 
 A backend is onboarded by **filling its column**, not inventing tests: add it to

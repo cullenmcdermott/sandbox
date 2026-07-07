@@ -7,7 +7,7 @@
 // `opencode serve` (opencode.ts) and the interactive `opencode attach` path are
 // unchanged — both talk to the same server; the runner now also can.
 //
-// Event mapping (see docs/opencode-turn-adapter-notes.md):
+// Event mapping (see docs/archive/opencode-turn-adapter-notes.md):
 //   message.part.updated(text)      → message.started / message.delta / message.completed
 //   message.part.delta(text)        → message.started / message.delta (streaming channel)
 //   message.part.updated(reasoning) → reasoning.started / reasoning.delta / reasoning.completed

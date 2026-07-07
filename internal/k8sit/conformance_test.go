@@ -12,7 +12,7 @@ import (
 	"github.com/cullenmcdermott/sandbox/internal/session"
 )
 
-// Phase C — k8sit backend-conformance suite (docs/testing-parity-plan.md). Every
+// Phase C — k8sit backend-conformance suite (docs/archive/testing-parity-plan.md). Every
 // scenario is table-driven over backendCases so each backend runs the IDENTICAL
 // live checks: a new backend (Codex) is onboarded by appending its row, never by
 // inventing a test story. These exercise the runTurn/registry-level parity paths

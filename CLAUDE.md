@@ -10,8 +10,41 @@ This is the k8s-native successor to a Lima-based local sandbox CLI. The old Lima
 
 ## Task backlog
 
-When you discover or are told about a new issue, note it (in the PR, or a
-`TODO.md`-style local note) with a `file:line` pointer to the relevant code.
+`TODO.md` is the backlog, and its **"How to use this file" preamble is the
+canonical protocol** — numbered workstreams, every item carries `file:line`
+pointers + a fix direction, and finished items get checked off with a one-line
+summary while the detail moves to `docs/archive/done-log-YYYY-MM.md`. Follow it.
+When you discover or are told about a new issue mid-task, add it to `TODO.md`
+(§0 inbox, or the matching workstream) with a `file:line` pointer.
+
+## Docs map & lifecycle
+
+`docs/` holds two kinds of files. Know which you're touching:
+
+**Durable references** — when a change alters what one of these describes,
+update the doc *in the same change* (stale references are bugs):
+
+- `docs/architecture.md` — component map, event-model rationale
+- `docs/runner-api.md` — the HTTP+SSE contract between CLI and runner
+- `docs/session-lifecycle.md` — create/suspend/resume/destroy flow
+- `docs/verification-protocol.md` — the `just check`/`just verify` philosophy
+- `docs/backend-conformance.md` — the per-backend test contract
+
+**Plans / ADRs / reviews** — everything else is point-in-time. Rules:
+
+- Every plan/ADR carries a `Status:` line near the top (planning / draft /
+  implemented / superseded).
+- When your work completes or supersedes one, set its status and `git mv` it
+  to `docs/archive/` in the same change (update inbound references — `rg` for
+  the filename). `docs/archive/` is the **only** archive; done-logs live there
+  too. Links *inside* archived docs are as-of-archive-time and stay unfixed.
+- `docs/superpowers/` is the maintainer's local-only plan scratch (globally
+  gitignored — other clones don't have it). Never rely on it from tracked
+  files without saying so.
+
+**Repo hygiene:** if you notice tracked cruft — empty files, stale build
+outputs, docs your change just obsoleted — remove or archive it in a dedicated
+commit rather than leaving it for the next agent.
 
 ## Commands
 

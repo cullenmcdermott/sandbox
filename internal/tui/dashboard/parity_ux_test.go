@@ -6,7 +6,7 @@ import (
 	"github.com/cullenmcdermott/sandbox/internal/session"
 )
 
-// parity_ux_test.go — Phase F of docs/testing-parity-plan.md: the cross-backend
+// parity_ux_test.go — Phase F of docs/archive/testing-parity-plan.md: the cross-backend
 // UX-PARITY BAR. Every backend emits the SAME normalized events and the dashboard
 // renders them through ONE backend-agnostic transcript, so "no second-class
 // backends" is testable: the SAME events/keys must produce the SAME affordances for

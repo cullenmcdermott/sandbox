@@ -51,7 +51,7 @@ const (
 )
 
 // backendCase is the single source of truth for the integration conformance
-// suite (Phase A of docs/testing-parity-plan.md): every live test runs the same
+// suite (Phase A of docs/archive/testing-parity-plan.md): every live test runs the same
 // scenarios for each row, so a new backend (Codex) is onboarded by appending one.
 type backendCase struct {
 	name      string // subtest name

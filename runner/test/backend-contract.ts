@@ -1,4 +1,4 @@
-// Shared backend-conformance contract (Phase A of docs/testing-parity-plan.md).
+// Shared backend-conformance contract (Phase A of docs/archive/testing-parity-plan.md).
 //
 // Every backend's event mapper (claude-sdk `mapping.ts`, opencode
 // `opencode-turn.ts`, Codex next) emits normalized events through the SAME

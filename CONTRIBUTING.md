@@ -50,11 +50,11 @@ just gen         # regenerate event-model code (see below)
 
 ### Test caveat: sandboxed environments bind ports
 
-`internal/runner` and `internal/models` bind local ports (`httptest`, listeners)
-that some sandboxed dev environments block. If you develop inside such a sandbox,
-run those suites — and `just test` / `just check` overall — **with the command
-sandbox disabled**, or those tests will fail spuriously on port binding rather than
-on real defects.
+Several suites bind local ports or spawn PTYs that sandboxed dev environments
+block. The canonical, kept-current list lives in **CLAUDE.md → "Before you call
+it done"**; the short version is run `just test` / `just check` with the command
+sandbox disabled, or those tests fail spuriously on port binding rather than on
+real defects.
 
 ### Linters aren't required locally
 
@@ -94,8 +94,9 @@ the rationale.
 - Branch off `main`; keep PRs focused.
 - Run `just check` and make sure it is green before opening the PR.
 - Include tests for behavior changes and bug fixes.
-- Update the relevant docs (`docs/architecture.md`, `docs/runner-api.md`, or the
-  READMEs) when you change behavior or the API contract.
+- Update the relevant docs when you change behavior or the API contract — the
+  list of durable references (and the plan-doc archive convention) is in
+  **CLAUDE.md → "Docs map & lifecycle"**.
 
 ## License
 

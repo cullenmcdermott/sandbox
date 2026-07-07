@@ -1,7 +1,7 @@
 package dashboard
 
 // triage_console_test.go — oracle + counter tests for the Triage Console
-// redesign (docs/dashboard-redesign.md). Each test cites the phase / P-item it
+// redesign (docs/archive/dashboard-redesign.md). Each test cites the phase / P-item it
 // proves. mkEvent / makeSession live in the sibling test files.
 
 import (

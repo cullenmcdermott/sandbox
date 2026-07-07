@@ -1,6 +1,6 @@
 package dashboard
 
-// zones.go — the Triage Console layout (docs/dashboard-redesign.md). The
+// zones.go — the Triage Console layout (docs/archive/dashboard-redesign.md). The
 // dashboard is composed into bands: a persistent header band, a one-line cluster
 // strip, a mid region split into a SESSIONS list (left) + a DETAIL pane (right),
 // and a persistent bottom status bar. Every band paints an opaque background so a

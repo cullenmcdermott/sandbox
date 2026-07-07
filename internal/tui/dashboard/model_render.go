@@ -277,7 +277,7 @@ func (m *Model) rowScrollTop(rows []groupedSession, height int) int {
 }
 
 // renderSessionRow renders one session as two physical lines joined by "\n" (the
-// row spec in docs/dashboard-redesign.md):
+// row spec in docs/archive/dashboard-redesign.md):
 //
 //	line 1: selection-bar(2) attention-dot(2) status-glyph(2) title(flex) right-aligned relTime
 //	line 2 (dim, indented): "<model>·<client>  <short-id>  <ctx%>  [⚠ if failed]"

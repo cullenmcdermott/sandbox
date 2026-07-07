@@ -16,7 +16,7 @@ import (
 // TestBackendTurn drives a REAL one-shot turn through EACH backend end to end
 // (CreateSession → Start → PortForward → runner.StartTurn → SSE Events), table-
 // driven over backendCases so every backend runs the identical scenario — the
-// backend half of the parity matrix (docs/testing-parity-plan.md). opencode goes
+// backend half of the parity matrix (docs/archive/testing-parity-plan.md). opencode goes
 // through its turn adapter (runner/src/opencode-turn.ts) on the free big-pickle
 // model ($0, no key); claude asserts a real reply only when its OAuth token Secret
 // is present, else degrades to plumbing-only. Codex is onboarded by appending a
