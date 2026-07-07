@@ -22,6 +22,24 @@ func TestValidateAnthropicAuth(t *testing.T) {
 	}
 }
 
+// TestValidateOpencodeProvider: the valid selectors ("", the three
+// session.OpencodeProvider* spellings) clear the gate; anything else — notably
+// the tempting shorthand "zen" — is rejected with ErrInvalidOpencodeProvider
+// rather than silently falling through to the backend's Anthropic default
+// (which would inject a DIFFERENT provider's credential than intended).
+func TestValidateOpencodeProvider(t *testing.T) {
+	for _, ok := range []string{"", "anthropic", "openai", "opencode-zen"} {
+		if err := validateOpencodeProvider(ok); err != nil {
+			t.Errorf("validateOpencodeProvider(%q): unexpected error %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"zen", "Anthropic", "open-ai", "opencode_zen", "opencode-zen "} {
+		if err := validateOpencodeProvider(bad); !errors.Is(err, ErrInvalidOpencodeProvider) {
+			t.Errorf("validateOpencodeProvider(%q): got %v, want ErrInvalidOpencodeProvider", bad, err)
+		}
+	}
+}
+
 // TestValidateAnthropicAccount covers the fail-closed account/credential
 // contract: a named account with empty bytes errors (ErrAnthropicCredentialMissing),
 // bytes with no account id error (ErrAnthropicAccountRequired), an id that is

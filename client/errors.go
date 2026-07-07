@@ -46,6 +46,14 @@ var (
 	// default OAuth path.
 	ErrInvalidAnthropicAuth = errors.New("sandbox: invalid anthropic auth")
 
+	// ErrInvalidOpencodeProvider is returned by Create when
+	// CreateOptions.OpencodeProvider is a non-empty value other than the exact
+	// session.OpencodeProvider* spellings ("anthropic", "openai",
+	// "opencode-zen"). A typo errors here rather than silently selecting the
+	// backend's Anthropic default — and with it a different provider's
+	// credential than the caller intended.
+	ErrInvalidOpencodeProvider = errors.New("sandbox: invalid opencode provider")
+
 	// ErrAnthropicCredentialMissing is returned by Create when
 	// CreateOptions.AnthropicAccountID names an account but AnthropicCredential
 	// is empty — the resolver produced no bytes (e.g. a denied Keychain read or

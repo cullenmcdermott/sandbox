@@ -276,6 +276,16 @@ type CreateOptions struct {
 	// var only. Bytes without an AnthropicAccountID are rejected with
 	// ErrAnthropicAccountRequired. Ignored by non-claude backends.
 	AnthropicCredential []byte `json:"-"`
+	// OpencodeProvider selects which SINGLE model-provider API key an
+	// opencode-server session's pod receives from the shared opencode-credentials
+	// Secret (fail-closed — the pod refuses to start if the selected provider's
+	// key is absent). One of session.OpencodeProviderAnthropic,
+	// session.OpencodeProviderOpenAI, session.OpencodeProviderZen. Empty keeps
+	// the documented default (Anthropic); any OTHER value is rejected with
+	// ErrInvalidOpencodeProvider rather than silently defaulting (a typo must
+	// not select a different provider's credential). Ignored by non-opencode
+	// backends.
+	OpencodeProvider string
 	// StorageClass is the PVC storage class (empty uses the cluster default).
 	StorageClass string
 	// StorageGiB is the PVC size in GiB (0 uses the backend default, 50).
@@ -306,6 +316,9 @@ func (c *Client) Create(ctx context.Context, opt CreateOptions) (*Session, error
 		return nil, err
 	}
 	if err := validateAnthropicAuth(opt.AnthropicAuth); err != nil {
+		return nil, err
+	}
+	if err := validateOpencodeProvider(opt.OpencodeProvider); err != nil {
 		return nil, err
 	}
 	// Fail closed on account/credential mismatch (a design-review requirement):
@@ -351,6 +364,7 @@ func (c *Client) Create(ctx context.Context, opt CreateOptions) (*Session, error
 		AnthropicAuth:       opt.AnthropicAuth,
 		AnthropicAccountID:  opt.AnthropicAccountID,
 		AnthropicCredential: opt.AnthropicCredential,
+		OpencodeProvider:    opt.OpencodeProvider,
 		StorageClass:        opt.StorageClass,
 		StorageGiB:          opt.StorageGiB,
 	}
@@ -502,6 +516,21 @@ func validateAnthropicAuth(a string) error {
 		return nil
 	default:
 		return fmt.Errorf("%w: %q (must be \"oauth\" or \"api-key\")", ErrInvalidAnthropicAuth, a)
+	}
+}
+
+// validateOpencodeProvider rejects a non-empty OpencodeProvider that isn't one
+// of the exact session.OpencodeProvider* spellings — otherwise a typo like
+// "zen" would silently fall through to the backend's Anthropic default and
+// select a DIFFERENT provider's credential than the caller intended (the §7a
+// "validate, not default" contract for the user-facing selector).
+func validateOpencodeProvider(p string) error {
+	switch p {
+	case "", session.OpencodeProviderAnthropic, session.OpencodeProviderOpenAI, session.OpencodeProviderZen:
+		return nil
+	default:
+		return fmt.Errorf("%w: %q (must be %q, %q, or %q)", ErrInvalidOpencodeProvider,
+			p, session.OpencodeProviderAnthropic, session.OpencodeProviderOpenAI, session.OpencodeProviderZen)
 	}
 }
 
