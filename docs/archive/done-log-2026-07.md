@@ -664,3 +664,33 @@ real defect found and fixed in-tree.
   turn.first_message / turn.first_delta / turn.settled + msgs= count.
 - `sandbox trace` (event replay) deliberately untouched. SDK surface
   unchanged. Next-instrumentation list recorded in TODO.
+
+## 2026-07-06 — TODO.md prune (maintainer ask)
+
+All checked-off items were removed from TODO.md outright (previously retained
+as one-line summaries). Their detail is in the sections above and in
+done-log-2026-06.md. Residual "STILL OPEN" tails were promoted to standalone
+open items: §1c statusline row-1 tail + subagent child-tool budgeting; §1d
+ForwardDone seam + mutagen conflict detail; §1e index re-arm follow-up; §2a
+row-model consolidation (from §1b); §2c tool-card follow-ups; §4
+visibleSessions memoize + lastCompleteBlock rescan (both measure-first); §7a
+ClusterRole namespacing; §7c observer interrupt-id leak.
+
+Trivial one-liners removed without a matching detail section above, recorded
+here for completeness:
+
+- §3: README documents the supported `claude --resume` escape hatch
+  (one-way-fork / exits-the-audit-envelope caveat; `claudeSession` field name
+  verified against the status API + local index).
+- §5: `waitForPodReady` poll tightened 2s→1s (1s not 500ms — gentle on the
+  API server).
+- §7a: README OpenCode auth section — keys→env table, fail-closed + rotation
+  semantics, namespace scoping, suspend/resume persistence.
+- §7: Fable review of the OpenCode idle/status/reaper fix — APPROVED; caveat
+  worth keeping in mind: the dashboard `clearPendingPermission()` calls are
+  safe today because `setStatus` dedups and busy/idle fire only at turn
+  boundaries (`runner/src/session.ts:202`, `claude.ts:345`) — re-verify if
+  status emission points ever grow.
+- §10: PTY-test in-sandbox caveat documented in CLAUDE.md; `just check`
+  honest skip report; sdktest tui surface pins; `client.RunnerClient`
+  widening pin (all Fable-approved 2026-07-06, detailed in earlier batches).

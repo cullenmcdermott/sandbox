@@ -1,6 +1,21 @@
 # Per-session git worktree lifecycle — design
 
-**Status:** DRAFT — design only. No code lands until the maintainer signs off.
+**Status:** ACCEPTED (maintainer sign-off 2026-07-07) — the §9 open questions
+are resolved (see decision-proposals-2026-07-06.md §4): (1) add
+`Spec.WorkspacePath`, `ProjectPath` stays the repo root; (2) transcripts key
+off the worktree path — accepted; (3) `WorktreeAuto` default from day one;
+(4) non-git collision warns only; (5) dirty destroy = silent WIP commit to
+the session branch, `--discard` opt-out; (6) no merge helper in v1; (7)
+cross-machine attach ships B1 only (maintainer rarely roams machines); (8)
+**the TUI owns the branch-name/commit-message proposal prompt** — no
+`Session.ProposeBranch` SDK helper in v1 (avoids the propose-exchange landing
+in the session transcript; the SDK surface stays the deterministic
+`ConvertToBranch` only — revisit the helper if an external consumer asks);
+(9) any valid ref, prompt suggests prefixes; (10) worktree root
+`~/.local/share/sandbox/worktrees/<id>` + move `ssh/` inside the state root
+in the same pre-OSS break. Implementation is unblocked: Spec split →
+auto-worktree at Create → capture-then-remove teardown/reap →
+convert-to-branch → TUI proposal prompt.
 **Owner ask:** TODO.md §9 "Per-session git worktree lifecycle" (promoted from inbox 2026-07-04).
 **Cross-ref:** TODO.md §1d "Concurrent sessions on one project share one local sync endpoint, no dedup" (`internal/sync/sync.go:197` — the collision is analyzed in §3 below and, spoiler, per-session worktrees fix it for git projects).
 **SDK-first:** every new capability is specified as a `client/` addition first; the CLI/TUI dogfood it (CLAUDE.md "New capability goes HERE first, not in `internal/cli`").

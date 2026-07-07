@@ -1,9 +1,20 @@
 # ADR: Runner package-manager strategy (Debian base + Flox layer)
 
-- **Status:** Proposed (Opus draft, 2026-07-05). **Docs only — implementation is
-  gated on maintainer sign-off of this ADR.** Nothing in this document has been
-  built; the code references below are the *seams* an implementation would touch,
-  not changes already made.
+- **Status:** ACCEPTED WITH AMENDMENT (maintainer, 2026-07-07). The env-seam,
+  cache, CI, and agent-guidance designs below stand as written, but the **base
+  image decision is amended**: instead of committing to option 1
+  (Debian `node:24-slim` + layered Flox), first **spike `ghcr.io/flox/flox`
+  as the base image with everything above the OS resolving from a pinned
+  Flox env** (node, sshd, sqlite, opencode — one package world, no apt/Flox
+  split; pin flox ≥ 1.13 for `flox run <pkg>` one-offs). Acceptance gate for
+  the spike: image builds in Depot, sshd + PVC host-key path work,
+  `better-sqlite3` compiles against the Flox node, and backend conformance
+  passes in kind. If the spike hits a wall, fall back to option 1 exactly as
+  written below, with the wall documented. The Nix-built OCI (option 2)
+  remains pass 2 via flake container outputs; FloxHub publish of the CLI via
+  Depot CI can land independently (see decision-proposals §2.8). Standing
+  directive recorded 2026-07-06: Flox (preferably) or Nix is the preferred
+  install mechanism everywhere in the chain.
 - **Scope:** TODO.md §7b (Flox/Nix-first runner environment). This ADR decides
   the runner image's package-manager strategy and the runtime env/mount seam; it
   does **not** decide the cache-publish gate (a follow-on design) and does **not**

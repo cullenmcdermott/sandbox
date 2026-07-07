@@ -1,5 +1,8 @@
 # `/effort` integration plan
 
+Status: **implemented** (archived 2026-07-06 — `/effort` ships in the dashboard
+command palette and the runner maps it to the SDK `EffortLevel`).
+
 Wire an in-session **`/effort`** slash command into the Claude Agent SDK TUI so the
 user can set the SDK reasoning-effort level per turn, mirroring the existing
 `/model` override path end-to-end. Top tier is labeled **`ultracode`**.

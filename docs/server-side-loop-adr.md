@@ -1,7 +1,14 @@
 # ADR: Server-side autopilot loop (runner-owned driver)
 
-- **Status:** Proposed (Opus draft, 2026-07-05). Implementation gated on
-  maintainer sign-off.
+- **Status:** ACCEPTED (maintainer sign-off 2026-07-07) — all open items
+  resolved as proposed in `docs/decision-proposals-2026-07-06.md` §1:
+  endpoint shape (a) `PUT/DELETE /sessions/:id/autopilot`; `max_iterations`
+  default **50** (always enforced), `token_budget` optional but shipped in
+  v1; capability bit lives in `GET /sessions/:id/status`; H2 retry = 5
+  attempts, backoff `max(interval_ms, 30s)` doubling capped at 5 min;
+  Q1/H1 staleness bound N = 30 min; H4 anti-double-submit guard skipped in
+  v1 (accepted skew risk). Implementation is unblocked (schema → runner →
+  TUI → tests).
 - **Scope:** TODO.md §1e item 6. Items 1–5 (the local `tea.Tick` driver:
   detach-durable `/goal` continuation, sentinel termination, lapse toast,
   idle-reaper warn, esc contract) are **already implemented** and do **not**

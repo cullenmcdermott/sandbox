@@ -1,7 +1,8 @@
 # ADR: KRO composite resource for session provisioning
 
-- **Status:** Research / Proposed (Opus draft, 2026-07-05). No code until
-  decided.
+- **Status:** DECIDED (maintainer, 2026-07-07) — recommendation accepted: do
+  NOT adopt kro; implement `ownerReferences` (Secret+PVC → Sandbox) directly
+  in `CreateSession` (TODO §6 item 3, now unblocked). Archived.
 - **Scope:** TODO.md §10 "Research/ADR: KRO composite resource". Evaluates
   whether [kro](https://kro.run) (Kube Resource Orchestrator) should wrap the
   per-session **Secret + PVC + Sandbox** trio into one composite custom

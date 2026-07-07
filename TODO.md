@@ -6,33 +6,25 @@
 > section (or one bolded cluster), plan the cluster together where the intro
 > says so, and when a batch lands: check it off, summarize in one line, move the
 > detail to `docs/archive/done-log-2026-07.md` (convention). Provenance docs:
-> [`docs/review-2026-06-24.md`](docs/review-2026-06-24.md) (deep review behind
+> [`docs/archive/review-2026-06-24.md`](docs/archive/review-2026-06-24.md) (deep review behind
 > older items), the 2026-07-01 whole-system review (§1d/§8 intros), and the
-> 2026-07-04 multi-agent TUI audit (§1a–1c, §2 — every bug adversarially
+> 2026-07-04 multi-agent TUI audit (§1c residuals, §2 — every bug adversarially
 > re-verified against source). Done-work history:
 > [`docs/archive/done-log-2026-06.md`](docs/archive/done-log-2026-06.md),
 > [`done-log-2026-07.md`](docs/archive/done-log-2026-07.md).
 >
-> **Opus-ready map (2026-07-04 triage; refreshed later the same day after a
-> Fable review + pointer re-verification pass — every file:line below was
-> spot-checked against the working tree):** §1a–§1c, §1e items 1–5, §2a–§2c,
-> §4, §7a (Fable-reviewed — follow its ordering decisions), §10 (except the
-> ops/traefik item) and most of §5 carry pointers + fix direction — pick a
-> cluster and go; §1a's replay-class item and §1e items 1–2 have full fix
-> plans. ADRs/design docs Opus can DRAFT now (implementation gated on
-> maintainer sign-off): §7b runner package-manager strategy, §1e item 6
-> server-side loop, §10 KRO, §9 worktrees (the maintainer spec in the item is
-> enough to design from). Still gated on a maintainer decision: §8
-> (deliberate design calls), the §2d yolo-default + first-account items
-> (Fable recommendations recorded inline). Needs the
-> real cluster or live services, not opus-offline: §5 Spegel deploy, §6 codex
-> spike, §7 verify sweeps, parts of §1d.
+> **2026-07-06 prune:** everything closed through the 2026-07-06 Fable review
+> pass (27/28 approved as-shipped, one `catchingUp` fix; `just check` green,
+> zero skipped gates) was removed from this file; residual "STILL OPEN" tails
+> were promoted to standalone open items below. Detail lives in the done log.
 >
-> **2026-07-06 Fable review pass:** every 2026-07-05 item stamped PENDING
-> FABLE REVIEW across §1a–§1e / §2a–§2d / §4 / §10 was adversarially
-> verified and archived to the done log (27/28 approved as-shipped; one
-> fix: §1a `catchingUp` release paths). `just check` green, zero skipped
-> gates.
+> **Opus-ready map:** §1c–§1d residuals, §2a–§2d, §4, §7a and the §5 GC
+> follow-ups carry pointers + fix direction — pick a cluster and go. Drafted,
+> awaiting maintainer sign-off: §1e server-side-loop ADR, §7b package-manager
+> ADR, §10 KRO ADR, §9 worktree design. Still gated on a maintainer decision:
+> §8 (deliberate design calls), the §2d yolo-default + first-account items
+> (Fable recommendations recorded inline). Needs the real cluster or live
+> services: §5 Spegel deploy, §6 codex spike, §7 verify sweeps, parts of §1d.
 
 ## 0) Inbox — human notes, needs triage
 
@@ -40,189 +32,74 @@ Raw maintainer notes. Triage = either promote into a numbered section with
 pointers, or answer inline and archive. (Resolved investigations moved to the
 done log.)
 
-*(empty — 2026-07-04 triage promoted everything into §2d, §5, §7, §7b, §9,
-§10 or answered it in the done log's "Inbox investigations" section.)*
+* Create nix flake (with binary and container outputs?). Is there a place to
+  host nix binary cache, maybe tigris? Also consider publishing to FloxHub as
+  a public package (via Depot CI). — *note: a flake exists but only packages
+  the Go CLI (`flake.nix:20-33`); "container outputs" intersects the §7b
+  package-manager ADR (Nix-built OCI is its deferred option 2), the
+  binary-cache hosting question is the ADR's §4a substituter decision, and
+  FloxHub publishing is the distribution channel on top — proposals for all
+  three in
+  [`docs/decision-proposals-2026-07-06.md`](docs/decision-proposals-2026-07-06.md)
+  §2.3/§2.8. Standing directive recorded 2026-07-06: Flox (preferably) or
+  Nix is the preferred install mechanism everywhere in the chain. Triage
+  alongside the §7b sign-off.*
 
 ## 1) Correctness bugs
 
-### 1a. TUI SSE / state-machine cluster (2026-07-04 audit) — CLOSED
+§1a (TUI SSE / state-machine cluster) and §1b (group view / sort / search /
+pickers) are fully closed — done log. Residuals from §1c live below; the §1b
+row-model consolidation moved to §2a where it belongs.
 
-**Fable-reviewed 2026-07-06: all six items approved + archived** (replay-
-treated-as-live class, duplicate-connect stream registration, StreamEnded
-permission preservation, watch-beats-seed hydration, seenSeq restore,
-liveSSEReadyMsg attachedID guard; ggPending was fixed earlier). The review
-caught and fixed one MEDIUM: the hydrate-armed `catchingUp` suppression could
-stick forever on a session whose background connect never succeeds — now
-released on connect-failure / reconnect exhaustion / not-running teardown,
-with tests. Detail in
-[`done-log-2026-07.md`](docs/archive/done-log-2026-07.md).
+### 1c. Rendering / layout residuals (2026-07-04 audit; parents fixed — done log)
 
-### 1b. Group view / sort / search / pickers (2026-07-04 audit, verified)
-
-The two group-view items share a root cause with the long-tracked **consolidate
-the two row models** refactor — `visibleSessions()` vs `visibleRows()` both
-interpret `m.cursor`; one row abstraction with a `sessionAt(cursor)` accessor
-for render+nav+actions subsumes them (`groups.go:57`). Prefer that fix.
-
-- [x] **Account picker silently drops pastes (HIGH).** Fixed 2026-07-04
-  (`cb0e375`): PasteMsg routed to picker label/console forms via `pickerPaste`.
-  Detail in the done log.
-- [x] **Group view filter + attention ordering** — fixed (groups build from
-  `visibleSessions()`; arrows-only filter nav); Fable-approved 2026-07-06.
-  Done log.
-- [x] **ctrl+g jump in group view** — verified row-cursor-correct + expands
-  the target group; test added; Fable-approved 2026-07-06.
-- [x] **Descending sort comparator is invalid (MED).** Fixed 2026-07-04
-  (`cb0e375`): three-way cmp + sign flip + fixed ID tie-break; DisplayTitle.
-  Detail in the done log.
-- [x] **Archive no-op binding removed** — Fable-approved 2026-07-06; the S15
-  archived-section design pointer lives in the `groups.go` header comment
-  (belongs with the §2a row-model consolidation).
-- [x] **Transcript search drops uppercase + byte-wise backspace (MED/LOW).**
-  Fixed 2026-07-04 (`cb0e375`): accept ModShift in `searchKey`; rune-wise
-  backspace. Detail in the done log.
-
-### 1c. Rendering / layout bugs (2026-07-04 audit, verified)
-
-- [x] **`hasLinkRefDef` isn't fence-aware (MED, perf-critical).** Fixed
-  2026-07-04 (uncommitted claude-pane pass): fenceInfo tracking skips fenced
-  lines. `chat/streaming_markdown.go:466-487`. Detail in the done log.
-- [x] **`truncate()` not ANSI-aware (LOW).** Fixed 2026-07-04 (uncommitted
-  claude-pane pass): delegates to `ansi.Truncate`. `model.go:2635-2645`.
-  Detail in the done log.
-- [~] **Spread rows never truncate segments** — all spread-shaped rows fixed
-  (shared `spread()` hardening; header/hint/external statusRow routed through
-  it; `clampLines` clips); Fable-approved 2026-07-06. STILL OPEN: the
-  `statusline.go` row-1 segment-join tail is not a `spread` fix — folds into
+- [ ] **`statusline.go` row-1 segment-join tail can still overflow** — not a
+  `spread()`-shaped fix (the shared `spread()` hardening landed); folds into
   the §2c statusline collapse.
-- [x] **renderToolCard budget overflow** — fixed by construction in the §2c
-  two-line card redesign (ANSI-aware measured budgets + per-line truncate
-  backstop; tested at widths 20/30/40). Fable-verified 2026-07-06. STILL
-  OPEN (same latent pattern, LOW): subagent child tool lines
-  (`renderChildTool`, `subagent.go`) still use the old arg≤w/2+summary≤w/3
-  budgeting.
-- [x] **Theme change render-cache invalidation** — `theme.Epoch()` folds +
-  epoch-changed forced reconcile; chain traced end-to-end in review (fp →
-  version bump → list cache miss → glamour pool reset), force-path test
-  added; Fable-approved 2026-07-06. Done log.
-- [x] **Composer width split-brain below width 21** — shared
-  `composerBoxWidth()`/`composerInnerWidth()` helpers unify `layout()` and
-  `renderInput()`; Fable-approved 2026-07-06.
+- [ ] **Subagent child tool lines still use the old arg≤w/2+summary≤w/3
+  budgeting (LOW).** Same latent overflow pattern the §2c two-line card
+  redesign fixed by construction for top-level cards. `renderChildTool`,
+  `subagent.go`.
 
 ### 1d. System reliability (2026-07-01 whole-system review; HIGHs all fixed — see done log)
 
-- [x] **O(sessions) steady-state cap** — observer streams capped at 16
-  (`WithMaxObserverStreams`), coldest-evicted on `nowFunc` recency
-  (attached/needs-attention never evicted; admission gate stops over-cap
-  launches; eviction tears down forward+SSE+goroutines+warm model);
-  reconnect-on-focus; launch-burst observers yield to foreground attach via
-  `attachGate`. Evicted rows stay lifecycle-accurate via the cluster watch;
-  attention is SSE-derived so it can go stale on a cold row — acceptable
-  because active turns keep sessions warm (recorded tradeoff).
-  Fable-verified 2026-07-06. Done log. Possible future: cluster-side
-  attention signal if caps ever tighten.
-- [x] **SSE consumer backpressure** — scanner/forwarder split with an internal
-  FIFO; watchdog liveness now measures wire reads, not consumer drain
-  (`c72f0c7`); Fable-verified 2026-07-06. Done log.
-- [~] **Port-forward retries a dead pod forever** — terminal state landed
-  (`c191c85`); dashboard now consumes the equivalent signal: reconnect
-  errors thread into `liveSSEReconnectFailedMsg.err`, and
-  `session.ErrSessionGone` aborts the retry loop immediately (teardown in
-  ~2s, not the ~14s budget). Fable-verified 2026-07-06. STILL OPEN
-  (SMALL, optional): consuming the literal `ForwardHandle.Done()` channel
-  needs a `ConnectResult.ForwardDone` seam through client/cli — only worth
-  it if mid-stream (non-reconnect) death detection matters.
-- [x] **Dead-node pods read as Running** — shared staleness cross-check on
-  both paths (`fe259d6`); Fable review 2026-07-06 found + fixed one watch-path
-  defect (never-Ready slow start read UNKNOWN after 90s — now gated by
-  `sandboxNeverReady`). Done log.
 - [ ] **Concurrent sessions on one project share one local sync endpoint, no
   dedup (LOW-MED).** Mutagen session name keys on SessionID only; two agents on
   the same repo silently cross-feed edits (same-file race → perpetual
-  conflicts). `internal/sync/sync.go:130`.
-- [~] **Mutagen conflicts in the TUI** — `SyncConflicted` distinction done
-  (conflict outranks stall in the worst-of reducer; `⇄ conflicted` in both
-  glyph maps; Gold needs-you vs Coral transport); Fable-approved 2026-07-06.
-  STILL OPEN: per-file/side detail + a textual resolution hint (needs parsing
-  the mutagen `conflicts[]` JSON shape, currently `[]any`).
+  conflicts). `internal/sync/sync.go:130`. Cross-ref §9 worktrees — per-session
+  worktrees are plausibly the fix; design together.
+- [ ] **Mutagen conflict detail in the TUI.** The `SyncConflicted` worst-of
+  distinction landed (done log); still open: per-file/side detail + a textual
+  resolution hint (needs parsing the mutagen `conflicts[]` JSON shape,
+  currently `[]any`).
 - [ ] **Transcript sync merges pod-agent history into local `~/.claude`
   unscoped (LOW-MED).** By design (subPath bind), but pod conversations become
   locally `--resume`-able with no tag or audit trail back to the sandbox
   session. `internal/k8s/backend.go:1233`, `internal/sync/sync.go:62`.
-- [x] **`destroy` active-turn warning** — suspend-style probe (5s bound)
-  before the irreversible confirmation gate, warn to stderr, non-fatal;
-  Fable-approved 2026-07-06. `internal/cli/commands.go`.
+- [ ] **Port-forward mid-stream death detection (SMALL, optional).** Terminal
+  state + immediate `ErrSessionGone` reconnect-abort landed (done log);
+  consuming the literal `ForwardHandle.Done()` channel needs a
+  `ConnectResult.ForwardDone` seam through client/cli — only worth it if
+  mid-stream (non-reconnect) death detection matters.
 
-### 1e. Autopilot (`/loop`/`/goal`) — detach durability + termination (2026-07-04 review of the uncommitted `autopilot.go`)
+### 1e. Autopilot (`/loop`/`/goal`)
 
-**Target use case (maintainer):** set an agent loose iterating through `TODO.md`
-with Opus, detach to the dashboard, and come back to finished work. What already
-works (verified + tested, `autopilot_test.go`): `/loop` survives detach — ticks
-carry session+gen (`autopilot.go:75`), `App.autopilotTick` routes them to the
-retained warm model and re-points POSTs at the dashboard's background SSE client
-(`app.go:867`, `warm.go:49`); model/effort/mode overrides ride every loop turn
-(`transcript.go:1916`). The gaps below are what breaks the use case. **Plan
-items 1–2 together** — they share one "completion scan on turn end" mechanism.
+The local driver is complete (items 1–5: detach-durable `/goal` continuation,
+sentinel termination, lapse toast, idle-reaper interval warn, esc contract —
+done log; the item-3 follow-up below is the one loose end).
 
-- [x] **1. `/goal` continuation dies on detach (HIGH — the headline gap).**
-  DONE: `handleRunnerEvent` now drives detached goal continuation after ingest
-  (`model.go` `driveDetachedAutopilot`) — it rewires the warm model to the live
-  background client and returns `autopilotAfterTurn()`'s continuation Cmd; goal
-  reached surfaces via `autopilotToast` (reuses the `toastMsg` OS-notification
-  plumbing). Foreground path unchanged. Tests: `TestGoalContinuesWhileDetached`,
-  `TestDetachedGoalReachedStopsAndToasts`.
-  `autopilotAfterTurn` runs only in the foreground `handleEvent` path, gated on
-  `m.events != nil` (`transcript.go:2287`) because a background `ingest()`
-  discards returned Cmds — so the natural primitive for "work until TODO.md is
-  done" stalls after the in-flight turn the moment the user detaches. Fix: route
-  goal continuation through the App exactly like `autopilotTickMsg` already is.
-  Mechanism: the background apply path (`model.go:1371`, `tr.ingest(...)` inside
-  `handleRunnerEvent`) sees every `turn.completed`; after ingest, when
-  `tr.autopilot.kind == autopilotGoal`, install the live background client on
-  the model (`t.client = liveClient`, the `app.go:888` pattern) and return
-  `tr.autopilotAfterTurn()` as the Cmd (`handleRunnerEvent` already returns
-  Cmds). Keep the foreground path as-is; guard with gen so a stopped goal can't
-  continue. **Acceptance:** start `/goal`, detach mid-turn, stay on the
-  dashboard → turns keep chaining until the sentinel; "goal reached" surfaces
-  as a toast/OS notification (reuse `notifyIfBackgroundAttention` plumbing),
-  not silently in a parked transcript.
-- [x] **2. `/loop` never terminates — teach it the sentinel (HIGH for cost).**
-  DONE: `autopilotAfterTurn` now handles loop mode — on each loop turn's
-  completion it scans `m.lastAssistantText` with `goalReached()` and stops +
-  toasts on `GOAL_MET`, foreground (via `handleEvent`) and detached (via the
-  same `driveDetachedAutopilot` hook as item 1). The `/loop` usage line documents
-  the sentinel tip. (Optional `/loop until <condition>` flourish not done.)
-  Tests: `TestLoopStopsOnSentinelForeground`, `TestDetachedLoopStopsOnSentinel`.
-- [x] **3. Loop/goal lapse is silent (MED).** DONE (toast half): `App.autopilotTick`
-  emits `autopilotToast(sess, "⟳ loop ended — session suspended")` when a tick
-  finds the warm model gone (`app.go`), instead of returning nil silently. Test:
-  `TestAutopilotLapseToastWhenModelGone`. NOT done: recording the driver spec in
-  `internal/index` for a one-key re-arm on re-attach — left as a follow-up.
-- [x] **4. Idle-reaper can kill the pod between iterations (MED).** DONE (warn
-  path): `TranscriptModel.idleTimeout` is threaded from the dashboard (attach +
-  `ensureRetained`); `cmdLoop` warns in the transcript when `interval >=
-  idleTimeout`. Chose warn over clamp (the user may keep the session busy another
-  way). The bigger "resume, then fire" alternative was NOT taken. Test:
-  `TestLoopWarnsWhenIntervalExceedsIdleTimeout`.
-- [x] **5. esc contract inconsistent with the chip (LOW).** DONE:
-  `escapeConsumes()` returns true when `m.autopilot.active()` (`modes.go`), and
-  the esc handler stops the driver in that branch when there is no live turn to
-  interrupt (`transcript.go`); detach stays on ctrl+]. Test:
-  `TestEscStopsIdleAutopilot`.
-- [~] **6. Server-side loop for true laptop-closed autonomy — ADR drafted +
-  Fable-reviewed 2026-07-06; implementation gated on maintainer sign-off.**
-  [`docs/server-side-loop-adr.md`](docs/server-side-loop-adr.md) commits to
-  the runner-owned driver and answers Q1–Q3 plus the hardening pass: explicit
-  `state` lifecycle field (H3), boot re-arm anchored on `last_completed_at`
-  (H1), 409-defer / bounded-retry / stopped(error) failure ladder (H2),
-  version-skew accepted-risk note (H4). Sign off on the ADR's open items
-  (endpoint shape, guard defaults, capability-bit home, retry/staleness
-  constants), then implement (schema → runner → TUI → tests).
-- Context note for long runs: each iteration is a new turn in one continuous
-  SDK session — multi-hour Opus runs lean entirely on server-side compaction.
-  ctx% used to be silently wrong after it; §2b gap 4 (the `context.compacted`
-  event + baseline reset) is fixed + Fable-approved (2026-07-06), so this
-  prerequisite is cleared — no separate work here.
+- [ ] **Record the driver spec in `internal/index` for a one-key re-arm on
+  re-attach (SMALL, follow-up to the lapse toast).** A lapsed loop currently
+  toasts and is gone; re-arming means retyping the /loop command.
+- [ ] **6. Server-side loop — ADR ACCEPTED 2026-07-07, IMPLEMENT.**
+  [`docs/server-side-loop-adr.md`](docs/server-side-loop-adr.md) — runner-
+  owned driver; all constants settled at sign-off (endpoint
+  `PUT/DELETE /sessions/:id/autopilot`; max_iterations default 50;
+  token_budget optional, shipped v1; capability bit in `/status`; retry 5×
+  backoff max(interval,30s)→5m cap; staleness N=30m; no H4 guard).
+  Order: schema (`autopilot.state` + `just gen`) → runner (spec persistence,
+  self-submit loop, guards, reaper non-idle, boot re-arm) → TUI (arm/disarm +
+  render-from-events, local tea.Tick kept as no-capability fallback) → tests.
 
 ## 2) The "feels like Claude Code" program (2026-07-04 audit)
 
@@ -237,22 +114,9 @@ resume.
 
 ### 2a. Structural enablers (transcript/model decomposition)
 
-- [x] **Unify the dual block representations** — `blockCard` (embeds
-  `list.Versioned`, implements `list.Item`) is the single source of truth;
-  `m.blocks` is `[]*blockCard`; mutations bump versions at the site (tool/
-  subagent cards carry a card back-ref); `syncBody`/`reconcileItems`/`tblock`/
-  `blockItem`/`blockFP`/`markBlockDirty`/`renderBlockRaw` deleted; streamed
-  deltas refresh only the tail card (O(1)). Per-block state (unread/turnGap/
-  future expanded) lives on the card. Fable-verified 2026-07-06 (bump-site
-  audit + ported parity/golden/T1 suites). Done log.
-- [x] **One event reducer** — `sessionReadModel` (`readmodel.go`) embedded by
-  both `Session` and `TranscriptModel`; the 6 doubly-parsed payloads
-  (started/usage/compacted/workspace/permission/status) each unmarshal in
-  exactly one place; `handleEvent` keeps presentation only, `ApplyRunnerEvent`
-  keeps dashboard extras; snapshot format unchanged (kept flat by design).
-  Two divergences unified (Branch=="" preserves; resolved→busy safe by runner
-  event order — settled-once + resolve-precedes-terminal). Fable-verified
-  2026-07-06. Done log.
+Block unification, the one-event-reducer, and the mechanical god-file split
+all landed (done log) — the items below are what remains.
+
 - [ ] **Declarative vertical layout regions (HIGH).** Stack arithmetic
   hand-counted in 4+ places (layout(), renderTranscript(), previewView
   `h-3-bannerH`, scrollbarDragTo `bodyTop=2`, App.modalRect) — any layout
@@ -260,11 +124,11 @@ resume.
   every copy; mouse hit-testing silently breaks. Fix: one per-frame
   `[]region{name, height, render}` with body as flex; all consumers walk it.
   `transcript.go:882`.
-- [x] **Mechanical god-file split** — transcript.go (3087→745) →
-  {stream,reduce,render,input,permission_diff}; model.go (3086→799) →
-  {sse,reduce,render,input}. Pure code motion, verified by AST decl
-  accounting + independent line-multiset diff; Fable-verified 2026-07-06.
-  Done log.
+- [ ] **Consolidate the two dashboard row models (from §1b).**
+  `visibleSessions()` vs `visibleRows()` both interpret `m.cursor`; one row
+  abstraction with a `sessionAt(cursor)` accessor for render+nav+actions.
+  The S15 archived-section design pointer lives in the `groups.go` header
+  comment. `groups.go:57`.
 - [ ] **App.Update flat dispatch + one detachTranscript() (MED).** 450-line
   screen-router; detach sequence duplicated 4×; recursive
   `a.Update(*msg.ready)` re-entry (`app.go:615,630`); B17 single-delegation
@@ -288,18 +152,13 @@ resume.
   closed, so these are unblocked; (b) `tui/theme.FadeColor` computes elapsed
   internally (`tui/theme/styles.go`) — public §8 surface change; (c) test-only
   counters (`reconciles`/`fpComputes`/`bdBuilds`) → observer interface.
-- [x] **Dedup: markdown-renderer closure** — single package-level
-  `renderAssistantMD` feeds finalized + streaming paths; Fable-approved
-  2026-07-06.
-- [x] **status→label switches** — retriaged: divergence is by design
-  (user-seat phrasing in chat); locked with exhaustive enum-walk tests
-  instead of merging; Fable-approved 2026-07-06.
 
 ### 2b. Event-model parity gaps (schema → mapper → renderer)
 
 Which Claude Code UI capabilities the pipeline can't represent / doesn't map /
 doesn't render. These cap how Claude-Code-like ANY client can feel. Schema
 changes go through `schema/events.json` + `just gen` (never hand-edit `*.gen.*`).
+(Numbering preserved from the audit; gap 4 — compaction — landed, done log.)
 
 - [ ] **1. Subagent output flattens into the main transcript (correctness
   bug).** `MessagePayload` has no `parentToolUseId`
@@ -324,11 +183,6 @@ changes go through `schema/events.json` + `just gen` (never hand-edit `*.gen.*`)
   Renderer-only: mirror the streamAI live path (`:2284-2306`); make blocks
   expandable. (Folds in the earlier "multi-line reasoning unrecoverable" item;
   target presentation in §2c.)
-- [x] **4. Compaction signal** — `context.compacted` end-to-end
-  (schema→runner→TUI; ctx% baseline reset when PostTokens>0, preserved when
-  absent; replay-safe marker). Fable-approved 2026-07-06 — mapping verified
-  against the vendored SDK's `SDKCompactBoundaryMessage` field names and
-  required/optional split. Done log.
 - [ ] **5. Background tasks / tool progress dropped.** `tool_progress` ignored
   (`mapping.ts:81-85`), no progress/notification event type — background Bash
   + async completion (signature Claude Code features) unrepresentable. Fix:
@@ -350,25 +204,16 @@ changes go through `schema/events.json` + `just gen` (never hand-edit `*.gen.*`)
 - [ ] **10. MCP unwired.** No `mcpServers` in buildOptions; `mcp_*` blocks
   dropped. Generic tool.* events would mostly work once configured; non-text
   MCP results flattened.
-- [x] Minor: `MessagePayload.Role` — user echoes render as user blocks, stay
-  out of `lastAssistantText` (goal-sentinel safe), dedup the optimistic
-  block; Fable-approved 2026-07-06.
 
 ### 2c. Design/layout changes (renderer)
 
-Deduped against `docs/ux-polish-plan.md` — nothing below is already committed
+Deduped against `docs/archive/ux-polish-plan.md` — nothing below is already committed
 there. HIGH items are the at-a-glance tells; most are renderer-local.
 
-- [x] **Tool cards: ⏺-head + ⎿-elbow two-line idiom + ctrl+o expansion** —
-  status-toned bullet, `Bash(arg)` head, dim elbow line with expand hint;
-  ctrl+o (composer-empty) toggles the latest card: diffs for edit tools
-  (post-approval diffs preserved via the permission_diff machinery), capped
-  output for output tools (runner caps at 64KB head+tail in `capToolOutput`;
-  display clamps further), full arg fallback only when truncated.
-  `ToolPayload.output` already existed — no schema change. 4 golden files
-  updated (enumerated in done log). Fable-verified 2026-07-06. Follow-ups:
-  per-card focus/expand for older cards (space/toggleSubagents has the same
-  gap); `⎿ exit 0 · 42 lines` combo needs exit-code plumbing (§2b gap 5).
+- [ ] **Tool-card follow-ups** (the two-line ⏺/⎿ idiom + ctrl+o expansion
+  landed — done log): per-card focus/expand for older cards
+  (space/toggleSubagents has the same latest-only gap); `⎿ exit 0 · 42 lines`
+  combo needs exit-code plumbing (§2b gap 5).
 - [ ] **Kill the full-height `▌` role gutter bars; quiet user prompts (HIGH).**
   Colored bars down every message line + bold-green user text is the largest
   departure from CC's look. Assistant: single `⏺ ` bullet + 2-space hanging
@@ -428,51 +273,38 @@ there. HIGH items are the at-a-glance tells; most are renderer-local.
 - [ ] **`q`/`g` overloads on the dashboard (LOW-MED).** `q` opens the perm
   queue when any session waits (footer still says quit); lone `g` toggles
   group view, `gg` = top. Surprising vs advertised bindings.
-  `model.go:1817,1866`. (Fix alongside the §2a input-context tables + §1a
-  ggPending bug.)
-- [~] **ctrl+g/ctrl+k nav inconsistent by screen** — dashboard half done
-  (`NextAttention` keymap binding, auto-surfaced in `?` FullHelp);
-  Fable-approved 2026-07-06. STILL OPEN (maintainer design call): which keys
-  the external (opencode) pane reserves — ctrl+g/ctrl+k are forwarded to the
-  embedded client today (`app.go` ScreenExternal), and reserving them risks
-  trapping the user in opencode's own UI (esp. ctrl+k, its command palette).
-  Decide alongside the §2a input-context/binding-table work.
-- [x] **Fresh Claude session blank body** — centered first-hint welcome,
-  live attached view only, `fitModal`-exact at widths 20–80; Fable-approved
-  2026-07-06.
-- [x] **Failed sessions aren't floated by attention-first sort (LOW).** Fixed
-  2026-07-04 (uncommitted): `needsAttention()` now includes Failed and
-  `sortByAttention()` floats via it. `attention.go:17`.
-- [ ] **TUI has no path to a FIRST Anthropic account (LOW).** Zero stored
-  accounts skips the account picker entirely, so "＋ add account" is only
-  reachable once one exists via `sandbox auth login`. Decide: first-run hint,
-  or always enter the account stage with cluster-default + add-account rows.
-  `account_picker.go:123`. **Fable recommendation (2026-07-04):** always
-  enter the account stage with cluster-default + "＋ add account" rows —
-  discoverable, costs one keypress in the common case, no CLI detour.
-- [ ] **Decide: default permission mode = yolo (`bypassPermissions`)?
-  (maintainer ask, 2026-07 triage — needs the decision, then the change is
-  small).** Today an empty/unknown mode resolves to `acceptEdits`
-  (`runner/src/claude.ts:70-81`); the TUI/CLI send whatever the composer/flag
-  holds (`transcript.go:2804`, `internal/cli/turn.go:67`). If yes: flip the
-  default (runner-side, or CLI-side per backend), keep the SDK safety gate
-  wired (`allowDangerouslySkipPermissions`, `claude.ts:216-218` — needs
-  `IS_SANDBOX=1` as root), and surface the active mode in the statusline so
-  yolo is visible. Cross-ref §8 "turn model is Claude-SDK-shaped" (the mode
-  enum may be abstracted there). **Fable recommendation (2026-07-04, needs
-  maintainer confirm before flipping):** yes — default pod sessions to
-  `bypassPermissions`. The SDK safety gate is already fully wired (runner
-  defaults `IS_SANDBOX=1` and sets `allowDangerouslySkipPermissions` for
-  bypass mode, `runner/src/claude.ts:216-229`), pods have default-deny
-  egress + Bash guards + audit log, and the headline §1e use case (unattended
-  TODO burn-down) assumes it. Ship the statusline mode surface in the same
-  change so yolo is never invisible.
+  `model.go:1817,1866`. (Fix alongside the §2a input-context tables.)
+- [ ] **External-pane nav keys — DECIDED 2026-07-07: leader-chord,
+  IMPLEMENT with the §2a binding tables.** Reserve NEITHER ctrl+g nor ctrl+k
+  (both keep forwarding to the embedded client, `app.go` ScreenExternal);
+  instead extend the already-reserved detach key into a leader inside
+  external panes: `ctrl+]` then `g`/`k` = next/prev-attention, `ctrl+]`
+  `ctrl+]` (or timeout) = detach as today. One reserved prefix scales to
+  codex and any future backend. (Dashboard-side `NextAttention` binding
+  already landed 2026-07-06.)
+- [ ] **First-account path — DECIDED 2026-07-07: always enter the account
+  stage, IMPLEMENT.** Zero stored accounts currently skips the picker
+  entirely (`account_picker.go:123`); change it to always show the stage
+  with "cluster default" + "＋ add account" rows. Also the natural home for
+  the §6 launch-preflight reauth stage — build the stage machinery once.
+- [ ] **Yolo default — DECIDED 2026-07-07: yes, IMPLEMENT.** Flip the
+  runner's empty/unknown-mode default from `acceptEdits` to
+  `bypassPermissions` (`runner/src/claude.ts:70-81`) so every client
+  inherits it; the SDK safety gate is already wired (`IS_SANDBOX=1` +
+  `allowDangerouslySkipPermissions`, `claude.ts:216-229`). REQUIRED in the
+  same change: statusline surfaces the active mode so yolo is never
+  invisible (`statusline.go`). Cost brake for unattended runs = the §1e
+  autopilot guards (max_iterations 50 / token_budget), signed off same day.
+  Cross-ref §8's mode-enum abstraction (6.2) — flip the default now, don't
+  wait for the enum.
 
 ## 3) Decision record — Claude Code as the local client (SETTLED 2026-07-04)
 
 Three-track research (official surface, community art, repo feasibility) into
 using Claude Code **directly** as the client for a remote sandbox session.
 Outcome: **not happening; invest in §2 instead.** Kept here so nobody re-treads.
+(The supported `claude --resume` escape hatch is documented in README —
+done log.)
 
 - **Blocked upstream:** Claude Code has no remote-attach transport — no analog
   of `codex --remote ws://…` / `opencode attach <url>`;
@@ -502,10 +334,6 @@ Outcome: **not happening; invest in §2 instead.** Kept here so nobody re-treads
   If one ships, it slots into the codex Option-B pattern
   (`docs/codex-integration-plan.md`) and obsoletes the custom transcript
   renderer for the claude backend. Cheap periodic check; no code now.
-- [x] **Documented the supported escape hatch in README** (2026-07-06):
-  `claude --resume` section with the one-way-fork / exits-the-audit-envelope
-  caveat; `claudeSession` field name verified against the status API + local
-  index.
 - Also evaluated and rejected: SSHFS mounts (per-file-op RTT),
   MCP-ssh-tools-with-built-ins-denied (token-expensive file ops, model drifts
   back to native tools), dev containers (local isolation only), web teleport
@@ -513,39 +341,20 @@ Outcome: **not happening; invest in §2 instead.** Kept here so nobody re-treads
 
 ## 4) Performance
 
-- [x] **Mutagen `sync list` polling gated on focus** — selected+attached
-  sessions probe at 4s, others back off to 30s, first tick sweeps all
-  (`114223d`); Fable-verified 2026-07-06 (conflict-detection latency is
-  cosmetic-only — sync status never drove attention routing). Done log.
 - [ ] Warm-session detail preview re-renders the retained transcript tail
   every frame (no unchanged-guard). Re-verified 2026-07-04: it renders via
   `tr.tailLines(5, width)` (bounded), so cost is lower than originally
   claimed — measure before optimizing. `model.go:2537`, `transcript.go:2113`.
-- [~] **`partition()` render-path dedup** — computed once per `renderZoned`,
-  passed to both bands; Fable-approved 2026-07-06. STILL OPEN (measure-first):
-  `visibleSessions()` re-filters+re-sorts 4+ times per frame (`groups.go`) —
-  memoize only if profiling shows it matters.
+- [ ] **`visibleSessions()` re-filters+re-sorts 4+ times per frame**
+  (`groups.go`) — measure-first; memoize only if profiling shows it matters.
+  (The `partition()` render-path dedup itself landed — done log.)
 - [ ] `bodyView` still ~283µs/frame: `fitModal` does two ANSI `lipgloss.Width`
   scans per visible line every frame. `transcript_list.go:302`.
-- [x] **SSE `broadcast()` frame hoist + zero-client early return** —
-  behavior-preserving (frame is a pure function of the event; per-client
-  `afterSeq` filtering untouched); Fable-approved 2026-07-06.
-- [x] **Streaming-markdown incremental boundary scanning** — `mdScanner`
-  commits each complete line once (fence/link-ref/boundary state carried
-  across deltas); ~8× faster, 3× fewer allocs; property-tested against the
-  original predicates as oracle at every prefix × multiple chunkings;
-  Fable-verified 2026-07-06. Done log. Residual (smaller term):
-  `lastCompleteBlock` still rescans per block-boundary crossing — O(blocks·N),
-  measure before touching.
-- [x] **Resize coalescing in tui/list** — `SetSize` is O(1); deferred re-pin
-  settles once in `normalize()`; no eager cache drop (stale-width entries
-  refresh lazily, width oscillation re-hits cache); Fable-verified 2026-07-06
-  (renderer pool is width-keyed, so no per-WindowSizeMsg rebuild remains).
-  Done log.
+- [ ] **`lastCompleteBlock` still rescans per block-boundary crossing** —
+  O(blocks·N), a smaller term now that the incremental `mdScanner` landed
+  (done log); measure before touching.
 - [ ] Glamour pads wrapped lines with per-space SGR runs (bytes; upstream
   glamour style; inflates parse work).
-- [x] Reconcile-is-O(n)-per-event: retired by the §2a block unification
-  (2026-07-06) — streamed deltas now touch only the tail card.
 
 ## 5) New-session startup speed (ordered by likely win)
 
@@ -558,26 +367,8 @@ Outcome: **not happening; invest in §2 instead.** Kept here so nobody re-treads
   `internal/cli/claude_remote.go:35`); npm layer `runner/Dockerfile:66`.
   Decide image naming in the same change — the
   "claude-runner" name is a misnomer today (one shared image serves every
-  backend; inbox 2026-07).
-- [x] **Prompt no longer gated on the first-sync flush** — Connect returns at
-  runner-health + project-sync-create; flush/CreateInputs/reaper run in
-  `startBackgroundSync` (ctx-rooted, no leaks); `Session.AwaitSync` is the
-  advisory seam; turn submission stays gated via `stagedRunner` (StartTurn
-  awaits staging — every consumer); dashboard polls `AwaitWarning` and
-  surfaces late advisories as transcript blocks. Fable-verified 2026-07-06.
-  Done log.
-- [x] **Parallelized independent serial steps** — Secret+PVC via errgroup
-  (rollback-safe, race-verified), then Sandbox; only the project sync created
-  foreground (7 config/transcript syncs backgrounded, serial for GC-label
-  determinism); port-forwards established concurrently (order-preserving,
-  cancel+close siblings on failure). Fable-verified 2026-07-06. Done log.
-- [x] Tightened `waitForPodReady` poll 2s→1s (1s not 500ms — gentle on the
-  API server).
-- [x] **Deferred `ensureReaper`** (3-attempt backoff in the background task,
-  failure surfaces via AwaitSync) + dropped the redundant connect-time Status
-  Get and re-`ensureSSHKey` on the freshly-created path. Launch-burst
-  observer half landed with the §1d cap (`attachGate`: observers yield to
-  foreground attach/create). Fable-verified 2026-07-06.
+  backend; inbox 2026-07). Cross-ref the §7b ADR — its Flox layer is designed
+  as the shared base of this split.
 - [ ] **Mutagen sync GC follow-ups** (core landed — see done log): **MF3**
   cross-context over-reap (stamp `--label sandbox-context=<ctx>` in CreateAll,
   scope List/gc to current context); **MF5** mid-session sync loss doesn't
@@ -605,6 +396,9 @@ ChatGPT-plan OAuth owned by the credential manager.
   create/connect **reconcile** that seeds the `agent-sessions` Secret +
   prompts for renewal when a cred can't auto-refresh. Generalizes
   `ensureSSHKey`. Egress allowlist must gain OpenAI/ChatGPT hosts.
+  NOTE (from the landed §7a injection work): `resolveOpencodeProvider`
+  silently defaults unrecognized values to Anthropic — the future
+  `CreateOptions` selector must validate, not default.
 - [ ] **Unified per-backend credential lifecycle (maintainer ask 2026-07-04;
   Fable-triaged same day — claude's model is the template, opencode/codex
   converge on it).** Target flow: TUI launch → preflight the backend's creds
@@ -636,7 +430,8 @@ ChatGPT-plan OAuth owned by the credential manager.
   3. **Secret GC for out-of-band deletion (SMALL).** CLI destroy cleans up,
      but `kubectl delete sandbox` outside the CLI orphans the PVC + Secret.
      Set ownerReferences (Secret+PVC → Sandbox) so cluster-side deletion
-     cascades. Cross-ref the §10 KRO ADR, which would subsume this.
+     cascades. Cross-ref the §10 KRO ADR, which recommends exactly this over
+     adopting kro.
   4. **Isolation contract (DECIDED — implement via §7a items 1/3).** No
      shared cross-provider Secret: each backend's key lives in the
      per-session Secret, seeded from `client/cred` for the selected provider
@@ -648,12 +443,14 @@ ChatGPT-plan OAuth owned by the credential manager.
   `internal/authstatus`): dashboard strip rendering (CLI-only today);
   `--check` live pings (codex plan/rate-limit via app-server; provider key
   liveness); Claude check should read the credential store, not just env.
-- [ ] **Codex transport spike — remaining (off-airplane).** Recorded so far:
-  stdio app-server works (newline JSON-RPC, no-auth initialize);
-  remote-control/ws needs the STANDALONE managed install (bundle in pod
-  image); refresh+approvals delegated to the client; metrics/auth-status are
-  client requests. Still TODO live: ws endpoint addressing + a 2nd-client
-  thread-observe check.
+- [x] **Codex transport spike — COMPLETE (2026-07-06, containerized).**
+  `codex app-server --listen ws://127.0.0.1:PORT` (fixed port, loopback, no
+  auth needed, `/readyz`+`/healthz` free) on the PLAIN npm build — standalone
+  install NOT needed (managed daemon = cloud-relay pairing, not our
+  transport); 2nd-client observer CONFIRMED (notification broadcast +
+  `thread/read`; key on notifications, not `thread/list`). Full results in
+  the plan's "Spike results (2026-07-06)". Residual for Phase 2: authed live
+  turn-observe + refresh-ownership decision.
 - [ ] Codex runner-as-metrics-observer (same pattern as opencode's, app-server
   thread notifications).
 
@@ -666,27 +463,23 @@ metrics source for every backend. See the codex plan "Parity bar".
 
 ### 7a. OpenCode auth persistence / validation (2026-07-04 triage)
 
+*(A full task-by-task implementation plan exists at
+`docs/superpowers/plans/2026-07-04-opencode-credential-manager.md` — local-only,
+gitignored; the decisions below are self-sufficient without it.)*
+
 **Fable review (2026-07-04): direction approved — Opus-executable in the
-order listed.** Current behavior (re-verified): provider keys come from a
-shared namespace Secret (`opencode-credentials`) injected as `Optional: true`
-env refs for ALL of Anthropic/OpenAI/OpenCode-Zen; `buildOpencodeConfig`
-enables whichever env vars are present; OpenCode config/history live on the
-session PVC (survive suspend/resume, not new sessions); no create/connect
-validation anywhere — the whole chain is fail-open. Decisions: **(1)** do NOT
-build an OpenCode-specific store — generalize `client/cred` with a provider
-dimension first (that is §6's write-side item; the multi-account store,
-Keychain/file backends, and secret/manifest split generalize cleanly — only
-the type taxonomy and manifest filename are Anthropic-hardwired) and make
-item 1 below consume it. **(2)** The connect preflight bar (item 2) is
+order listed.** Landed so far (done log): selected-provider-only fail-closed
+key injection, freshness/rotation stamps, secret-handling + reaper-RBAC
+hardening, README auth section. Decisions that still govern the open items:
+**(1)** do NOT build an OpenCode-specific store — generalize `client/cred`
+with a provider dimension first (that is §6's write-side item) and make item
+1 below consume it. **(2)** The connect preflight bar (item 2) is
 Secret-presence + key-shape for the *selected* provider, fail-closed; live
 provider/model pings belong behind `sandbox auth status --check`, never on
-the connect path. **(3)** Item 3 drops `Optional: true` for the selected
-provider's ref and stops mounting unselected providers at all. **(4)** Reaper
-RBAC (item 5): replace the cluster-wide ClusterRole `secrets: get` with a
-namespaced Role bound in `agent-sessions`. **(5)** Docs item lands last.
-The cross-backend contract these decisions implement (preflight → reauth →
-local store → per-session Secret → GC, one provider per Secret) is §6's
-"Unified per-backend credential lifecycle" item — read that first.
+the connect path. The cross-backend contract these decisions implement
+(preflight → reauth → local store → per-session Secret → GC, one provider per
+Secret) is §6's "Unified per-backend credential lifecycle" item — read that
+first.
 
 - [ ] **Implement OpenCode local credential store + JIT Secret reconcile.**
   Replace the local-dev-only env/1Password path with a `client/cred`-style store
@@ -700,127 +493,96 @@ local store → per-session Secret → GC, one provider per Secret) is §6's
   (`client/session.go:217-221,301-312`). Add a cluster-aware check for the
   selected provider key and, if feasible, a lightweight model/provider liveness
   probe before launching/attaching.
-- [x] **Selected-provider-only key injection, fail-closed** —
-  `Spec.OpencodeProvider` (defaults Anthropic) → `opencodeEnv` injects exactly
-  one non-Optional SecretKeyRef; missing key = `CreateContainerConfigError`,
-  never an uncredentialed pod. Fable-verified 2026-07-06. NOTE for the §6
-  selector: `resolveOpencodeProvider` silently defaults unrecognized values to
-  Anthropic — the future `CreateOptions` selector must validate, not default.
-  Done log.
-- [x] **Freshness/rotation stamps** — Sandbox annotated with truncated-sha256
-  key hash + provider at create; re-create reconcile warns on drift; Resume
-  re-stamps; local script's kept-stale-Secret branch is now loud.
-  Fable-verified 2026-07-06. Done log.
-- [x] **Secret handling + RBAC hardening** — prefix printing removed; 0600
-  overlay check; namespace derived (env → context → default); reaper
-  `secrets: get` moved to a namespaced Role in `agent-sessions` (the reaper
-  DOES need it — `RunnerToken` authenticates the `/idle` poll). Follow-up
-  noted in the manifest: the remaining Sandbox/pod ClusterRole grants could
-  also be namespaced. Fable-verified 2026-07-06. Done log.
-- [x] **README OpenCode auth section** — keys→env table, fail-closed +
-  rotation-requires-restart semantics, namespace scoping, suspend/resume
-  persistence. 2026-07-06.
+- [ ] (SMALL) Namespace the remaining Sandbox/pod ClusterRole grants — the
+  reaper `secrets: get` move to a namespaced Role landed; the follow-up is
+  noted in the k8s manifest.
 
 ### 7b. Flox/Nix-first runner environment (2026-07-04 triage)
 
-**Fable review (2026-07-04): proceed — the ADR is Opus-draftable now;
-implementation waits on maintainer sign-off of the ADR.** Context: the repo
-has a committed Flox dev/CI environment (`.flox/env/manifest.toml:9-36`,
-`.envrc:1-20`) and CI runs `flox activate -- just check`
-(`.depot/workflows/ci.yml:42-86`), but runner pods are Debian/apt+npm images
-with no `flox`/`nix` in the agent environment. Recommended ADR direction:
-keep the Debian `node:24-slim` base (preserves sshd, native `better-sqlite3`,
-the tested entrypoint/host-key path) and layer Flox (which vendors Nix) into
-the image with the base tool closure baked in — do NOT flip to a fully
-Nix-built OCI in the first pass. The §5 per-backend image split composes with
-this (shared Flox layer). Per-session PVCs stay out of the `/nix`-store
-business; cluster caching = substituters via the env seam (item 2), with the
-maintainer's cache requirements (configurable trusted-substituters,
-anti-poisoning publish gate, pruning) forming the ADR's cache section — the
-scan-then-publish gate is a follow-on design, not runner-image scope. Decided
-regardless of ADR outcome: the activation hook's `go get .` (item 6) should
-go — it mutates go.mod/module cache as a side effect of `cd`.
+**ADR ACCEPTED WITH AMENDMENT 2026-07-07** —
+[`docs/runner-package-manager-adr.md`](docs/runner-package-manager-adr.md):
+**first spike `ghcr.io/flox/flox` as the base image** (everything above the
+OS from one pinned Flox env — node, sshd, sqlite, opencode; flox ≥ 1.13 for
+`flox run`; acceptance gate = Depot build + sshd/PVC host keys +
+better-sqlite3 compile + kind conformance), falling back to the ADR's
+Debian+Flox-layer option only if the spike hits a wall. Env/mount seam,
+substituters (home = ceph S3 w/ egress CIDR carve-out; Tigris = public/OSS
+cache), re-sign-at-publish-gate, no shared /nix mount in pass 1, age-based
+pruning all stand as written. Nix-built OCI = pass 2 via flake container
+outputs; FloxHub CLI publish via Depot CI can land independently. Decided
+regardless: the activation hook's `go get .`
+(`.flox/env/manifest.toml:54-60`) goes — it mutates go.mod/module cache as a
+side effect of `cd`.
 
-- [ ] **Write an ADR for the runner package-manager strategy.** **Draft
-  exists** — [`docs/runner-package-manager-adr.md`](docs/runner-package-manager-adr.md)
-  (Opus, 2026-07-05); awaiting maintainer sign-off. Choose between
-  Debian+Nix/Flox, Nix-built OCI, Flox-containerized runner, or split per-backend
-  images. Preserve sshd, Node 24, native `better-sqlite3`, `claude`/`opencode`,
-  git, sqlite, and diagnostics. Current image uses apt + npm global opencode in
-  `runner/Dockerfile:30-67`; entrypoint only starts sshd + Node
-  (`runner/entrypoint.sh:34-38`); flake only packages the Go CLI today
-  (`flake.nix:20-33`, `nix/package.nix:14-45`).
-- [ ] **Add a runtime bootstrap env/mount seam for package managers.** Extend the
-  common pod env (`internal/k8s/backend.go:1244-1277`) with package-manager
-  preference, cache dirs, binary-cache config, and any optional `/nix`/Flox
-  mounts while preserving the existing `/session` PVC + SSH mounts
-  (`internal/k8s/backend.go:1185-1241`).
-- [ ] **Propagate Flox/Nix preference to agent child processes.** Claude receives
-  an explicit env map (`runner/src/claude.ts:213-231`); OpenCode serve inherits
-  env and runs at `PROJECT_PATH` (`runner/src/opencode.ts:248-253`). Inject PATH,
-  cache/config env, and agent guidance so agents prefer an existing project Flox
-  env, create one only when appropriate, otherwise use `flox run` or
-  `nix run nixpkgs#…` for one-off tools.
-- [ ] **Update runner-image CI triggers and local tool checks.** If the runner
-  image depends on `.flox`, `flake.nix`, `flake.lock`, or `nix/**`, add those to
-  `.depot/workflows/build-runner-image.yml:12-20`. `opencode attach` requires a
-  host `opencode` (`internal/tui/dashboard/external_pane.go:121-155`) and
-  `claude setup-token` requires host `claude` (`internal/cli/auth_accounts.go:30-47`);
-  package them in Flox if possible or make `just doctor` report the gap.
-- [ ] **Plan Kubernetes Nix/Flox cache strategy.** Prefer baked closures when
-  possible; otherwise define `NIX_CONFIG` substituters/trusted keys, egress
-  allowlist, and a cluster cache/cache-warmer. Current caching is OCI-layer based
-  (`internal/k8s/backend.go:194-208,55-62`), per-session PVCs are not a good
-  shared `/nix` store, and the §5 Spegel item only covers OCI images.
-  Maintainer requirements (inbox 2026-07): trusted-substituters configurable
-  in the agent env so it "just works" (home = ceph S3 cache; work needs a
-  reasonably generic mechanism); anti-poisoning — agents must not publish to
-  the cache directly, e.g. an MCP tool/job that scans a closure and publishes
-  it (without re-signing?) only if it passes; and a pruning story for entries
-  no longer needed.
-- [ ] **Clean up Flox env surprises before making it runtime-canonical.** The
-  Flox manifest is now committed, so remove stale notes claiming it is missing;
-  also review the activation hook that runs `go get .` on every activation
-  (`.flox/env/manifest.toml:54-60`) before using the env as a reproducible
-  runner or CI contract.
+- [ ] **Spike the flox-base image, then implement the rollout** (items below
+  are the ADR's work breakdown, kept for pointers):
+  - Runtime bootstrap env/mount seam: extend the common pod env
+    (`internal/k8s/backend.go:1244-1277`) with package-manager preference,
+    cache dirs, binary-cache config, optional `/nix`/Flox mounts, preserving
+    the existing `/session` PVC + SSH mounts (`backend.go:1185-1241`).
+  - Propagate Flox/Nix preference to agent child processes: Claude's explicit
+    env map (`runner/src/claude.ts:213-231`); OpenCode inherits env
+    (`runner/src/opencode.ts:248-253`); inject PATH/cache/config env + agent
+    guidance (prefer project Flox env → `flox run` → `nix run nixpkgs#…`).
+  - Update runner-image CI triggers (`.depot/workflows/build-runner-image.yml:12-20`
+    — build context is `runner/`, root-level `.flox`/`flake.nix` are outside
+    it) and host-tool checks (`opencode attach` needs host `opencode`,
+    `claude setup-token` needs host `claude`; package in Flox or `just
+    doctor` reports the gap).
+  - Kubernetes Nix/Flox cache strategy: baked closures first; `NIX_CONFIG`
+    substituters/trusted keys via the env seam; egress allowlist opening;
+    anti-poisoning publish gate (follow-on design) + pruning story.
+  - Remove the `go get .` activation hook (can land first, independent).
 
-- [ ] CLI `opencode` still lacks `--model` and an initial-prompt arg
-  (cancel/suspend-warning correctness landed — see done log).
-  `claude_remote.go:23-71`.
+### 7c. OpenCode operational items
+
+- [ ] CLI `opencode` still lacks `--model`, an initial-prompt arg, and a
+  `--provider` flag (cancel/suspend-warning correctness landed — see done
+  log). `claude_remote.go:23-71`. NOTE: the SDK half of provider selection
+  landed 2026-07-06 — `CreateOptions.OpencodeProvider`, validated fail-closed
+  (`ErrInvalidOpencodeProvider`, `client/client.go`) — the CLI flag just
+  threads it through `runStartSession`.
 - [ ] Verify detach (Ctrl+]) + surrounding chrome behave identically for every
   backend's external pane.
-- [ ] **Live-session verify sweep — opencode (promoted from inbox 2026-07-04;
-  needs the real cluster, not opus-offline):** (a) agent-generated title +
-  busy/idle status should now stream via the Phase 4 observer — confirm
-  against a live session, then archive; (b) clickable spots — real SGR mouse
-  forwarding landed in Phase 3 and live capture showed opencode's own clicks
-  working — confirm, then archive.
-- [x] **Fable review (2026-07-04) — OpenCode idle/status/reaper fix: APPROVED,
-  two follow-ups below.** Verified against the working tree: the `/proc`
-  socket math is correct (`establishedConnections` counts server-side sockets
-  with local port :4096; `runnerOwnedConnections` matches this process's
-  client fds by socket inode via `/proc/self/fd`, so
-  `externalClientConnections` isolates real attach clients and a runner
-  loopback connection nets to zero); terminalizing observer `reset()` with
-  `turn.interrupted` kills the stuck-busy-on-stream-drop class; the
-  synchronous `/idle` activity probe closes the 20s-poller race; the
-  dashboard `EventSessionStatusChanged` mirror matches the transcript's
-  mapping, and its `clearPendingPermission()` calls are safe today because
-  `setStatus` dedups and busy/idle fire only at turn boundaries
-  (`runner/src/session.ts:202`, `claude.ts:345`) — re-verify if status
-  emission points ever grow.
-- [x] **Bound stuck synthetic-busy** — 5-min staleness bound gated on
-  `isDetached()`; real turns immune via the `activeTurns>0` guard; reaper keys
-  on `idleSince` only (`5f96ccd`); Fable-verified 2026-07-06 (accepted
-  tradeoff: a fully-detached opencode turn silent >5min becomes
-  idle-eligible). Done log.
-- [x] **GC `interruptedTurns` in `reset()`** (`5f96ccd`); Fable-verified —
-  safe because `reset()` also clears `activeTurnId`. Residual pre-existing
-  edge (LOW, not a regression): `markObservedTurnInterrupted(id)` for an id
-  that never becomes the active cycle still leaks
-  (`runner/src/opencode-observer.ts:120`).
+- [~] **Live-session verify sweep — opencode (2026-07-06 headless pass on
+  omni-prod, zen provider, free big-pickle):** (a) **busy/idle status:
+  CONFIRMED live** — `session.status_changed busy→idle` streams at turn
+  boundaries. **Title: NOT verifiable headless** — the turn adapter creates
+  opencode sessions with an explicit placeholder title
+  (`opencode-turn.ts:487,649`), and no `session.title` event fired within
+  ~60s post-turn; opencode's auto-retitle may be skipped for pre-titled
+  sessions. STILL OPEN: verify title via the real TUI path (opencode-created
+  session through `opencode attach`) — maintainer eyeball, or investigate
+  whether the adapter should create sessions WITHOUT a title so retitle
+  fires. (b) clickable spots — still needs interactive TUI eyeball, not
+  automatable headless.
+- [ ] (LOW, pre-existing) `markObservedTurnInterrupted(id)` for an id that
+  never becomes the active turn cycle leaks its entry
+  (`runner/src/opencode-observer.ts:120`). (The `reset()` GC half landed —
+  done log.)
+- [ ] **Reasoning re-emitted as a trailing `message.completed` (opencode turn
+  adapter, live 2026-07-06).** Observed on omni-prod (big-pickle, reasoning
+  model): the reasoning text streams as `message.delta`s → `reasoning.completed`
+  → the REAL answer streams + `message.completed` → then a SECOND
+  `message.completed` carrying the reasoning text again (seq 41 vs 38 in the
+  capture) — a double-render in any client that appends per
+  `message.completed`. Likely the adapter/observer flushes the reasoning part
+  as a message at turn end. `runner/src/opencode-turn.ts` (part→event
+  mapping), cross-ref §2b gap 3 (thinking presentation).
 - [ ] **Diagnose live: opencode looks stuck after disconnect/reconnect
-  (maintainer report 2026-07-04; needs the real cluster — recipe below).**
+  (maintainer report 2026-07-04; recipe below). 2026-07-06 live probes
+  (omni-prod) EXONERATED the event layer:** (i) SSE dropped mid-flight
+  during a 45s bash tool → the turn ran to completion server-side and
+  reconnect with `after=<seq>` replayed contiguously incl. `tool.completed`,
+  `turn.completed`, and the `idle` status flip
+  (`firstReplay=dropSeq+1, contiguous=true` — three separate runs); (ii) an
+  idle SSE stream survived a 6-min window on 30s heartbeats (90s watchdog
+  never fired); (iii) the 409 active-turn gate behaved correctly under
+  client churn. So a "stuck" display after reconnect is NOT missing replay —
+  remaining candidates narrow to (1) provider rate-limit/retry invisibility
+  under real load and (3) upstream `opencode attach` rendering a stale
+  in-flight tool (our PTY mirrors its bytes). Capture recipe below still
+  applies at next natural occurrence.
   Symptom: sometimes, after detaching, a session appears frozen; on reconnect
   the pane shows the same file-read in flight far longer than plausible;
   possibly correlated with opencode-spawned subagents. Same day the
@@ -847,107 +609,107 @@ go — it mutates go.mod/module cache as a side effect of `cd`.
   `TestCLISmoke` is opencode-only; make it table-driven over `backendCases`
   (gate the non-empty-output assertion on `expectRealReply`) so claude/codex
   fill the column.
-- [ ] Should the opencode window feel like a modal over the dash? (design
-  decision.)
+- [x] **OpenCode window as modal over the dash — DECIDED 2026-07-07: no.**
+  Full-screen external pane stays (modal PTY = constant reflow churn on a
+  client we don't control + "whose chrome wins" ambiguity); parity
+  investment goes to identical detach chrome + status strip instead (the
+  verify item above).
 
-## 8) Public SDK / client API (deferred design decisions, 2026-07-01 sweep)
+## 8) Public SDK / client API — ALL DECIDED 2026-07-07, now an implementation backlog
 
-Deliberately NOT auto-fixed (maintainer call). Breaking changes OK pre-OSS;
-update `sdktest/` pins in the same change.
+Decisions from the live proposal review (decision-proposals-2026-07-06.md §6).
+Breaking changes OK pre-OSS; update `sdktest/` pins in the same change.
+Suggested batching: one tui/* PR (Register + palette + Finished + B-tier);
+one client-behavior PR (destroy ordering + DialRunner); the interface,
+naming-break, and Shell items each stand alone.
 
-- [ ] **client: no external test seam / `WithBackend` unusable outside the
-  module.** The option takes concrete `internal/k8s.Backend` (importers can't
-  name it; only untyped nil compiles), so no fake injection for
-  `Create`/`Connect` orchestration tests (zero unit coverage). Narrow public
-  backend interface, or drop the option. Deliberately un-pinned in
-  `sdktest/surface_test.go`. `client/client.go:141,150`.
-- [ ] **The "normalized" turn/state model is Claude-SDK-shaped (MED).**
-  `TurnInput.Mode` is the literal SDK permission-mode enum (opencode discards
-  it; codex will too); `Connection.Opencode` is backend-specific in the central
-  public struct (codex plan pre-announces the break); `State.ClaudeSession` has
-  no slot for opencode's resume id. Model execution-policy/state abstractly.
-  `internal/session/types.go:175-178` (TurnInput.Mode), `:144-153`
-  (State.ClaudeSession), `client/session.go:62`.
-- [ ] **tui/theme: closed registry + missing exported tokens.** No
-  `Register(Theme)` despite the doc promise; `Denied/Info/Success/Warning`
-  tones have no exported active vars. `tui/theme/theme.go:63,107-144`.
-- [ ] **tui/kit: unsynchronized global palette.** `SetComponentColors` writes a
-  plain map read on every render; `theme.ApplyTheme` off the render goroutine
-  is a concurrent-map panic; two tea.Programs share one palette.
-  Atomic-pointer swap or documented single-goroutine ownership.
-  `tui/kit/style.go:21`, `tui/kit/components.go:32`.
-- [ ] **tui/list: `Item.Finished()` is dead API** — never called, every
-  implementer must write it. Drop it. `tui/list/list.go:12`.
-- [ ] client: `Destroy` stops sync *after* the cluster destroy (library callers
-  race EOF errors; TUI's PreDestroyHook covers interactive). `client/client.go`.
-- [ ] client: `DialRunner` forwards the unused SSH port. `client/client.go`.
-- [ ] `sandbox shell` has no `client/` equivalent — dogfooding gap; external
-  consumers can't replicate a shipped command. `internal/cli/shell.go`.
-- [ ] kit.FormatTokens caps at "1000M". `tui/kit/style.go`.
-- [ ] WithStateDir ssh-dir layout: per-session SSH include lives in a *sibling*
-  `ssh/` dir of the state root; containing it is a breaking include-path
-  migration — decide pre-OSS. `client/sync.go`.
+- [ ] **Narrow public `client.Backend` interface** (exactly the methods
+  Create/Connect/Destroy orchestration uses; `internal/k8s.Backend`
+  satisfies it; `WithBackend` takes the interface) — enables fake-injection
+  unit tests for orchestration (zero coverage today) and the seam a future
+  non-k8s backend needs. Pin in sdktest. `client/client.go:141,150`.
+- [ ] **De-Claude the turn/state model in ONE coordinated break:**
+  `TurnInput.Mode` → owned `ApprovalPolicy` enum (mapped per-backend in the
+  runner; non-honoring backends documented, not silent);
+  `Connection.Opencode` → generic `Connection.External` (codex reuses the
+  shape); `State.ClaudeSession` → `State.AgentSessionID` (one backend per
+  session ⇒ one resume id). `internal/session/types.go:175-178`, `:144-153`,
+  `client/session.go:62`. Cross-ref the §2d yolo flip (mode default changes
+  runner-side independently).
+- [ ] **`Session.Shell` in the SDK (maintainer call — full interactive
+  shell, not just a primitive).** SDK gains the one-call interactive shell
+  (PTY handling included); `internal/cli/shell.go` becomes a thin wrapper.
+  Build it atop an ssh-target seam so non-interactive consumers can still
+  exec. Pin in sdktest.
+- [ ] tui/theme: add `Register(Theme)` (doc promise exists) + export the
+  missing `Denied/Info/Success/Warning` active tone vars.
+  `tui/theme/theme.go:63,107-144`.
+- [ ] tui/kit: palette race → `atomic.Pointer` swap (two tea.Programs must
+  not share a plain map). `tui/kit/style.go:21`, `tui/kit/components.go:32`.
+- [ ] tui/list: drop dead `Item.Finished()`. `tui/list/list.go:12`.
+- [ ] client: `Destroy` stops sync BEFORE the cluster destroy (mirror the
+  TUI's PreDestroyHook ordering in the SDK). `client/client.go`.
+- [ ] client: `DialRunner` stops forwarding the unused SSH port.
+  `client/client.go`.
+- [ ] kit.FormatTokens gains the `B` tier (caps at "1000M" today).
+  `tui/kit/style.go`.
+- [x] WithStateDir ssh-dir layout — DECIDED via the §9 worktree sign-off
+  (4.10): move `ssh/` INSIDE the state root in the same pre-OSS break that
+  adds the worktree root; implement with the worktree Spec-split change.
+  `client/sync.go`.
 
 ## 9) Unbuilt features
 
 - [ ] **T10 — working-directory picker** (only unexecuted superpowers plan;
-  `docs/superpowers/plans/2026-06-22-t10-working-dir-picker.md`): dirPicker
+  `docs/superpowers/plans/2026-06-22-t10-working-dir-picker.md` — NOTE:
+  `docs/superpowers/` is local-only, ignored by the maintainer's global
+  gitignore; the item text here is self-sufficient): dirPicker
   overlay end-to-end — `dirpicker_path.go` (~-expansion, child listing,
   longest-common-prefix completion, validation) + overlay struct (open/close,
   prefill, Tab, recents) + wiring before the backend picker + thread
   `projectPath` into the Creator. None exists.
 - [ ] **Tekken-style agent-picker modal** — animations + per-agent
   ascii/ansi portrait.
-- [ ] **Per-session git worktree lifecycle (maintainer feature ask, promoted
-  from inbox 2026-07-04; design first, lands in the public SDK).** **Design
-  draft exists** — [`docs/worktree-lifecycle-design.md`](docs/worktree-lifecycle-design.md)
-  (Opus, 2026-07-05); awaiting maintainer review. New
-  sessions should automatically get their own worktree, and on sync-back the
-  work must be reachable on the laptop as a sanely-named branch — never a
-  cryptic worktree name, never silently lost. Pieces: (a) auto-create a
-  worktree at session create (`client/` + CLI/TUI); (b) a "convert to branch"
-  affordance (keymap) where an LLM proposes the branch name + commit message
-  but the git operations run deterministically CLI-side with human
-  confirmation (LLM generates content only); (c) merge/cleanup semantics —
-  mutagen syncs from the laptop, so merging into main happens laptop-side and
-  the remote shouldn't pull; the agent should name/clean the worktree before
-  it becomes a human-pushed branch; (d) reap abandoned worktrees. SDK-first
-  rule applies (§8/CLAUDE.md). Cross-ref §1d "concurrent sessions on one
-  project share one sync endpoint" — per-session worktrees are plausibly the
-  fix for that collision; design them together.
+- [ ] **Per-session git worktree lifecycle — design ACCEPTED 2026-07-07,
+  IMPLEMENT.** [`docs/worktree-lifecycle-design.md`](docs/worktree-lifecycle-design.md)
+  — all 10 open questions resolved in its Status block (headlines:
+  `Spec.WorkspacePath` split; worktree-keyed transcripts accepted;
+  `WorktreeAuto` default; WIP-commit on dirty destroy; **TUI owns the
+  branch-name proposal prompt** — SDK ships only the deterministic
+  `ConvertToBranch`; cross-machine = B1 only; worktree root under the state
+  dir + `ssh/` moves inside it in the same pre-OSS break, resolving the §8
+  WithStateDir item). Implementation order: Spec split → auto-worktree at
+  Create → capture-then-remove teardown/reap (`ReapWorktrees`, destroy hook)
+  → `ConvertToBranch` → TUI proposal prompt + confirm modal + `sandbox
+  worktree gc`. SDK-first; update sdktest pins in-change. Fixes §1d's sync
+  collision for git projects (distinct mutagen alphas).
 
 ## 10) Harness / tests / docs / ops
 
-- [x] **`just check` honest skip report** — per-gate skip detection mirrors
-  each recipe's own condition (incl. a separate `tsc` check for typecheck);
-  amber summary lists what CI still enforces; Fable-approved 2026-07-06.
-- [x] **sdktest tui surface pins** — all five public `tui/` packages
-  compile-pinned from the external module (incl. the `Item` interface via a
-  consumer stub); Fable-approved 2026-07-06.
-- [x] **`client.RunnerClient` widening pin** — 9-method consumer stub in
-  `sdktest/surface_test.go`; widening now breaks the conformance compile
-  first; Fable-approved 2026-07-06.
-- [x] PTY-test in-sandbox caveat documented in CLAUDE.md; Fable-approved
-  2026-07-06.
 - [ ] Ops: new CLI-created sessions use `:latest` and can hit the stale traefik
   manifest cache — bust the cache or pin digests CLI-side. (Resume path
   already fixed via digest pinning — see done log.)
-- [ ] **End-user host setup recipe / doctor (promoted from inbox 2026-07-04;
-  maintainer wrote "AICR recipe" — confirm what the acronym meant; Fable
-  2026-07-04: no expansion found anywhere in the repo, maintainer must
-  expand — the item is otherwise executable as a `sandbox doctor` design).** A
+- [ ] **End-user host setup: `sandbox doctor` (promoted from inbox
+  2026-07-04; the "AICR" acronym is resolved — separate item below).** A
   first-run check/setup path so the CLI "just works" on a fresh host:
   kubeconfig + context, mutagen binary, ssh, runner/reaper image refs,
   credential store. `just doctor` today only validates the Flox *dev* env
   (`justfile:243-271`), nothing exists for an end user of the `sandbox`
   binary itself (`sandbox doctor`?).
-- [ ] **Research/ADR: KRO composite resource (promoted from inbox
-  2026-07-04).** Could KRO wrap Sandbox+PVC+Secret(s) into one custom
-  resource, replacing CLI-side create orchestration
-  (`internal/k8s/backend.go:226-319`)? Key question: custom status/conditions
-  support. Short ADR only; no code until decided. **Draft exists** —
-  [`docs/kro-composite-adr.md`](docs/kro-composite-adr.md) (Opus,
-  2026-07-05); awaiting maintainer read.
+- [ ] **Research: NVIDIA AICR (github.com/nvidia/aicr) home use cases
+  (maintainer, expanded 2026-07-07).** Maintainer works on AICR at work
+  (GPU-cluster focus) and wants to find homelab use cases for components
+  that require multiple pieces of configuration synced up together.
+  Candidate fits worth evaluating: the per-session Secret+PVC+Sandbox trio
+  (note the KRO decision — [`docs/archive/kro-composite-adr.md`](docs/archive/kro-composite-adr.md)
+  rejected adding a controller dependency for this; the same bar applies),
+  the §7b substituter/egress/cache config bundle, and non-sandbox homelab
+  components. Research note only; no code until a concrete use case earns
+  it.
+- [x] **KRO — DECIDED 2026-07-07: not adopting.** ADR archived
+  ([`docs/archive/kro-composite-adr.md`](docs/archive/kro-composite-adr.md));
+  the §6 item-3 ownerReferences fix (Secret+PVC → Sandbox) is now unblocked
+  and immediately executable (~10 lines in `CreateSession`).
 - [~] **Observability first cut landed** — dependency-free spans behind
   `SANDBOX_TRACE=1` / `sandbox --trace`: connect/create phases incl. the
   backgrounded flush/inputs/reaper under one correlation id (`client/trace.go`);
@@ -955,7 +717,9 @@ update `sdktest/` pins in the same change.
   `runner/src/trace.ts`). Fable-verified 2026-07-06. NEXT (not done):
   correlate CLI connect id ↔ runner turn id across the HTTP seam; runner
   startup spans (index.ts); pod-ready sub-phases (schedule vs pull vs ready
-  — the big §5 unknown); SSE first-event latency.
+  — the big §5 unknown); SSE first-event latency. Also: `SANDBOX_TRACE` and
+  the §1d observer-cap model are absent from `docs/architecture.md` — update
+  the durable ref (doc drift, found in the 2026-07-06 harness audit).
 
 ## Open caveats (carry-forward)
 

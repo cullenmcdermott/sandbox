@@ -62,7 +62,7 @@ the dashboard statusline. The local `codex --remote` TUI still drives the turns;
 the runner just watches. This is what makes external-pane backends first-class on
 **metrics** without paying for the full Option A event mapping. (The same
 runner-as-observer fix retrofits OpenCode's metrics gap by subscribing to
-`opencode serve`'s event stream — see `docs/review-2026-06-24.md` agent-parity.)
+`opencode serve`'s event stream — see `docs/archive/review-2026-06-24.md` agent-parity.)
 
 ## Authentication
 
@@ -134,7 +134,7 @@ The read side of the credential manager: validate the configured auth for every
 supported agent and surface it (the maintainer's ask, 2026-06-24). Each `Provider`
 exposes `Status() → {configured, method, plan?, healthy?, detail}`; the dashboard
 renders a compact red/green strip (fits the cluster strip from
-`docs/dashboard-redesign.md`) and `sandbox auth status` / `sandbox doctor` prints it.
+`docs/archive/dashboard-redesign.md`) and `sandbox auth status` / `sandbox doctor` prints it.
 
 - **Kubernetes** — 🟢/🔴 can we reach the cluster API? (lightweight `/healthz` /
   `kubectl` ping; the backend already builds the kubeconfig). Surface the
@@ -269,6 +269,53 @@ SECOND client can observe another client's thread (`thread/list`+`thread/read` e
 and the daemon is multi-client, so plausible). The standalone install also can't be
 set up here (no network; and not imperatively on a Nix host).
 
+### Spike results (2026-07-06 — the off-airplane items, run in a container; SPIKE COMPLETE)
+
+Run against codex **0.142.5** (npm build + standalone, in a disposable
+`node:24-slim` container — matching the pod-image shape). **Both remaining
+questions answered; Option B's transport is settled:**
+
+- **ws endpoint addressing: `codex app-server --listen ws://IP:PORT` — no
+  daemon needed.** The bare app-server takes `--listen` (`stdio://` default,
+  `unix://PATH`, `ws://IP:PORT`, `off`) and binds a **fixed, chosen port**. It
+  also serves **`GET /readyz` and `/healthz`** on the same port — the runner
+  supervisor's health-probe surface for free. Auth: `--ws-auth
+  {capability-token,signed-bearer-token}` + `--ws-token-file` exist **for
+  non-loopback listeners**; a `127.0.0.1` bind (our plan) needs none, and the
+  TUI's `--remote-auth-token-env` carries the bearer for the non-loopback
+  case if we ever want it.
+- **The npm build serves `--listen ws://` fine** (verified on 8789, listener +
+  readyz up) — **the STANDALONE managed install is NOT needed for Option B.**
+  The standalone/managed-daemon path (`app-server daemon bootstrap
+  --remote-control`, `codex remote-control start`) turns out to be a
+  **cloud-relay pairing flow**: it dials OUT (status `connecting`,
+  `environmentId`, pairing codes/enrollments in the binary strings — the
+  "use codex from another device" product feature), requires ChatGPT auth to
+  register, and never binds a local TCP port. Not our transport; ignore it.
+  (Host Homebrew 0.139.0 also has `--listen` — the 2026-06-24 "standalone
+  required" conclusion applied only to the managed daemon.)
+- **Observer feasibility: CONFIRMED.** Two concurrent ws clients (Node 24
+  global `WebSocket`, one JSON-RPC message per text frame): A `initialize` +
+  `thread/start` → **B receives the `thread/started` notification broadcast
+  and `thread/read`s A's thread by id.** Server notifications are broadcast
+  to all connected clients — exactly the runner-as-metrics-observer shape.
+  Caveats: `thread/list` returned empty for A's fresh in-memory thread (list
+  appears to cover persisted threads only — the observer should key on
+  notifications + `thread/read`, not list); a live **turn** observation
+  (deltas streaming to B) still needs authed model access — do it as part of
+  Phase 2 with the real auth Secret, but nothing structural remains in doubt.
+- **Implications for the plan:** pod runs `codex app-server --listen
+  ws://127.0.0.1:8788` under a runner supervisor (mirror `opencode.ts`);
+  `portCodex = 8788` port-forward; local client = `codex --remote
+  ws://127.0.0.1:<lp>`; runner observer = a second ws client on pod-loopback.
+  The unix-over-SSH fallback is unnecessary. Server→client requests
+  (approvals, `account/chatgptAuthTokens/refresh`) arrive at **every**
+  client — the observer must answer/refuse them politely (JSON-RPC error) so
+  it never wedges an approval the TUI should own; refresh ownership remains
+  the auth question flagged above. Codex installs into the pod image via the
+  normal package path (npm today, Flox closure per the §7b directive) — no
+  vendor self-installer layer.
+
 ## Phase 1 — backend plumbing (Go + runner)
 
 1. **`internal/session/types.go`** — add `BackendCodex = "codex-app-server"`
@@ -320,7 +367,7 @@ set up here (no network; and not imperatively on a Nix host).
    `SANDBOX_BACKEND === 'codex-app-server'` (mirror the opencode boot branch).
 8. **`runner/Dockerfile`** — install the `codex` binary in the runtime image. This
    grows the image. Startup-speed plan (maintainer, 2026-06-24), addresses the
-   cold-start image-pull finding in `docs/review-2026-06-24.md`:
+   cold-start image-pull finding in `docs/archive/review-2026-06-24.md`:
    - **Shrink + split per-backend images** (claude-only default; opencode image;
      codex image) so each `sandbox <agent>` pulls only what it needs.
    - **Deploy Spegel** (stateless, P2P/cluster-local OCI mirror) so the first node
