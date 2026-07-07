@@ -167,10 +167,13 @@ in [`docs/review-2026-07-07.md`](docs/review-2026-07-07.md) §A/§B (id in brack
   `/sessions/:id/permissions/:id` with the bearer token and self-approves —
   defeating the whole approval flow. `guards.ts`' `\bANTHROPIC_API_KEY\b` regex
   is false comfort (`env`/`printenv`/`/proc/self/environ` bypass it). Fix:
-  positive-allowlist env for the children (reuse `exec.ts:26-43`
-  `sanitizedExecEnv`); never pass `RUNNER_TOKEN`/`OPENCODE_SERVER_PASSWORD`;
-  contain provider-key exfil at the network layer (A3). Cross-ref §10 test gap
-  F2 (the PreToolUse guard is itself untested).
+  positive-allowlist env for the claude child (reuse `exec.ts:26-43`
+  `sanitizedExecEnv`), stripping `RUNNER_TOKEN`; contain provider-key exfil at the
+  network layer (A3). **NB (verified):** do NOT strip `OPENCODE_SERVER_PASSWORD`
+  from the `opencode serve` child — it hard-refuses to start without it
+  (`opencode.ts:279`); opencode in-agent Bash containment belongs at its
+  tool-spawn/guardrail layer. Cross-ref §10 test gap F2 (the PreToolUse guard is
+  itself untested).
 - [ ] **Event log + SSE persist secrets verbatim, unlike the redacted audit log
   (LOW-MED) [A2].** `events.ts:191-224` `appendEvent` writes/broadcasts raw
   payloads (prompts, Bash commands, tool inputs) with no `redactSecrets`
