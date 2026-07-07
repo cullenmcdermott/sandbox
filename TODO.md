@@ -18,6 +18,17 @@
 > zero skipped gates) was removed from this file; residual "STILL OPEN" tails
 > were promoted to standalone open items below. Detail lives in the done log.
 >
+> **2026-07-07 handoff review:** an 8-agent sweep (security ×2, perf ×2,
+> test-coverage ×2, runner TS, Go client, event-model, docs, TUI-regression)
+> added verified findings across §1d/§1f/§2b/§2c/§4/§10 — all backed by
+> [`docs/review-2026-07-07.md`](docs/review-2026-07-07.md) (bracketed ids like
+> `[A1]`/`[D1]`/`[H1]` point into it). **Start here (highest severity):**
+> §1f **[A1]** RUNNER_TOKEN self-approve (HIGH, 3 agents); §2b **[D1]** tool-card
+> FIFO misattribution + **[D2]** crash-replays-as-working (HIGH); §1d **[H1]/[C1]**
+> the observer cap is a no-op + leaks forwards (the 953ef87 cap needs a real fix);
+> §4 **[E1]/[E2]** the two O(n²)/event-loop-blocking hot paths; §10 **[F1]/[F2]**
+> two CRITICAL untested enforcement paths (both cheap).
+>
 > **Opus-ready map:** §1c–§1d residuals, §2a–§2d, §4, §7a and the §5 GC
 > follow-ups carry pointers + fix direction — pick a cluster and go. Drafted,
 > awaiting maintainer sign-off: §1e server-side-loop ADR, §7b package-manager
@@ -40,7 +51,7 @@ done log.)
   binary-cache hosting question is the ADR's §4a substituter decision, and
   FloxHub publishing is the distribution channel on top — proposals for all
   three in
-  [`docs/decision-proposals-2026-07-06.md`](docs/decision-proposals-2026-07-06.md)
+  [`docs/decision-proposals-2026-07-06.md`](docs/archive/decision-proposals-2026-07-06.md)
   §2.3/§2.8. Standing directive recorded 2026-07-06: Flox (preferably) or
   Nix is the preferred install mechanism everywhere in the chain. Triage
   alongside the §7b sign-off.*
@@ -63,11 +74,54 @@ row-model consolidation moved to §2a where it belongs.
 
 ### 1d. System reliability (2026-07-01 whole-system review; HIGHs all fixed — see done log)
 
+**2026-07-07 handoff-review additions** — detail in
+[`docs/review-2026-07-07.md`](docs/review-2026-07-07.md) §C/§H (id in brackets):
+
+- [ ] **Observer cap (953ef87) is a no-op for the fleet it targets (MED-HIGH)
+  [H1].** `NeedsInput` is the steady state of every session that ever completed a
+  turn (`readmodel.go:180,208`), and `observerProtected` protects all attention
+  rows (`warm.go:42-48`) — so a relaunch with 30 completed sessions admits all 30
+  and evicts nothing, restoring the ~30 API-server forwards the cap exists to
+  prevent (compounds C1 below). Fix: protect only Waiting/Failed(+attached), or
+  gate NeedsInput protection on unseen output (`seenSeq < lastSeq`).
+- [ ] **Background observer connects leak SPDY port-forwards forever (HIGH)
+  [C1].** `portforward.go:97` roots forwards at `context.Background()` but
+  `ConnectResult` has no close seam; eviction/reconnect/`EventsPassive`-failure
+  all leak the forward + its reconnect loop (a suspended session's leaked forward
+  polls pods+Sandbox every ≤10s forever). Fix: add `Close func()` to
+  `ConnectResult`/`CreateResult` (→ `sess.Close`), call from
+  `cancelLiveSSE`/eviction/reconnect-supersede. Undercuts the observer-cap work
+  directly; pairs with H1.
+- [ ] **Eviction kills detached autopilot + false "suspended" toast; Busy row
+  freezes (MED) [H2/H3].** `evictObserver`→`dropRetained` discards the warm model
+  incl. an armed `/loop` driver + `queuedPrompt` while the pod is healthy
+  (`warm.go:107`), and the lapse toast says "suspended" wrongly (`app.go:930-938`);
+  an evicted-while-Busy row keeps its spinner until focused. Fix: protect
+  `autopilot.active()`/`queuedPrompt!=""`; tear down only the stream (not the
+  retained model); stamp evicted rows to a watch-derived status.
+- [ ] **`models.normalize` breaks every non-Claude model lookup (MED) [C2].**
+  `models.go:295-306` prefixes `claude-` onto any id, so `big-pickle`→
+  `claude-big-pickle` never matches the opencode/openai tables → all opencode
+  sessions get the 200k/$0 fallback (wrong ctx%/cost). Fix: try the raw id first.
+- [ ] **Re-create with a different account patches the Secret but not the Sandbox
+  env → auth breaks silently (MED) [C3].** `backend.go:391,444-488` vs the
+  `AlreadyExists` pod template (`buildEnv:1433-1461`). Patch the pod-template env
+  on the AlreadyExists path, or reject a shape-changing re-create.
+- [ ] **Assorted client reliability (LOW→MED-LOW) [C4-C11]:** observer connect to
+  opencode opens 3 forwards not 1 (switch order, `session.go:286-296`); ssh config
+  paths unquoted → spaced state dir breaks all sync (`ssh.go:123,134`); backgrounded
+  `CreateInputs`/reaper unbounded → hung mutagen wedges the first turn
+  (`session.go:458,506`); rollback can delete a pre-existing PVC (`backend.go:297-307`);
+  data race on `Session.projectPath` (`session.go:244-248`, trips `-race`);
+  `suspend` probe unbounded ~40s (`commands.go:97`); `models.Limit` sync-fetches
+  models.dev inside the reducer, freezes UI ~5s (`models.go:186-227`);
+  `IdleTimeout` override no-ops when a reaper already runs (`reaper.go:71-74`).
+
 - [ ] **Concurrent sessions on one project share one local sync endpoint, no
   dedup (LOW-MED).** Mutagen session name keys on SessionID only; two agents on
   the same repo silently cross-feed edits (same-file race → perpetual
-  conflicts). `internal/sync/sync.go:130`. Cross-ref §9 worktrees — per-session
-  worktrees are plausibly the fix; design together.
+  conflicts). `internal/sync/sync.go:202` (`projectName`). Cross-ref §9
+  worktrees — per-session worktrees are plausibly the fix; design together.
 - [ ] **Mutagen conflict detail in the TUI.** The `SyncConflicted` worst-of
   distinction landed (done log); still open: per-file/side detail + a textual
   resolution hint (needs parsing the mutagen `conflicts[]` JSON shape,
@@ -75,7 +129,7 @@ row-model consolidation moved to §2a where it belongs.
 - [ ] **Transcript sync merges pod-agent history into local `~/.claude`
   unscoped (LOW-MED).** By design (subPath bind), but pod conversations become
   locally `--resume`-able with no tag or audit trail back to the sandbox
-  session. `internal/k8s/backend.go:1233`, `internal/sync/sync.go:62`.
+  session. `internal/k8s/backend.go:1338-1375` (subPath bind), `internal/sync/sync.go:62`.
 - [ ] **Port-forward mid-stream death detection (SMALL, optional).** Terminal
   state + immediate `ErrSessionGone` reconnect-abort landed (done log);
   consuming the literal `ForwardHandle.Done()` channel needs a
@@ -100,6 +154,53 @@ done log; the item-3 follow-up below is the one loose end).
   Order: schema (`autopilot.state` + `just gen`) → runner (spec persistence,
   self-submit loop, guards, reaper non-idle, boot re-arm) → TUI (arm/disarm +
   render-from-events, local tea.Tick kept as no-capability fallback) → tests.
+
+### 1f. Security & runner-reliability hardening (2026-07-07 handoff review)
+
+Verified findings from the 8-agent handoff sweep; full detail + exploit/scenario
+in [`docs/review-2026-07-07.md`](docs/review-2026-07-07.md) §A/§B (id in brackets).
+
+- [ ] **Agent child processes inherit `RUNNER_TOKEN` → self-approve permissions
+  (HIGH; 3 agents converged) [A1].** SDK/opencode children get
+  `env: { ...process.env }` (`claude.ts:222-231,815`, `opencode.ts:305-308`);
+  a prompt-injected agent runs one Bash `wget` against its own
+  `/sessions/:id/permissions/:id` with the bearer token and self-approves —
+  defeating the whole approval flow. `guards.ts`' `\bANTHROPIC_API_KEY\b` regex
+  is false comfort (`env`/`printenv`/`/proc/self/environ` bypass it). Fix:
+  positive-allowlist env for the children (reuse `exec.ts:26-43`
+  `sanitizedExecEnv`); never pass `RUNNER_TOKEN`/`OPENCODE_SERVER_PASSWORD`;
+  contain provider-key exfil at the network layer (A3). Cross-ref §10 test gap
+  F2 (the PreToolUse guard is itself untested).
+- [ ] **Event log + SSE persist secrets verbatim, unlike the redacted audit log
+  (LOW-MED) [A2].** `events.ts:191-224` `appendEvent` writes/broadcasts raw
+  payloads (prompts, Bash commands, tool inputs) with no `redactSecrets`
+  (contrast `audit.ts`). Factor redaction into a shared module; run it in
+  `appendEvent` for `turn.started`/`tool.*`/`permission.*`.
+- [ ] **SECURITY.md: 0.0.0.0 binds + open-443 egress example (INFO) [A3].**
+  Runner/sshd/opencode bind all interfaces (`server.ts:77` etc.);
+  `networkpolicy-egress-allow.yaml:48-59` permits 443 to any public host — the
+  exfil channel behind A1/A2. Document prominently; point at FQDN-scoped egress.
+- [ ] **opencode `serve` child has no `'error'` listener → uncaught exception
+  kills the runner (MED) [B1].** `opencode.ts:304-318`. Add `proc.on('error')`
+  with backoff respawn (mirror `exec.ts:120`).
+- [ ] **Single-turn 409 gate ignores observer-synthetic busy → concurrent
+  prompts into a busy opencode session (MED) [B2].** `server.ts:169` checks only
+  `activeTurns.size`. Also 409 when `backend==='opencode-server' &&
+  status==='busy'` (mirror `server.ts:213`).
+- [ ] **`/exec` hangs past its 30s timeout + leaks grandchildren on a backgrounded
+  child (MED) [B3].** `exec.ts:115-129` resolves on `'close'` and kills only the
+  direct bash. `spawn(detached)` + `kill(-pid)`, or resolve on `'exit'`.
+- [ ] **Persist-failure drops the event from the live stream too (LOW-MED)
+  [B4].** `events.ts:200-224` broadcasts with `seq=0`, which the `<=afterSeq`
+  filter (`:271`) drops for all clients → turn "working" forever. Bypass the
+  filter for `seq===0` or assign a synthetic seq. (Consumer-side twin of D-note.)
+- [ ] **Assorted runner robustness (LOW) [B5-B9]:** `after > lastSeq` accepted →
+  silent live-event swallow (clamp, `server.ts:127-130`); synchronous git in
+  `emitWorkspaceStatus` blocks the loop ~9s/turn (`claude.ts:857-895`, async it);
+  corrupt `session.json` crash-loops the pod (`session.ts:135-137`, catch + move
+  aside); permission-resolve races the deadline and lies `resolved:true`
+  (`server.ts:233-251`); oversized/malformed body → 500 not 413/400
+  (`httputil.ts:14-26`).
 
 ## 2) The "feels like Claude Code" program (2026-07-04 audit)
 
@@ -131,7 +232,7 @@ all landed (done log) — the items below are what remains.
   comment. `groups.go:57`.
 - [ ] **App.Update flat dispatch + one detachTranscript() (MED).** 450-line
   screen-router; detach sequence duplicated 4×; recursive
-  `a.Update(*msg.ready)` re-entry (`app.go:615,630`); B17 single-delegation
+  `a.Update(*msg.ready)` re-entry (`app.go:676,691`); B17 single-delegation
   enforced only by comments. `app.go:368`.
 - [ ] **Explicit input contexts + binding tables (MED).** ~180 lines of raw
   string-compare if-chains encode key precedence by code order (esc cascade =
@@ -164,7 +265,7 @@ changes go through `schema/events.json` + `just gen` (never hand-edit `*.gen.*`)
   bug).** `MessagePayload` has no `parentToolUseId`
   (`schema/events.json:88-95`); `handleStreamEvent` receives it but only
   attaches it to `tool_use`, never text/thinking deltas
-  (`runner/src/mapping.ts:119-124,249-253`) — a running Task's narration
+  (`runner/src/mapping.ts:110-114,249-253`) — a running Task's narration
   interleaves into the single `assistantBuf` (`transcript.go:2301-2306`),
   corrupting the main streaming reply. Fix: schema field + `just gen`; thread
   in handleAssistantMessage/handleStreamEvent; route parented events into the
@@ -205,6 +306,49 @@ changes go through `schema/events.json` + `just gen` (never hand-edit `*.gen.*`)
   dropped. Generic tool.* events would mostly work once configured; non-text
   MCP results flattened.
 
+**2026-07-07 parity-audit additions** (detail in
+[`docs/review-2026-07-07.md`](docs/review-2026-07-07.md) §D; id in brackets):
+
+- [ ] **Tool completion is FIFO-matched ignoring `toolUseId`, and open cards are
+  never closed at turn boundaries (HIGH) [D1].** `finishToolCard` pops
+  `pendingTools[0]` (`transcript_reduce.go:72-92`) though the runner emits
+  `toolUseId` (`mapping.ts:236-245`) and the `flatTools` id-map exists; and the
+  `turn.*` terminal handlers never drain `pendingTools`. An interrupted tool
+  poisons every later card for the session's life; parallel tools land on wrong
+  cards. Fix: match `flatTools[ToolUseID]` first; drain+mark `pendingTools` in the
+  three terminal handlers.
+- [ ] **Mid-turn pod crash replays as "working forever" (HIGH) [D2].** Boot
+  coerces `busy`→`idle` (`session.ts:93-95`) but appends no terminal event for the
+  orphaned turn, so replay drives `StatusBusy` with nothing to flip it back
+  (`readmodel.go:189-191`). Fix: on the boot busy→idle flip append
+  `turn.interrupted` + `session.status_changed{idle}` before the boot
+  `session.started`. Distinct from §7c (live-pod) — this is the reboot path.
+- [ ] **All four `turn.*` payloads are off-schema → invisible to the drift gate
+  (MED) [D3].** `turn.started/completed/failed/interrupted` carry fields absent
+  from `schema/events.json`; the Go TUI decodes `turn.failed` via a coincidental
+  shared `message` key. Add Turn payloads to the schema + `just gen` (unblocks D5).
+- [ ] **Interrupt mid-thinking leaves the live "Thinking" tail up forever + leaks
+  the buffer into the next turn (MED) [D4].** `m.reasoning` cleared only on
+  `reasoning.completed` (`transcript_reduce.go:536`); no backend emits it on abort.
+  Reset `m.reasoning`/`reasoningBuf` in `finalizeStreaming`.
+- [ ] **OpenCode transcripts have no user prompts on attach/replay (MED) [D5].**
+  Adapter/observer map only assistant parts; the prompt lives only in the
+  off-schema `turn.started`. Emit `message.*  role:user`, or render
+  `TurnStartedPayload.prompt` once D3 lands.
+- [ ] **`tool.delta` carries no `toolUseId`/`parentToolUseId` → live input preview
+  attaches to the wrong card (MED) [D6].** `mapping.ts:295-297` drops the
+  in-scope `parentToolUseId`; the TUI targets the newest pending flat card. Thread
+  the ids and target by id. Distinct from gap 1 (text/thinking deltas).
+- [ ] **Event-model LOW residuals [D7-D12]:** hook-blocked tools emit two
+  `tool.failed` (double FIFO pop, `claude.ts:302-306`); runner omits the schema's
+  `required` `ToolPayload.tool` and never emits schematized `exitCode`
+  (§2c exit-code plumbing); `session.State.Status` dual vocabulary in the public
+  SDK (`client.go:174-188` vs `types.go:156-163`, cross-ref §8); `TurnInput`
+  mirror drift (`Advisor` absent TS-side; `Resume` mistyped as `TurnID`);
+  pre-cycle `session.error` + retitle-during-headless-turn invisible
+  (`opencode-observer.ts:142-153,210`); usage double-emit + cache-token/ctx% edge
+  (`mapping.ts:321-366`, `readmodel.go:145-149`).
+
 ### 2c. Design/layout changes (renderer)
 
 Deduped against `docs/archive/ux-polish-plan.md` — nothing below is already committed
@@ -213,7 +357,16 @@ there. HIGH items are the at-a-glance tells; most are renderer-local.
 - [ ] **Tool-card follow-ups** (the two-line ⏺/⎿ idiom + ctrl+o expansion
   landed — done log): per-card focus/expand for older cards
   (space/toggleSubagents has the same latest-only gap); `⎿ exit 0 · 42 lines`
-  combo needs exit-code plumbing (§2b gap 5).
+  combo needs exit-code plumbing (§2b gap 5). **2026-07-07 regression residuals
+  from 9e1d03b** (detail [`docs/review-2026-07-07.md`](docs/review-2026-07-07.md)
+  §H): expanded output renders unsanitized `\r`/non-SGR control sequences into the
+  frame → smears the transcript (MED, new exposure; `transcript_render.go:536-560`,
+  strip in `clampOutputLines`/`toolExpandBody`) [H4]; tabs measure width 0 but
+  expand to 8 cols → expanded Go diffs overflow the budget
+  (`transcript_render.go:552`, `permission_diff.go:52`) [H5]; opencode tool output
+  is uncapped (`opencode-turn.ts:296`, cap only on the claude path
+  `mapping.ts:222`) [H6]; ctrl+o toggles content-less cards with no feedback +
+  strands `expanded=true` (`transcript_reduce.go:98-110`) [H7].
 - [ ] **Kill the full-height `▌` role gutter bars; quiet user prompts (HIGH).**
   Colored bars down every message line + bold-green user text is the largest
   departure from CC's look. Assistant: single `⏺ ` bullet + 2-space hanging
@@ -406,6 +559,45 @@ done log.)
 - [ ] Glamour pads wrapped lines with per-space SGR runs (bytes; upstream
   glamour style; inflates parse work).
 
+**2026-07-07 perf-review additions** (two agents; ✓ = both flagged it; detail in
+[`docs/review-2026-07-07.md`](docs/review-2026-07-07.md) §E, id in brackets):
+
+- [ ] **`tool.delta` handler re-parses the whole accumulated input JSON per delta
+  — O(n²), often ×2 (HIGH) [E1].** `transcript_reduce.go:547-573`: full-buffer
+  `json.Unmarshal` (fails mid-stream, then re-parses with `+"\"}"`) plus
+  `syncItems()` per delta. A 100 KB file write ≈ 10 MB scanned + 10 MB copied +
+  100 list rebuilds, ×warm-model count. Fix: `strings.Builder`, throttle preview
+  extraction, version-bump instead of `syncItems()` (mirror `streamDelta`).
+- [ ] **Runner SSE replay materializes the whole log synchronously → blocks the
+  event loop + RSS spike (HIGH ✓) [E2].** `events.ts:277-282,227-249` `.all()` +
+  parse + re-stringify; a long-session `after=0` attach stalls live turns/health/
+  interrupts and risks OOM per connect. Fix: `stmt.iterate()`, splice the raw
+  `payload` column, pause on `write()===false`.
+- [ ] **No SSE backpressure → a wedged passive client grows runner RSS unbounded
+  (MED ✓) [E3].** `events.ts:284-287` ignores `res.write()`; a half-open stream
+  OOM-kills the pod (presents as "session died"). Cap `writableLength`, destroy
+  past it (reconnect replays from `after`).
+- [ ] **Delta events persisted forever; log unbounded by default (MED ✓) [E4].**
+  Delta-only compaction on `turn.completed` (delete `*.delta` older than the last
+  N turns — seq gaps are fine, remaining events stay contiguous). Not M34's
+  rejected all-or-nothing retention.
+- [ ] **Passive SSE streams: one Update+View per event, no batching (MED ✓)
+  [E5].** `model_sse.go:630-638` vs the foreground `waitForEvent` 512-batch;
+  3-5 busy warm sessions ≈ 100-150 render pipelines/s. Mirror the non-blocking
+  drain, or skip deltas for `passive=1` streams runner-side. (The multiplier that
+  makes the §4 per-frame costs user-visible.)
+- [ ] **Live reasoning tail re-wraps the entire buffer per frame (MED) [E6].**
+  `transcript_render.go:354-363` — assistant tail got the stable-prefix cache,
+  reasoning didn't. Cache the prefix wrap, or slice to the last N lines first.
+- [ ] **Streaming tail re-hashes + copies the whole buffer per delta (MED-LOW)
+  [E7].** `transcript_list.go:240-254` `fnv(entire buf)` + string→[]byte copy;
+  running-FNV over delta bytes, or key on `buf.Len()` (monotonic).
+- [ ] **LOW perf [E8-E10]:** Go SSE consumer double-copies each line
+  (`client.go:403-422`, use `scanner.Bytes()`); `appendEvent` re-prepares its
+  INSERT per event (✓, `events.ts:201-207`, prepare once); host event-cache
+  reopens the ndjson file per cached event + no size cap
+  (`sync_support.go:252-258`, hold an open handle + cap the tail).
+
 ## 5) New-session startup speed (ordered by likely win)
 
 - [ ] **Shrink + split images, and deploy Spegel** — image pull dominates cold
@@ -434,7 +626,7 @@ done log.)
 Plan: [`docs/codex-integration-plan.md`](docs/codex-integration-plan.md) —
 remote app-server + local `codex --remote` TUI (Option B), mirroring the
 opencode supervisor/external-pane pattern + runner metrics-observer. Backend id
-`codex-app-server` reserved (`internal/session/types.go:52`). Auth =
+`codex-app-server` reserved (`internal/session/types.go:63`). Auth =
 ChatGPT-plan OAuth owned by the credential manager.
 
 - [ ] **CLI-owned credential manager — write side.** Anthropic part DONE
@@ -667,7 +859,7 @@ side effect of `cd`.
 
 ## 8) Public SDK / client API — ALL DECIDED 2026-07-07, now an implementation backlog
 
-Decisions from the live proposal review (decision-proposals-2026-07-06.md §6).
+Decisions from the live proposal review (archive/decision-proposals-2026-07-06.md §6).
 Breaking changes OK pre-OSS; update `sdktest/` pins in the same change.
 Suggested batching: one tui/* PR (Register + palette + Finished + B-tier);
 one client-behavior PR (destroy ordering + DialRunner); the interface,
@@ -736,6 +928,50 @@ naming-break, and Shell items each stand alone.
 
 ## 10) Harness / tests / docs / ops
 
+**2026-07-07 test-coverage additions** (two agents; detail in
+[`docs/review-2026-07-07.md`](docs/review-2026-07-07.md) §F, id in brackets):
+
+- [ ] **CI never tests the SQLite event log — durability contract dark
+  (CRITICAL; both agents; cheapest fix) [F1].** `.depot/workflows/ci.yml:83`
+  installs runner deps `--ignore-scripts` → better-sqlite3's native addon isn't
+  built → `runner/test/events.test.ts` self-skips. Monotonic-seq / append-before-
+  stream / replay-ordering invariants run only on a full local install. Fix: add
+  `npm rebuild better-sqlite3` to the CI test job; fail if the suite skips under
+  `RUNNER_REQUIRE_SQLITE=1`.
+- [ ] **The claude PreToolUse Bash guard (primary enforcement path) is untested
+  (CRITICAL) [F2].** `claude.ts:294-311` `makePreToolUseBashHook` — the
+  highest-traffic of three `bashCommandBlocked` sites — is never invoked by a
+  test (unlike `/exec` and the opencode plugin). An SDK shape change silently
+  disables Bash blocking for claude. Export/test-hook it; table-test block/allow.
+  Cross-ref §1f A1.
+- [ ] **Client orchestration incl. the planned `Destroy` reorder is 0% covered
+  (HIGH) [F3].** All of `client/session.go` runtime + `client/client.go:411-469`
+  + `client/sync.go`. §8's `Destroy` sync-before-destroy flip has no regression
+  net. Unblocked once §8 narrows `Backend`: fake-backed table test per method +
+  a `Destroy` call-order spy.
+- [ ] **`server.ts` HTTP layer dark; "e2e" is fake-on-both-sides (HIGH) [F4].**
+  Route dispatch, bearer enforcement, 409 gate, SSE `after=` untested runner-side;
+  `internal/e2e`'s fake runner faithfulness to `server.ts` is unchecked. Add a
+  `node:test` suite booting `createServer` (401/404/409/replay).
+- [ ] **Port-forward lifecycle 0% covered (HIGH) [F5].** `portforward.go`
+  retry loop + `Done` signaling (site of C1 and the §1d `ForwardDone` seam).
+  Extract the retry decision to a pure func + table-test; unit-test `Done` closes
+  once.
+- [ ] **MED coverage [F6/F7]:** opencode cred-rotation warning
+  (`backend.go:1530-1584`) + the §7c opencode double-`message.completed`/observer
+  leak have no pinning test; `waitHealthy` (`connect.go:41-66`), `reaperTick`
+  (`reap.go`, a regression silently stops fleet idle-suspend), and the dashboard
+  `model_sse.go` command closures execute in no test (only their reduced messages
+  do). Copy the `reap.go` pure-decision split pattern.
+
+- [ ] **`docs/runner-api.md` shape gaps** (2026-07-07 docs sweep): `/healthz`
+  body `{status,protocolVersion}` undocumented (consumed by `client.go:97`);
+  `POST /turns` 409s (concurrent-turn + supervise-only) undocumented; interrupt
+  empty-turn-segment (`/turns//interrupt` = active turn) undocumented. README
+  omits `sandbox auth logout`, `auth status`, `sync … gc`. `LAUNCH-CHECKLIST.md`
+  "whole tree is uncommitted WIP (no HEAD)" is false; `HARDENING-BACKLOG.md`
+  C*/M*/BR* items live outside the TODO single-backlog protocol (fold in or keep
+  as a referenced provenance backlog).
 - [ ] Ops: new CLI-created sessions use `:latest` and can hit the stale traefik
   manifest cache — bust the cache or pin digests CLI-side. (Resume path
   already fixed via digest pinning — see done log.)

@@ -24,7 +24,7 @@ The `docs/oss-launch/` directory itself is internal working material — delete 
   machine may not ignore it. Keep it untracked or add a repo-local ignore.
 
 ## Recommended before/at publish
-- [ ] **Seed GitHub Issues** from `docs/oss-launch/TODO-ARCHIVE.md` (open backlog)
+- [ ] **Seed GitHub Issues** from `docs/archive/oss-launch/TODO-ARCHIVE.md` (open backlog)
   and `docs/oss-launch/HARDENING-BACKLOG.md` (production hardening). CLAUDE.md's
   task-backlog section now points contributors at Issues, not the deleted
   `TODO.md`.
