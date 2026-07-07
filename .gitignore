@@ -11,6 +11,9 @@ runner/dist/
 /dist/
 /mockup
 /tuikit-demo
+# `go build ./cmd/gen-eventschema` output (the generator is run via `go run` in
+# `just gen`; a built binary must never be committed).
+/gen-eventschema
 
 # KIND local dev cluster (dev/local): the local kubeconfig and any provider-secret
 # overlay are machine-local and may carry credentials — never commit them.

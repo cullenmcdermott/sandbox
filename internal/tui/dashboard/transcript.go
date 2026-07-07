@@ -244,7 +244,7 @@ type TranscriptModel struct {
 	// caps holds terminal capabilities (copied from the dashboard Model on
 	// attach). Gates the opt-in ctx-gauge sweep + other Ghostty effects; a zero
 	// Caps (tests, non-truecolor, NO_COLOR) lights up nothing, so the status
-	// line is byte-identical to today. See docs/ghostty-terminal-effects.md.
+	// line is byte-identical to today. See docs/archive/ghostty-terminal-effects.md.
 	caps terminal.Caps
 
 	// Stage 3 (Kitty graphics ctx gauge). kittyGaugeBucket is the last fill
@@ -252,7 +252,7 @@ type TranscriptModel struct {
 	// kittyGaugeID is that image's id (a new id each change forces a re-fetch);
 	// pendingKitty holds the one-shot APC transmission queued when the bucket
 	// changes, drained into the next frame by App.View. All zero/empty unless
-	// caps.KittyGraphics. See docs/ghostty-terminal-effects.md §4.
+	// caps.KittyGraphics. See docs/archive/ghostty-terminal-effects.md §4.
 	kittyGaugeBucket int
 	kittyGaugeID     uint32
 	pendingKitty     string

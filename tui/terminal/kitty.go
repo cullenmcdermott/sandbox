@@ -9,7 +9,7 @@ import (
 // Kitty graphics protocol, Unicode-placeholder ("virtual placement") variant —
 // the only form safe to use inside a Bubble Tea AltScreen, because the rendered
 // placeholder cells are normal-width and the diff renderer measures them
-// correctly (docs/ghostty-terminal-effects.md §4).
+// correctly (docs/archive/ghostty-terminal-effects.md §4).
 //
 // Two pieces:
 //

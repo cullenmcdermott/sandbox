@@ -156,7 +156,7 @@ func blockBar(frac float64, n int, fillColor color.Color) string {
 
 // shimmerBlockBar renders an n-segment block bar whose FILLED cells carry a
 // gradient that scrolls by `phase` cells each frame, producing a live shimmer
-// while a turn runs (Stage 1, docs/ghostty-terminal-effects.md). Empty cells use
+// while a turn runs (Stage 1, docs/archive/ghostty-terminal-effects.md). Empty cells use
 // the same recessed dim rung as blockBar, and the total cell count is identical,
 // so the bar occupies exactly the same width — no layout shift versus the static
 // path. When pulse is true (ctx ≥ 80%) the fill breathes through a coral ramp

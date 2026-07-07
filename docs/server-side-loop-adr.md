@@ -1,7 +1,7 @@
 # ADR: Server-side autopilot loop (runner-owned driver)
 
 - **Status:** ACCEPTED (maintainer sign-off 2026-07-07) — all open items
-  resolved as proposed in `docs/decision-proposals-2026-07-06.md` §1:
+  resolved as proposed in `docs/archive/decision-proposals-2026-07-06.md` §1:
   endpoint shape (a) `PUT/DELETE /sessions/:id/autopilot`; `max_iterations`
   default **50** (always enforced), `token_budget` optional but shipped in
   v1; capability bit lives in `GET /sessions/:id/status`; H2 retry = 5

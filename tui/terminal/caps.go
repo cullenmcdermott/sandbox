@@ -1,5 +1,5 @@
 // Package terminal owns terminal-capability detection and escape-sequence
-// emission for opt-in "Ghostty effects" (see docs/ghostty-terminal-effects.md).
+// emission for opt-in "Ghostty effects" (see docs/archive/ghostty-terminal-effects.md).
 // It detects capabilities once at startup into a Caps value that is threaded
 // into a model; every visual enhancement is gated behind a Caps field so
 // non-capable terminals (and NO_COLOR) get plain output.

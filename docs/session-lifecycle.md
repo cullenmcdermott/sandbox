@@ -1,11 +1,13 @@
 # Session lifecycle: ephemeral pods, idle reaping, and reconnect
 
-Status: **code complete** (design approved 2026-06-18). The CLI, runner, and
-reaper code paths below are implemented and unit-tested; what remains is image
-builds and the cluster GitOps wiring (RBAC, namespaces, network policy — see the
-example manifests under `k8s/`), which have not been validated on a live
-cluster. This document is both the design and the implementation checklist for
-making sandbox session pods ephemeral and resilient.
+Status: **implemented and live-validated** (design approved 2026-06-18;
+end-to-end path verified on a real cluster 2026-06-23, see
+`docs/archive/done-log-2026-06.md`). The CLI, runner, and reaper code paths are
+implemented and unit-tested; runner + reaper images publish to GHCR via
+`.depot/workflows/`. The cluster GitOps wiring (RBAC, namespaces, network
+policy) ships as example manifests under `k8s/`. This document is both the
+design and the implementation checklist for making sandbox session pods
+ephemeral and resilient.
 
 ## Goals
 
@@ -31,7 +33,7 @@ making sandbox session pods ephemeral and resilient.
 
 ### Unique session IDs (done)
 `sandbox claude` mints a fresh ID per invocation: `claude-sdk-<pathhash6>-<rand>`
-(`internal/cli/root.go:newSessionID`). The path hash keeps sessions grouped by
+(minted in `client/client.go`, `newSessionID`). The path hash keeps sessions grouped by
 project at a glance; the random suffix guarantees distinct pods. Reconnecting is
 done by **explicit ID** via `attach`, `status`, etc. — not by re-deriving from
 the path.
@@ -124,7 +126,7 @@ Go client (`internal/runner`):
 Reaper:
 - [x] hidden `reap` subcommand (poll → suspend → exit) (`internal/cli/reap.go`)
 - [x] `internal/k8s` helpers: pod IP, read runner token via API, ensure reaper Job
-      (`PodIP`, `RunnerToken`, `EnsureReaper` in `backend.go`)
+      (`PodIP`, `RunnerToken` in `backend.go`; `EnsureReaper` in `internal/k8s/reaper.go`)
 
 CLI/TUI:
 - [x] spawn reaper Job on `claude` create + `attach`/`resume`
@@ -134,8 +136,8 @@ CLI/TUI:
 - [x] `terminationGracePeriodSeconds` in pod spec (`internal/k8s/backend.go`)
 
 Images:
-- [ ] build/push runner image (`runner/Dockerfile`) to a registry the cluster can pull
-- [ ] build/push reaper image (`Dockerfile.reaper`) to that registry
+- [x] build/push runner image (`runner/Dockerfile`) to GHCR (`.depot/workflows/build-runner-image.yml`)
+- [x] build/push reaper image (`Dockerfile.reaper`) to GHCR (`.depot/workflows/build-reaper-image.yml`)
 
 Cluster (GitOps — example manifests under `k8s/`):
 - [ ] `agent-reaper` namespace + ServiceAccount

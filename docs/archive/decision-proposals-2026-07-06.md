@@ -1,6 +1,12 @@
 # Consolidated decision proposals — 2026-07-06
 
-**Status:** partially decided (live review with maintainer, 2026-07-07):
+**Status:** IMPLEMENTED/RESOLVED — every proposal below was decided in the
+2026-07-07 live review and the outcome migrated into the source ADRs/designs and
+TODO.md (§1e, §7b, §9, §8, §2d). This doc is the point-in-time decision record;
+archived 2026-07-07. Nothing here is open.
+
+**Original status line (kept for provenance):** partially decided (live review
+with maintainer, 2026-07-07):
 - **§1 server-side loop — SIGNED OFF as proposed** (ADR status updated).
 - **§2 package manager — SIGNED OFF with amendment:** spike
   `ghcr.io/flox/flox` as the base (one package world, flox ≥ 1.13 for

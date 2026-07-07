@@ -9,10 +9,10 @@ has two halves that talk over one HTTP+SSE API:
 The PVC behind each pod is the source of truth for session state, so a session
 survives detach, suspend/resume, and CLI restarts.
 
-> **Status:** the component boundaries and the auth/env wiring are implemented
-> and unit-tested. The end-to-end file-sync path (Mutagen over SSH) and the
-> runner image build have **not** yet been validated on a live cluster — see
-> [Unvalidated paths](#unvalidated-paths).
+> **Status:** implemented and unit-tested; the end-to-end path — runner image
+> build, live turn round-trip, and Mutagen-over-SSH sync — was validated on a
+> real cluster 2026-06-23 (see `docs/archive/done-log-2026-06.md`) and the
+> runner/reaper images publish to GHCR via `.depot/workflows/`.
 
 ## Components
 
@@ -26,11 +26,21 @@ survives detach, suspend/resume, and CLI restarts.
 | Local | `internal/index` | Local session index + SSH key storage under `~/.local/share/sandbox` |
 | Local | `internal/session` | Shared contract: `Spec`, `State`, `Event`, `Backend`, `RunnerClient` |
 | Local | `internal/models` | Resolves a model's context-window limit + per-million-token pricing; drives the TUI ctx% indicator |
+| Local | `internal/authstatus` | Offline per-agent auth-status report behind `sandbox auth status` (Claude/Codex/OpenCode providers) |
+| SDK   | `client/`, `client/cred` | Public Go SDK (create/connect/suspend/destroy/turns/events/sync) the CLI + TUI dogfood; `client/cred` is the multi-account Anthropic credential store. New capability lands here first |
+| SDK   | `tui/` | Public, importable TUI building blocks split out of the dashboard: `tui/kit`, `tui/anim`, `tui/list`, `tui/theme`, `tui/terminal` |
+| Test  | `sdktest/` | Separate Go module that imports `client`/`client/cred` as an external consumer — compile-time signature pins + behavioral contract tests (`just sdk-conformance`) |
+| Test  | `internal/k8sit` | Build-tagged two-layer integration tests (CLI→controller→pod) incl. the backend-conformance `backendCases` harness |
 | Test  | `internal/e2e` | Build-tagged (`//go:build e2e`) CLI↔runner smoke test: a full turn across the `internal/runner` HTTP+SSE seam against an in-process fake runner |
 | Pod | `runner/src/server.ts` | node:http server, bearer auth, routes (see `runner-api.md`) |
 | Pod | `runner/src/claude.ts` | Claude Agent SDK `query()`, hooks, permission flow, event mapping |
+| Pod | `runner/src/mapping.ts` | SDK message → normalized event mapper (shared turn-mapper invariants) |
+| Pod | `runner/src/guards.ts` | Shared Bash blocklist enforced by the claude PreToolUse hook, `/exec`, and the generated opencode guard plugin |
+| Pod | `runner/src/grants.ts` | Session-scoped permission grants (`scope:'session'`, edited input) |
+| Pod | `runner/src/auth.ts` | Constant-time bearer-token gate for every non-`/healthz` route |
 | Pod | `runner/src/opencode.ts` | OpenCode backend: supervises `opencode serve` for `sandbox opencode` sessions |
 | Pod | `runner/src/opencode-turn.ts` | OpenCode turn adapter: drives a one-shot turn via the `opencode serve` HTTP API (@opencode-ai/sdk), mapping its events into the normalized model |
+| Pod | `runner/src/opencode-observer.ts` | Second-client observer that surfaces interactive opencode turns as normalized busy/idle + events |
 | Pod | `runner/src/events.ts` | SQLite event log; append-before-stream; SSE replay |
 
 There are **two agent backends**, both implementing the runner's `Agent` turn

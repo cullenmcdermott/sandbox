@@ -291,7 +291,7 @@ type Model struct {
 	// caps holds terminal capabilities detected once at startup. Every opt-in
 	// Ghostty/terminal effect is gated behind a caps field; a zero Caps (the
 	// default in tests) lights up nothing, so output matches today exactly.
-	// See docs/ghostty-terminal-effects.md.
+	// See docs/archive/ghostty-terminal-effects.md.
 	caps terminal.Caps
 }
 
