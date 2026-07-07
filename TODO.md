@@ -83,7 +83,9 @@ row-model consolidation moved to §2a where it belongs.
   rows (`warm.go:42-48`) — so a relaunch with 30 completed sessions admits all 30
   and evicts nothing, restoring the ~30 API-server forwards the cap exists to
   prevent (compounds C1 below). Fix: protect only Waiting/Failed(+attached), or
-  gate NeedsInput protection on unseen output (`seenSeq < lastSeq`).
+  gate NeedsInput protection on unseen output (`seenSeq < lastSeq`) — the more
+  surgical option; land it together with the H2/H3 eviction fixes since eviction
+  currently freezes the evicted row's last SSE-derived status.
 - [ ] **Background observer connects leak SPDY port-forwards forever (HIGH)
   [C1].** `portforward.go:97` roots forwards at `context.Background()` but
   `ConnectResult` has no close seam; eviction/reconnect/`EventsPassive`-failure

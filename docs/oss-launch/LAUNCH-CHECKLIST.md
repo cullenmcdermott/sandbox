@@ -16,9 +16,10 @@ The `docs/oss-launch/` directory itself is internal working material — delete 
   before the first commit. `internal/tui/model.go` is already `git rm --cached`'d;
   `runner/package-lock.json` is now committed; `/dist/` and `/mockup` are
   gitignored so the 47MB + 5.8MB binaries can't slip in.
-- [ ] **Remove (or promote) `docs/oss-launch/`** — it holds this checklist,
-  `ASSESSMENT.md`, `PLAN.md`, and the preserved `HARDENING-BACKLOG.md` /
-  `TODO-ARCHIVE.md`. Don't ship the internal process docs as-is.
+- [ ] **Remove (or promote) `docs/oss-launch/`** — it now holds only this
+  checklist + `HARDENING-BACKLOG.md` (the superseded `ASSESSMENT.md` / `PLAN.md` /
+  `TODO-ARCHIVE.md` were moved to `docs/archive/oss-launch/` on 2026-07-07). Don't
+  ship the internal process docs as-is.
 - [ ] **Confirm `docs/superpowers/` stays out.** It's gitignored via the global
   `~/.gitignore` (so it won't be committed), but a fresh clone / different
   machine may not ignore it. Keep it untracked or add a repo-local ignore.
