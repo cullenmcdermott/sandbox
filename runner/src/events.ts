@@ -263,12 +263,36 @@ function sseFrame(evt: Event): string {
   return `data: ${JSON.stringify(evt)}\n\n`;
 }
 
+/**
+ * Whether a live-broadcast event with `eventSeq` should be delivered to a client
+ * caught up to `afterSeq`. Pure + exported so the fan-out gate is unit-testable.
+ *
+ * Normal case: deliver only events strictly after what the client already has
+ * (`eventSeq > afterSeq`) — the after=<seq> replay contract, so a live tail never
+ * re-delivers replayed history.
+ *
+ * B4: an event whose SQLite insert FAILED keeps seq === 0 (appendEvent's R11
+ * fallback: "a missed log event beats a killed turn"). afterSeq is always >= 0,
+ * so `eventSeq <= afterSeq` would drop every seq-0 event for every client — e.g.
+ * a disk-full during `turn.completed` vanishes from BOTH the log and the live
+ * stream, leaving the TUI stuck "working" until a reattach. So seq === 0 bypasses
+ * the filter and is delivered live to everyone. This is safe against replay
+ * ordering: real seqs start at 1 (AUTOINCREMENT), so seq 0 never collides with a
+ * persisted event; and because it was never written to the log, a client that
+ * later reconnects with after=<lastPersistedSeq> simply never replays it — which
+ * is exactly the intended live-only, best-effort delivery.
+ */
+export function shouldDeliver(eventSeq: number, afterSeq: number): boolean {
+  if (eventSeq === 0) return true;
+  return eventSeq > afterSeq;
+}
+
 function broadcast(evt: Event): void {
   if (clients.size === 0) return;
   // Serialize the frame once — it is identical for every client.
   const frame = sseFrame(evt);
   for (const client of clients) {
-    if (evt.seq <= client.afterSeq) continue;
+    if (!shouldDeliver(evt.seq, client.afterSeq)) continue;
     writeSse(client.res, frame);
   }
 }

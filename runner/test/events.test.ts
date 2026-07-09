@@ -24,6 +24,26 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Database, sqliteSkip as skip } from './sqlite-probe.js';
+import { shouldDeliver } from '../src/events.js';
+
+// B4: the SSE broadcast filter. A persist-failure event keeps seq === 0
+// (appendEvent's R11 fallback); the old `seq <= afterSeq` filter dropped it for
+// every client (afterSeq >= 0 always), so a turn-completing event that failed to
+// persist vanished from the live stream and the TUI hung "working" forever.
+// shouldDeliver bypasses the filter for seq === 0 while still gating real seqs.
+test('shouldDeliver: real seqs are gated by afterSeq, seq-0 (persist failure) is always delivered', () => {
+  // Normal replay contract: deliver only events strictly after the client's seq.
+  assert.equal(shouldDeliver(5, 3), true);
+  assert.equal(shouldDeliver(4, 3), true);
+  assert.equal(shouldDeliver(3, 3), false, 'must not re-deliver what the client already has');
+  assert.equal(shouldDeliver(2, 3), false);
+
+  // B4: a seq-0 (failed-to-persist) event is delivered live to EVERY client,
+  // regardless of how far it has caught up.
+  assert.equal(shouldDeliver(0, 0), true);
+  assert.equal(shouldDeliver(0, 42), true);
+  assert.equal(shouldDeliver(0, Number.MAX_SAFE_INTEGER), true);
+});
 
 // The exact schema + statements src/events.ts uses.
 const CREATE_SQL = `

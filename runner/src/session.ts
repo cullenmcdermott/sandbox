@@ -8,7 +8,7 @@
 
 import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { IdleStatus, SessionState, StatusResponse } from './types.js';
+import type { EventType, IdleStatus, SessionState, StatusResponse } from './types.js';
 import { PROTOCOL_VERSION, SESSION_JSON_PATH } from './types.js';
 import { appendEvent, sseClientCount, setClientsChangedHandler } from './events.js';
 
@@ -94,6 +94,52 @@ export function reconcileLoadedStatus(status: SessionState['status'] | undefined
   return status === 'busy' ? 'idle' : (status ?? 'idle');
 }
 
+/** A normalized event the boot sequence appends before the boot `session.started`
+ * (see orphanedTurnBootEvents / index.ts). Mirrors appendEvent's parameters. */
+export interface BootEvent {
+  turnId?: string;
+  type: EventType;
+  payload: Record<string, unknown>;
+}
+
+/**
+ * Events to append on boot when a persisted 'busy' session status is coerced to
+ * 'idle' — i.e. the pod died mid-turn (hard SIGKILL/OOM, or even a best-effort
+ * SIGTERM that never flipped the status back). The SQLite event log still ends
+ * with the orphaned turn's events (turn.started, tool.started, deltas, …) and no
+ * terminal event, so any client attaching with after=0 (or resuming from its
+ * last seq) replays a stream that drives its read-model to "busy" with nothing
+ * to flip it back — the TUI shows the session working forever (D2).
+ *
+ * We append, matching the live emitters' payload shapes exactly (server.ts's
+ * turn.interrupted `{ reason }`, setStatus's session.status_changed `{ status }`):
+ *   1. `turn.interrupted { reason }` for the orphaned turn, recovered from
+ *      `state.last_turn_id`. server.ts persists that via setLastTurn() *before*
+ *      registerTurn() flips the status to 'busy', so a persisted 'busy' always
+ *      carries the running turn's id there — it is the cheapest recovery and the
+ *      exact signal activeTurnId() already trusts while busy (no event-log scan
+ *      needed). Skipped when last_turn_id is empty (corrupt/partial state) so we
+ *      never emit an interrupt for a garbage id.
+ *   2. `session.status_changed { status: 'idle' }` so the read-model flips back
+ *      to needs-input (readmodel.go's idle case).
+ *
+ * Returns [] unless the persisted status was 'busy'; idle/error/undefined boots
+ * append nothing extra.
+ */
+export function orphanedTurnBootEvents(
+  persistedStatus: SessionState['status'] | undefined,
+  state: SessionState,
+): BootEvent[] {
+  if (persistedStatus !== 'busy') return [];
+  const events: BootEvent[] = [];
+  const turnId = state.last_turn_id;
+  if (turnId) {
+    events.push({ turnId, type: 'turn.interrupted', payload: { reason: 'runner restart' } });
+  }
+  events.push({ type: 'session.status_changed', payload: { status: 'idle' } });
+  return events;
+}
+
 /**
  * Normalize a parsed session.json into live state. Exported for tests (the
  * production path constant points at /session).
@@ -130,8 +176,18 @@ export function reviveSessionState(parsed: Partial<SessionState>, cfg: RunnerCon
   };
 }
 
-/** Load session.json, or seed it from env if absent. */
-export function loadSessionState(cfg: RunnerConfig): SessionState {
+/** The result of loading session.json on boot: the live state plus any events
+ * the boot sequence must append before `session.started` (see BootEvent /
+ * orphanedTurnBootEvents). bootEvents is empty except after a mid-turn crash. */
+export interface LoadedSession {
+  state: SessionState;
+  bootEvents: BootEvent[];
+}
+
+/** Load session.json, or seed it from env if absent. Also returns the boot
+ * events needed to terminate an orphaned turn when a persisted 'busy' status is
+ * coerced to 'idle' (D2); the caller must append them before `session.started`. */
+export function loadSessionState(cfg: RunnerConfig): LoadedSession {
   if (existsSync(SESSION_JSON_PATH)) {
     const raw = readFileSync(SESSION_JSON_PATH, 'utf8');
     const parsed = JSON.parse(raw) as Partial<SessionState>;
@@ -140,11 +196,11 @@ export function loadSessionState(cfg: RunnerConfig): SessionState {
     if (parsed.status !== loaded.status || parsed.state_version !== loaded.state_version) {
       saveSessionState(loaded);
     }
-    return loaded;
+    return { state: loaded, bootEvents: orphanedTurnBootEvents(parsed.status, loaded) };
   }
   const state = emptyState(cfg);
   saveSessionState(state);
-  return state;
+  return { state, bootEvents: [] };
 }
 
 /** Persist session.json atomically (write+rename). Always stamps the current

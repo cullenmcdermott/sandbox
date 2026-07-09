@@ -169,6 +169,35 @@ test('stop() SIGTERMs the child and resolves only after it exits', async () => {
   assert.equal(resolved, true, 'stop() must resolve once the child exits');
 });
 
+// REGRESSION (B1): a spawn failure emits 'error' (with NO 'exit') on the child.
+// Without an 'error' listener Node re-throws it as an uncaught exception that
+// kills the whole runner. The supervisor must catch it and schedule exactly one
+// backoff respawn.
+test('a spawn error does not crash the supervisor and schedules exactly one respawn', async () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  const children: FakeChild[] = [];
+  const spy = (() => { const c = fakeChild(); children.push(c); return c; }) as unknown as SpawnFn;
+  const sup = startOpencodeSupervisor(
+    { OPENCODE_PORT: '4096', OPENCODE_SERVER_PASSWORD: 's3cret' } as NodeJS.ProcessEnv,
+    spy,
+  );
+  try {
+    assert.equal(children.length, 1);
+    // Emitting 'error' on an EventEmitter with NO listener throws; the assertion
+    // that this call does not throw proves the supervisor registered one (B1).
+    assert.doesNotThrow(() => children[0].emit('error', new Error('spawn opencode ENOENT')));
+    // A late 'exit' on the SAME failed child must NOT schedule a second respawn.
+    children[0].emit('exit', null, 'SIGKILL');
+    mock.timers.tick(1000); // fire the backoff timer(s)
+    assert.equal(children.length, 2, 'error+exit on one child must respawn exactly once');
+  } finally {
+    const stopped = sup.stop(); // clears the activity interval + SIGTERMs the live child
+    children[children.length - 1].emit('exit', 0, null);
+    await stopped;
+    mock.timers.reset();
+  }
+});
+
 // REGRESSION (O5): if the child ignores SIGTERM, stop() escalates to SIGKILL
 // after STOP_GRACE_MS so shutdown never blocks past the pod grace period.
 test('stop() escalates to SIGKILL when the child ignores SIGTERM', async () => {

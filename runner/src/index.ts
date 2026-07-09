@@ -74,7 +74,7 @@ function main(): void {
   const cfg = loadConfig();
   openEventLog();
 
-  const state = loadSessionState(cfg);
+  const { state, bootEvents } = loadSessionState(cfg);
   const reg = initRegistry(state);
 
   // Emit session.started on (re)boot so live SSE clients see the session come
@@ -97,6 +97,15 @@ function main(): void {
     // projectPath escapes the workspace root (should not happen on a valid pod):
     // omit cwd rather than crash the boot emit.
   }
+  // D2: if the pod died mid-turn, loadSessionState coerced the persisted 'busy'
+  // status to 'idle' but the event log still ends with an orphaned turn's events
+  // and no terminal. Append that terminal (turn.interrupted + status_changed
+  // idle) BEFORE the boot session.started so a client replaying with after=0
+  // sees the turn end instead of spinning forever. Normal boots yield [].
+  for (const ev of bootEvents) {
+    appendEvent(reg.state.sandbox_session_id, ev.turnId, ev.type, ev.payload);
+  }
+
   appendEvent(reg.state.sandbox_session_id, undefined, 'session.started', {
     model: reg.state.model ?? '',
     cwd: bootCwd,

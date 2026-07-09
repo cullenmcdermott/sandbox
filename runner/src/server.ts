@@ -56,6 +56,37 @@ export function healthzBody(): { status: 'ok'; protocolVersion: number } {
   return { status: 'ok', protocolVersion: PROTOCOL_VERSION };
 }
 
+/**
+ * Decide whether a POST /turns must be rejected with 409, and with what message,
+ * given the backend and the session's live state. Pure + exported so the gate is
+ * unit-testable without the http server (F4: the HTTP layer is otherwise dark).
+ *
+ * Two ways a session can already be busy:
+ *  - a registered runner turn (activeTurnCount > 0) — the R4 single-active-turn
+ *    invariant; two overlapping query() calls interleave events.
+ *  - B2: an interactive opencode turn. It runs INSIDE `opencode serve`, driven by
+ *    the attached client, and never registers in activeTurns — it only surfaces
+ *    as status:'busy' via the passive observer. Without this check a headless
+ *    POST /turns is accepted mid-interactive-turn and opencode-turn.ts prompts the
+ *    SAME session concurrently, freezing the observer's open-cycle mapper. Mirror
+ *    of the interrupt route's `backend === 'opencode-server' && status === 'busy'`.
+ *
+ * Returns the 409 error message, or null when the turn may proceed.
+ */
+export function turnRejectReason(
+  backend: string,
+  activeTurnCount: number,
+  status: string,
+): string | null {
+  if (activeTurnCount > 0) {
+    return 'a turn is already active; interrupt it before starting a new one';
+  }
+  if (backend === 'opencode-server' && status === 'busy') {
+    return 'the opencode session is busy; interrupt the active turn before starting a new one';
+  }
+  return null;
+}
+
 // --- Router ---------------------------------------------------------------
 
 export function startServer(): void {
@@ -163,12 +194,15 @@ async function handle(req: IncomingMessage, res: ServerResponse, cfg: ReturnType
     if (!body || typeof body.prompt !== 'string' || !body.prompt) {
       return badRequest(res, 'prompt is required');
     }
-    // R4: reject concurrent turns — two overlapping query() calls against one
-    // Claude session interleave events. Callers must interrupt the active turn
-    // first, then POST a new one. (Synchronous from here through registerTurn.)
-    if (reg.activeTurns.size > 0) {
+    // R4/B2: reject concurrent turns — two overlapping query() calls against one
+    // Claude session interleave events, and a headless POST into a busy opencode
+    // session drives the same session concurrently. Callers must interrupt the
+    // active turn first, then POST a new one. (Synchronous from here through
+    // registerTurn.)
+    const rejectReason = turnRejectReason(cfg.backend, reg.activeTurns.size, reg.state.status);
+    if (rejectReason) {
       res.writeHead(409, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'a turn is already active; interrupt it before starting a new one' }));
+      res.end(JSON.stringify({ error: rejectReason }));
       return;
     }
     const turnId = reg.nextTurnId();

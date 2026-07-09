@@ -340,12 +340,26 @@ export function startOpencodeSupervisor(
       ['serve', '--hostname', '0.0.0.0', '--port', String(port)],
       { stdio: 'inherit', env: childEnv, cwd: env.PROJECT_PATH ?? process.cwd() },
     );
-    proc.on('exit', (code, signal) => {
-      if (stopped) return;
-      console.error(`opencode serve exited (code=${code} signal=${signal}); restarting in 1s`);
+    // B1: a spawn failure (ENOENT `opencode`, EAGAIN) emits 'error' on the child
+    // with NO 'exit'; with no listener Node re-throws it as an uncaught exception
+    // that kills the whole runner (no /healthz, /idle, event log). Both 'error'
+    // and 'exit' schedule the SAME backoff respawn, guarded by a per-child flag so
+    // a child that fires both (or fires 'error' then a late 'exit') respawns at
+    // most once.
+    let respawnScheduled = false;
+    const scheduleRespawn = (why: string): void => {
+      if (stopped || respawnScheduled) return;
+      respawnScheduled = true;
+      console.error(`opencode serve ${why}; restarting in 1s`);
       setTimeout(() => {
         if (!stopped) child = spawnServe();
       }, 1000);
+    };
+    proc.on('exit', (code, signal) => {
+      scheduleRespawn(`exited (code=${code} signal=${signal})`);
+    });
+    proc.on('error', (err: Error) => {
+      scheduleRespawn(`failed to spawn (${err.message})`);
     });
     return proc;
   };

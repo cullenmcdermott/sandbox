@@ -51,6 +51,31 @@ test('a blocked command is refused before the shell runs', async () => {
   }
 });
 
+// REGRESSION (B3): a command that backgrounds a child (`sleep 30 &`) leaves the
+// grandchild holding the stdout pipe, so the old resolve-on-'close' hung until
+// the grandchild died (~30s). runExec now resolves on the direct bash's 'exit',
+// so this must return promptly with the foreground output captured.
+test('backgrounding a child does not hang exec past the parent exit', async () => {
+  const start = Date.now();
+  const r = await runExec('sleep 30 & echo done', tmpdir());
+  const elapsed = Date.now() - start;
+  assert.match(r.stdout, /done/, 'foreground output must be captured');
+  assert.equal(r.exitCode, 0);
+  assert.ok(elapsed < 5000, `must resolve at bash exit, not wait for the child: ${elapsed}ms`);
+});
+
+// REGRESSION (B3): the timeout SIGKILLs the whole process GROUP (detached child),
+// so a command whose bash stays alive (blocked in `wait`) — and its backgrounded
+// grandchild — are both killed near the timeout rather than surviving. Uses a
+// sub-second injected timeout to keep the test fast.
+test('the timeout kills the backgrounded process group and reports 124', async () => {
+  const start = Date.now();
+  const r = await runExec('sleep 30 & wait', tmpdir(), 300);
+  const elapsed = Date.now() - start;
+  assert.equal(r.exitCode, 124, 'a timed-out command returns 124');
+  assert.ok(elapsed < 5000, `must be killed near the timeout, not wait 30s: ${elapsed}ms`);
+});
+
 // Sanity: a benign command sharing no blocked token still runs normally.
 test('a benign command still executes', async () => {
   const probe = join(tmpdir(), `exec-benign-${process.pid}-${Date.now()}`);
