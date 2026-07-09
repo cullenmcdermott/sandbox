@@ -56,6 +56,23 @@ export type Emit = (type: EventType, payload: Record<string, unknown>) => void;
  */
 export type AuditTool = (tool: string, input: unknown) => void;
 
+/**
+ * D5: echo the driving prompt as a role:"user" message so a replayed/attached
+ * opencode transcript shows the question, not just the answer. turn.started
+ * carries the prompt, but the Go transcript reducer does not render that payload
+ * as a block — it renders user blocks off message.completed(role:"user"). This
+ * mirrors the Claude adapter's user-echo (mapping.ts handleUserMessage), so every
+ * client gets the prompt on attach with no TUI special-casing. The reducer
+ * dedupes this echo against the optimistic user block a live foreground submit
+ * appends, so it does not double-print for interactive turns — it only fills the
+ * gap on cold attach/replay. Emitted only by the runner-driven turn adapter; the
+ * always-on observer (external opencode client) has no prompt and does not echo.
+ */
+export function emitOpencodeUserPrompt(emit: Emit, prompt: string): void {
+  emit('message.started', { role: 'user', content: prompt });
+  emit('message.completed', { role: 'user', content: prompt });
+}
+
 /** Build a client for the in-pod opencode server with basic auth when secured. */
 export function opencodeTurnClient(env: NodeJS.ProcessEnv = process.env): OpencodeClient {
   const port = parseInt(env.OPENCODE_PORT ?? String(DEFAULT_PORT), 10);
@@ -524,6 +541,7 @@ async function runTurn(
   };
 
   emit('turn.started', { prompt });
+  emitOpencodeUserPrompt(emit, prompt);
 
   let stream: AsyncGenerator<Event> | undefined;
   let mapper: ReturnType<typeof createOpencodeTurnMapper> | undefined;

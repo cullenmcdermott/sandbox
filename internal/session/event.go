@@ -31,6 +31,48 @@ type Event struct {
 	Payload   json.RawMessage `json:"payload"`
 }
 
+// TurnStartedPayload is the payload for turn.started events: the prompt that
+// drives this turn. Prompt is the user's (or autopilot /loop) message and is
+// empty when the runner only mirrors an externally-driven turn (the opencode
+// observer emits turn.started with no prompt because the attached opencode
+// client owns the input). The runner-driven turn adapters (Claude, opencode)
+// also emit a message.started/completed role:"user" echo of the same prompt, so
+// the TUI renders the user block off that shared path rather than off this
+// payload (avoids double-printing the optimistic block for live sessions).
+type TurnStartedPayload struct {
+	Prompt string `json:"prompt,omitempty"`
+}
+
+// TurnCompletedPayload is the payload for turn.completed events: the terminal
+// result summary. Every field is optional — the Claude backend fills them from
+// the SDK result message; the opencode backend emits turn.completed with an
+// empty payload (its result text arrives via message.completed instead).
+type TurnCompletedPayload struct {
+	Result     string `json:"result,omitempty"`     // final assistant result text (Claude); absent on opencode
+	StopReason string `json:"stopReason,omitempty"` // SDK stop reason (e.g. "end_turn"); absent on opencode
+	NumTurns   int    `json:"numTurns,omitempty"`   // SDK-internal sub-turn count; absent on opencode
+	DurationMs int    `json:"durationMs,omitempty"` // wall-clock duration in ms; absent on opencode
+}
+
+// TurnFailedPayload is the payload for turn.failed events: a turn that ended in
+// error. Message is always present (a human-readable reason; the runner also
+// emits a parallel error event with the same text). Subtype and Errors are the
+// richer Claude result-path detail and are absent on the opencode backend and
+// the Claude mid-turn failure path, which emit Message only. The TUI renders
+// Message.
+type TurnFailedPayload struct {
+	Message string   `json:"message"`
+	Subtype string   `json:"subtype,omitempty"` // SDK result subtype (Claude result path only)
+	Errors  []string `json:"errors,omitempty"`  // individual SDK error strings (Claude result path only)
+}
+
+// TurnInterruptedPayload is the payload for turn.interrupted events: an
+// in-flight turn torn down before it completed. Reason names the cause (e.g.
+// "client interrupt", "runner restart", "opencode observer stream ended").
+type TurnInterruptedPayload struct {
+	Reason string `json:"reason"`
+}
+
 // MessagePayload is the payload for message.* events.
 type MessagePayload struct {
 	Role    string `json:"role"`            // "user" | "assistant"

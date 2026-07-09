@@ -120,6 +120,40 @@ export interface TerminatingPayload {
   turnsAborted: number;
 }
 
+/** payload for turn.started events: the prompt that drives this turn. `prompt` is the user's (or autopilot's /loop) message; it is absent when the runner only mirrors an externally-driven turn (the opencode observer emits turn.started with no prompt because the attached opencode client owns the input). Clients render the prompt as a user block so a replayed/attached transcript shows the question, not just the answer. */
+export interface TurnStartedPayload {
+  /** the user/autopilot prompt that started this turn; absent for observer-mirrored turns */
+  prompt?: string;
+}
+
+/** payload for turn.completed events: the terminal result summary. Every field is optional — the Claude backend fills them from the SDK result message; the opencode backend emits turn.completed with an empty payload (its result text arrives via message.completed instead). */
+export interface TurnCompletedPayload {
+  /** final assistant result text (Claude SDK result.result); absent on opencode */
+  result?: string;
+  /** SDK stop reason (e.g. "end_turn"); absent on opencode */
+  stopReason?: string;
+  /** SDK-internal sub-turn count for this turn; absent on opencode */
+  numTurns?: number;
+  /** wall-clock duration of the turn in milliseconds; absent on opencode */
+  durationMs?: number;
+}
+
+/** payload for turn.failed events: a turn that ended in error. `message` is always present (a human-readable reason; the runner also emits a parallel `error` event with the same text). `subtype` and `errors` are the richer Claude result-path detail (the SDK result subtype + the individual error strings) and are absent on the opencode backend and the Claude mid-turn failure path, which emit `message` only. The Go TUI renders `message`. */
+export interface TurnFailedPayload {
+  /** human-readable failure reason */
+  message: string;
+  /** SDK result subtype for the failure (Claude result path only) */
+  subtype?: string;
+  /** individual SDK error strings (Claude result path only) */
+  errors?: string[];
+}
+
+/** payload for turn.interrupted events: an in-flight turn torn down before it completed. `reason` names the cause (e.g. "client interrupt", "runner restart", "opencode observer stream ended"). Emitted by the server on an explicit interrupt, on boot recovery for an orphaned turn (D2), and by the opencode observer when its stream ends mid-turn. */
+export interface TurnInterruptedPayload {
+  /** human-readable cause of the interrupt */
+  reason: string;
+}
+
 /** payload for message.* events. */
 export interface MessagePayload {
   /** user | assistant */

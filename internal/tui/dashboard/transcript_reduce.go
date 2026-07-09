@@ -392,7 +392,7 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		m.finalizeStreaming()
 		m.drainPendingTools("interrupted") // in-flight tools die with the failed turn (D1)
 		m.turnActive = false
-		var p session.ErrorPayload
+		var p session.TurnFailedPayload
 		_ = json.Unmarshal(ev.Payload, &p)
 		msg := p.Message
 		if strings.TrimSpace(msg) == "" {

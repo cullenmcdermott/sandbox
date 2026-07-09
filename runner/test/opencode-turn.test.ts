@@ -20,6 +20,7 @@ import {
   autoPermissionResponse,
   effectiveOpencodeSession,
   effectiveOpencodeModel,
+  emitOpencodeUserPrompt,
   type Emit,
 } from '../src/opencode-turn.js';
 import { assertMapperInvariants } from './backend-contract.js';
@@ -516,4 +517,25 @@ test('effectiveOpencodeModel: per-turn override wins, empty falls back to sessio
   assert.equal(effectiveOpencodeModel(undefined, undefined), undefined);
   assert.equal(effectiveOpencodeModel('', ''), undefined);
   assert.equal(effectiveOpencodeModel('', undefined), undefined);
+});
+
+// --- D5: prompt echoed as a role:user message (attach/replay parity) --------
+
+// The runner-driven opencode turn adapter must echo the prompt as a role:"user"
+// message so a replayed/attached transcript shows the question, not just the
+// answer. Mirrors the Claude adapter's user-echo (mapping.ts handleUserMessage).
+test('emitOpencodeUserPrompt echoes the prompt as message.started/completed role:user (D5)', () => {
+  const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+  const emit: Emit = (type, payload) => events.push({ type, payload });
+
+  emitOpencodeUserPrompt(emit, 'what is 2+2?');
+
+  assert.deepEqual(
+    events.map((e) => e.type),
+    ['message.started', 'message.completed'],
+  );
+  for (const e of events) {
+    assert.equal(e.payload.role, 'user');
+    assert.equal(e.payload.content, 'what is 2+2?');
+  }
 });
