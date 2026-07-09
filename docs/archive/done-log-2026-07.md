@@ -740,3 +740,58 @@ pass / 0 skipped. Provenance: docs/review-2026-07-07.md.
   opencode sessions reading 200k/$0 (wrong ctx%/cost). Adversarial check:
   raw/alias key forms are structurally disjoint for every Claude id — no
   prior resolution changes; static fallback unchanged.
+
+## 2026-07-08 — handoff-review batch 2 (§2b D1/D2/D4, §1f B1–B4)
+
+- **§2b [D1] — tool completion id-matched; pending cards drained at turn
+  boundaries (HIGH).** `finishToolCard` now takes the event's `toolUseId` and
+  closes the exact card via the existing `flatTools` id-map (new
+  `removePending` keeps the FIFO consistent for out-of-order closes); the FIFO
+  pop survives only as the fallback for id-less events (the PreToolUse-hook
+  synthetic `tool.failed`, pre-toolUseId runners). New `drainPendingTools`
+  runs in all three turn-terminal handlers (completed/interrupted/failed) so
+  an interrupted tool can never render "running" into the next turn or poison
+  later FIFO matches. Tests: `transcript_d1_d4_test.go` (non-head id close,
+  parallel tools, drain on each terminal, FIFO fallback).
+- **§2b [D2] — mid-turn pod crash no longer replays as "working forever"
+  (HIGH).** `loadSessionState` returns `bootEvents` from new
+  `orphanedTurnBootEvents`: when a persisted `busy` is coerced to `idle`,
+  boot appends `turn.interrupted {reason:'runner restart'}` (turn id from
+  `last_turn_id`, which setLastTurn persists before the status flips) +
+  `session.status_changed {idle}` BEFORE the boot `session.started`, so
+  replay terminates the orphaned turn. Tests:
+  `runner/test/session-boot-events.test.ts`.
+- **§2b [D4] — interrupt mid-think tears down the live reasoning tail
+  (MED).** `finalizeStreaming` resets `m.reasoning`/`reasoningBuf` (no
+  backend emits `reasoning.completed` on abort) and syncs items on the
+  empty-assistant path; the "Thinking" tail no longer renders forever nor
+  leaks into the next turn. Test in `transcript_d1_d4_test.go`.
+- **§1f [B1] — opencode `serve` spawn failure no longer kills the runner
+  (MED).** `startOpencodeSupervisor` registers `proc.on('error')`; error and
+  exit share one respawn scheduler guarded per-child so error+late-exit
+  respawns exactly once. Test: `runner/test/opencode.test.ts`.
+- **§1f [B2] — POST /turns 409s on observer-synthetic opencode busy (MED).**
+  New pure `turnRejectReason(backend, activeTurnCount, status)` in
+  `server.ts` (unit-testable — a first bite of [F4]) mirrors the interrupt
+  route's `opencode-server && busy` check. Tests:
+  `runner/test/turn-gate.test.ts`.
+- **§1f [B3] — /exec resolves at bash exit and SIGKILLs the process group
+  (MED).** `runExec` spawns `detached:true` (own pgid), resolves on `'exit'`
+  not `'close'` (a backgrounded grandchild holding the stdout pipe no longer
+  hangs the call past the timeout), timeout kills `-pid` via
+  `killProcessGroup`, and our pipe ends are destroyed post-resolve.
+  `timeoutMs` injectable for tests. Trade-off: output written by a surviving
+  grandchild after bash exits is dropped. Tests: `runner/test/exec.test.ts`
+  (prompt return with `sleep 30 &`; group-kill reports 124 near the deadline).
+- **§1f [B4] — persist-failure events reach the live stream (LOW-MED).**
+  New pure `shouldDeliver(eventSeq, afterSeq)` in `events.ts`: seq-0 (the
+  R11 insert-failure fallback) bypasses the `<= afterSeq` filter — real seqs
+  start at 1 so there is no collision, and a reconnect simply never replays
+  it (intended best-effort live-only delivery). Test in
+  `runner/test/events.test.ts`.
+- **Test-infra rider:** the external-pane PTY test
+  (`TestAppExternalPaneEscIsForwardedNotDetached`) now SELF-SKIPS visibly
+  when `opencode` or a PTY is unavailable instead of failing, and the
+  `opencode` CLI is pinned in the flox env (linux + aarch64-darwin — upstream
+  has no x86_64-darwin build) so local unsandboxed runs and Depot CI exercise
+  it for real. CLAUDE.md caveat updated.

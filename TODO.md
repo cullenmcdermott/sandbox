@@ -23,11 +23,11 @@
 > added verified findings across §1d/§1f/§2b/§2c/§4/§10 — all backed by
 > [`docs/review-2026-07-07.md`](docs/review-2026-07-07.md) (bracketed ids like
 > `[A1]`/`[D1]`/`[H1]` point into it). **Start here (highest severity):**
-> §2b **[D1]** tool-card FIFO misattribution + **[D2]** crash-replays-as-working
-> (HIGH); §1d **[H1]/[C1]** the observer cap is a no-op + leaks forwards (the
+> §1d **[H1]/[C1]** the observer cap is a no-op + leaks forwards (the
 > 953ef87 cap needs a real fix); §4 **[E1]/[E2]** the two
-> O(n²)/event-loop-blocking hot paths. *(2026-07-08: [A1]+[F1]+[F2]+[C2]
-> landed — done log; A1's `/proc` residual is a new §1f item.)*
+> O(n²)/event-loop-blocking hot paths. *(2026-07-08 batch 1:
+> [A1]+[F1]+[F2]+[C2] landed — done log; A1's `/proc` residual is a new §1f
+> item. Batch 2: [D1]+[D2]+[D4]+[B1]+[B2]+[B3]+[B4] landed — done log.)*
 >
 > **Opus-ready map:** §1c–§1d residuals, §2a–§2d, §4, §7a and the §5 GC
 > follow-ups carry pointers + fix direction — pick a cluster and go. Drafted,
@@ -184,20 +184,16 @@ in [`docs/review-2026-07-07.md`](docs/review-2026-07-07.md) §A/§B (id in brack
   Runner/sshd/opencode bind all interfaces (`server.ts:77` etc.);
   `networkpolicy-egress-allow.yaml:48-59` permits 443 to any public host — the
   exfil channel behind A1/A2. Document prominently; point at FQDN-scoped egress.
-- [ ] **opencode `serve` child has no `'error'` listener → uncaught exception
-  kills the runner (MED) [B1].** `opencode.ts:304-318`. Add `proc.on('error')`
-  with backoff respawn (mirror `exec.ts:120`).
-- [ ] **Single-turn 409 gate ignores observer-synthetic busy → concurrent
-  prompts into a busy opencode session (MED) [B2].** `server.ts:169` checks only
-  `activeTurns.size`. Also 409 when `backend==='opencode-server' &&
-  status==='busy'` (mirror `server.ts:213`).
-- [ ] **`/exec` hangs past its 30s timeout + leaks grandchildren on a backgrounded
-  child (MED) [B3].** `exec.ts:115-129` resolves on `'close'` and kills only the
-  direct bash. `spawn(detached)` + `kill(-pid)`, or resolve on `'exit'`.
-- [ ] **Persist-failure drops the event from the live stream too (LOW-MED)
-  [B4].** `events.ts:200-224` broadcasts with `seq=0`, which the `<=afterSeq`
-  filter (`:271`) drops for all clients → turn "working" forever. Bypass the
-  filter for `seq===0` or assign a synthetic seq. (Consumer-side twin of D-note.)
+- [x] **[B1] opencode `serve` spawn-error listener — done 2026-07-08** (done
+  log): `'error'` + `'exit'` share one per-child respawn scheduler.
+- [x] **[B2] 409 gate covers observer-synthetic opencode busy — done
+  2026-07-08** (done log): pure `turnRejectReason` in `server.ts`
+  (a first bite of [F4]).
+- [x] **[B3] /exec resolves at bash exit + process-group SIGKILL — done
+  2026-07-08** (done log): `detached:true`, resolve on `'exit'`,
+  `kill(-pid)` on timeout.
+- [x] **[B4] persist-failure events delivered live — done 2026-07-08** (done
+  log): seq-0 bypasses the `<=afterSeq` filter (`shouldDeliver`).
 - [ ] **Assorted runner robustness (LOW) [B5-B9]:** `after > lastSeq` accepted →
   silent live-event swallow (clamp, `server.ts:127-130`); synchronous git in
   `emitWorkspaceStatus` blocks the loop ~9s/turn (`claude.ts:857-895`, async it);
@@ -313,28 +309,19 @@ changes go through `schema/events.json` + `just gen` (never hand-edit `*.gen.*`)
 **2026-07-07 parity-audit additions** (detail in
 [`docs/review-2026-07-07.md`](docs/review-2026-07-07.md) §D; id in brackets):
 
-- [ ] **Tool completion is FIFO-matched ignoring `toolUseId`, and open cards are
-  never closed at turn boundaries (HIGH) [D1].** `finishToolCard` pops
-  `pendingTools[0]` (`transcript_reduce.go:72-92`) though the runner emits
-  `toolUseId` (`mapping.ts:236-245`) and the `flatTools` id-map exists; and the
-  `turn.*` terminal handlers never drain `pendingTools`. An interrupted tool
-  poisons every later card for the session's life; parallel tools land on wrong
-  cards. Fix: match `flatTools[ToolUseID]` first; drain+mark `pendingTools` in the
-  three terminal handlers.
-- [ ] **Mid-turn pod crash replays as "working forever" (HIGH) [D2].** Boot
-  coerces `busy`→`idle` (`session.ts:93-95`) but appends no terminal event for the
-  orphaned turn, so replay drives `StatusBusy` with nothing to flip it back
-  (`readmodel.go:189-191`). Fix: on the boot busy→idle flip append
-  `turn.interrupted` + `session.status_changed{idle}` before the boot
-  `session.started`. Distinct from §7c (live-pod) — this is the reboot path.
+- [x] **[D1] tool completion id-matched + turn-boundary drain — done
+  2026-07-08** (done log): `finishToolCard` closes by `flatTools[toolUseId]`
+  first (FIFO only as the id-less fallback); `drainPendingTools` runs in all
+  three turn-terminal handlers.
+- [x] **[D2] mid-turn crash boot terminal events — done 2026-07-08** (done
+  log): boot appends `turn.interrupted` + `status_changed{idle}` for the
+  orphaned turn before `session.started` (`orphanedTurnBootEvents`).
 - [ ] **All four `turn.*` payloads are off-schema → invisible to the drift gate
   (MED) [D3].** `turn.started/completed/failed/interrupted` carry fields absent
   from `schema/events.json`; the Go TUI decodes `turn.failed` via a coincidental
   shared `message` key. Add Turn payloads to the schema + `just gen` (unblocks D5).
-- [ ] **Interrupt mid-thinking leaves the live "Thinking" tail up forever + leaks
-  the buffer into the next turn (MED) [D4].** `m.reasoning` cleared only on
-  `reasoning.completed` (`transcript_reduce.go:536`); no backend emits it on abort.
-  Reset `m.reasoning`/`reasoningBuf` in `finalizeStreaming`.
+- [x] **[D4] interrupt mid-think reasoning teardown — done 2026-07-08** (done
+  log): `finalizeStreaming` resets `m.reasoning`/`reasoningBuf`.
 - [ ] **OpenCode transcripts have no user prompts on attach/replay (MED) [D5].**
   Adapter/observer map only assistant parts; the prompt lives only in the
   off-schema `turn.started`. Emit `message.*  role:user`, or render
