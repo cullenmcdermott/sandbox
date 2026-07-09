@@ -835,3 +835,65 @@ pass / 0 skipped. Provenance: docs/review-2026-07-07.md.
   gone); the autopilot lapse toast is cause-agnostic ("suspended or
   unreachable") since that path can't distinguish suspend from delete from
   a dead stream.
+
+## 2026-07-09 — handoff-review batch 4 (§4 E1/E2/E3/E5/E6, the perf hot paths)
+
+Implemented by Opus subagents under Fable orchestration; every diff audited
+line-by-line against the review's invariants before landing.
+
+- **§4 [E1] — tool.delta handler no longer O(n²) (HIGH).** `toolCard.rawJSON`
+  string → `rawBuf strings.Builder` (O(N) accumulation); preview extraction
+  throttled off a `lastExtractLen` watermark (parse every delta under 2KB for
+  live feel, then once per +2KB of growth — the preview is cosmetic, the
+  finalized tool.started overwrites `arg`); the per-delta `syncItems()` list
+  rebuild replaced with a lone `Bump()`, mirroring `streamDelta`'s
+  refresh-in-place (list cache keyed on (item, width, version)). New test-only
+  `argExtracts` counter; `transcript_e1_test.go` pins behavior (small-input
+  preview + full accumulation) and cost (200 deltas → 28 parses; 0 reconciles
+  with version still advancing).
+- **§4 [E2] — runner SSE replay streams in bounded chunks (HIGH).**
+  `replayTo` (`.all()` whole log + JSON.parse + re-stringify, one synchronous
+  write burst) → `streamReplayThenAttach`: 512-row `LIMIT` chunks (each fully
+  materialized before any await — an open better-sqlite3 iterator held across
+  a yield would break concurrent appendEvent INSERTs), raw `payload`-column
+  frame splice (`rawFrame`, byte-identical to live `JSON.stringify` frames
+  incl. omit-turnId-when-NULL), `await drain` on write()===false +
+  setImmediate yields between chunks. Ordering contract preserved via a
+  `replaying` client flag (broadcast skips a replaying client; its
+  during-replay appends are picked up from SQLite by a later chunk — exactly
+  once, in order) + a fully synchronous zero-rows handoff (set afterSeq,
+  clear replaying, write `: replay-complete` in one tick). Audited deviation
+  from the orchestrator's sketch: the client registers in `clients` at attach
+  (not after replay) so RV6 idle-count and M33 cap semantics are unchanged.
+  Disconnect mid-replay aborts the loop; a thrown replay routes to cleanup
+  (no unhandled rejection). seq-0 (B4) live bypass untouched.
+- **§4 [E3] — live SSE broadcast gets a backpressure cap (MED ✓✓).**
+  `broadcast` destroys + cleans up a client whose `res.writableLength`
+  exceeds `MAX_SSE_CLIENT_BUFFER_BYTES` (4 MiB) — a wedged/half-open reader
+  can no longer grow runner RSS until the pod OOMs; it reconnects and replays
+  from its last seq. The replay path deliberately keeps drain-await as its
+  own flow control instead. Tests: `runner/test/events-replay.test.ts` (9
+  tests: order/boundary/multi-chunk/backpressure/raw-splice round-trip incl.
+  control chars/NULL turn_id/mid-replay disconnect/after=mid/seq-0). Audit
+  fix: raw \x00/\x01 bytes in a test literal escaped to \u-escapes.
+- **§4 [E5] — passive SSE streams batch-drain (MED ✓✓).** New
+  `liveSSEBatchCmd` + `RunnerEventBatchMsg` mirror the foreground
+  `waitForEvent` 512-drain: block for the first event, non-blockingly drain
+  the burst, ONE Update+View per batch (was one per event — 3-5 busy warm
+  sessions ≈ 100-150 render pipelines/s). `handleRunnerEvent` split into
+  shared `applyRunnerEvent`/`handleStreamEnded` so single- and batch-paths
+  reduce identically (audited move-only); stale-gen guard gates the whole
+  batch; close-mid-drain applies drained events then the ended handling;
+  per-batch post-handling (anim/notify) runs once. `model_e5_test.go`.
+- **§4 [E6] — live reasoning tail wraps incrementally (MED).**
+  `wrapLiveReasoning` caches the styled complete-lines prefix (lipgloss wraps
+  hard lines independently, so a completed line's wrap never changes) keyed
+  by width + theme epoch, re-wrapping only the trailing partial per frame;
+  cache resets at all three `reasoningBuf.Reset()` sites incl. the D4
+  `finalizeStreaming`. Audit note: TrimSpace-on-a-growing-buffer keeps the
+  cached prefix valid (the old trimmed text is always a prefix of the new).
+  Oracle tests pin byte-equality with the full wrap incl. blank lines, plus
+  width/theme invalidation and a cost bound. `transcript_e6_test.go`.
+
+Still open in §4: E4 (delta compaction — retention design), E7-E10 (LOW),
+and the older measure-first items.

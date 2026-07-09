@@ -22,11 +22,12 @@
 > test-coverage ×2, runner TS, Go client, event-model, docs, TUI-regression)
 > added verified findings across §1d/§1f/§2b/§2c/§4/§10 — all backed by
 > [`docs/review-2026-07-07.md`](docs/review-2026-07-07.md) (bracketed ids like
-> `[A1]`/`[D1]`/`[H1]` point into it). **Start here (highest severity):**
-> §4 **[E1]/[E2]** the two O(n²)/event-loop-blocking hot paths.
+> `[A1]`/`[D1]`/`[H1]` point into it). The 2026-07-07 HIGHs are all closed;
+> next by severity: §1f [A2]/[B5-B9], §2b [D3]/[D5]/[D6], §4 [E4].
 > *(2026-07-08 batch 1: [A1]+[F1]+[F2]+[C2] landed — done log; A1's `/proc`
 > residual is a new §1f item. Batch 2: [D1]+[D2]+[D4]+[B1]+[B2]+[B3]+[B4]
-> landed. Batch 3 (2026-07-09): [C1]+[H1]+[H2]/[H3] landed — done log.)*
+> landed. Batch 3 (2026-07-09): [C1]+[H1]+[H2]/[H3]. Batch 4 (2026-07-09):
+> [E1]+[E2]+[E3]+[E5]+[E6] — done log.)*
 >
 > **Opus-ready map:** §1c–§1d residuals, §2a–§2d, §4, §7a and the §5 GC
 > follow-ups carry pointers + fix direction — pick a cluster and go. Drafted,
@@ -538,33 +539,26 @@ done log.)
 **2026-07-07 perf-review additions** (two agents; ✓ = both flagged it; detail in
 [`docs/review-2026-07-07.md`](docs/review-2026-07-07.md) §E, id in brackets):
 
-- [ ] **`tool.delta` handler re-parses the whole accumulated input JSON per delta
-  — O(n²), often ×2 (HIGH) [E1].** `transcript_reduce.go:547-573`: full-buffer
-  `json.Unmarshal` (fails mid-stream, then re-parses with `+"\"}"`) plus
-  `syncItems()` per delta. A 100 KB file write ≈ 10 MB scanned + 10 MB copied +
-  100 list rebuilds, ×warm-model count. Fix: `strings.Builder`, throttle preview
-  extraction, version-bump instead of `syncItems()` (mirror `streamDelta`).
-- [ ] **Runner SSE replay materializes the whole log synchronously → blocks the
-  event loop + RSS spike (HIGH ✓) [E2].** `events.ts:277-282,227-249` `.all()` +
-  parse + re-stringify; a long-session `after=0` attach stalls live turns/health/
-  interrupts and risks OOM per connect. Fix: `stmt.iterate()`, splice the raw
-  `payload` column, pause on `write()===false`.
-- [ ] **No SSE backpressure → a wedged passive client grows runner RSS unbounded
-  (MED ✓) [E3].** `events.ts:284-287` ignores `res.write()`; a half-open stream
-  OOM-kills the pod (presents as "session died"). Cap `writableLength`, destroy
-  past it (reconnect replays from `after`).
+- [x] **[E1] tool.delta O(n²) hot path fixed — done 2026-07-09** (done log):
+  Builder accumulation, eager-under-2KB-then-every-+2KB parse throttle,
+  per-delta `Bump()` instead of `syncItems()`.
+- [x] **[E2] SSE replay streams in bounded chunks — done 2026-07-09** (done
+  log): 512-row chunks + raw-payload frame splice + drain-aware yields; the
+  `replaying` flag + synchronous handoff preserve the in-order/no-dup/
+  replay-complete contract.
+- [x] **[E3] live-broadcast backpressure cap — done 2026-07-09** (done log):
+  4 MiB `writableLength` cap; a wedged client is destroyed and reconnects
+  with `after=<seq>`.
 - [ ] **Delta events persisted forever; log unbounded by default (MED ✓) [E4].**
   Delta-only compaction on `turn.completed` (delete `*.delta` older than the last
   N turns — seq gaps are fine, remaining events stay contiguous). Not M34's
   rejected all-or-nothing retention.
-- [ ] **Passive SSE streams: one Update+View per event, no batching (MED ✓)
-  [E5].** `model_sse.go:630-638` vs the foreground `waitForEvent` 512-batch;
-  3-5 busy warm sessions ≈ 100-150 render pipelines/s. Mirror the non-blocking
-  drain, or skip deltas for `passive=1` streams runner-side. (The multiplier that
-  makes the §4 per-frame costs user-visible.)
-- [ ] **Live reasoning tail re-wraps the entire buffer per frame (MED) [E6].**
-  `transcript_render.go:354-363` — assistant tail got the stable-prefix cache,
-  reasoning didn't. Cache the prefix wrap, or slice to the last N lines first.
+- [x] **[E5] passive streams batch-drain — done 2026-07-09** (done log):
+  `liveSSEBatchCmd` + `RunnerEventBatchMsg` mirror the foreground 512-drain;
+  one Update+View per burst.
+- [x] **[E6] live reasoning wrap is incremental — done 2026-07-09** (done
+  log): complete-lines prefix cache keyed by width+theme epoch; only the
+  trailing partial re-wraps per frame.
 - [ ] **Streaming tail re-hashes + copies the whole buffer per delta (MED-LOW)
   [E7].** `transcript_list.go:240-254` `fnv(entire buf)` + string→[]byte copy;
   running-FNV over delta bytes, or key on `buf.Len()` (monotonic).
