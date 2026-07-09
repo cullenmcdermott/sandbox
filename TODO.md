@@ -22,12 +22,13 @@
 > test-coverage ×2, runner TS, Go client, event-model, docs, TUI-regression)
 > added verified findings across §1d/§1f/§2b/§2c/§4/§10 — all backed by
 > [`docs/review-2026-07-07.md`](docs/review-2026-07-07.md) (bracketed ids like
-> `[A1]`/`[D1]`/`[H1]` point into it). The 2026-07-07 HIGHs are all closed;
-> next by severity: §1f [A2]/[B5-B9], §2b [D3]/[D5]/[D6], §4 [E4].
-> *(2026-07-08 batch 1: [A1]+[F1]+[F2]+[C2] landed — done log; A1's `/proc`
-> residual is a new §1f item. Batch 2: [D1]+[D2]+[D4]+[B1]+[B2]+[B3]+[B4]
-> landed. Batch 3 (2026-07-09): [C1]+[H1]+[H2]/[H3]. Batch 4 (2026-07-09):
-> [E1]+[E2]+[E3]+[E5]+[E6] — done log.)*
+> `[A1]`/`[D1]`/`[H1]` point into it). The 2026-07-07 sweep is nearly
+> burned down — remaining: §1f the A1 `/proc` residual + the hook-shape
+> forward-compat item + [A3] SECURITY.md; §2b [D6] + [D7-D12]; §2c [H4-H7];
+> §1d [C3]-[C11]; §4 [E7-E10] + the older measure-first items; §10 [F3-F7].
+> *(Batches 1-5, 2026-07-08→09: [A1] [F1] [F2] [C2] · [D1] [D2] [D4]
+> [B1-B4] · [C1] [H1] [H2/H3] · [E1] [E2] [E3] [E5] [E6] · [A2] [B5-B9]
+> [D3] [D5] [E4] — all in the done log.)*
 >
 > **Opus-ready map:** §1c–§1d residuals, §2a–§2d, §4, §7a and the §5 GC
 > follow-ups carry pointers + fix direction — pick a cluster and go. Drafted,
@@ -161,11 +162,10 @@ in [`docs/review-2026-07-07.md`](docs/review-2026-07-07.md) §A/§B (id in brack
   (they pin what we return, not what the SDK honors). `claude.ts:349-354`,
   `runner/test/pretooluse-guard.test.ts`. Consider pinning the SDK version
   (cross-ref the carry-forward caveat below).
-- [ ] **Event log + SSE persist secrets verbatim, unlike the redacted audit log
-  (LOW-MED) [A2].** `events.ts:191-224` `appendEvent` writes/broadcasts raw
-  payloads (prompts, Bash commands, tool inputs) with no `redactSecrets`
-  (contrast `audit.ts`). Factor redaction into a shared module; run it in
-  `appendEvent` for `turn.started`/`tool.*`/`permission.*`.
+- [x] **[A2] event log + SSE redact secrets — done 2026-07-09** (done log):
+  shared `redact.ts`; `appendEvent` masks `turn.started`/`tool.*`/
+  `permission.*` + role-user `message.*` (the D5 echo) before persist AND
+  broadcast.
 - [ ] **SECURITY.md: 0.0.0.0 binds + open-443 egress example (INFO) [A3].**
   Runner/sshd/opencode bind all interfaces (`server.ts:77` etc.);
   `networkpolicy-egress-allow.yaml:48-59` permits 443 to any public host — the
@@ -180,13 +180,10 @@ in [`docs/review-2026-07-07.md`](docs/review-2026-07-07.md) §A/§B (id in brack
   `kill(-pid)` on timeout.
 - [x] **[B4] persist-failure events delivered live — done 2026-07-08** (done
   log): seq-0 bypasses the `<=afterSeq` filter (`shouldDeliver`).
-- [ ] **Assorted runner robustness (LOW) [B5-B9]:** `after > lastSeq` accepted →
-  silent live-event swallow (clamp, `server.ts:127-130`); synchronous git in
-  `emitWorkspaceStatus` blocks the loop ~9s/turn (`claude.ts:857-895`, async it);
-  corrupt `session.json` crash-loops the pod (`session.ts:135-137`, catch + move
-  aside); permission-resolve races the deadline and lies `resolved:true`
-  (`server.ts:233-251`); oversized/malformed body → 500 not 413/400
-  (`httputil.ts:14-26`).
+- [x] **[B5-B9] runner robustness LOWs — done 2026-07-09** (done log): after
+  clamp; async git (A1 sanitization preserved); corrupt session.json moved
+  aside + reseed; permission resolve first-write-wins with honest 409;
+  typed 413/400 body errors.
 
 ## 2) The "feels like Claude Code" program (2026-07-04 audit)
 
@@ -302,16 +299,14 @@ changes go through `schema/events.json` + `just gen` (never hand-edit `*.gen.*`)
 - [x] **[D2] mid-turn crash boot terminal events — done 2026-07-08** (done
   log): boot appends `turn.interrupted` + `status_changed{idle}` for the
   orphaned turn before `session.started` (`orphanedTurnBootEvents`).
-- [ ] **All four `turn.*` payloads are off-schema → invisible to the drift gate
-  (MED) [D3].** `turn.started/completed/failed/interrupted` carry fields absent
-  from `schema/events.json`; the Go TUI decodes `turn.failed` via a coincidental
-  shared `message` key. Add Turn payloads to the schema + `just gen` (unblocks D5).
+- [x] **[D3] turn.* payloads on-schema — done 2026-07-09** (done log): four
+  payload defs (field union across all emitters) + `just gen` + hand-written
+  Go structs; TUI decodes `turn.failed` via the real `TurnFailedPayload`.
 - [x] **[D4] interrupt mid-think reasoning teardown — done 2026-07-08** (done
   log): `finalizeStreaming` resets `m.reasoning`/`reasoningBuf`.
-- [ ] **OpenCode transcripts have no user prompts on attach/replay (MED) [D5].**
-  Adapter/observer map only assistant parts; the prompt lives only in the
-  off-schema `turn.started`. Emit `message.*  role:user`, or render
-  `TurnStartedPayload.prompt` once D3 lands.
+- [x] **[D5] opencode replay shows user prompts — done 2026-07-09** (done
+  log): the turn adapter echoes the prompt as `message.* role:user`
+  (Claude-parity path; existing reducer dedup prevents double-print).
 - [ ] **`tool.delta` carries no `toolUseId`/`parentToolUseId` → live input preview
   attaches to the wrong card (MED) [D6].** `mapping.ts:295-297` drops the
   in-scope `parentToolUseId`; the TUI targets the newest pending flat card. Thread
@@ -549,10 +544,9 @@ done log.)
 - [x] **[E3] live-broadcast backpressure cap — done 2026-07-09** (done log):
   4 MiB `writableLength` cap; a wedged client is destroyed and reconnects
   with `after=<seq>`.
-- [ ] **Delta events persisted forever; log unbounded by default (MED ✓) [E4].**
-  Delta-only compaction on `turn.completed` (delete `*.delta` older than the last
-  N turns — seq gaps are fine, remaining events stay contiguous). Not M34's
-  rejected all-or-nothing retention.
+- [x] **[E4] delta-only compaction — done 2026-07-09** (done log): one
+  bounded DELETE on `turn.completed` keeps the last N turns' deltas
+  (`DELTA_COMPACT_KEEP_TURNS`, default 2); never fails the append.
 - [x] **[E5] passive streams batch-drain — done 2026-07-09** (done log):
   `liveSSEBatchCmd` + `RunnerEventBatchMsg` mirror the foreground 512-drain;
   one Update+View per burst.

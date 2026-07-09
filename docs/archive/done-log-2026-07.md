@@ -897,3 +897,64 @@ line-by-line against the review's invariants before landing.
 
 Still open in §4: E4 (delta compaction — retention design), E7-E10 (LOW),
 and the older measure-first items.
+
+## 2026-07-09 — handoff-review batch 5 (§1f A2/B5-B9, §2b D3/D5, §4 E4)
+
+Three Opus subagents in parallel (file-disjoint packages) under Fable
+orchestration; diffs audited line-by-line, one cross-agent seam fixed by the
+orchestrator.
+
+- **§1f [A2] — event log + SSE redact secrets (LOW-MED).** Redaction factored
+  out of audit.ts into shared `redact.ts` (byte-identical logic, re-exported
+  for back-compat); `appendEvent` masks `turn.started`/`tool.*`/`permission.*`
+  payloads BEFORE persist and broadcast, so log, live frames, and (via E2's
+  raw splice) replay all carry the masked form. Orchestrator integration fix:
+  role-`user` `message.*` events are masked too — the D5 user echo carries the
+  same prompt text `turn.started` does, so masking one but not the other
+  leaked anyway; assistant message.* stays untouched and message.delta never
+  pays the walk. Tests: events-redaction.test.ts incl. the A2×D5 seam pin.
+- **§4 [E4] — delta-only compaction (MED ✓✓).** On `turn.completed`, one
+  bounded DELETE removes `*.delta` events older than the last N turns
+  (`DELTA_COMPACT_KEEP_TURNS`, default 2 = current + previous, so a
+  just-detached client still replays its live tail; invalid env → default).
+  Non-delta events always survive (full replay still reconstructs the
+  transcript; seq gaps are within the after=<seq> contract). Best-effort:
+  compaction failure never fails the append (R11 stance). Distinct from
+  M34's rejected all-or-nothing retention; safe against E2's seq-cursor
+  chunked replay; no VACUUM (file plateaus, never shrinks — that's the goal).
+- **§1f [B5-B9] — runner robustness LOWs.** B5: SSE `after` beyond the head
+  clamps to `lastSeq` (pure `clampAfterSeq`) instead of silently swallowing
+  every live event. B6: `emitWorkspaceStatus` git calls now async
+  (promisified execFile; A1 env sanitization + fsmonitor/hooksPath disarming
+  preserved verbatim; `mapMessage` awaited so workspace.status still lands
+  after turn.completed) — no more ~9s of blocked event loop per turn worst
+  case. B7: corrupt session.json is moved aside
+  (`session.json.corrupt-<ts>`) + logged + reseeded instead of crash-looping
+  the pod; no bootEvents from an unrecoverable file. B8: permission resolve
+  is first-write-wins — a POST that loses to the deadline/abort/detach
+  auto-deny returns 409 `{resolved:false, reason:'expired'}` instead of
+  lying `resolved:true` (Go client treats non-2xx as a visible error and
+  reads `{error}` — verified read-only). B9: `readBody` rejects with typed
+  `BodyTooLargeError`/`InvalidJsonError` mapped centrally to 413/400.
+  Tests: robustness-b5-b9.test.ts, session-corrupt.test.ts.
+  `docs/runner-api.md` updated in-change (409 case, after-clamp, 413/400,
+  redaction + compaction replay notes).
+- **§2b [D3] — turn.* payloads on-schema (MED).** Four payload definitions
+  added to schema/events.json from the field union across ALL emitters
+  (claude/mapping/opencode-turn/opencode-observer/server/session):
+  `turn.started{prompt?}`, `turn.completed{result?,stopReason?,numTurns?,
+  durationMs?}`, `turn.failed{message,subtype?,errors?}`,
+  `turn.interrupted{reason}`. `just gen` (idempotent, verified twice) +
+  generator payloadOrder + hand-written Go structs registered in
+  schema_test's payloadRegistry (the drift gate now covers them) + types.ts
+  re-exports. TUI `turn.failed` decode switched from the coincidental
+  ErrorPayload to the real TurnFailedPayload.
+- **§2b [D5] — opencode replay shows user prompts (MED).** Chose the
+  Claude-parity fix: the runner-driven opencode turn adapter echoes the
+  driving prompt as `message.started/completed role:"user"`
+  (`emitOpencodeUserPrompt`), the exact shape mapping.ts emits for claude —
+  the reducer's existing role:user dedup (optimistic-block trimEqual)
+  prevents double-printing on live sessions, and /loop-driven turns render
+  their prompt too. The prompt-less observer path (external client owns
+  input) is untouched. Tests: transcript_d5_test.go (replay order, no
+  double-print, turn.failed payload), opencode-turn.test.ts echo pin.
