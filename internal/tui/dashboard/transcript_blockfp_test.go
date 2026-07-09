@@ -54,7 +54,7 @@ func TestReconcileStillUpdatesMutableToolCard(t *testing.T) {
 	toolIdx := len(m.blocks) - 1
 	verBefore := m.blocks[toolIdx].Version()
 
-	m.finishToolCard(toolOK, "exit 0", "Bash", "")
+	m.finishToolCard(toolOK, "exit 0", "Bash", "", "")
 	if m.blocks[toolIdx].Version() == verBefore {
 		t.Fatal("tool card version did not bump on completion — mutable card not re-rendered")
 	}

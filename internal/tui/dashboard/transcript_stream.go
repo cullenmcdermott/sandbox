@@ -44,6 +44,17 @@ func (m *TranscriptModel) maybeCache(ev session.Event) {
 // block (covers turns that end without a message.completed) and returns that
 // block's index, or -1 if nothing was committed.
 func (m *TranscriptModel) finalizeStreaming() int {
+	// D4: tear down the live reasoning tail here too. No backend emits
+	// reasoning.completed on abort, so an interrupt (or any end-of-stream) mid-
+	// think would otherwise leave the "∴ Thinking" tail rendering forever and leak
+	// reasoningBuf into the next turn. Clearing m.reasoning lets syncItems drop the
+	// ephemeral tail; every terminal caller appends a block (→ syncItems) after
+	// this, but the empty-assistant path below syncs explicitly so it's self-
+	// contained.
+	hadReasoning := m.reasoning
+	m.reasoning = false
+	m.reasoningBuf.Reset()
+
 	if m.streaming && strings.TrimSpace(m.assistantBuf.String()) != "" {
 		m.streaming = false
 		text := m.assistantBuf.String()
@@ -55,6 +66,9 @@ func (m *TranscriptModel) finalizeStreaming() int {
 	m.streaming = false
 	m.assistantBuf.Reset()
 	m.streamAI = nil
+	if hadReasoning {
+		m.syncItems() // no block appended; drop the live reasoning tail now
+	}
 	return -1
 }
 

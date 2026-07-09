@@ -97,7 +97,7 @@ func TestToolCardBulletTone(t *testing.T) {
 func TestToolCardExpandToggle(t *testing.T) {
 	m := toolCardTM(t)
 	m.startToolCard("Bash", "echo hi")
-	m.finishToolCard(toolOK, "3 lines", "Bash", "one\ntwo\nthree")
+	m.finishToolCard(toolOK, "3 lines", "Bash", "one\ntwo\nthree", "")
 
 	last := m.blocks[len(m.blocks)-1]
 	if last.kind != blockToolCard || last.tool == nil {

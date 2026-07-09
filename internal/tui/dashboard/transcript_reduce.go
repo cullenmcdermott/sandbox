@@ -66,12 +66,29 @@ func (m *TranscriptModel) startOrUpdateToolCard(p session.ToolPayload) {
 	}
 }
 
-// finishToolCard resolves the oldest pending tool card with a result. tool.
-// completed/failed payloads carry no tool name, so cards are matched in start
-// order; toolName (if present, e.g. on failure) is a label fallback.
-func (m *TranscriptModel) finishToolCard(status toolStatus, summary, toolName, output string) {
+// finishToolCard resolves a pending tool card with a result. The runner emits
+// the tool_use id on tool.completed/failed (runner/src/mapping.ts,
+// opencode-turn.ts), so we close the EXACT card that id names — even when it
+// isn't the oldest pending one (D1). This is what keeps parallel tool_use from
+// landing results on the wrong card, and an interrupted tool whose completion
+// never arrives from poisoning FIFO order for the session's life. Only when no
+// id is present (the PreToolUse-hook synthetic tool.failed in claude.ts omits
+// it, as do pre-toolUseId runners) do we fall back to matching in start order;
+// toolName (if present, e.g. on failure) is a label fallback for the orphan case.
+func (m *TranscriptModel) finishToolCard(status toolStatus, summary, toolName, output, toolUseID string) {
 	// Remap any ANSI the tool emitted in its result onto the theme palette (§A.2).
 	summary = kit.RemapANSI(summary)
+	if toolUseID != "" {
+		if idx, ok := m.flatTools[toolUseID]; ok && idx >= 0 && idx < len(m.blocks) && m.blocks[idx].tool != nil {
+			m.removePending(idx)
+			m.blocks[idx].tool.status = status
+			m.blocks[idx].tool.summary = summary
+			m.blocks[idx].tool.output = output
+			m.blocks[idx].Bump()
+			m.syncItems()
+			return
+		}
+	}
 	if len(m.pendingTools) > 0 {
 		idx := m.pendingTools[0]
 		m.pendingTools = m.pendingTools[1:]
@@ -88,6 +105,41 @@ func (m *TranscriptModel) finishToolCard(status toolStatus, summary, toolName, o
 	card := m.newBlockCard(blockToolCard, "")
 	card.tool = &toolCard{tool: toolName, status: status, summary: summary, output: output, card: card}
 	m.blocks = append(m.blocks, card)
+	m.syncItems()
+}
+
+// removePending drops a block index from the pendingTools FIFO wherever it sits,
+// so an id-matched completion (finishToolCard) closes an out-of-order card
+// without leaving a stale slot that a later FIFO fallback would mis-pop.
+func (m *TranscriptModel) removePending(blockIdx int) {
+	for i, v := range m.pendingTools {
+		if v == blockIdx {
+			m.pendingTools = append(m.pendingTools[:i:i], m.pendingTools[i+1:]...)
+			return
+		}
+	}
+}
+
+// drainPendingTools closes any tool cards still marked running at a turn
+// boundary (D1). tool.completed/failed matching alone can strand a card forever
+// when a tool is interrupted before its result arrives; draining on every
+// turn-terminal event guarantees no card renders "running" across turns. Cards
+// are marked failed (the only non-running terminal status) with the boundary
+// reason as their summary so the interruption/failure is visible in scrollback.
+func (m *TranscriptModel) drainPendingTools(summary string) {
+	if len(m.pendingTools) == 0 {
+		return
+	}
+	for _, idx := range m.pendingTools {
+		if idx >= 0 && idx < len(m.blocks) && m.blocks[idx].tool != nil && m.blocks[idx].tool.status == toolRunning {
+			m.blocks[idx].tool.status = toolErr
+			if m.blocks[idx].tool.summary == "" {
+				m.blocks[idx].tool.summary = summary
+			}
+			m.blocks[idx].Bump()
+		}
+	}
+	m.pendingTools = nil
 	m.syncItems()
 }
 
@@ -268,6 +320,9 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 	case session.EventTurnCompleted:
 		// Status → needs-input is set by the shared reducer.
 		m.finalizeStreaming()
+		// Close any tool card whose result never arrived (D1) so it can't render
+		// "running" into the next turn.
+		m.drainPendingTools("no result")
 		// Per-turn footer: a dim model/cost summary so scrollback is self-
 		// documenting (§D).
 		if f := m.turnFooter(); f != "" {
@@ -302,6 +357,10 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 	case session.EventTurnInterrupted:
 		// Status → needs-input is set by the shared reducer.
 		m.finalizeStreaming()
+		// The runner emits nothing terminal for an in-flight tool on abort, so
+		// drain the pending cards here (D1) — otherwise an esc mid-Bash leaves that
+		// card "running" forever and the next turn's tool.completed FIFO-pops it.
+		m.drainPendingTools("interrupted")
 		m.turnActive = false
 		m.appendBlock(blockInfo, "[interrupted]")
 		// A queued prompt here means the interrupt was a steer (queueSteer keeps
@@ -318,6 +377,7 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 	case session.EventTurnFailed:
 		// Status → failed is set by the shared reducer.
 		m.finalizeStreaming()
+		m.drainPendingTools("interrupted") // in-flight tools die with the failed turn (D1)
 		m.turnActive = false
 		var p session.ErrorPayload
 		_ = json.Unmarshal(ev.Payload, &p)
@@ -424,7 +484,7 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		var p session.ToolPayload
 		_ = json.Unmarshal(ev.Payload, &p)
 		if !m.finishNested(p, toolOK, toolSummary(p.Output)) {
-			m.finishToolCard(toolOK, toolSummary(p.Output), p.Tool, p.Output)
+			m.finishToolCard(toolOK, toolSummary(p.Output), p.Tool, p.Output, p.ToolUseID)
 		}
 
 	case session.EventToolFailed:
@@ -439,7 +499,7 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 			summary = toolSummary(p.Output)
 		}
 		if !m.finishNested(p, toolErr, summary) {
-			m.finishToolCard(toolErr, summary, p.Tool, p.Output)
+			m.finishToolCard(toolErr, summary, p.Tool, p.Output, p.ToolUseID)
 		}
 
 	case session.EventPermissionRequested:
