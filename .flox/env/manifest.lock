@@ -47,6 +47,14 @@
       "nodejs": {
         "pkg-path": "nodejs"
       },
+      "opencode": {
+        "pkg-path": "opencode",
+        "systems": [
+          "aarch64-darwin",
+          "aarch64-linux",
+          "x86_64-linux"
+        ]
+      },
       "tilt": {
         "pkg-path": "tilt"
       }
@@ -73,6 +81,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T03:13:14.050869Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -103,6 +112,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T03:44:08.514175Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -133,6 +143,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T04:13:06.311756Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -163,6 +174,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T04:47:04.583291Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -193,6 +205,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T03:13:14.069212Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -223,6 +236,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T03:44:08.543536Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -253,6 +267,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T04:13:06.330518Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -283,6 +298,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T04:47:04.617045Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -313,6 +329,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T03:13:14.221612Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -343,6 +360,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T03:44:08.814613Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -373,6 +391,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T04:13:06.495136Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -403,6 +422,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T04:47:04.905714Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -433,6 +453,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T03:13:14.749561Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -466,6 +487,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T03:44:09.645275Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -500,6 +522,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T04:13:07.064846Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -533,6 +556,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T04:47:05.803732Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -569,6 +593,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T03:13:14.850851Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -602,6 +627,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T03:44:09.791984Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -635,6 +661,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T04:13:07.165719Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -667,6 +694,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T04:47:05.961403Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -703,6 +731,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T03:13:14.979907Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -733,6 +762,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T03:44:10.523965Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -763,6 +793,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T04:13:07.336579Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -793,6 +824,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T04:47:06.772425Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -824,6 +856,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T03:13:15.046385Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -854,6 +887,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T03:44:10.625045Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -884,6 +918,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T04:13:07.403081Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -914,6 +949,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T04:47:06.882434Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -944,6 +980,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T03:13:31.265729Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -983,6 +1020,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T03:44:31.099705Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -1021,6 +1059,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T04:13:24.080171Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -1058,6 +1097,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T04:47:28.480167Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -1099,6 +1139,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T03:13:31.395089Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -1132,6 +1173,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T03:44:31.262810Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -1165,6 +1207,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T04:13:24.214231Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -1198,6 +1241,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T04:47:28.673613Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -1231,6 +1275,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T03:13:31.745925Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -1261,6 +1306,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T03:44:32.469727Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -1291,6 +1337,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T04:13:24.594817Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -1321,6 +1368,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T04:47:30.017817Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -1351,6 +1399,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T03:13:31.994864Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -1384,6 +1433,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T03:44:32.916870Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -1417,6 +1467,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T04:13:24.863568Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -1450,6 +1501,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T04:47:30.531928Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -1483,6 +1535,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T03:13:32.046643Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -1513,6 +1566,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T03:44:32.983929Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -1543,6 +1597,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T04:13:24.916620Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -1573,6 +1628,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T04:47:30.598428Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -1603,6 +1659,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T03:13:38.048990Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -1633,6 +1690,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T03:44:46.366128Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -1663,6 +1721,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T04:13:31.248461Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -1693,6 +1752,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T04:47:46.071495Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -1723,6 +1783,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T03:13:39.213888Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -1755,6 +1816,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T03:44:48.128392Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -1786,6 +1848,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T04:13:32.462339Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -1817,6 +1880,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T04:47:47.914293Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -1828,6 +1892,99 @@
       ],
       "outputs": {
         "out": "/nix/store/5a8ysg1jnj8jmzzyfcfw7rvpvnp5rfpa-nodejs-24.15.0"
+      },
+      "system": "x86_64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "opencode",
+      "broken": false,
+      "derivation": "/nix/store/rfgwzvh3n6jim76ssg7g43knc9l2dz22-opencode-1.17.7.drv",
+      "description": "AI coding agent built for the terminal",
+      "install_id": "opencode",
+      "license": "MIT",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=567a49d1913ce81ac6e9582e3553dd90a955875f",
+      "name": "opencode-1.17.7",
+      "pname": "opencode",
+      "rev": "567a49d1913ce81ac6e9582e3553dd90a955875f",
+      "rev_count": 1017464,
+      "rev_date": "2026-06-16T02:33:49Z",
+      "scrape_date": "2026-06-17T03:13:44.435542Z",
+      "stabilities": [
+        "stable",
+        "staging",
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "1.17.7",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/yxclajlc2f9b6wiwa0hazn1xqy42py5x-opencode-1.17.7"
+      },
+      "system": "aarch64-darwin",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "opencode",
+      "broken": false,
+      "derivation": "/nix/store/ikxvdkpy3yxnvd0zwhgpjy756ahcdgin-opencode-1.17.7.drv",
+      "description": "AI coding agent built for the terminal",
+      "install_id": "opencode",
+      "license": "MIT",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=567a49d1913ce81ac6e9582e3553dd90a955875f",
+      "name": "opencode-1.17.7",
+      "pname": "opencode",
+      "rev": "567a49d1913ce81ac6e9582e3553dd90a955875f",
+      "rev_count": 1017464,
+      "rev_date": "2026-06-16T02:33:49Z",
+      "scrape_date": "2026-06-17T03:44:54.966791Z",
+      "stabilities": [
+        "stable",
+        "staging",
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "1.17.7",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/l5mkwawxi1d2mpjs93xdf1jp732zy9jx-opencode-1.17.7"
+      },
+      "system": "aarch64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "opencode",
+      "broken": false,
+      "derivation": "/nix/store/kvlj1mnqb2djp4dh2sfndi1yv0rkp58p-opencode-1.17.7.drv",
+      "description": "AI coding agent built for the terminal",
+      "install_id": "opencode",
+      "license": "MIT",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=567a49d1913ce81ac6e9582e3553dd90a955875f",
+      "name": "opencode-1.17.7",
+      "pname": "opencode",
+      "rev": "567a49d1913ce81ac6e9582e3553dd90a955875f",
+      "rev_count": 1017464,
+      "rev_date": "2026-06-16T02:33:49Z",
+      "scrape_date": "2026-06-17T04:47:55.054882Z",
+      "stabilities": [
+        "stable",
+        "staging",
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "1.17.7",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/qwaln804k1cgacmzzrgkj7g7shcixg5i-opencode-1.17.7"
       },
       "system": "x86_64-linux",
       "group": "toplevel",
@@ -1848,6 +2005,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T03:15:38.231692Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -1878,6 +2036,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T03:47:14.903132Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -1908,6 +2067,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T04:15:32.460878Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],
@@ -1938,6 +2098,7 @@
       "rev_date": "2026-06-16T02:33:49Z",
       "scrape_date": "2026-06-17T04:50:18.020383Z",
       "stabilities": [
+        "stable",
         "staging",
         "unstable"
       ],

@@ -28,6 +28,12 @@ cri-tools.pkg-path = "cri-tools"
 kubectl.pkg-path = "kubectl"
 kubernetes-helm.pkg-path = "kubernetes-helm"
 mutagen.pkg-path = "mutagen"
+# opencode attach client — the TUI external pane spawns it, and the dashboard
+# PTY test (TestAppExternalPaneEscIsForwardedNotDetached) needs it on PATH to
+# actually run instead of self-skipping (so CI exercises it). Upstream doesn't
+# build it for x86_64-darwin, hence the per-package systems scope.
+opencode.pkg-path = "opencode"
+opencode.systems = ["aarch64-darwin", "aarch64-linux", "x86_64-linux"]
 # CI tooling — pin golangci-lint to the exact CI version so its v2 config schema
 # (.golangci.yml) can't drift on a `flox upgrade`. jq is used by recipes/scripts.
 golangci-lint.pkg-path = "golangci-lint"

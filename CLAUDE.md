@@ -75,8 +75,11 @@ See `docs/verification-protocol.md` for the verification philosophy
   `just test` / `just verify` (and `just check`) with the sandbox disabled.
   Other packages test fine in-sandbox, with one exception:
   `internal/tui/dashboard`'s `TestAppExternalPaneEscIsForwardedNotDetached`
-  spawns a PTY (blocked in-sandbox) — it passes unsandboxed. Run the dashboard
-  suite with the sandbox disabled if that test fails locally.
+  spawns a real `opencode attach` child in a PTY, so it SELF-SKIPS (visibly)
+  when the `opencode` binary or a PTY is unavailable — in practice only inside
+  the command sandbox. The `opencode` CLI is pinned in the flox env
+  (`.flox/env/manifest.toml`), so unsandboxed local runs and Depot CI both
+  exercise it for real.
 - **Linters** (`golangci-lint`, `eslint`) aren't on the Nix host — local recipes
   skip them with a warning; CI is the hard enforcement point. Don't install them
   imperatively (run `golangci-lint` via `nix run nixpkgs#golangci-lint -- run`).
