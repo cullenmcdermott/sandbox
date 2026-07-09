@@ -41,6 +41,26 @@ type RunnerEventMsg struct {
 	gen uint64
 }
 
+// RunnerEventBatchMsg carries a BURST of SSE events drained from one passive
+// stream in a single message (§4 E5). liveSSEBatchCmd blocks for the first event
+// then non-blockingly drains up to eventBatchMax more, so a delta burst costs one
+// Update+View instead of one per event. One channel is one generation, so gen
+// tags the whole batch and the stale-stream guard checks it once. StreamEnded
+// means the channel closed mid-drain: Events (read before the close) are applied
+// first, then the stream-ended handling — no event is lost.
+type RunnerEventBatchMsg struct {
+	// ID is the session the events belong to.
+	ID session.ID
+	// Events are the drained events, in arrival order. May be empty when the
+	// channel closed on the very first (blocking) read.
+	Events []session.Event
+	// StreamEnded is true when the channel closed (with or without drained
+	// events). The handler applies Events, then degrades to cluster-derived status.
+	StreamEnded bool
+	// gen is the producing stream's generation (see RunnerEventMsg.gen).
+	gen uint64
+}
+
 // syncStatusMsg carries one warm session's freshly-probed sync health.
 type syncStatusMsg struct {
 	id     session.ID
@@ -668,6 +688,39 @@ func liveSSENextCmd(id session.ID, ch <-chan session.Event, gen uint64) tea.Cmd 
 			return RunnerEventMsg{ID: id, StreamEnded: true, gen: gen}
 		}
 		return RunnerEventMsg{ID: id, Event: ev, gen: gen}
+	}
+}
+
+// liveSSEBatchCmd is the batching passive-stream reader (§4 E5). It blocks for
+// the first event, then non-blockingly drains any already-buffered events (up to
+// eventBatchMax, shared with the foreground transcript's waitForEvent) into ONE
+// RunnerEventBatchMsg — so a delta burst collapses to a single Update+View
+// instead of one full render pipeline per event. This mirrors waitForEvent's
+// coalescing for the dashboard's background observer streams.
+//
+// If the channel closes on the first read, StreamEnded rides on an empty batch.
+// If it closes mid-drain, the events read so far ride along WITH StreamEnded so
+// the handler applies them before degrading — no drained event is lost. gen tags
+// the batch; a stale reader (superseded connect) is ignored by the guard.
+func liveSSEBatchCmd(id session.ID, ch <-chan session.Event, gen uint64) tea.Cmd {
+	return func() tea.Msg {
+		ev, ok := <-ch
+		if !ok {
+			return RunnerEventBatchMsg{ID: id, StreamEnded: true, gen: gen}
+		}
+		events := []session.Event{ev}
+		for len(events) < eventBatchMax {
+			select {
+			case ev, ok := <-ch:
+				if !ok {
+					return RunnerEventBatchMsg{ID: id, Events: events, StreamEnded: true, gen: gen}
+				}
+				events = append(events, ev)
+			default:
+				return RunnerEventBatchMsg{ID: id, Events: events, gen: gen}
+			}
+		}
+		return RunnerEventBatchMsg{ID: id, Events: events, gen: gen}
 	}
 }
 

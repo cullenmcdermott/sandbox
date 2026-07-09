@@ -357,9 +357,69 @@ func (m *TranscriptModel) renderLiveReasoning(text string) string {
 	if text == "" {
 		return placeIndent(label)
 	}
-	body := lipgloss.NewStyle().Foreground(theme.TextMuted).Italic(true).
-		Width(m.assistantWrapWidth()).Render(text)
+	body := m.wrapLiveReasoning(text)
 	return placeIndent(label + "\n" + body)
+}
+
+// wrapLiveReasoning word-wraps the live think body incrementally (§4 E6, Option
+// A: prefix cache). Wrapping the whole buffer every delta is O(buffer²) over a
+// long think; instead we wrap each COMPLETE line (everything up to the last '\n')
+// exactly once — lipgloss wraps hard lines independently, so a cached line's wrap
+// never changes as later text arrives — and re-wrap only the trailing partial
+// line each frame. Output is byte-identical to a single .Width(w).Render(text)
+// because text is already TrimSpace'd (so it never ends in '\n', the one case
+// where per-line and whole-text rendering diverge). The cache self-invalidates on
+// width/epoch change or when the buffer shrank below what we cached (a reset /
+// new think), and resetReasoningWrapCache clears it at every reasoningBuf.Reset.
+func (m *TranscriptModel) wrapLiveReasoning(text string) string {
+	w := m.assistantWrapWidth()
+	epoch := theme.Epoch()
+	style := lipgloss.NewStyle().Foreground(theme.TextMuted).Italic(true).Width(w)
+
+	// prefixLen is the byte offset just past the last newline: text[:prefixLen] is
+	// the complete-lines region (ends in '\n'), text[prefixLen:] the partial tail.
+	prefixLen := strings.LastIndexByte(text, '\n') + 1
+
+	// Invalidate the cache if the wrap key changed or the buffer shrank below the
+	// cached region (D4 reset, or a fresh think reusing the same model).
+	if w != m.reasoningWrapWidth || epoch != m.reasoningWrapEpoch || prefixLen < m.reasoningWrapLen {
+		m.reasoningWrapCache = ""
+		m.reasoningWrapLen = 0
+		m.reasoningWrapWidth = w
+		m.reasoningWrapEpoch = epoch
+	}
+
+	// Extend the cache with any newly-completed lines (the O(delta) part).
+	if prefixLen > m.reasoningWrapLen {
+		seg := text[m.reasoningWrapLen : prefixLen-1] // drop the trailing '\n'
+		for _, ln := range strings.Split(seg, "\n") {
+			if m.reasoningWrapCache != "" {
+				m.reasoningWrapCache += "\n"
+			}
+			m.reasoningWrapCache += style.Render(ln)
+		}
+		m.reasoningWrapLen = prefixLen
+	}
+
+	// Wrap only the trailing partial line each frame and append it to the cache.
+	partial := text[prefixLen:]
+	if partial == "" {
+		return m.reasoningWrapCache
+	}
+	rendered := style.Render(partial)
+	if m.reasoningWrapCache == "" {
+		return rendered
+	}
+	return m.reasoningWrapCache + "\n" + rendered
+}
+
+// resetReasoningWrapCache drops the live-reasoning wrap cache (§4 E6) so the next
+// think starts clean. Called wherever reasoningBuf is reset (finalizeStreaming
+// D4, reasoning start/complete) — without it a new think could concatenate onto
+// the previous think's cached lines.
+func (m *TranscriptModel) resetReasoningWrapCache() {
+	m.reasoningWrapCache = ""
+	m.reasoningWrapLen = 0
 }
 
 // renderTodos formats a todo.updated checklist as one line per item with a

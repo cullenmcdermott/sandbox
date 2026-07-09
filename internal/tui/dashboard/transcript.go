@@ -62,13 +62,22 @@ const (
 // tool.completed / tool.failed event arrives, and ctrl+o toggles its expanded
 // state to reveal the edit diff / captured output.
 type toolCard struct {
-	tool    string
-	arg     string
-	rawJSON string          // accumulated tool.delta input fragments (parsed into arg, never shown raw)
-	input   json.RawMessage // tool input, retained so ctrl+o expansion can reconstruct the edit diff (permission_diff) post-approval
-	status  toolStatus
-	summary string
-	output  string // captured (runner-capped) tool output, revealed on ctrl+o expansion
+	tool string
+	arg  string
+	// rawBuf accumulates tool.delta input-JSON fragments as they stream, parsed
+	// into arg for a live preview but never shown raw. E1: a Builder (not string
+	// concat) so N fragments accumulate in O(N) total, not O(N²). Never copy a
+	// toolCard by value once this is used — the Builder forbids it (cards are
+	// always held via *toolCard, so this holds).
+	rawBuf strings.Builder
+	// lastExtractLen is rawBuf.Len() at the last preview-extraction attempt. E1:
+	// toolArg is a full json.Unmarshal of the whole buffer, so the tool.delta case
+	// throttles re-parses off this watermark instead of parsing every fragment.
+	lastExtractLen int
+	input          json.RawMessage // tool input, retained so ctrl+o expansion can reconstruct the edit diff (permission_diff) post-approval
+	status         toolStatus
+	summary        string
+	output         string // captured (runner-capped) tool output, revealed on ctrl+o expansion
 	// expanded is the ctrl+o expansion state: when set the card renders its
 	// available content (arg / edit diff / captured output) under the elbow.
 	expanded bool
@@ -168,6 +177,23 @@ type TranscriptModel struct {
 	// ReasoningCompleted.
 	reasoningBuf strings.Builder
 	reasoning    bool
+
+	// Live-reasoning wrap cache (§4 E6). renderLiveReasoning used to word-wrap the
+	// ENTIRE accumulated think every frame — O(buffer) per delta, O(buffer²) over a
+	// long think, the dominant per-frame cost the perf review flagged. lipgloss
+	// wraps each hard line independently, so every COMPLETE line (everything up to
+	// the last '\n') is stable once written: we wrap it once and cache the styled
+	// result, then each frame re-wrap only the trailing partial line (mirrors the
+	// assistant tail's A2 stable-prefix incremental render). The cache holds the
+	// rendered complete lines joined by "\n" (no trailing newline); reasoningWrapLen
+	// is the byte offset of reasoningBuf covered by it (just past the last covered
+	// '\n'). Keyed by width + theme epoch (styles are theme-derived) so a resize or
+	// /theme swap can never render a stale wrap. Reset in finalizeStreaming and at
+	// every reasoningBuf.Reset() (D4) via resetReasoningWrapCache.
+	reasoningWrapCache string
+	reasoningWrapLen   int
+	reasoningWrapWidth int
+	reasoningWrapEpoch uint64
 
 	// Subagent nesting (slice 4b): Task cards keyed by tool_use id, plus a child
 	// tool_use id → card index so child tool.* events nest under their Task.
@@ -403,6 +429,11 @@ type TranscriptModel struct {
 	// reconciles counts commitItems() calls — a behavioral counter the bulk
 	// replay test asserts on to prove the replay collapses to a single commit.
 	reconciles int
+	// argExtracts counts full-buffer preview parses (toolArg) driven by the
+	// tool.delta path — a test-only cost counter the E1 regression pin asserts on
+	// to prove the preview extraction is throttled (far fewer than one per delta),
+	// not run on every fragment of a large streamed input.
+	argExtracts int
 
 	// lastThemeEpoch is the theme.Epoch() observed at the previous commit. A
 	// /theme swap bumps the global epoch but leaves every committed card's version

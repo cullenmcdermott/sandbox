@@ -683,7 +683,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ensureRetained(sess, msg.client)
 			m.maybeWarnWarm()
 		}
-		return m, liveSSENextCmd(msg.id, msg.ch, msg.gen)
+		return m, liveSSEBatchCmd(msg.id, msg.ch, msg.gen)
 
 	case liveSSEReconnectMsg:
 		// Backoff elapsed — try to re-open the background stream, unless the
@@ -764,6 +764,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, cmd, m.maybeStartAnim())
 		// Background attention notification: if a session other than the
 		// attached one needs attention, surface a toast.
+		cmds = append(cmds, m.notifyIfBackgroundAttention(m.attachedID))
+		return mdl, tea.Batch(cmds...)
+
+	case RunnerEventBatchMsg:
+		// §4 E5: a drained burst of passive-stream events reduced in ONE Update
+		// pass. handleRunnerEventBatch applies every event (per-event side effects
+		// identical to the single path); the post-handling below runs ONCE per
+		// batch — that batching of the render pipeline is the whole point.
+		mdl, cmd := m.handleRunnerEventBatch(msg)
+		var cmds []tea.Cmd
+		cmds = append(cmds, cmd, m.maybeStartAnim())
 		cmds = append(cmds, m.notifyIfBackgroundAttention(m.attachedID))
 		return mdl, tea.Batch(cmds...)
 

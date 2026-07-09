@@ -54,6 +54,7 @@ func (m *TranscriptModel) finalizeStreaming() int {
 	hadReasoning := m.reasoning
 	m.reasoning = false
 	m.reasoningBuf.Reset()
+	m.resetReasoningWrapCache()
 
 	if m.streaming && strings.TrimSpace(m.assistantBuf.String()) != "" {
 		m.streaming = false

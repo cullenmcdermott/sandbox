@@ -11,6 +11,19 @@ import (
 	"github.com/cullenmcdermott/sandbox/tui/kit"
 )
 
+// E1: tool.delta preview-parse throttle. toolArg re-parses the ENTIRE
+// accumulated input buffer, so running it per fragment is O(N²) on a large
+// streamed input (e.g. a 100KB Write). Parse every delta while the buffer is
+// under toolPreviewEagerBytes (live feel on the common small input), then only
+// once per additional toolPreviewStepBytes of growth. The preview is purely
+// cosmetic — tool.started later overwrites arg with the cleanly-parsed value —
+// so a slightly stale preview on a huge input is fine. Worst case is
+// ~(eager/frag) + (total/step) parses instead of one per delta.
+const (
+	toolPreviewEagerBytes = 2048
+	toolPreviewStepBytes  = 2048
+)
+
 func (m *TranscriptModel) appendBlock(kind tblockKind, text string) {
 	m.blocks = append(m.blocks, m.newBlockCard(kind, text))
 	m.syncItems()
@@ -570,6 +583,7 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		// spinner — syncItems reconciles the ephemeral reasoning tail into the list.
 		m.reasoning = true
 		m.reasoningBuf.Reset()
+		m.resetReasoningWrapCache()
 		m.syncItems()
 
 	case session.EventReasoningDelta:
@@ -595,6 +609,7 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		}
 		m.reasoning = false
 		m.reasoningBuf.Reset()
+		m.resetReasoningWrapCache()
 		if text != "" {
 			m.appendBlock(blockReasoning, text) // appendBlock syncs the body (clears the live tail)
 		} else {
@@ -617,18 +632,32 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 			idx := m.pendingTools[len(m.pendingTools)-1]
 			if idx >= 0 && idx < len(m.blocks) && m.blocks[idx].tool != nil {
 				c := m.blocks[idx].tool
-				// Accumulate the fragments but never show raw JSON: parse the
-				// buffer (closing an open string value with `"}` — the common
-				// mid-stream shape) and preview the extracted argument. Frames
-				// that don't parse keep the last good preview.
-				c.rawJSON += p.PartialJSON
-				if arg := toolArg(c.tool, json.RawMessage(c.rawJSON)); arg != "" {
-					c.arg = collapseSpaces(arg)
-				} else if arg := toolArg(c.tool, json.RawMessage(c.rawJSON+`"}`)); arg != "" {
-					c.arg = collapseSpaces(arg)
+				// Accumulate the fragments in a Builder — never string concat
+				// (E1: concat copies the whole buffer per delta ⇒ O(N²)).
+				c.rawBuf.WriteString(p.PartialJSON)
+				total := c.rawBuf.Len()
+				// Throttle the preview parse (E1): toolArg is a full Unmarshal of
+				// the entire buffer. Parse eagerly while small, then only after
+				// each further +step of growth (watermark = lastExtractLen).
+				if total < toolPreviewEagerBytes || total-c.lastExtractLen >= toolPreviewStepBytes {
+					c.lastExtractLen = total
+					m.argExtracts++ // E1 cost pin: counts full-buffer parses
+					// Never show raw JSON: parse the buffer (closing an open string
+					// value with `"}` — the common mid-stream shape) and preview the
+					// extracted argument. Frames that don't parse keep the last good
+					// preview.
+					raw := c.rawBuf.String()
+					if arg := toolArg(c.tool, json.RawMessage(raw)); arg != "" {
+						c.arg = collapseSpaces(arg)
+					} else if arg := toolArg(c.tool, json.RawMessage(raw+`"}`)); arg != "" {
+						c.arg = collapseSpaces(arg)
+					}
 				}
+				// Re-render just this already-registered card, mirroring streamDelta
+				// (transcript_list.go): the list cache is keyed on (item, version),
+				// so a Bump alone invalidates only this card. E1: dropped the
+				// per-delta m.syncItems(), which rebuilt the whole item set.
 				m.blocks[idx].Bump()
-				m.syncItems()
 			}
 		}
 

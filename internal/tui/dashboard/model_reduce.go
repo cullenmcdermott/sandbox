@@ -42,6 +42,13 @@ func (m *Model) saveSnapshot(s *Session, force bool) {
 // handleRunnerEvent applies a single SSE event to the relevant session in the
 // read-model. If the stream ended, it degrades back to the cluster-derived
 // status (idle/suspended/failed) without crashing.
+//
+// This single-event path is retained for tests that drive one RunnerEventMsg
+// directly (and stays byte-for-byte identical to before). Production passive
+// streams flow through handleRunnerEventBatch (§4 E5), which coalesces a delta
+// burst into ONE Update+View; both share applyRunnerEvent / handleStreamEnded so
+// the reduction semantics are identical — batching changes only the
+// message/render granularity, never what each event does.
 func (m *Model) handleRunnerEvent(msg RunnerEventMsg) (tea.Model, tea.Cmd) {
 	// Stale-stream guard (§1a connect-side): a message tagged with a generation
 	// that no longer matches this session's registered stream came from a
@@ -57,67 +64,134 @@ func (m *Model) handleRunnerEvent(msg RunnerEventMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	if msg.StreamEnded {
-		// warm→cold: a closed stream means the pod is no longer feeding us. Drop
-		// the warm model unless the cluster still believes the pod is running (a
-		// transient port-forward blip that the reconnect path below will retry).
-		if s := m.sessionByID(msg.ID); s.State.Status != session.StatusRunning {
-			m.dropRetained(msg.ID)
-		}
-		// Stream closed; clean up.
-		m.cancelLiveSSE(msg.ID)
-		delete(m.liveSSEChannels, msg.ID)
-		var retryCmd tea.Cmd
-		for i, s := range m.sessions {
-			if s.ID() == msg.ID {
-				// A stream drop is either a genuinely dead runner (B13: "runner
-				// unreachable = failed") or just a transient port-forward blip on
-				// a healthy pod (common with client-go SPDY forwards).
-				if m.sessions[i].State.Status == session.StatusRunning {
-					// Transient blip on a still-Running pod: PRESERVE the current
-					// attention state — the Busy/Waiting glyph, a NeedsInput
-					// awaiting-input state, and any pending permission — and retry
-					// the background stream with backoff rather than flip to a scary
-					// 'failed' glyph (RV1). Background streams had no reconnect path
-					// at all before this. Preservation matters because the reconnect
-					// replays after=lastSeq, which EXCLUDES the events that produced
-					// this state (permission.requested, turn.completed→NeedsInput,
-					// their Seq<=lastSeq) — so resetting to cluster-derived idle or
-					// clearing the permission here would PERMANENTLY lose it (§1a
-					// step 7; the old default branch reset NeedsInput→idle and the
-					// Busy/Waiting branch wiped the permission → dead approve/deny).
-					// If the state genuinely changed during the blip, the reconnect
-					// replays the newer events at higher seqs and ApplyRunnerEvent
-					// updates it; degradeUnreachable degrades only once the
-					// reconnects are exhausted.
-					retryCmd = liveSSEReconnectTick(msg.ID, 0, liveSSEReconnectDelay(0))
-				} else {
-					// Cluster says not-running (suspended/gone) — degrade to the
-					// authoritative status and clear any now-unresolvable permission.
-					// Release catch-up suppression too: the stream is gone for good,
-					// so no EventStreamLive boundary will clear it, and a Failed
-					// derived status must stay toastable.
-					m.sessions[i].DashStatus = DeriveStatus(m.sessions[i].State)
-					m.sessions[i].clearPendingPermission()
-					m.sessions[i].catchingUp = false
-				}
-				// Persist the final state so a relaunch reflects it (and resumes
-				// from the last seq we saw) rather than replaying from zero. A
-				// preserved permission/attention state rides along in the snapshot
-				// so it stays resolvable after a relaunch.
-				m.saveSnapshot(&m.sessions[i], true)
-				break
-			}
-		}
-		return m, retryCmd
+		return m, m.handleStreamEnded(msg.ID)
 	}
+	autopilotCmd := m.applyRunnerEvent(msg.ID, msg.Event)
+	// Re-issue the Cmd to read the next event from the stored channel. Carry the
+	// same generation forward so the continuing reader stays tagged as this
+	// stream (msg.gen matched the registered gen via the guard above).
+	ch, ok := m.liveSSEChannels[msg.ID]
+	if !ok {
+		return m, autopilotCmd // channel cancelled; still deliver any autopilot Cmd
+	}
+	return m, tea.Batch(autopilotCmd, liveSSENextCmd(msg.ID, ch, msg.gen))
+}
 
+// handleRunnerEventBatch applies a burst of SSE events read from one passive
+// stream in a SINGLE Update pass (§4 E5). The old per-event liveSSENextCmd cost
+// one full Update+View pipeline PER event — 3-5 busy warm sessions ≈ 100-150
+// render pipelines/sec, the multiplier that made every per-frame cost
+// user-visible. liveSSEBatchCmd now drains a burst into one RunnerEventBatchMsg;
+// we reduce every event here (identical per-event side effects) but render once.
+//
+// One channel is one generation, so the stale-stream guard gates the WHOLE batch
+// with a single check. If the channel closed mid-drain (StreamEnded), the events
+// read before the close are applied FIRST, then the stream-ended handling runs —
+// no event read before the close is lost. Per-event autopilot Cmds are collected
+// and batched; the once-per-batch post-handling (maybeStartAnim,
+// notifyIfBackgroundAttention) lives in the RunnerEventBatchMsg case in Update.
+func (m *Model) handleRunnerEventBatch(msg RunnerEventBatchMsg) (tea.Model, tea.Cmd) {
+	if msg.gen != 0 {
+		if cur, ok := m.liveSSEStreamGen[msg.ID]; !ok || cur != msg.gen {
+			return m, nil
+		}
+	}
+	var cmds []tea.Cmd
+	for _, ev := range msg.Events {
+		if c := m.applyRunnerEvent(msg.ID, ev); c != nil {
+			cmds = append(cmds, c)
+		}
+	}
+	if msg.StreamEnded {
+		// Channel closed mid-drain: apply the drained events (above) THEN the
+		// stream-ended degrade/reconnect — do not re-arm the reader.
+		if c := m.handleStreamEnded(msg.ID); c != nil {
+			cmds = append(cmds, c)
+		}
+		return m, tea.Batch(cmds...)
+	}
+	// Re-arm the batch reader on the same channel + generation.
+	if ch, ok := m.liveSSEChannels[msg.ID]; ok {
+		cmds = append(cmds, liveSSEBatchCmd(msg.ID, ch, msg.gen))
+	}
+	return m, tea.Batch(cmds...)
+}
+
+// handleStreamEnded degrades a session whose SSE stream closed: warm→cold drop,
+// transient-blip reconnect on a still-Running pod, or authoritative degrade
+// otherwise. Extracted so both the single- and batch-event paths (§4 E5) share
+// identical stream-ended semantics. Returns a reconnect Cmd, or nil.
+func (m *Model) handleStreamEnded(id session.ID) tea.Cmd {
+	// warm→cold: a closed stream means the pod is no longer feeding us. Drop
+	// the warm model unless the cluster still believes the pod is running (a
+	// transient port-forward blip that the reconnect path below will retry).
+	if s := m.sessionByID(id); s.State.Status != session.StatusRunning {
+		m.dropRetained(id)
+	}
+	// Stream closed; clean up.
+	m.cancelLiveSSE(id)
+	delete(m.liveSSEChannels, id)
+	var retryCmd tea.Cmd
+	for i, s := range m.sessions {
+		if s.ID() == id {
+			// A stream drop is either a genuinely dead runner (B13: "runner
+			// unreachable = failed") or just a transient port-forward blip on
+			// a healthy pod (common with client-go SPDY forwards).
+			if m.sessions[i].State.Status == session.StatusRunning {
+				// Transient blip on a still-Running pod: PRESERVE the current
+				// attention state — the Busy/Waiting glyph, a NeedsInput
+				// awaiting-input state, and any pending permission — and retry
+				// the background stream with backoff rather than flip to a scary
+				// 'failed' glyph (RV1). Background streams had no reconnect path
+				// at all before this. Preservation matters because the reconnect
+				// replays after=lastSeq, which EXCLUDES the events that produced
+				// this state (permission.requested, turn.completed→NeedsInput,
+				// their Seq<=lastSeq) — so resetting to cluster-derived idle or
+				// clearing the permission here would PERMANENTLY lose it (§1a
+				// step 7; the old default branch reset NeedsInput→idle and the
+				// Busy/Waiting branch wiped the permission → dead approve/deny).
+				// If the state genuinely changed during the blip, the reconnect
+				// replays the newer events at higher seqs and ApplyRunnerEvent
+				// updates it; degradeUnreachable degrades only once the
+				// reconnects are exhausted.
+				retryCmd = liveSSEReconnectTick(id, 0, liveSSEReconnectDelay(0))
+			} else {
+				// Cluster says not-running (suspended/gone) — degrade to the
+				// authoritative status and clear any now-unresolvable permission.
+				// Release catch-up suppression too: the stream is gone for good,
+				// so no EventStreamLive boundary will clear it, and a Failed
+				// derived status must stay toastable.
+				m.sessions[i].DashStatus = DeriveStatus(m.sessions[i].State)
+				m.sessions[i].clearPendingPermission()
+				m.sessions[i].catchingUp = false
+			}
+			// Persist the final state so a relaunch reflects it (and resumes
+			// from the last seq we saw) rather than replaying from zero. A
+			// preserved permission/attention state rides along in the snapshot
+			// so it stays resolvable after a relaunch.
+			m.saveSnapshot(&m.sessions[i], true)
+			break
+		}
+	}
+	return retryCmd
+}
+
+// applyRunnerEvent reduces a single non-StreamEnded SSE event into the read-model
+// and warm transcript, returning any autopilot Cmd it produced. It runs every
+// per-event side effect (seq dedup, touchObserver, ApplyRunnerEvent, warm ingest
+// + detached-autopilot drive, snapshot throttling, title/session-id persistence,
+// re-sort). The stale-generation guard is the CALLER's responsibility — one
+// channel is one generation, so the batch path checks it once for the whole burst
+// (§4 E5). This is the shared reduction body for both handleRunnerEvent and
+// handleRunnerEventBatch.
+func (m *Model) applyRunnerEvent(id session.ID, event session.Event) tea.Cmd {
 	// autopilotCmd carries a detached driver's continuation POST or termination
-	// toast (see the ingest block below), batched into the return.
+	// toast (see the ingest block below), returned to the caller.
 	var autopilotCmd tea.Cmd
 
 	// Patch the session's status from this event.
 	for i, s := range m.sessions {
-		if s.ID() == msg.ID {
+		if s.ID() == id {
 			// §1a step 3: clear the catch-up flag ONLY at the runner's
 			// replay-complete boundary — EventStreamLive (Seq==0), which the runner
 			// reliably emits as the LAST event of the after=<seq> replay burst
@@ -128,7 +202,7 @@ func (m *Model) handleRunnerEvent(msg RunnerEventMsg) (tea.Model, tea.Cmd) {
 			// freshness heuristic false-positives and leaks a spurious toast + OS
 			// notification for an attention state resolved later in the same burst
 			// (adversarial review, 2026-07-05).
-			if m.sessions[i].catchingUp && msg.Event.Type == session.EventStreamLive {
+			if m.sessions[i].catchingUp && event.Type == session.EventStreamLive {
 				m.sessions[i].catchingUp = false
 			}
 			// Seq dedup (§1a step 2 — the list reducer's analog of the
@@ -141,42 +215,42 @@ func (m *Model) handleRunnerEvent(msg RunnerEventMsg) (tea.Model, tea.Cmd) {
 			// locally-synthesized markers) always pass through so downstream
 			// boundary handling still sees them. The transcript self-dedups, so
 			// the warm model is still fed below unconditionally.
-			dup := msg.Event.Seq != 0 && msg.Event.Seq <= m.sessions[i].lastSeq
+			dup := event.Seq != 0 && event.Seq <= m.sessions[i].lastSeq
 			var changed bool
 			if !dup {
 				// Live activity keeps this observer stream warm for the LRU cap
 				// (§1d): a session mid-turn is the last one we want to evict, and a
 				// session heading toward attention is busy first, so it stays warm
 				// and never becomes the coldest victim before it goes Waiting.
-				m.touchObserver(msg.ID)
-				changed = ApplyRunnerEvent(&m.sessions[i], msg.Event)
+				m.touchObserver(id)
+				changed = ApplyRunnerEvent(&m.sessions[i], event)
 				// Advance the resume cursor so a relaunch resumes from here
 				// instead of replaying history.
-				if msg.Event.Seq > m.sessions[i].lastSeq {
-					m.sessions[i].lastSeq = msg.Event.Seq
+				if event.Seq > m.sessions[i].lastSeq {
+					m.sessions[i].lastSeq = event.Seq
 				}
 				// Keep the foreground session fully "seen" so it never accumulates
 				// an unread badge for output the user is actively watching.
-				if msg.ID == m.attachedID {
+				if id == m.attachedID {
 					m.sessions[i].seenSeq = m.sessions[i].lastSeq
 				}
 			}
 			// Feed the warm model so the retained chat stays live in the
 			// background (dedup is handled by the transcript's own lastSeq guard,
 			// so a replayed event here is harmless to the transcript).
-			if tr, ok := m.retained[msg.ID]; ok {
-				tr.ingest(msg.Event)
+			if tr, ok := m.retained[id]; ok {
+				tr.ingest(event)
 				// Detached autopilot (§1e items 1–2): the foreground continuation
 				// path (handleEvent) discards a background model's Cmds, so a /goal
 				// stalls and a /loop can't self-terminate once the user detaches.
-				// Drive it HERE instead, where handleRunnerEvent can return the Cmd.
+				// Drive it HERE instead, where the reducer can return the Cmd.
 				// Only for a genuinely background model (its own stream is nil); the
 				// foreground session runs continuation through its own handleEvent.
 				// Gated on !dup so a REPLAYED turn.completed can't re-submit the
 				// next turn (double-drive the driver).
-				if !dup && msg.Event.Type == session.EventTurnCompleted &&
+				if !dup && event.Type == session.EventTurnCompleted &&
 					tr.events == nil && tr.autopilot.active() {
-					autopilotCmd = m.driveDetachedAutopilot(msg.ID, tr)
+					autopilotCmd = m.driveDetachedAutopilot(id, tr)
 				}
 			}
 			if !dup {
@@ -184,15 +258,15 @@ func (m *Model) handleRunnerEvent(msg RunnerEventMsg) (tea.Model, tea.Cmd) {
 				// Persist a runner-generated auto title so it survives a re-seed
 				// (the cluster state carries no local label). RenamedTitle still
 				// wins at display time, so this is safe even for a renamed session.
-				if msg.Event.Type == session.EventSessionTitle &&
+				if event.Type == session.EventSessionTitle &&
 					m.titleStore != nil && m.sessions[i].AutoTitle != "" {
-					m.titleStore.SaveAutoTitle(msg.ID, m.sessions[i].AutoTitle)
+					m.titleStore.SaveAutoTitle(id, m.sessions[i].AutoTitle)
 				}
 				// Persist the Claude SDK session id (session.started) so the CLI
 				// can make the session resumable from the laptop on shutdown.
-				if msg.Event.Type == session.EventSessionStarted &&
+				if event.Type == session.EventSessionStarted &&
 					m.titleStore != nil && m.sessions[i].ClaudeSessionID != "" {
-					m.titleStore.SaveClaudeSessionID(msg.ID, m.sessions[i].ClaudeSessionID)
+					m.titleStore.SaveClaudeSessionID(id, m.sessions[i].ClaudeSessionID)
 				}
 				if changed {
 					m.sortSessions()
@@ -202,15 +276,7 @@ func (m *Model) handleRunnerEvent(msg RunnerEventMsg) (tea.Model, tea.Cmd) {
 			break
 		}
 	}
-
-	// Re-issue the Cmd to read the next event from the stored channel. Carry the
-	// same generation forward so the continuing reader stays tagged as this
-	// stream (msg.gen matched the registered gen via the guard above).
-	ch, ok := m.liveSSEChannels[msg.ID]
-	if !ok {
-		return m, autopilotCmd // channel cancelled; still deliver any autopilot Cmd
-	}
-	return m, tea.Batch(autopilotCmd, liveSSENextCmd(msg.ID, ch, msg.gen))
+	return autopilotCmd
 }
 
 // driveDetachedAutopilot continues (goal) or terminates (goal/loop) a warm
