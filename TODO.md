@@ -23,11 +23,10 @@
 > added verified findings across §1d/§1f/§2b/§2c/§4/§10 — all backed by
 > [`docs/review-2026-07-07.md`](docs/review-2026-07-07.md) (bracketed ids like
 > `[A1]`/`[D1]`/`[H1]` point into it). **Start here (highest severity):**
-> §1d **[H1]/[C1]** the observer cap is a no-op + leaks forwards (the
-> 953ef87 cap needs a real fix); §4 **[E1]/[E2]** the two
-> O(n²)/event-loop-blocking hot paths. *(2026-07-08 batch 1:
-> [A1]+[F1]+[F2]+[C2] landed — done log; A1's `/proc` residual is a new §1f
-> item. Batch 2: [D1]+[D2]+[D4]+[B1]+[B2]+[B3]+[B4] landed — done log.)*
+> §4 **[E1]/[E2]** the two O(n²)/event-loop-blocking hot paths.
+> *(2026-07-08 batch 1: [A1]+[F1]+[F2]+[C2] landed — done log; A1's `/proc`
+> residual is a new §1f item. Batch 2: [D1]+[D2]+[D4]+[B1]+[B2]+[B3]+[B4]
+> landed. Batch 3 (2026-07-09): [C1]+[H1]+[H2]/[H3] landed — done log.)*
 >
 > **Opus-ready map:** §1c–§1d residuals, §2a–§2d, §4, §7a and the §5 GC
 > follow-ups carry pointers + fix direction — pick a cluster and go. Drafted,
@@ -77,30 +76,16 @@ row-model consolidation moved to §2a where it belongs.
 **2026-07-07 handoff-review additions** — detail in
 [`docs/review-2026-07-07.md`](docs/review-2026-07-07.md) §C/§H (id in brackets):
 
-- [ ] **Observer cap (953ef87) is a no-op for the fleet it targets (MED-HIGH)
-  [H1].** `NeedsInput` is the steady state of every session that ever completed a
-  turn (`readmodel.go:180,208`), and `observerProtected` protects all attention
-  rows (`warm.go:42-48`) — so a relaunch with 30 completed sessions admits all 30
-  and evicts nothing, restoring the ~30 API-server forwards the cap exists to
-  prevent (compounds C1 below). Fix: protect only Waiting/Failed(+attached), or
-  gate NeedsInput protection on unseen output (`seenSeq < lastSeq`) — the more
-  surgical option; land it together with the H2/H3 eviction fixes since eviction
-  currently freezes the evicted row's last SSE-derived status.
-- [ ] **Background observer connects leak SPDY port-forwards forever (HIGH)
-  [C1].** `portforward.go:97` roots forwards at `context.Background()` but
-  `ConnectResult` has no close seam; eviction/reconnect/`EventsPassive`-failure
-  all leak the forward + its reconnect loop (a suspended session's leaked forward
-  polls pods+Sandbox every ≤10s forever). Fix: add `Close func()` to
-  `ConnectResult`/`CreateResult` (→ `sess.Close`), call from
-  `cancelLiveSSE`/eviction/reconnect-supersede. Undercuts the observer-cap work
-  directly; pairs with H1.
-- [ ] **Eviction kills detached autopilot + false "suspended" toast; Busy row
-  freezes (MED) [H2/H3].** `evictObserver`→`dropRetained` discards the warm model
-  incl. an armed `/loop` driver + `queuedPrompt` while the pod is healthy
-  (`warm.go:107`), and the lapse toast says "suspended" wrongly (`app.go:930-938`);
-  an evicted-while-Busy row keeps its spinner until focused. Fix: protect
-  `autopilot.active()`/`queuedPrompt!=""`; tear down only the stream (not the
-  retained model); stamp evicted rows to a watch-derived status.
+- [x] **[H1] observer cap protection fixed — done 2026-07-09** (done log):
+  NeedsInput protected only while output is unseen (`lastSeq > seenSeq`);
+  Waiting/Failed/attached stay protected.
+- [x] **[C1] Close seam for port-forwards — done 2026-07-09** (done log):
+  `ConnectResult`/`CreateResult.Close` (→ `sess.Close`) wired through
+  `cancelLiveSSE`, ready-msg discards, EventsPassive failure, approve
+  fallback, detach (`parkTranscript`), external-pane close, stale-gen ready.
+- [x] **[H2/H3] eviction side effects fixed — done 2026-07-09** (done log):
+  armed `/loop`/`queuedPrompt` protected; eviction keeps the warm model;
+  Busy rows stamped to watch baseline; lapse toast wording cause-agnostic.
 - [ ] **Re-create with a different account patches the Secret but not the Sandbox
   env → auth breaks silently (MED) [C3].** `backend.go:391,444-488` vs the
   `AlreadyExists` pod template (`buildEnv:1433-1461`). Patch the pod-template env

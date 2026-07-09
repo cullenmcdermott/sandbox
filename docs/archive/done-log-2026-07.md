@@ -795,3 +795,43 @@ pass / 0 skipped. Provenance: docs/review-2026-07-07.md.
   `opencode` CLI is pinned in the flox env (linux + aarch64-darwin — upstream
   has no x86_64-darwin build) so local unsandboxed runs and Depot CI exercise
   it for real. CLAUDE.md caveat updated.
+
+## 2026-07-09 — handoff-review batch 3 (§1d C1/H1/H2/H3, the observer-cap cluster)
+
+- **§1d [C1] — port-forwards get a real close seam; every discard path
+  releases its transport (HIGH).** `ConnectResult`/`CreateResult` gain
+  `Close func()` (→ `client.Session.Close`, which closes the SPDY forward
+  handles + their reconnect loops); the CLI connectors wire it. Dashboard:
+  the ready message carries it, `liveSSECloses` registers it, and
+  `cancelLiveSSE` — the single stream-teardown choke point (eviction,
+  suspend, supersede) — invokes it; ready-msg discard paths (raced
+  duplicate / session gone / attached-owns-stream) use a shared `discard()`;
+  `EventsPassive` failure and the approveCmd one-shot fallback close after
+  use. Foreground too: `parkTranscript` (the single detach hook) closes the
+  transcript's transport (`TranscriptModel.transportClose`; the background
+  observer + autopilot reroute own the session post-detach), the external
+  pane's real teardown (`close()`, never minimize) releases the opencode
+  forwards after the child dies, and a stale-generation `attachReadyMsg`
+  is closed instead of silently dropped. Tests:
+  `observer_cap_test.go` (choke-point close, all three discard paths,
+  detach + pane close).
+- **§1d [H1] — observer cap protects the right rows (MED-HIGH).**
+  `observerProtected` no longer blankets all attention rows: Waiting/Failed
+  (+ attached) stay protected; NeedsInput — the steady state of every
+  session that ever completed a turn — is protected only while it carries
+  UNSEEN output (`lastSeq > seenSeq`; hydrate marks history seen, so a
+  relaunch with a fleet of completed sessions evicts down to the cap again
+  instead of admitting all of them). Tests: unseen-vs-seen protection + the
+  end-to-end needs-input-fleet eviction oracle.
+- **§1d [H2] — eviction no longer destroys detached work (MED).**
+  `observerProtected` also protects a warm model with an armed
+  `/loop`/`/goal` driver or a queued prompt; `evictObserver` keeps the
+  retained model (the cap targets API-server forward pressure, not RAM —
+  and C1 means eviction now actually releases the forward), preserving the
+  O(1) re-focus swap.
+- **§1d [H3] — evicted Busy rows unfreeze; lapse toast stops lying (MED).**
+  `evictObserver` stamps a runner-derived Busy row back to its
+  watch-derived baseline (nothing is left to flip it once the stream is
+  gone); the autopilot lapse toast is cause-agnostic ("suspended or
+  unreachable") since that path can't distinguish suspend from delete from
+  a dead stream.
