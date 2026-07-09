@@ -299,9 +299,25 @@ type liveSSEReadyMsg struct {
 	ch     <-chan session.Event
 	cancel context.CancelFunc
 	client RunnerClient
+	// close tears down the connect's transport (the SPDY forward + reconnect
+	// loop — ConnectResult.Close). May be nil (tests). EVERY path that handles
+	// this message must either register it (liveSSECloses) or invoke it alongside
+	// cancel — a discarded ready message that only cancels leaks the forward
+	// forever (§1d C1).
+	close func()
 	// gen is the generation token minted for this connect at launch (see
 	// Model.liveSSEStreamGen). Stored as the registered generation on success.
 	gen uint64
+}
+
+// discard releases everything a ready message carries when the handler refuses
+// to register it (session gone/suspended, attached owns the stream, raced
+// duplicate): the SSE read ctx AND the transport (§1d C1).
+func (msg liveSSEReadyMsg) discard() {
+	msg.cancel()
+	if msg.close != nil {
+		msg.close()
+	}
 }
 
 // liveSSEReconnectMsg fires after a backoff delay to (re)attempt a background
@@ -495,11 +511,16 @@ func (m *Model) startLiveSSECmd(sess Session) tea.Cmd {
 		release()
 		if err != nil {
 			cancel()
+			// The connect succeeded, so a forward is up — release it (§1d C1);
+			// cancel() alone stops only the establishment ctx, not the forward.
+			if res.Close != nil {
+				res.Close()
+			}
 			return liveSSEConnectFailedMsg{id: id, gen: gen}
 		}
 		// Deliver the ready message; the Update loop stores the cancel and
 		// starts reading events.
-		return liveSSEReadyMsg{id: id, ch: ch, cancel: cancel, client: res.Client, gen: gen}
+		return liveSSEReadyMsg{id: id, ch: ch, cancel: cancel, client: res.Client, close: res.Close, gen: gen}
 	}
 }
 
@@ -574,9 +595,12 @@ func (m *Model) reconnectLiveSSECmd(sess Session, attempt int) tea.Cmd {
 		release()
 		if err != nil {
 			cancel()
+			if res.Close != nil {
+				res.Close() // release the established forward (§1d C1)
+			}
 			return liveSSEReconnectFailedMsg{id: id, attempt: attempt, gen: gen, err: err}
 		}
-		return liveSSEReadyMsg{id: id, ch: ch, cancel: cancel, client: res.Client, gen: gen}
+		return liveSSEReadyMsg{id: id, ch: ch, cancel: cancel, client: res.Client, close: res.Close, gen: gen}
 	}
 }
 
@@ -610,6 +634,16 @@ func (m *Model) cancelLiveSSE(id session.ID) {
 	if cancel, ok := m.liveSSECancels[id]; ok {
 		cancel()
 		delete(m.liveSSECancels, id)
+	}
+	// Tear down the transport too (§1d C1): the forward is rooted at
+	// context.Background(), so cancelling the stream ctx above does NOT stop it —
+	// without this, every evicted/suspended/superseded observer left an SPDY
+	// forward + reconnect loop polling the API server forever.
+	if closeFn, ok := m.liveSSECloses[id]; ok {
+		if closeFn != nil {
+			closeFn()
+		}
+		delete(m.liveSSECloses, id)
 	}
 	delete(m.liveSSEChannels, id)
 	delete(m.liveSSEClients, id)
@@ -674,6 +708,10 @@ func (m *Model) approveCmd(sess Session, allow bool) tea.Cmd {
 		res, err := connector(ctx, ref, projectPath, func(ConnectStage, string) {})
 		if err != nil {
 			return approveResultMsg{id: id, err: err}
+		}
+		// One-shot connection: release its forward once the call returns (§1d C1).
+		if res.Close != nil {
+			defer res.Close()
 		}
 		err = res.Client.ResolvePermission(ctx, ref, decision)
 		return approveResultMsg{id: id, err: err}

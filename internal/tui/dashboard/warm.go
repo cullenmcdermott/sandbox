@@ -35,16 +35,35 @@ func (m *Model) observerCap() int {
 }
 
 // observerProtected reports whether a session's observer stream must never be
-// evicted: the attached session (its transcript owns the live stream) and any
-// session that currently needs attention (waiting / needs-input / failed — a row
-// the user must be able to act on, and whose attention state is only known
-// because its stream is live). The coldest-eviction policy skips these.
+// evicted: the attached session (its transcript owns the live stream), a
+// detached-but-armed session (running /loop driver or queued prompt — evicting
+// it would silence work the user set in motion, §1d H2), and rows the user must
+// be able to act on. Waiting (pending permission) and Failed are always
+// protected; NeedsInput only while it carries UNSEEN output (§1d H1) —
+// needs-input is the steady state of every session that ever completed a turn,
+// so protecting it unconditionally admitted the whole fleet past the cap and
+// made eviction a no-op (the 953ef87 cap protected everything it targeted).
+// Once the user has viewed the output (seenSeq caught up, incl. the
+// hydrate-from-snapshot path, which marks history seen), the row is evictable;
+// focus reconnects it on demand.
 func (m *Model) observerProtected(id session.ID) bool {
 	if id != "" && id == m.attachedID {
 		return true
 	}
+	if t, ok := m.retained[id]; ok && (t.autopilot.active() || t.queuedPrompt != "") {
+		return true
+	}
 	s := m.sessionByID(id)
-	return s.ID() != "" && needsAttention(s)
+	if s.ID() == "" {
+		return false
+	}
+	switch s.DashStatus {
+	case StatusWaiting, StatusFailed:
+		return true
+	case StatusNeedsInput:
+		return s.lastSeq > s.seenSeq
+	}
+	return false
 }
 
 // touchObserver stamps a session's observer as active/visible at nowFunc(), the
@@ -97,19 +116,30 @@ func (m *Model) coldestObserver(keepID session.ID) session.ID {
 }
 
 // evictObserver tears down a session's observer stream + forward to reclaim its
-// laptop-side cost (SPDY forward, SSE goroutine, idle-probe timer, warm model).
-// The row falls back to its watch-driven lifecycle status — the cluster watch
-// keeps Running/Suspended/Failed/Gone fresh WITHOUT a forward; only runner-
-// derived attention (pending permission / busy / needs-input) goes stale until a
-// later focus/attention transition reconnects the stream on demand.
+// cluster-side cost (SPDY forward + reconnect loop, SSE goroutine, idle-probe
+// timer). The retained warm model is deliberately KEPT (§1d H2): the cap exists
+// for API-server port-forward pressure, not laptop RAM, and the model may carry
+// an armed /loop driver or a queued prompt that dropRetained would silently
+// destroy while the pod is healthy — plus keeping it preserves the O(1) re-focus
+// swap. The row falls back to its watch-driven lifecycle status — the cluster
+// watch keeps Running/Suspended/Failed/Gone fresh WITHOUT a forward; only
+// runner-derived attention goes stale until a later focus/attention transition
+// reconnects the stream on demand.
 func (m *Model) evictObserver(id session.ID) {
-	m.cancelLiveSSE(id) // also prunes the observerActiveAt recency entry
-	m.dropRetained(id)
-	// No stream boundary (EventStreamLive) is coming, so release any armed
-	// catch-up suppression rather than leave it stuck on the cold row.
+	m.cancelLiveSSE(id) // closes the forward (C1) + prunes the recency entry
 	for i := range m.sessions {
 		if m.sessions[i].ID() == id {
+			// No stream boundary (EventStreamLive) is coming, so release any armed
+			// catch-up suppression rather than leave it stuck on the cold row.
 			m.sessions[i].catchingUp = false
+			// A runner-derived Busy has nothing left to flip it back (§1d H3: the
+			// evicted row kept its spinner until focused) — stamp the watch-derived
+			// baseline. Waiting is protected (never lands here) and NeedsInput stays
+			// accurate without a stream, so Busy is the only stale-prone status.
+			if m.sessions[i].DashStatus == StatusBusy {
+				m.sessions[i].DashStatus = DeriveStatus(m.sessions[i].State)
+				m.sessions[i].statusChangedAt = nowFunc()
+			}
 			break
 		}
 	}

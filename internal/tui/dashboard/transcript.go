@@ -314,6 +314,13 @@ type TranscriptModel struct {
 	reconnect    ReconnectFunc
 	reconnecting bool
 	terminating  bool
+	// transportClose tears down the foreground connection's transport (the SPDY
+	// port-forwards behind m.client — ConnectResult.Close). Installed on attach,
+	// invoked+cleared by the App's parkTranscript on every detach path (§1d C1):
+	// after detach the background observer stream owns the session's live client
+	// (autopilotTick reroutes through it), so the parked foreground forward was
+	// pure leak. nil while detached/warm or in tests.
+	transportClose func()
 	// reconnectAttempts counts consecutive failed reconnect tries; it drives the
 	// backoff and message throttling, and resets to 0 on a successful reconnect
 	// (RV29: previously the loop retried every flat 3s forever, hammering the

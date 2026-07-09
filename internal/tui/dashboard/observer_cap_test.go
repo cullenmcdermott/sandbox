@@ -309,3 +309,209 @@ func TestAttachGateNestingAndNil(t *testing.T) {
 		t.Fatal("gate must reopen once the last foreground connect exits")
 	}
 }
+
+// --------------------------------------------------------------------------
+// §1d H1/H2/H3 + C1 (2026-07-07 handoff review): the cap must actually evict a
+// fleet of completed sessions, eviction must not destroy detached work, and
+// every stream teardown must release its SPDY forward.
+// --------------------------------------------------------------------------
+
+// needsInputSession builds a Running session in the post-turn steady state:
+// needs-input with all output already seen (lastSeq == seenSeq).
+func needsInputSession(id string, lastSeq, seenSeq uint64) Session {
+	s := Session{
+		State:            session.State{ID: session.ID(id), Status: session.StatusRunning},
+		sessionReadModel: sessionReadModel{DashStatus: StatusNeedsInput},
+	}
+	s.lastSeq = lastSeq
+	s.seenSeq = seenSeq
+	return s
+}
+
+// H1 ORACLE: needs-input is the steady state of every session that ever
+// completed a turn, so a SEEN needs-input row must NOT be protected — otherwise
+// a relaunch with a fleet of completed sessions admits everything and the cap
+// is a no-op (the exact 953ef87 regression). UNSEEN output still protects.
+func TestObserverCapNeedsInputProtectedOnlyWhileUnseen(t *testing.T) {
+	m := New(nil)
+	m.sessions = []Session{
+		needsInputSession("seen", 42, 42),   // caught up → evictable
+		needsInputSession("unseen", 42, 40), // unseen output → protected
+	}
+	if m.observerProtected("seen") {
+		t.Error("a needs-input session with no unseen output must be evictable (H1: the cap was a no-op)")
+	}
+	if !m.observerProtected("unseen") {
+		t.Error("a needs-input session with unseen output must stay protected")
+	}
+}
+
+// H1: the relaunch scenario end-to-end — a fleet of completed (needs-input,
+// seen) sessions larger than the cap is evicted down to the cap, exactly like
+// idle rows. Before the fix every one of these was "protected" and the cap
+// admitted all of them.
+func TestObserverCapEvictsSteadyStateNeedsInputFleet(t *testing.T) {
+	m := New(nil)
+	m.maxObserverStreams = 2
+	base := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 5; i++ {
+		id := string(rune('a' + i))
+		m.sessions = append(m.sessions, needsInputSession(id, 10, 10))
+		registerObserver(t, m, session.ID(id), base.Add(time.Duration(i)*time.Minute))
+	}
+	if got := len(m.liveSSECancels); got != 2 {
+		t.Fatalf("established streams = %d, want cap 2 (needs-input fleet must not bypass the cap)", got)
+	}
+}
+
+// H2: a detached session with an armed /loop driver (or a queued prompt) on its
+// warm model must never be the eviction victim — evicting it would silence work
+// the user set in motion while the pod is healthy.
+func TestObserverProtectsArmedAutopilotAndQueuedPrompt(t *testing.T) {
+	m := New(nil)
+	m.sessions = []Session{runningSession("loop"), runningSession("queued"), runningSession("plain")}
+
+	loop := &TranscriptModel{}
+	loop.autopilot = autopilotState{kind: autopilotLoop, prompt: "go"}
+	m.retained["loop"] = loop
+
+	queued := &TranscriptModel{}
+	queued.queuedPrompt = "next thing"
+	m.retained["queued"] = queued
+
+	m.retained["plain"] = &TranscriptModel{}
+
+	if !m.observerProtected("loop") {
+		t.Error("an armed /loop driver must protect its session's observer stream")
+	}
+	if !m.observerProtected("queued") {
+		t.Error("a queued prompt must protect its session's observer stream")
+	}
+	if m.observerProtected("plain") {
+		t.Error("an idle warm model must not protect its stream")
+	}
+}
+
+// H2: eviction reclaims the transport, NOT the warm model — the retained
+// transcript (and anything armed on it) survives, so re-focus is still an O(1)
+// swap and a briefly-cold session loses no state.
+func TestEvictObserverKeepsWarmModel(t *testing.T) {
+	m := New(nil)
+	m.sessions = []Session{runningSession("s")}
+	m.liveSSECancels["s"] = func() {}
+	m.retained["s"] = &TranscriptModel{}
+
+	m.evictObserver("s")
+
+	if _, ok := m.liveSSECancels["s"]; ok {
+		t.Error("eviction must tear down the stream")
+	}
+	if _, ok := m.retained["s"]; !ok {
+		t.Error("eviction must NOT drop the retained warm model (H2)")
+	}
+}
+
+// H3: an evicted-while-Busy row must fall back to its watch-derived baseline
+// instead of spinning forever with no stream left to flip it.
+func TestEvictObserverStampsBusyRowToWatchBaseline(t *testing.T) {
+	m := New(nil)
+	s := runningSession("busy")
+	s.DashStatus = StatusBusy
+	m.sessions = []Session{s}
+	m.liveSSECancels["busy"] = func() {}
+
+	m.evictObserver("busy")
+
+	if got := m.sessions[0].DashStatus; got != StatusIdle {
+		t.Errorf("evicted Busy row status = %v, want watch-derived StatusIdle", got)
+	}
+}
+
+// C1 ORACLE: cancelLiveSSE (the single stream-teardown choke point — eviction,
+// suspend, supersede all funnel through it) must invoke the registered transport
+// close, or the SPDY forward + reconnect loop poll the API server forever.
+func TestCancelLiveSSEClosesTransport(t *testing.T) {
+	m := New(nil)
+	m.sessions = []Session{runningSession("s")}
+	closed := 0
+	m.liveSSEConnecting["s"] = true
+	m.Update(liveSSEReadyMsg{
+		id:     "s",
+		ch:     make(chan session.Event),
+		cancel: func() {},
+		client: &fakeRunnerClient{},
+		close:  func() { closed++ },
+		gen:    m.nextLiveSSEGen(),
+	})
+	if closed != 0 {
+		t.Fatal("registration must not close the transport")
+	}
+	m.cancelLiveSSE("s")
+	if closed != 1 {
+		t.Fatalf("cancelLiveSSE closed the transport %d times, want 1", closed)
+	}
+	if _, ok := m.liveSSECloses["s"]; ok {
+		t.Error("the close func must be dropped after teardown")
+	}
+}
+
+// C1: every ready-message discard path (raced duplicate, gone/suspended session,
+// attached session) must release the incoming connection's transport — a
+// discarded ready that only cancels the read ctx leaks the forward.
+func TestDiscardedReadyMsgClosesTransport(t *testing.T) {
+	m := New(nil)
+	m.sessions = []Session{runningSession("dup"), runningSession("attached")}
+	m.attachedID = "attached"
+	// An established stream already registered for "dup".
+	m.liveSSECancels["dup"] = func() {}
+
+	mk := func(id session.ID, closed *int) liveSSEReadyMsg {
+		return liveSSEReadyMsg{
+			id:     id,
+			ch:     make(chan session.Event),
+			cancel: func() {},
+			client: &fakeRunnerClient{},
+			close:  func() { *closed++ },
+			gen:    m.nextLiveSSEGen(),
+		}
+	}
+
+	var dupClosed, goneClosed, attachedClosed int
+	m.Update(mk("dup", &dupClosed)) // raced duplicate
+	if dupClosed != 1 {
+		t.Errorf("raced-duplicate ready must close its transport, closed %d times", dupClosed)
+	}
+	m.Update(mk("vanished", &goneClosed)) // session no longer exists
+	if goneClosed != 1 {
+		t.Errorf("gone-session ready must close its transport, closed %d times", goneClosed)
+	}
+	m.Update(mk("attached", &attachedClosed)) // transcript owns the live stream
+	if attachedClosed != 1 {
+		t.Errorf("attached-session ready must close its transport, closed %d times", attachedClosed)
+	}
+}
+
+// C1: the foreground paths release their transport too — detach funnels through
+// parkTranscript (the single detach hook), and the external pane's real
+// teardown (close(), never minimize) does the same for the opencode forwards.
+func TestDetachAndPaneCloseReleaseTransport(t *testing.T) {
+	app := NewApp(nil, nil, nil)
+	m := NewTranscript(&fakeRunnerClient{}, transcriptSession(), nil)
+	closed := 0
+	m.transportClose = func() { closed++ }
+	app.parkTranscript(m)
+	if closed != 1 {
+		t.Errorf("parkTranscript closed the transport %d times, want 1", closed)
+	}
+	if m.transportClose != nil {
+		t.Error("parkTranscript must clear transportClose so a re-park can't double-close")
+	}
+
+	pane := &ExternalPane{}
+	paneClosed := 0
+	pane.transportClose = func() { paneClosed++ }
+	pane.close()
+	if paneClosed != 1 {
+		t.Errorf("pane close() closed the transport %d times, want 1", paneClosed)
+	}
+}

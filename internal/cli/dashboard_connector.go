@@ -89,6 +89,10 @@ func newDashboardConnector(c *client.Client, reaperImage string) dashboard.Conne
 			// §5: sync/reaper advisories settle in the background now; the
 			// dashboard polls this seam so they surface instead of vanishing.
 			AwaitWarning: sess.AwaitSync,
+			// §1d C1: forwards outlive the connect ctx by design; this is the only
+			// handle that actually releases them. sess is per-connector-call, so
+			// closing here can't touch another connect's forwards.
+			Close: func() { _ = sess.Close() },
 		}, nil
 	}
 }
@@ -122,6 +126,7 @@ func newDashboardObserverConnector(c *client.Client, reaperImage string) dashboa
 			Client:    conn.Runner,
 			Reconnect: reconnect,
 			Endpoint:  conn.Endpoint,
+			Close:     func() { _ = sess.Close() },
 		}, nil
 	}
 }
@@ -194,6 +199,7 @@ func newDashboardCreator(c *client.Client, runnerImage, reaperImage string) dash
 			OpencodeCreds: mapOpencode(conn.Opencode),
 			Warning:       conn.Warning,
 			AwaitWarning:  sess.AwaitSync,
+			Close:         func() { _ = sess.Close() },
 		}, nil
 	}
 }

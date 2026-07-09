@@ -62,6 +62,13 @@ type ConnectResult struct {
 	// returns the late advisory, empty on clean success. The App polls it once
 	// per attach and surfaces the result exactly like Warning.
 	AwaitWarning func(context.Context) (string, error)
+	// Close, when non-nil, tears down the connection's transport — the SPDY
+	// port-forward(s) and their reconnect loops (§1d C1). The context handed to
+	// the Connector governs only establishment; an established forward lives
+	// until Close is called. Every owner that discards a ConnectResult — stream
+	// teardown, observer eviction, a superseded/raced connect, a failed
+	// EventsPassive — MUST call it, or the forward polls the API server forever.
+	Close func()
 }
 
 // Connector is a function that (re)establishes a live runner connection for
@@ -128,6 +135,8 @@ type CreateResult struct {
 	Warning string
 	// AwaitWarning mirrors ConnectResult.AwaitWarning for the create path.
 	AwaitWarning func(context.Context) (string, error)
+	// Close mirrors ConnectResult.Close for the create path (§1d C1).
+	Close func()
 }
 
 // CreateParams carries the new-session choices the picker gathers before

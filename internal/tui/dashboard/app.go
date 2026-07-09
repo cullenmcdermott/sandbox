@@ -62,6 +62,11 @@ type attachReadyMsg struct {
 	// sync/reaper work settles and returns its late advisory (§5). The App
 	// polls it once via a Cmd and surfaces the result as a syncAdvisoryMsg.
 	awaitWarning func(context.Context) (string, error)
+	// close tears down the connection's transport (ConnectResult.Close — the
+	// SPDY forwards, §1d C1). The handler hands it to the owning pane
+	// (TranscriptModel.transportClose / ExternalPane.transportClose); a dropped
+	// stale-generation ready must invoke it instead.
+	close func()
 }
 
 // syncAdvisoryMsg carries a late background-sync/reaper advisory (see
@@ -518,6 +523,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			id := msg.sess.ID()
 			pane := NewExternalPane(msg.sess, *msg.opencodeCreds, func() Session { return a.dashboard.sessionByID(id) })
 			pane.w, pane.h = a.width, a.height
+			// The pane owns the attach connection's forwards from here; its close()
+			// releases them once the child is dead (§1d C1).
+			pane.transportClose = msg.close
 			a.external = pane
 			a.screen = ScreenExternal
 			return a, pane.Init()
@@ -545,6 +553,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m = NewTranscript(msg.client, msg.sess, msg.reconnect)
 		}
+		// The transcript owns the attach connection's transport until detach
+		// (parkTranscript invokes it — §1d C1).
+		m.transportClose = msg.close
 		a.dashboard.putRetained(msg.sess.ID(), m)
 		// Thread detected terminal capabilities into the transcript so its
 		// status-line effects (ctx-gauge sweep, etc.) light up only on a capable
@@ -663,6 +674,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// connect, attach a cancelled session, or re-arm the drain on the new
 		// attempt's channel (double reader).
 		if msg.gen != a.connectGen {
+			// A stale READY carries a live connection nobody will ever own —
+			// release its forwards instead of leaking them (§1d C1).
+			if msg.ready != nil && msg.ready.close != nil {
+				msg.ready.close()
+			}
 			return a, nil
 		}
 		switch {
@@ -913,6 +929,14 @@ func (a *App) parkTranscript(m *TranscriptModel) {
 	// SSE client open after detach (NEW-5). Every detach path parks the
 	// transcript immediately before releasing it, so this is the single hook.
 	m.cancelStream()
+	// Release the foreground connection's forwards too (§1d C1): the detached
+	// session is served by the background observer stream from here (its own
+	// forward), and autopilotTick already reroutes POSTs through that live
+	// client — the parked forward would only poll the API server for nothing.
+	if m.transportClose != nil {
+		m.transportClose()
+		m.transportClose = nil
+	}
 }
 
 // autopilotTick advances a /loop for its session by dispatching the tick to the
@@ -930,12 +954,15 @@ func (a *App) autopilotTick(msg autopilotTickMsg) tea.Cmd {
 	t, ok := a.dashboard.retainedTranscript(msg.sess)
 	if !ok {
 		// The warm model is gone — dropRetained fires when the pod suspends, is
-		// deleted, or the background stream is exhausted (a laptop sleep that
-		// outlives the SSE stream lands here too). The loop lapses; surface it as a
-		// toast + OS notification instead of dying silently (§1e item 3). A model
-		// this tick can no longer read carries no gen to re-check, but a lapse this
-		// deep is a genuine loss of the running loop, not a benign stale tick.
-		return a.dashboard.autopilotToast(msg.sess, "⟳ loop ended — session suspended")
+		// deleted, or the session is terminally gone (a laptop sleep that outlives
+		// the SSE stream lands here too; observer-cap eviction deliberately does
+		// NOT drop the model, §1d H2). The loop lapses; surface it as a toast + OS
+		// notification instead of dying silently (§1e item 3). A model this tick
+		// can no longer read carries no gen to re-check, but a lapse this deep is a
+		// genuine loss of the running loop, not a benign stale tick. The wording
+		// stays cause-agnostic: this path can't tell suspended from deleted from
+		// unreachable (§1d H3's false "suspended" toast).
+		return a.dashboard.autopilotToast(msg.sess, "⟳ loop ended — session suspended or unreachable")
 	}
 	client, ok := a.dashboard.liveClient(msg.sess)
 	if !ok {
@@ -1261,6 +1288,7 @@ func (a *App) connectCmd(sess Session) tea.Cmd {
 				opencodeCreds: res.OpencodeCreds,
 				warning:       res.Warning,
 				awaitWarning:  res.AwaitWarning,
+				close:         res.Close,
 			}
 			ch <- connectUpdateMsg{gen: gen, ready: &ready}
 		}
@@ -1320,6 +1348,7 @@ func (a *App) createCmd(params CreateParams) tea.Cmd {
 				opencodeCreds: res.OpencodeCreds,
 				warning:       res.Warning, // RV23: surface new-session sync warnings
 				awaitWarning:  res.AwaitWarning,
+				close:         res.Close,
 			}
 			ch <- connectUpdateMsg{gen: gen, ready: &ready}
 		}

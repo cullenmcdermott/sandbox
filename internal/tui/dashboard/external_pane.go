@@ -47,6 +47,12 @@ type ExternalPane struct {
 	// captured at construction. nil in tests/standalone → falls back to p.sess.
 	liveSession func() Session
 
+	// transportClose tears down the attach connection's transport (the HTTP/SSH/
+	// opencode SPDY forwards — ConnectResult.Close, §1d C1). The `opencode attach`
+	// child talks through the opencode forward, so this must run only when the
+	// pane is torn down for real (close()), never on minimize. nil in tests.
+	transportClose func()
+
 	emu  *vt.Emulator
 	ptmx *os.File
 	cmd  *exec.Cmd
@@ -401,6 +407,12 @@ func (p *ExternalPane) close() {
 		// is uncatchable so Wait() returns promptly — same call the EOF path makes.
 		_ = p.cmd.Wait()
 		p.exited = true
+	}
+	// Release the attach connection's forwards last, after the child that used
+	// them is dead (§1d C1).
+	if p.transportClose != nil {
+		p.transportClose()
+		p.transportClose = nil
 	}
 }
 

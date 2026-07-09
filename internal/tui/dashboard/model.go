@@ -135,6 +135,15 @@ type Model struct {
 	// fresh connection. Keyed by session.ID.
 	liveSSEClients map[session.ID]RunnerClient
 
+	// liveSSECloses holds each registered stream's transport teardown
+	// (ConnectResult.Close — the SPDY forward + its reconnect loop). The stream's
+	// cancel func stops only the SSE read; the forward is rooted at
+	// context.Background() by design (it must outlive the connect ctx), so
+	// WITHOUT this call every eviction/reconnect/suspend leaked a forward that
+	// polls the API server every ≤10s forever (§1d C1). Invoked in cancelLiveSSE,
+	// the single stream-teardown choke point.
+	liveSSECloses map[session.ID]func()
+
 	// liveSSEConnecting marks sessions whose background-connect Cmd is in flight
 	// (issued but not yet resolved to ready/failed). Every launch guard checks
 	// this IN ADDITION to liveSSECancels: a background connect is
@@ -308,6 +317,7 @@ func New(backend Backend) *Model {
 		liveSSECancels:    make(map[session.ID]context.CancelFunc),
 		liveSSEChannels:   make(map[session.ID]<-chan session.Event),
 		liveSSEClients:    make(map[session.ID]RunnerClient),
+		liveSSECloses:     make(map[session.ID]func()),
 		liveSSEConnecting: make(map[session.ID]bool),
 		liveSSEStreamGen:  make(map[session.ID]uint64),
 		syncProbedAt:      make(map[session.ID]time.Time),
@@ -619,7 +629,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the cancel; otherwise the stream would run until program exit.
 		sess := m.sessionByID(msg.id)
 		if sess.ID() == "" || sess.State.Status != session.StatusRunning {
-			msg.cancel()
+			msg.discard()
 			return m, nil
 		}
 		// The foreground session's stream is owned by its transcript's active
@@ -629,7 +639,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// double client + extra port-forward — alongside the active one. Mirror
 		// the liveSSEReconnectMsg guard below: cancel the redundant incoming stream.
 		if msg.id == m.attachedID {
-			msg.cancel()
+			msg.discard()
 			return m, nil
 		}
 		// A stream is already registered for this session — this incoming one is a
@@ -639,11 +649,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// leaking an uncancellable connection whose later StreamEnded would tear
 		// down the healthy stream (§1a connect-side).
 		if _, exists := m.liveSSECancels[msg.id]; exists {
-			msg.cancel()
+			msg.discard()
 			return m, nil
 		}
-		// Store the cancel, channel, client, and generation for this SSE stream.
+		// Store the cancel, transport close, channel, client, and generation for
+		// this SSE stream.
 		m.liveSSECancels[msg.id] = msg.cancel
+		if msg.close != nil {
+			m.liveSSECloses[msg.id] = msg.close
+		}
 		m.liveSSEChannels[msg.id] = msg.ch
 		m.liveSSEClients[msg.id] = msg.client
 		m.liveSSEStreamGen[msg.id] = msg.gen
