@@ -157,28 +157,41 @@ func preferProvider(a, b string) bool {
 
 func (p *provider) limit(modelID string) Info {
 	tbl := p.load()
-	key := normalize(modelID)
 	if tbl != nil {
-		// models.dev groups by provider and the SAME model id appears under many
-		// providers (anthropic, azure, venice, …) with differing limits/prices.
-		// Ranging the provider map returned a RANDOM match, so a model's reported
-		// context limit and prices flickered between runs (a real status-line bug).
-		// Pick deterministically, preferring the model's true vendor, and use that
-		// one provider's complete entry so limit + prices stay coherent.
-		best := ""
-		for prov := range tbl {
-			if _, ok := tbl[prov][key]; !ok {
-				continue
+		// Try each candidate key (raw id first, claude- alias second) so
+		// non-Claude ids resolve to their real limits/prices instead of the
+		// static fallback. Both context limit AND pricing come from the single
+		// Info returned here, so covering this path covers both.
+		for _, key := range lookupKeys(modelID) {
+			if info, ok := lookupEntry(tbl, key); ok {
+				return info
 			}
-			if best == "" || preferProvider(prov, best) {
-				best = prov
-			}
-		}
-		if best != "" {
-			return Info(tbl[best][key]) // modelEntry and Info are field-identical
 		}
 	}
-	return staticFallback(key)
+	return staticFallback(normalize(modelID))
+}
+
+// lookupEntry finds the best provider entry for an exact table key.
+// models.dev groups by provider and the SAME model id appears under many
+// providers (anthropic, azure, venice, …) with differing limits/prices.
+// Ranging the provider map returned a RANDOM match, so a model's reported
+// context limit and prices flickered between runs (a real status-line bug).
+// Pick deterministically, preferring the model's true vendor, and use that
+// one provider's complete entry so limit + prices stay coherent.
+func lookupEntry(tbl table, key string) (Info, bool) {
+	best := ""
+	for prov := range tbl {
+		if _, ok := tbl[prov][key]; !ok {
+			continue
+		}
+		if best == "" || preferProvider(prov, best) {
+			best = prov
+		}
+	}
+	if best == "" {
+		return Info{}, false
+	}
+	return Info(tbl[best][key]), true // modelEntry and Info are field-identical
 }
 
 // load returns the parsed table, fetching+caching as needed. It never returns
@@ -286,6 +299,26 @@ func writeCache(path string, raw []byte) {
 
 // datedSuffix matches a trailing "-YYYYMMDD" snapshot suffix.
 var datedSuffix = regexp.MustCompile(`-\d{8}$`)
+
+// lookupKeys returns the models.dev table keys to try for a model id, in order.
+// The RAW lowercase id (dated suffix stripped, dots preserved) is tried FIRST so
+// non-Claude ids — which models.dev keys verbatim, e.g. opencode/openai's
+// "gpt-4.1", "grok-code" — resolve to their real limits/prices. The claude-
+// alias form from normalize (dots→dashes, claude- prefix) is only a fallback,
+// so Anthropic shorthand like "opus-4.8" still maps to "claude-opus-4-8".
+// Blindly prefixing every id with claude- (the old behavior) made every
+// non-Anthropic lookup miss and silently hit the 200k/$0 static fallback.
+func lookupKeys(modelID string) []string {
+	raw := datedSuffix.ReplaceAllString(strings.ToLower(strings.TrimSpace(modelID)), "")
+	if raw == "" {
+		return nil
+	}
+	keys := []string{raw}
+	if norm := normalize(modelID); norm != raw {
+		keys = append(keys, norm)
+	}
+	return keys
+}
 
 // normalize maps a session.started model id to a models.dev key (lowercase).
 //   - exact ids pass through: claude-opus-4-8

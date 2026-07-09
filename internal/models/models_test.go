@@ -118,6 +118,101 @@ func TestMultiProviderDeterministicCanonical(t *testing.T) {
 	}
 }
 
+// nonClaudeAPI mirrors how models.dev keys opencode/openai models: the model id
+// verbatim (lowercased), dots preserved, NO claude- prefix. Pre-fix, normalize()
+// prefixed every id with claude- and swapped dots for dashes, so none of these
+// keys could ever match and every opencode/openai session hit the 200k/$0 static
+// fallback (wrong ctx% + cost in the TUI).
+const nonClaudeAPI = `{
+  "opencode": {"name":"opencode","models":{
+    "grok-code": {"id":"grok-code","limit":{"context":256000,"output":8192},"cost":{"input":0.2,"output":1.5}},
+    "gpt-4.1":   {"id":"gpt-4.1","limit":{"context":1047576,"output":32768},"cost":{"input":2,"output":8}}
+  }},
+  "openai": {"name":"OpenAI","models":{
+    "gpt-4o": {"id":"gpt-4o","limit":{"context":128000,"output":16384},"cost":{"input":2.5,"output":10}}
+  }},
+  "anthropic": {"name":"Anthropic","models":{
+    "claude-opus-4-8":   {"id":"claude-opus-4-8","limit":{"context":1000000,"output":64000},"cost":{"input":5,"output":25}},
+    "claude-sonnet-4-6": {"id":"claude-sonnet-4-6","limit":{"context":1000000,"output":64000},"cost":{"input":3,"output":15}}
+  }}
+}`
+
+// A model id is resolved to its real entry regardless of vendor: non-Claude ids
+// (opencode/openai, keyed verbatim) must NOT be forced through the claude- alias.
+// Claude ids and Anthropic shorthand must still resolve exactly as before.
+func TestLookupCoversNonClaudeAndClaude(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(nonClaudeAPI))
+	}))
+	defer srv.Close()
+
+	cases := []struct {
+		name string
+		id   string
+		want Info
+	}{
+		// Non-Claude ids resolve to their real limits AND pricing (the bug).
+		{"opencode grok-code", "grok-code", Info{ContextLimit: 256000, InputPrice: 0.2, OutputPrice: 1.5}},
+		{"opencode gpt-4.1 dotted", "gpt-4.1", Info{ContextLimit: 1047576, InputPrice: 2, OutputPrice: 8}},
+		{"openai gpt-4o", "gpt-4o", Info{ContextLimit: 128000, InputPrice: 2.5, OutputPrice: 10}},
+		{"non-claude case-insensitive", "GROK-CODE", Info{ContextLimit: 256000, InputPrice: 0.2, OutputPrice: 1.5}},
+		// Claude exact id + shorthand still resolve identically (no regression).
+		{"claude exact", "claude-opus-4-8", Info{ContextLimit: 1000000, InputPrice: 5, OutputPrice: 25}},
+		{"claude dated suffix", "claude-opus-4-8-20260101", Info{ContextLimit: 1000000, InputPrice: 5, OutputPrice: 25}},
+		{"claude shorthand dotted", "opus-4.8", Info{ContextLimit: 1000000, InputPrice: 5, OutputPrice: 25}},
+		{"claude shorthand sonnet", "sonnet-4.6", Info{ContextLimit: 1000000, InputPrice: 3, OutputPrice: 15}},
+	}
+	for _, c := range cases {
+		// fresh provider per case so each performs its own resolution.
+		p := newTestProvider(srv.URL, t.TempDir())
+		if got := p.limit(c.id); got != c.want {
+			t.Errorf("%s: limit(%q) = %+v, want %+v", c.name, c.id, got, c.want)
+		}
+	}
+}
+
+// An id absent from every provider table still hits the documented static
+// fallback (200k ctx, $0) — even a non-Claude id that no longer gets prefixed.
+func TestUnknownNonClaudeStillFallsBack(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(nonClaudeAPI))
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(srv.URL, t.TempDir())
+	got := p.limit("big-pickle") // real-world example from the review
+	if got != (Info{ContextLimit: staticContextLimit}) {
+		t.Errorf("limit(big-pickle) = %+v, want {200000, 0, 0}", got)
+	}
+}
+
+func TestLookupKeysFunc(t *testing.T) {
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"gpt-4.1", []string{"gpt-4.1", "claude-gpt-4-1"}},        // raw first, alias fallback
+		{"grok-code", []string{"grok-code", "claude-grok-code"}},  // dots absent: still both forms
+		{"claude-opus-4-8", []string{"claude-opus-4-8"}},          // already canonical: single key
+		{"claude-opus-4-8-20260101", []string{"claude-opus-4-8"}}, // dated suffix stripped
+		{"opus-4.8", []string{"opus-4.8", "claude-opus-4-8"}},     // shorthand: raw then alias
+		{"  ", nil}, // blank
+	}
+	for _, c := range cases {
+		got := lookupKeys(c.in)
+		if len(got) != len(c.want) {
+			t.Errorf("lookupKeys(%q) = %v, want %v", c.in, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("lookupKeys(%q) = %v, want %v", c.in, got, c.want)
+				break
+			}
+		}
+	}
+}
+
 func TestUnknownIDFallback(t *testing.T) {
 	p := newTestProvider("http://127.0.0.1:0", t.TempDir())
 	got := p.limit("gpt-4o")
