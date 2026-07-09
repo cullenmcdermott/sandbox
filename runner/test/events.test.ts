@@ -5,12 +5,13 @@
 //      order, and only those with seq > after (the SSE replay contract).
 //
 // This exercises a REAL better-sqlite3 temp DB so it validates the actual SQLite
-// engine behavior (AUTOINCREMENT monotonicity, ORDER BY seq). It is GUARDED:
-// CI installs runner deps with `npm install --ignore-scripts`, so the
-// better-sqlite3 native addon is NOT built and `require('better-sqlite3')`
-// throws at runtime. We probe for it up front and register the suite as SKIPPED
-// (not failed) when it is unavailable, so this runs in the runtime image / a
-// full local install but skips cleanly in --ignore-scripts CI.
+// engine behavior (AUTOINCREMENT monotonicity, ORDER BY seq). It is GUARDED via
+// the shared native-addon probe (./sqlite-probe): when better-sqlite3's compiled
+// addon is unavailable (a bare `npm install --ignore-scripts` with no rebuild)
+// the suite SKIPS cleanly — UNLESS RUNNER_REQUIRE_SQLITE=1, in which case the
+// probe throws so the suite fails loudly. CI sets RUNNER_REQUIRE_SQLITE=1 after
+// `npm rebuild better-sqlite3` so these durability invariants can never silently
+// self-skip.
 //
 // It replicates src/events.ts's exact schema and the INSERT / SELECT / MAX(seq)
 // statements rather than importing events.ts directly, because events.ts hard-
@@ -19,33 +20,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createRequire } from 'node:module';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-
-const require = createRequire(import.meta.url);
-
-// Probe for the native addon. IMPORTANT: better-sqlite3's JS wrapper require()s
-// fine even when the compiled .node addon is absent — the bindings file is only
-// located lazily inside the Database constructor. So we must actually attempt to
-// open an in-memory DB to detect a missing addon (a bare require() would pass
-// and then the suite would FAIL at `new Database()` instead of skipping).
-let Database: typeof import('better-sqlite3') | null = null;
-let loadError: unknown;
-try {
-  const Db = require('better-sqlite3') as typeof import('better-sqlite3');
-  // Construct + close: throws "Could not locate the bindings file" without the
-  // native addon (CI's --ignore-scripts install).
-  new Db(':memory:').close();
-  Database = Db;
-} catch (err) {
-  loadError = err;
-}
-
-const skip = Database
-  ? false
-  : `better-sqlite3 native addon unavailable: ${loadError instanceof Error ? loadError.message : String(loadError)}`;
+import { Database, sqliteSkip as skip } from './sqlite-probe.js';
 
 // The exact schema + statements src/events.ts uses.
 const CREATE_SQL = `

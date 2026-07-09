@@ -10,31 +10,14 @@
 //
 // Uses REAL better-sqlite3 in-memory databases via the exported migrateEventLog
 // (the production path constants point at /session, unwritable off-pod). Same
-// native-addon guard as events.test.ts: CI installs with --ignore-scripts, so
-// the suite must SKIP (not fail) when the compiled addon is absent.
+// native-addon guard as events.test.ts (shared ./sqlite-probe): the suite SKIPS
+// when the compiled addon is absent, UNLESS RUNNER_REQUIRE_SQLITE=1 (set in CI
+// after `npm rebuild better-sqlite3`), which makes a missing addon fail loudly.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createRequire } from 'node:module';
 import { migrateEventLog, SCHEMA_VERSION } from '../src/events.js';
-
-const require = createRequire(import.meta.url);
-
-// Probe for the native addon by actually opening a db — a bare require() of the
-// JS wrapper succeeds even when the compiled .node bindings are missing.
-let Database: typeof import('better-sqlite3') | null = null;
-let loadError: unknown;
-try {
-  const Db = require('better-sqlite3') as typeof import('better-sqlite3');
-  new Db(':memory:').close();
-  Database = Db;
-} catch (err) {
-  loadError = err;
-}
-
-const skip = Database
-  ? false
-  : `better-sqlite3 native addon unavailable: ${loadError instanceof Error ? loadError.message : String(loadError)}`;
+import { Database, sqliteSkip as skip } from './sqlite-probe.js';
 
 test('fresh database gets the current schema and version stamp', { skip }, () => {
   const d = new Database!(':memory:');

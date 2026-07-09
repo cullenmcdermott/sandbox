@@ -77,10 +77,17 @@ jobs:
         run: flox activate -vv -- true
 
       # Linters/typecheck/tests need the runner's node_modules (eslint, tsc, the
-      # node:test suite). --ignore-scripts skips better-sqlite3's native build,
-      # which `just check` doesn't exercise (that's the image build's job).
+      # node:test suite). --ignore-scripts avoids running arbitrary postinstall
+      # scripts on install; we then rebuild the single vetted native dep
+      # (better-sqlite3) so the SQLite event-log durability tests actually RUN in
+      # CI instead of self-skipping on a missing addon.
       - name: Install runner deps
-        run: flox activate -- bash -c 'cd runner && npm install --ignore-scripts'
+        run: flox activate -- bash -c 'cd runner && npm install --ignore-scripts && npm rebuild better-sqlite3'
 
+      # RUNNER_REQUIRE_SQLITE=1 turns a missing better-sqlite3 addon into a LOUD
+      # failure (the SQLite suites throw instead of skipping), so if the rebuild
+      # above ever breaks, CI goes red rather than green-with-silent-skips.
       - name: just check
         run: flox activate -- just check
+        env:
+          RUNNER_REQUIRE_SQLITE: "1"
