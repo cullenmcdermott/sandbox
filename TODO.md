@@ -23,11 +23,11 @@
 > added verified findings across §1d/§1f/§2b/§2c/§4/§10 — all backed by
 > [`docs/review-2026-07-07.md`](docs/review-2026-07-07.md) (bracketed ids like
 > `[A1]`/`[D1]`/`[H1]` point into it). **Start here (highest severity):**
-> §1f **[A1]** RUNNER_TOKEN self-approve (HIGH, 3 agents); §2b **[D1]** tool-card
-> FIFO misattribution + **[D2]** crash-replays-as-working (HIGH); §1d **[H1]/[C1]**
-> the observer cap is a no-op + leaks forwards (the 953ef87 cap needs a real fix);
-> §4 **[E1]/[E2]** the two O(n²)/event-loop-blocking hot paths; §10 **[F1]/[F2]**
-> two CRITICAL untested enforcement paths (both cheap).
+> §2b **[D1]** tool-card FIFO misattribution + **[D2]** crash-replays-as-working
+> (HIGH); §1d **[H1]/[C1]** the observer cap is a no-op + leaks forwards (the
+> 953ef87 cap needs a real fix); §4 **[E1]/[E2]** the two
+> O(n²)/event-loop-blocking hot paths. *(2026-07-08: [A1]+[F1]+[F2]+[C2]
+> landed — done log; A1's `/proc` residual is a new §1f item.)*
 >
 > **Opus-ready map:** §1c–§1d residuals, §2a–§2d, §4, §7a and the §5 GC
 > follow-ups carry pointers + fix direction — pick a cluster and go. Drafted,
@@ -101,10 +101,6 @@ row-model consolidation moved to §2a where it belongs.
   an evicted-while-Busy row keeps its spinner until focused. Fix: protect
   `autopilot.active()`/`queuedPrompt!=""`; tear down only the stream (not the
   retained model); stamp evicted rows to a watch-derived status.
-- [ ] **`models.normalize` breaks every non-Claude model lookup (MED) [C2].**
-  `models.go:295-306` prefixes `claude-` onto any id, so `big-pickle`→
-  `claude-big-pickle` never matches the opencode/openai tables → all opencode
-  sessions get the 200k/$0 fallback (wrong ctx%/cost). Fix: try the raw id first.
 - [ ] **Re-create with a different account patches the Secret but not the Sandbox
   env → auth breaks silently (MED) [C3].** `backend.go:391,444-488` vs the
   `AlreadyExists` pod template (`buildEnv:1433-1461`). Patch the pod-template env
@@ -162,20 +158,23 @@ done log; the item-3 follow-up below is the one loose end).
 Verified findings from the 8-agent handoff sweep; full detail + exploit/scenario
 in [`docs/review-2026-07-07.md`](docs/review-2026-07-07.md) §A/§B (id in brackets).
 
-- [ ] **Agent child processes inherit `RUNNER_TOKEN` → self-approve permissions
-  (HIGH; 3 agents converged) [A1].** SDK/opencode children get
-  `env: { ...process.env }` (`claude.ts:222-231,815`, `opencode.ts:305-308`);
-  a prompt-injected agent runs one Bash `wget` against its own
-  `/sessions/:id/permissions/:id` with the bearer token and self-approves —
-  defeating the whole approval flow. `guards.ts`' `\bANTHROPIC_API_KEY\b` regex
-  is false comfort (`env`/`printenv`/`/proc/self/environ` bypass it). Fix:
-  positive-allowlist env for the claude child (reuse `exec.ts:26-43`
-  `sanitizedExecEnv`), stripping `RUNNER_TOKEN`; contain provider-key exfil at the
-  network layer (A3). **NB (verified):** do NOT strip `OPENCODE_SERVER_PASSWORD`
-  from the `opencode serve` child — it hard-refuses to start without it
-  (`opencode.ts:279`); opencode in-agent Bash containment belongs at its
-  tool-spawn/guardrail layer. Cross-ref §10 test gap F2 (the PreToolUse guard is
-  itself untested).
+- [ ] **[A1 residual] `RUNNER_TOKEN` still recoverable via `/proc` — uid
+  separation needed to truly close self-approval (MED, adversarial review
+  2026-07-08).** The A1 env-strip landed (child spawns + the workspace git
+  calls all get `sanitizedExecEnv`; done log), but runner and agent child share
+  uid 0 (`backend.go:1377`), so `tr '\0' '\n' < /proc/1/environ` recovers the
+  bearer token and the runner API is reachable on in-pod localhost
+  (`server.ts:77`). Fix: run the agent child as a non-root uid distinct from
+  the runner (or mount `/proc` with `hidepid=2`); pod-spec + Dockerfile work,
+  coordinate with the §7b base-image spike. Until then A1 is
+  raised-bar-not-closed; comments in `claude.ts` say so.
+- [ ] **Migrate the PreToolUse block result off the legacy `decision:'block'`
+  shape (LOW, forward-compat).** The SDK also exposes
+  `hookSpecificOutput.permissionDecision:'deny'`; if a future SDK bump drops the
+  legacy path, Bash enforcement silently dies while the F2 tests stay green
+  (they pin what we return, not what the SDK honors). `claude.ts:349-354`,
+  `runner/test/pretooluse-guard.test.ts`. Consider pinning the SDK version
+  (cross-ref the carry-forward caveat below).
 - [ ] **Event log + SSE persist secrets verbatim, unlike the redacted audit log
   (LOW-MED) [A2].** `events.ts:191-224` `appendEvent` writes/broadcasts raw
   payloads (prompts, Bash commands, tool inputs) with no `redactSecrets`
@@ -936,19 +935,6 @@ naming-break, and Shell items each stand alone.
 **2026-07-07 test-coverage additions** (two agents; detail in
 [`docs/review-2026-07-07.md`](docs/review-2026-07-07.md) §F, id in brackets):
 
-- [ ] **CI never tests the SQLite event log — durability contract dark
-  (CRITICAL; both agents; cheapest fix) [F1].** `.depot/workflows/ci.yml:83`
-  installs runner deps `--ignore-scripts` → better-sqlite3's native addon isn't
-  built → `runner/test/events.test.ts` self-skips. Monotonic-seq / append-before-
-  stream / replay-ordering invariants run only on a full local install. Fix: add
-  `npm rebuild better-sqlite3` to the CI test job; fail if the suite skips under
-  `RUNNER_REQUIRE_SQLITE=1`.
-- [ ] **The claude PreToolUse Bash guard (primary enforcement path) is untested
-  (CRITICAL) [F2].** `claude.ts:294-311` `makePreToolUseBashHook` — the
-  highest-traffic of three `bashCommandBlocked` sites — is never invoked by a
-  test (unlike `/exec` and the opencode plugin). An SDK shape change silently
-  disables Bash blocking for claude. Export/test-hook it; table-test block/allow.
-  Cross-ref §1f A1.
 - [ ] **Client orchestration incl. the planned `Destroy` reorder is 0% covered
   (HIGH) [F3].** All of `client/session.go` runtime + `client/client.go:411-469`
   + `client/sync.go`. §8's `Destroy` sync-before-destroy flip has no regression

@@ -694,3 +694,49 @@ here for completeness:
 - §10: PTY-test in-sandbox caveat documented in CLAUDE.md; `just check`
   honest skip report; sdktest tui surface pins; `client.RunnerClient`
   widening pin (all Fable-approved 2026-07-06, detailed in earlier batches).
+
+## 2026-07-08 — batch 1 of the systematic TODO burndown: [A1]+[F2]+[F1]+[C2]
+
+Three parallel Opus implementers + one Opus adversarial reviewer + Fable
+review; `just check` green (all gates, race-twice, e2e), runner suite 177
+pass / 0 skipped. Provenance: docs/review-2026-07-07.md.
+
+- **§1f [A1] — RUNNER_TOKEN stripped from agent child processes (HIGH).**
+  New `buildAgentEnv` (claude.ts) applied at both SDK spawn sites
+  (buildOptions + title summarizer) and `buildOpencodeServeEnv` (opencode.ts)
+  for the `opencode serve` child — both start from `sanitizedExecEnv` (the
+  /exec denylist) and restore only the creds each child needs
+  (ANTHROPIC_API_KEY/CLAUDE_CODE_OAUTH_TOKEN for claude;
+  OPENCODE_SERVER_PASSWORD + the three provider keys for serve).
+  Fable-review addition: `emitWorkspaceStatus`'s git calls run in the
+  agent-writable workspace and inherited full env — a repo-local
+  `core.fsmonitor` would have executed with RUNNER_TOKEN in scope; those
+  calls now get sanitized env + `-c core.fsmonitor= -c core.hooksPath=/dev/null`
+  (verified harmless to branch/dirty/ahead-behind output on git 2.54).
+  Tests: runner/test/child-env.test.ts (incl. a live supervisor spawn-spy).
+  ADVERSARIAL-REVIEW RESIDUAL (tracked as a new §1f item): runner + agent
+  share uid 0, so /proc/<pid>/environ still recovers the token —
+  raised-bar, not closed; real fix is uid separation/hidepid.
+- **§10 [F2] — PreToolUse Bash guard pinned (CRITICAL gap).**
+  `makePreToolUseBashHook` exported with an injectable `emit` seam;
+  runner/test/pretooluse-guard.test.ts table-tests block/allow over real
+  `PreToolUseHookInput` shapes (block ⇒ `decision:'block'`+`continue:false`
+  + one tool.failed emit; benign ⇒ `{continue:true}`, no emit; missing/
+  non-string command edges). Forward-compat note (legacy `decision:'block'`
+  vs `hookSpecificOutput.permissionDecision`) tracked as a new LOW item.
+- **§10 [F1] — CI now runs the SQLite event-log suite (CRITICAL gap).**
+  ci.yml: `npm rebuild better-sqlite3` after the --ignore-scripts install +
+  `RUNNER_REQUIRE_SQLITE=1` on the `just check` step. New shared
+  runner/test/sqlite-probe.ts: skips cleanly when the addon is absent,
+  THROWS at import when the env var demands it — verified both paths
+  empirically (fail 1/nonzero vs skipped-clean). events.test.ts +
+  schema-version.test.ts (the only two sqlite-gated suites, verified by
+  grep) both consume it. Local macOS/Nix caveat: `npm rebuild` needs
+  `CC=clang CXX=clang++` on this host; CI is depot-ubuntu and unaffected.
+- **§1d [C2] — non-Claude model lookups resolve (MED).** `lookupKeys` tries
+  the RAW lowercase id (dated suffix stripped, dots preserved — models.dev's
+  verbatim keying for opencode/openai) before the `claude-` alias;
+  `lookupEntry` preserves the deterministic multi-provider pick. Fixes
+  opencode sessions reading 200k/$0 (wrong ctx%/cost). Adversarial check:
+  raw/alias key forms are structurally disjoint for every Claude id — no
+  prior resolution changes; static fallback unchanged.
