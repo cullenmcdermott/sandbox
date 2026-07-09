@@ -11,8 +11,37 @@ import { dirname } from 'node:path';
 import type { ServerResponse } from 'node:http';
 import type { Event, EventType } from './types.js';
 import { EVENTS_DB_PATH, STATE_DIR } from './types.js';
+import { redactSecrets } from './redact.js';
 
 type AnyPayload = Record<string, unknown>;
+
+/**
+ * A2: event types whose payload can carry user/tool secrets (prompt text, Bash
+ * commands, tool inputs like `{apiKey: "sk-..."}`, permission-request inputs).
+ * Their payloads are redacted BEFORE both persist and broadcast, so the SQLite
+ * log, the live SSE frame, and (automatically, via E2's raw-payload splice in
+ * rawFrame) replay all carry the masked form — matching what audit.jsonl already
+ * does (M13). Deliberate trade-off: a secret-keyed field also shows as
+ * `[redacted]` in the TUI's tool cards / permission prompts; that is intended,
+ * the same reason the audit log redacts. Every OTHER event type passes through
+ * untouched, and the check is a cheap type test BEFORE any deep walk so the hot
+ * path (message.delta et al.) never pays for the recursion.
+ *
+ * role:"user" message.* events are included too: the turn adapters echo the
+ * driving prompt as message.started/completed role:user (D5) — the SAME text
+ * turn.started carries — so masking one but not the other would leak the secret
+ * anyway. Assistant message.* stays unredacted (model output, high-volume, and
+ * mangling code the model wrote is worse than the marginal exposure); user
+ * messages never stream deltas, so the delta hot path still skips the walk.
+ */
+function shouldRedactPayload(type: EventType, payload: Record<string, unknown>): boolean {
+  return (
+    type === 'turn.started' ||
+    type.startsWith('tool.') ||
+    type.startsWith('permission.') ||
+    (type.startsWith('message.') && payload['role'] === 'user')
+  );
+}
 
 /** A connected SSE client waiting for events after a given seq. */
 interface SseClient {
@@ -95,6 +124,32 @@ const RETENTION_MAX_EVENTS = ((): number => {
   const v = parseInt(process.env.RETENTION_MAX_EVENTS ?? '', 10);
   return Number.isFinite(v) && v > 0 ? v : 0;
 })();
+
+/** E4 default: number of most-recent turns whose `*.delta` events survive
+ * compaction. 2 = current + previous turn keep their deltas, so a just-detached
+ * client's replay still shows the live tail it was watching. */
+const DELTA_COMPACT_KEEP_TURNS_DEFAULT = 2;
+
+/**
+ * E4: how many most-recent turns whose `*.delta` events survive compaction.
+ * On every `turn.completed` we DELETE delta events (message.delta / reasoning.delta
+ * / tool.delta — high-volume, worthless once the turn's completed/full events
+ * exist) older than the last N turns. Unlike M34's rejected all-or-nothing
+ * RETENTION_MAX_EVENTS, this touches ONLY deltas: the completed events
+ * (message.completed, tool.completed, …) are never deleted, so an after=0 replay
+ * still reconstructs the full transcript — just without the intra-turn streaming
+ * tail of turns older than N.
+ *
+ * Overridable via DELTA_COMPACT_KEEP_TURNS; a value < 1 or non-numeric
+ * (0/unset/NaN/negative) falls back to the default and must never break an
+ * append. Read on each turn.completed (a low-frequency event, so re-reading env
+ * costs nothing) rather than cached at import, which also keeps it testable.
+ * Exported for the E4 test.
+ */
+export function deltaCompactKeepTurns(): number {
+  const v = parseInt(process.env.DELTA_COMPACT_KEEP_TURNS ?? '', 10);
+  return Number.isFinite(v) && v >= 1 ? v : DELTA_COMPACT_KEEP_TURNS_DEFAULT;
+}
 
 /** Number of ACTIVE (non-passive) SSE clients currently attached. This is the
  * count used for idle detection: a session is "detached" only when no real
@@ -238,7 +293,16 @@ export function appendEvent(
 ): Event {
   const d = getDb();
   const time = new Date().toISOString();
-  const payloadJson = JSON.stringify(payload);
+  // A2: mask secrets for the sensitive event types BEFORE seq assignment, so the
+  // exact same redacted payload is what gets persisted, live-broadcast, and (via
+  // E2's rawFrame splice of the stored payload column) replayed. redactSecrets
+  // returns a fresh structure and never mutates the caller's object. This runs
+  // before broadcast()/seq logic, so the E2 replaying-flag and B4 seq-0 semantics
+  // are untouched — redaction changes only the payload bytes, not delivery.
+  const outPayload: AnyPayload = shouldRedactPayload(type, payload)
+    ? (redactSecrets(payload) as AnyPayload)
+    : payload;
+  const payloadJson = JSON.stringify(outPayload);
   let seq = 0;
   try {
     const info = d
@@ -253,16 +317,58 @@ export function appendEvent(
     // missed event in the log is preferable to a killed turn.
     console.error(`appendEvent: failed to persist ${type}:`, err);
   }
+  // E4: once a turn completes, compact away the now-worthless streaming deltas of
+  // turns older than the last N. Best-effort and AFTER the persist above: a
+  // compaction error must never fail the append (mirror R11 — a killed turn is
+  // worse than an uncompacted log).
+  if (type === 'turn.completed') {
+    try {
+      compactDeltas(d, sessionId);
+    } catch (err) {
+      console.error(`appendEvent: delta compaction failed for ${sessionId}:`, err);
+    }
+  }
   const evt: Event = {
     seq,
     time,
     sessionId,
     ...(turnId ? { turnId } : {}),
     type,
-    payload,
+    payload: outPayload,
   };
   broadcast(evt);
   return evt;
+}
+
+/**
+ * E4: delete `*.delta` events for `sessionId` that belong to turns older than the
+ * most-recent DELTA_COMPACT_KEEP_TURNS turns. One bounded SQL DELETE — no row
+ * materialization: an inner query finds the seq of the `turn.started` of the
+ * Nth-most-recent turn, and everything with type LIKE '%.delta' AND seq < that is
+ * removed. If fewer than N turns exist the inner query is empty and nothing is
+ * deleted (COALESCE floor of 0 → `seq < 0` matches nothing).
+ *
+ * Resulting seq gaps are fine: the after=<seq> replay contract tolerates gaps
+ * (remaining rows stay in seq order), and only deltas — never the completed/full
+ * events — are touched, so a full replay still reconstructs the transcript.
+ *
+ * Interlock with E2's chunked replay: deleting a row BETWEEN two replay chunks is
+ * safe. The replay cursor is seq-based (`WHERE seq > cursor ORDER BY seq LIMIT`),
+ * so a row deleted before a chunk read simply never appears — no shift, no
+ * duplicate, no reorder. WAL note: a DELETE doesn't shrink events.db on disk; we
+ * deliberately do NOT VACUUM (it blocks the single writer) — the file plateaus
+ * rather than growing without bound, which is the goal.
+ */
+function compactDeltas(d: Database.Database, sessionId: string): void {
+  d.prepare(
+    "DELETE FROM events WHERE session_id = ? AND type LIKE '%.delta' AND seq < (" +
+      "  SELECT COALESCE(MIN(seq), 0) FROM (" +
+      "    SELECT seq FROM events" +
+      "    WHERE session_id = ? AND type = 'turn.started'" +
+      '    ORDER BY seq DESC LIMIT ?' +
+      '  )' +
+      ')',
+  ).run(sessionId, sessionId, deltaCompactKeepTurns());
 }
 
 /** A raw event row as stored in SQLite (payload is still a JSON string). */
