@@ -7,7 +7,7 @@
 // a wrong id returns 404 rather than cross-session leakage.
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { readBody } from './httputil.js';
+import { readBody, BodyTooLargeError, InvalidJsonError } from './httputil.js';
 import { appendEvent, attachSseClient, lastSeq, sseTotalClientCount, MAX_SSE_CLIENTS } from './events.js';
 import { getRegistry, loadConfig, toStatusResponse } from './session.js';
 import { PORT, PROTOCOL_VERSION, type PermissionRequestBody, type TurnRequestBody, type TurnResponse, type ExecRequestBody } from './types.js';
@@ -87,6 +87,51 @@ export function turnRejectReason(
   return null;
 }
 
+/**
+ * B5: clamp an SSE `after` cursor to the session's current head (`lastSeq`). A
+ * client that requests `after` beyond the real max seq — its own bug, or a log
+ * truncated by a pod rebuild that reset the AUTOINCREMENT counter — would
+ * otherwise have every live event (seq <= after) silently dropped by
+ * attachSseClient's shouldDeliver filter: the stream stays open but never
+ * delivers, and the session looks frozen. Clamping to lastSeq makes such a client
+ * simply tail live from the true head. A well-behaved `after <= lastSeq` is
+ * returned unchanged (normal replay). Pure + exported for unit tests.
+ */
+export function clampAfterSeq(after: number, lastSeq: number): number {
+  return after > lastSeq ? lastSeq : after;
+}
+
+/**
+ * B8: the HTTP outcome of resolving a pending permission, given whether the
+ * resolution actually took effect. Resolution is first-write-wins: the canUseTool
+ * closure's absolute deadline / abort / detach paths can auto-deny between the
+ * route fetching the pending entry and calling its resolve, so a late POST may
+ * LOSE the race. When it does (`applied === false`), we must not reply
+ * `resolved:true` — that lies to the client that its choice won. Report honestly
+ * with 409 + `resolved:false, reason:'expired'`; the `error` field is what the Go
+ * client's ResolvePermission surfaces (it treats any non-200/204 as an error and
+ * reads `{error}` — see internal/runner/client.go statusError/serverErrorMessage),
+ * so a lost race becomes a visible error rather than a silent lie. A winning
+ * resolution keeps the original 200 `{permissionId, resolved:true}` shape.
+ */
+export function permissionResolveResponse(
+  permissionId: string,
+  applied: boolean,
+): { status: number; body: Record<string, unknown> } {
+  if (!applied) {
+    return {
+      status: 409,
+      body: {
+        error: 'permission already resolved (auto-denied by timeout, interrupt, or client detach)',
+        permissionId,
+        resolved: false,
+        reason: 'expired',
+      },
+    };
+  }
+  return { status: 200, body: { permissionId, resolved: true } };
+}
+
 // --- Router ---------------------------------------------------------------
 
 export function startServer(): void {
@@ -99,8 +144,13 @@ export function startServer(): void {
   const server = createServer((req, res) => {
     handle(req, res, cfg, agent).catch((err) => {
       const message = err instanceof Error ? err.message : String(err);
+      // B9: readBody's typed rejections are client faults, not server bugs — map
+      // an oversized body to 413 and malformed JSON to 400 instead of a blanket
+      // 500. Anything else stays a 500.
+      const status =
+        err instanceof BodyTooLargeError ? 413 : err instanceof InvalidJsonError ? 400 : 500;
       if (!res.headersSent) {
-        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.writeHead(status, { 'Content-Type': 'application/json' });
       }
       if (!res.writableEnded) res.end(JSON.stringify({ error: message }));
     });
@@ -156,9 +206,12 @@ async function handle(req: IncomingMessage, res: ServerResponse, cfg: ReturnType
   if (eventsMatch && method === 'GET') {
     if (eventsMatch[1] !== sid) return notFound(res, 'session not found');
     const afterParam = url.searchParams.get('after');
-    const afterSeq = afterParam ? parseInt(afterParam, 10) : lastSeq(sid);
+    const requestedAfter = afterParam ? parseInt(afterParam, 10) : lastSeq(sid);
     // R8: reject non-integers (NaN) and negatives; parseInt("-5") → -5 not NaN.
-    if (Number.isNaN(afterSeq) || afterSeq < 0) return badRequest(res, 'after must be a non-negative integer');
+    if (Number.isNaN(requestedAfter) || requestedAfter < 0) return badRequest(res, 'after must be a non-negative integer');
+    // B5: clamp `after` beyond the real head to lastSeq so a bogus cursor tails
+    // live from head instead of silently swallowing every live event.
+    const afterSeq = clampAfterSeq(requestedAfter, lastSeq(sid));
     // passive=1 marks a status observer (the dashboard's background list stream)
     // that must NOT count as an attached client for idle detection (RV6).
     const passive = url.searchParams.get('passive') === '1';
@@ -280,9 +333,16 @@ async function handle(req: IncomingMessage, res: ServerResponse, cfg: ReturnType
         return badRequest(res, 'editedInput must be valid JSON');
       }
     }
-    pending.resolve(body.allow, body.scope ?? 'once', body.editedInput);
+    // B8: first-write-wins. resolve returns false when the canUseTool closure was
+    // already settled (auto-denied by the absolute deadline / abort / detach)
+    // between resolvePermission's fetch above and this call — this POST lost the
+    // race and must not claim resolved:true. permissionResolveResponse maps the
+    // honest outcome (200 won / 409 expired). (real callback always returns a
+    // boolean; a void from a non-prod test double is treated as "won".)
+    const applied = pending.resolve(body.allow, body.scope ?? 'once', body.editedInput) !== false;
     reg.deletePermission(permissionId); // R2: prevent unbounded map growth
-    return ok(res, { permissionId, resolved: true });
+    const { status, body: respBody } = permissionResolveResponse(permissionId, applied);
+    return ok(res, respBody, status);
   }
 
   // /sessions/:id/exec (POST) — one-shot shell command in the session cwd.

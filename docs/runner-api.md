@@ -11,6 +11,10 @@ session-create time and reads it back from the Secret. SSE streams use
 The runner serves a single session (its `SANDBOX_SESSION_ID`); requests whose
 `:id` does not match that session return 404.
 
+Request bodies are capped at 1 MiB: an oversized body returns **413** and a
+body that is not valid JSON returns **400** (both `{"error": "..."}`); other
+unexpected failures return 500.
+
 ## Endpoints
 
 ### `GET /healthz`
@@ -115,6 +119,12 @@ is one of `once` | `session` (defaults to `once`). When `allow` is true and
 malformed edit returns 400 and leaves the permission pending so the client can
 retry). Returns 200 with `{"permissionId": "...", "resolved": true}`.
 
+Resolution is first-write-wins: the runner auto-denies a pending permission on
+its internal deadline, an interrupt, or client detach. A POST that loses that
+race returns **409** with
+`{"error": "...", "permissionId": "...", "resolved": false, "reason": "expired"}`
+instead of falsely claiming success.
+
 > **`session` scope** is a **tool-name-level** grant: when an allow resolves with
 > `scope: "session"`, the runner records a grant for that tool name and
 > auto-allows every subsequent use of the same tool for the rest of the session
@@ -154,7 +164,17 @@ SSE stream. Emits one `data: <json>` line per event. The stream stays open
 until the client disconnects. Events strictly after the given sequence number
 are sent; `after=0` replays the full log. If `after` is omitted, the stream
 resumes from the latest sequence (new events only). A non-integer or negative
-`after` returns 400.
+`after` returns 400. An `after` beyond the log's current head is clamped to the
+head (the client tails live from there) rather than silently swallowing every
+live event.
+
+Replay notes: sequence numbers may have gaps — the runner compacts `*.delta`
+events of turns older than the most recent N (`DELTA_COMPACT_KEEP_TURNS`,
+default 2) once a turn completes; the non-delta events always survive, so a
+full replay still reconstructs the transcript. Payloads of `turn.started`,
+`tool.*`, `permission.*`, and role-`user` `message.*` events are
+secret-redacted before they are persisted or broadcast (same masking as
+`audit.jsonl`), so log, live stream, and replay all carry the masked form.
 
 Each event is a JSON object:
 ```json

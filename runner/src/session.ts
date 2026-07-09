@@ -184,34 +184,75 @@ export interface LoadedSession {
   bootEvents: BootEvent[];
 }
 
-/** Load session.json, or seed it from env if absent. Also returns the boot
- * events needed to terminate an orphaned turn when a persisted 'busy' status is
- * coerced to 'idle' (D2); the caller must append them before `session.started`. */
-export function loadSessionState(cfg: RunnerConfig): LoadedSession {
-  if (existsSync(SESSION_JSON_PATH)) {
-    const raw = readFileSync(SESSION_JSON_PATH, 'utf8');
-    const parsed = JSON.parse(raw) as Partial<SessionState>;
+/**
+ * B7: read + parse session.json at `path`, surviving a corrupt/truncated file.
+ * Returns the parsed object, or null when the file is absent OR unparseable.
+ *
+ * A truncated or garbage file (partial write killed by an OOM, a bad disk) would
+ * otherwise throw at boot from JSON.parse; index.ts has no catch, so the pod
+ * restarts, reads the SAME corrupt file, and crash-loops forever. Instead we move
+ * the bad file aside (session.json.corrupt-<ts> — Date.now() is fine in the
+ * runner) and return null so the caller falls through to fresh emptyState seeding
+ * and the pod comes up. The moved-aside copy is preserved for post-mortem. Loud
+ * console.error so the incident is visible in pod logs, not silently swallowed.
+ * Exported for unit tests (production callers use SESSION_JSON_PATH).
+ */
+export function readSessionFile(path: string): Partial<SessionState> | null {
+  if (!existsSync(path)) return null;
+  const raw = readFileSync(path, 'utf8');
+  try {
+    return JSON.parse(raw) as Partial<SessionState>;
+  } catch (err) {
+    const aside = `${path}.corrupt-${Date.now()}`;
+    try {
+      renameSync(path, aside);
+    } catch {
+      /* best-effort: if we can't move it aside, still fall through to reseed */
+    }
+    console.error(
+      `session.json at ${path} is corrupt (${err instanceof Error ? err.message : String(err)}); ` +
+        `moved aside to ${aside} and reseeding a fresh empty session so the pod can boot`,
+    );
+    return null;
+  }
+}
+
+/** Load session.json, or seed it from env if absent OR corrupt (B7). Also returns
+ * the boot events needed to terminate an orphaned turn when a persisted 'busy'
+ * status is coerced to 'idle' (D2); the caller must append them before
+ * `session.started`. A corrupt file (moved aside) yields no bootEvents — its
+ * pre-crash state is unrecoverable, so we can't know a turn was orphaned. `path`
+ * is injectable for tests; production uses SESSION_JSON_PATH. */
+export function loadSessionState(cfg: RunnerConfig, path: string = SESSION_JSON_PATH): LoadedSession {
+  const parsed = readSessionFile(path);
+  if (parsed) {
     const loaded = reviveSessionState(parsed, cfg);
     // Persist corrections (busy→idle, version restamp) so disk matches reality.
     if (parsed.status !== loaded.status || parsed.state_version !== loaded.state_version) {
-      saveSessionState(loaded);
+      saveSessionStateTo(loaded, path);
     }
     return { state: loaded, bootEvents: orphanedTurnBootEvents(parsed.status, loaded) };
   }
+  // Absent or corrupt (moved aside): seed a fresh empty session; no boot events.
   const state = emptyState(cfg);
-  saveSessionState(state);
+  saveSessionStateTo(state, path);
   return { state, bootEvents: [] };
 }
 
-/** Persist session.json atomically (write+rename). Always stamps the current
- * STATE_VERSION: the file's contents conform to this runner's shape as of this
- * write (plus any preserved unknown fields, best-effort). */
-export function saveSessionState(state: SessionState): void {
-  mkdirSync(dirname(SESSION_JSON_PATH), { recursive: true });
-  const tmp = `${SESSION_JSON_PATH}.tmp`;
+/** Persist session.json atomically (write+rename) to `path`. Always stamps the
+ * current STATE_VERSION: the file's contents conform to this runner's shape as of
+ * this write (plus any preserved unknown fields, best-effort). */
+function saveSessionStateTo(state: SessionState, path: string): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = `${path}.tmp`;
   writeFileSync(tmp, JSON.stringify({ ...state, state_version: STATE_VERSION }, null, 2) + '\n', 'utf8');
   // Rename is atomic on POSIX.
-  renameSync(tmp, SESSION_JSON_PATH);
+  renameSync(tmp, path);
+}
+
+/** Persist session.json atomically to the production path (SESSION_JSON_PATH). */
+export function saveSessionState(state: SessionState): void {
+  saveSessionStateTo(state, SESSION_JSON_PATH);
 }
 
 export function toStatusResponse(state: SessionState, activeTurnId = ''): StatusResponse {
@@ -236,7 +277,13 @@ export interface PendingPermission {
   permissionId: string;
   tool: string;
   input: Record<string, unknown>;
-  resolve: (allow: boolean, scope: string, editedInput?: string) => void;
+  // B8: returns true when THIS call won the first-write-wins race (the canUseTool
+  // closure was still pending and is now resolved), false when the closure had
+  // already settled (auto-denied by deadline / abort / detach) so this resolution
+  // was a no-op. The server maps false → 409 rather than lying resolved:true. The
+  // `void` arm keeps pre-existing test doubles that return nothing compiling; the
+  // real callback (claude.ts makeCanUseTool) always returns a boolean.
+  resolve: (allow: boolean, scope: string, editedInput?: string) => boolean | void;
 }
 
 /** In-flight turn bookkeeping. */

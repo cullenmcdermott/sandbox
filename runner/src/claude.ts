@@ -19,7 +19,14 @@ import { query, type EffortLevel, type Options, type PermissionMode, type Query,
 import type { BetaContentBlock, BetaTextBlock } from '@anthropic-ai/sdk/resources/beta/messages/messages';
 import type { PermissionResult, HookCallback, HookInput, SyncHookJSONOutput } from '@anthropic-ai/claude-agent-sdk';
 import { mkdirSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+// B6: emitWorkspaceStatus previously ran git via execFileSync — up to three
+// synchronous subprocess calls (branch/dirty/ahead-behind) on the event loop,
+// worst case ~9s (3× the 3s timeout) of blocked I/O per turn on a slow/huge repo,
+// stalling every SSE stream and health check. Run git async instead.
+const execFileAsync = promisify(execFile);
 import { appendEvent, shortId } from './events.js';
 import { appendAudit } from './audit.js';
 import { bashCommandBlocked } from './guards.js';
@@ -520,8 +527,12 @@ function makeCanUseTool(
         permissionId,
         tool: toolName,
         input,
-        resolve: (allow, scope, editedInput) => {
-          if (settled) return; // already auto-denied (abort / abandon / deadline)
+        resolve: (allow, scope, editedInput): boolean => {
+          // B8: first-write-wins. Report to the caller (server.ts) whether this
+          // resolution actually took effect: false when already auto-denied
+          // (abort / abandon / deadline) so the route replies honestly (409)
+          // instead of a lying resolved:true; true when this call wins the race.
+          if (settled) return false;
           settled = true;
           cleanup();
           // Honor the resolution scope: scope:'session' records a tool-name
@@ -552,6 +563,7 @@ function makeCanUseTool(
               message: `Permission denied by user (permission ${permissionId})`,
             });
           }
+          return true;
         },
       });
     });
@@ -630,7 +642,7 @@ export async function runTurn(
             staleResume = true;
             continue;
           }
-          mapMessage(msg, sessionId, turnId);
+          await mapMessage(msg, sessionId, turnId);
           // Fetch the claude.ai plan rate-limit windows once per turn, triggered
           // by the SDK init message. The control channel (stdin) is open from
           // init until the result message closes it (single-user-turn mode), so
@@ -897,37 +909,60 @@ export const claudeAgent: Agent = { runTurn };
 // --- Workspace status (git branch + dirty) -------------------------------
 
 /**
+ * Parse `git rev-list --left-right --count @{upstream}...HEAD` output ("<behind>
+ * \t<ahead>") into {ahead, behind}. Pure + exported so B6's async git path keeps
+ * the exact same parsing (unit-tested) it had when it ran synchronously; an
+ * unparseable/empty string (no upstream) yields {0,0}.
+ */
+export function parseAheadBehind(revListOutput: string): { ahead: number; behind: number } {
+  const m = /^(\d+)\s+(\d+)$/.exec(revListOutput);
+  if (!m) return { ahead: 0, behind: 0 };
+  return { behind: parseInt(m[1], 10), ahead: parseInt(m[2], 10) };
+}
+
+/**
  * Emit a workspace.status event (git branch + dirty/ahead/behind) for the chat
  * status line. Runs git in the session cwd; emits nothing (and never throws)
  * when cwd is not a git repo or git is unavailable. Called at session start and
  * after each turn completes.
+ *
+ * B6: async so the (up to three) git subprocess calls never block the event loop.
+ * Callers await it (mapMessage → the runTurn loop) so the workspace.status event
+ * keeps landing AFTER turn.completed, preserving the prior ordering.
  */
-function emitWorkspaceStatus(sessionId: string, turnId: string): void {
+async function emitWorkspaceStatus(sessionId: string, turnId: string): Promise<void> {
   const cwd = resolveWorkspaceDir(loadConfig().projectPath);
   // A1: git executes repo-local config from the agent-writable workspace
   // (core.fsmonitor, hooks), so this child must not inherit RUNNER_TOKEN either
   // — a workspace fsmonitor command would run with the runner's env. Sanitize
   // like every other child spawn, and disable the two repo-local code-execution
   // knobs for good measure (they have no bearing on branch/dirty/ahead-behind).
-  const git = (args: string[]): string =>
-    execFileSync('git', ['-c', 'core.fsmonitor=', '-c', 'core.hooksPath=/dev/null', ...args], {
-      cwd,
-      encoding: 'utf8',
-      timeout: 3000,
-      stdio: ['ignore', 'pipe', 'ignore'],
-      env: sanitizedExecEnv(process.env),
-    }).trim();
+  // The env sanitization + `-c core.fsmonitor= -c core.hooksPath=/dev/null` flags
+  // are the A1 security fix — preserved verbatim across the sync→async move.
+  const git = async (args: string[]): Promise<string> => {
+    const { stdout } = await execFileAsync(
+      'git',
+      ['-c', 'core.fsmonitor=', '-c', 'core.hooksPath=/dev/null', ...args],
+      {
+        cwd,
+        encoding: 'utf8',
+        timeout: 3000,
+        env: sanitizedExecEnv(process.env),
+      },
+    );
+    return stdout.trim();
+  };
 
   let branch: string;
   try {
-    branch = git(['rev-parse', '--abbrev-ref', 'HEAD']);
+    branch = await git(['rev-parse', '--abbrev-ref', 'HEAD']);
   } catch {
     return; // not a git repo (or git missing): emit nothing, no error.
   }
 
   let dirty = false;
   try {
-    dirty = git(['status', '--porcelain']).length > 0;
+    dirty = (await git(['status', '--porcelain'])).length > 0;
   } catch {
     // leave dirty=false
   }
@@ -936,11 +971,9 @@ function emitWorkspaceStatus(sessionId: string, turnId: string): void {
   let behind = 0;
   try {
     // "<behind>\t<ahead>" relative to the upstream; errors when no upstream.
-    const m = /^(\d+)\s+(\d+)$/.exec(git(['rev-list', '--left-right', '--count', '@{upstream}...HEAD']));
-    if (m) {
-      behind = parseInt(m[1], 10);
-      ahead = parseInt(m[2], 10);
-    }
+    ({ ahead, behind } = parseAheadBehind(
+      await git(['rev-list', '--left-right', '--count', '@{upstream}...HEAD']),
+    ));
   } catch {
     // no upstream configured: ahead/behind stay 0
   }
@@ -955,7 +988,7 @@ function emitWorkspaceStatus(sessionId: string, turnId: string): void {
 // and apply the registry-affecting observations it returns: persist the model
 // into session.json, capture the Claude session id, and emit workspace.status
 // (which shells out to git) at session start and after a completed turn.
-function mapMessage(msg: SDKMessage, sessionId: string, turnId: string): void {
+async function mapMessage(msg: SDKMessage, sessionId: string, turnId: string): Promise<void> {
   const reg = getRegistry();
   const result = mapMessagePure(msg, (type, payload) => appendEvent(sessionId, turnId, type, payload));
   if (result.isInit) {
@@ -971,7 +1004,7 @@ function mapMessage(msg: SDKMessage, sessionId: string, turnId: string): void {
     if (shouldCaptureClaudeSession(reg.state.claude_session_id, observedId)) {
       reg.setClaudeSession(observedId);
     }
-    emitWorkspaceStatus(sessionId, turnId);
+    await emitWorkspaceStatus(sessionId, turnId);
   }
-  if (result.completed) emitWorkspaceStatus(sessionId, turnId);
+  if (result.completed) await emitWorkspaceStatus(sessionId, turnId);
 }
