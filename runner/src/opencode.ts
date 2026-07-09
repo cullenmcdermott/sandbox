@@ -16,9 +16,40 @@ import { mkdirSync, writeFileSync, readFileSync, readdirSync, readlinkSync } fro
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { serializeBlockedPatterns } from './guards.js';
+import { sanitizedExecEnv } from './exec.js';
 import { getRegistry, setExternalActivityProbe } from './session.js';
 
 const DEFAULT_PORT = 4096;
+
+// Env keys the `opencode serve` child genuinely needs, restored after
+// sanitizedExecEnv strips the runner-infra secrets (A1). sanitizedExecEnv drops
+// RUNNER_TOKEN (the runner's own bearer token) so opencode's in-agent Bash can't
+// read it and self-drive the runner API — but it also drops these, which serve
+// does need: its client-auth password (the supervisor hard-refuses to start
+// without it, O3) and the single injected provider key (buildOpencodeConfig
+// references `{env:<KEY>}`). RUNNER_TOKEN is deliberately absent from this list.
+// NB: this list must track resolveOpencodeProvider (internal/k8s/backend.go) —
+// a new provider env var (e.g. an OAuth token for anthropic) that
+// sanitizedExecEnv strips must be added here or serve silently loses auth.
+const OPENCODE_SERVE_ENV_KEYS = [
+  'OPENCODE_SERVER_PASSWORD',
+  'ANTHROPIC_API_KEY',
+  'OPENAI_API_KEY',
+  'OPENCODE_API_KEY',
+] as const;
+
+/**
+ * Build the env for the `opencode serve` child: sanitizedExecEnv (drops
+ * RUNNER_TOKEN + the other runner-infra secrets, A1) with the serve-required
+ * credentials restored (OPENCODE_SERVE_ENV_KEYS). Pure/exported for unit tests.
+ */
+export function buildOpencodeServeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const out = sanitizedExecEnv(env);
+  for (const k of OPENCODE_SERVE_ENV_KEYS) {
+    if (env[k] !== undefined) out[k] = env[k];
+  }
+  return out;
+}
 
 /** How often to check for a live opencode client (feeds the idle clock). */
 const ACTIVITY_POLL_MS = 20_000;
@@ -301,11 +332,13 @@ export function startOpencodeSupervisor(
     }
   }, ACTIVITY_POLL_MS);
 
+  // A1: strip RUNNER_TOKEN from the serve child (keep serve's own creds).
+  const childEnv = buildOpencodeServeEnv(env);
   const spawnServe = (): ChildProcess => {
     const proc = spawnFn(
       'opencode',
       ['serve', '--hostname', '0.0.0.0', '--port', String(port)],
-      { stdio: 'inherit', env, cwd: env.PROJECT_PATH ?? process.cwd() },
+      { stdio: 'inherit', env: childEnv, cwd: env.PROJECT_PATH ?? process.cwd() },
     );
     proc.on('exit', (code, signal) => {
       if (stopped) return;

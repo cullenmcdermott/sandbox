@@ -23,7 +23,7 @@ import { execFileSync } from 'node:child_process';
 import { appendEvent, shortId } from './events.js';
 import { appendAudit } from './audit.js';
 import { bashCommandBlocked } from './guards.js';
-import { resolveWorkspaceDir } from './exec.js';
+import { resolveWorkspaceDir, sanitizedExecEnv } from './exec.js';
 import { getRegistry, loadConfig } from './session.js';
 import type { RunnerConfig } from './session.js';
 import type { Agent } from './agent.js';
@@ -63,6 +63,42 @@ const DEFAULT_DISALLOWED_TOOLS = [
 
 // BLOCKED_BASH_PATTERNS / bashCommandBlocked moved to ./guards.js so the same
 // blocklist gates both the SDK Bash tool (below) and the /exec passthrough (O2).
+
+// --- Child-process env hardening (A1) -------------------------------------
+
+// Provider credentials the spawned `claude` binary authenticates with.
+// sanitizedExecEnv strips these (it is the /exec denylist, which must hide
+// provider keys from a `!cmd` passthrough), but the claude child MUST keep them
+// or every turn fails to authenticate. Containment of their *exfil* is a
+// network-layer concern (A3), not something we solve by withholding them here.
+// RUNNER_TOKEN is deliberately NOT in this set: the claude runtime never needs
+// it, and dropping it is the A1 fix — a prompt-injected agent that could read
+// $RUNNER_TOKEN would POST to its own session's /permissions/:id endpoint and
+// self-approve the permission it was just asked about.
+// SCOPE (adversarial review 2026-07-08): this closes the trivial env-read
+// vector only. The runner and the agent child share uid 0, so the token is
+// still recoverable via /proc/<runner-pid>/environ; truly closing self-approval
+// needs uid separation (or hidepid) at the pod level — tracked in TODO §1f.
+const CLAUDE_PROVIDER_ENV_KEYS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'] as const;
+
+/**
+ * Build the env for a spawned `claude` child (buildOptions + the title
+ * summarizer). Starts from sanitizedExecEnv — which drops RUNNER_TOKEN and the
+ * other runner-infra secrets (A1) — then restores the provider credentials the
+ * claude binary needs, and finally applies the caller's explicit overrides
+ * (CLAUDE_CONFIG_DIR, IS_SANDBOX, …). Pure and exported so the A1 stripping is
+ * unit-testable without invoking the SDK.
+ */
+export function buildAgentEnv(
+  overrides: NodeJS.ProcessEnv,
+  env: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const out = sanitizedExecEnv(env);
+  for (const k of CLAUDE_PROVIDER_ENV_KEYS) {
+    if (env[k] !== undefined) out[k] = env[k];
+  }
+  return { ...out, ...overrides };
+}
 
 // --- SDK options ----------------------------------------------------------
 
@@ -219,8 +255,11 @@ export function buildOptions(
     allowDangerouslySkipPermissions: permissionMode === 'bypassPermissions',
     allowedTools: allowedToolsOverride ?? DEFAULT_ALLOWED_TOOLS,
     disallowedTools: DEFAULT_DISALLOWED_TOOLS,
-    env: {
-      ...process.env,
+    // buildAgentEnv strips RUNNER_TOKEN (and the other runner-infra secrets)
+    // before the spawn so a prompt-injected agent's Bash tool can't read the
+    // bearer token and self-approve its own permissions (A1); it retains the
+    // provider creds the claude binary needs.
+    env: buildAgentEnv({
       CLAUDE_CONFIG_DIR,
       CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
       // The spawned `claude` binary refuses --dangerously-skip-permissions
@@ -228,7 +267,7 @@ export function buildOptions(
       // pod sets this too (k8s buildEnv), but set it on the spawn env directly so
       // bypass also works for local/non-k8s dev where the pod env is absent.
       IS_SANDBOX: process.env.IS_SANDBOX ?? '1',
-    },
+    }),
     settingSources: [],
     abortController: abort,
     includePartialMessages: true,
@@ -291,15 +330,24 @@ export function buildOptions(
 
 // --- Hooks ---------------------------------------------------------------
 
-function makePreToolUseBashHook(
+// makePreToolUseBashHook builds the SDK PreToolUse(Bash) hook — the primary
+// enforcement path for the Bash blocklist (the SDK Bash tool is what agents use
+// constantly; the /exec passthrough and opencode plugin gate the other two
+// surfaces). A blocked command returns the SDK's `decision:'block'` shape (which
+// stops the tool call) and records a tool.failed event; anything else permits.
+// The `emit` seam defaults to the live event log but is injectable so the guard
+// can be unit-tested without an open SQLite database (F2).
+export function makePreToolUseBashHook(
   sessionId: string,
   turnId: string,
+  emit: (type: 'tool.failed', payload: Record<string, unknown>) => void =
+    (type, payload) => appendEvent(sessionId, turnId, type, payload),
 ): HookCallback {
   return async (input: HookInput): Promise<SyncHookJSONOutput> => {
     if (input.hook_event_name !== 'PreToolUse') return { continue: true };
     const command = String((input.tool_input as { command?: unknown })?.command ?? '');
     if (bashCommandBlocked(command)) {
-      appendEvent(sessionId, turnId, 'tool.failed', {
+      emit('tool.failed', {
         tool: 'Bash',
         input: input.tool_input,
         error: `blocked by PreToolUse hook: command matches a host/cluster/credential pattern`,
@@ -812,12 +860,12 @@ function liveTitleDeps(cfg: RunnerConfig, sessionId: string, turnId: string): Ti
         // the root guard in the spawned binary rejects every title generation as
         // uid 0 (silently swallowed by maybeGenerateTitle's catch — auto-titling
         // was quietly broken). See buildOptions for the full rationale.
-        env: {
-          ...process.env,
+        // buildAgentEnv strips RUNNER_TOKEN here too (A1).
+        env: buildAgentEnv({
           CLAUDE_CONFIG_DIR,
           CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
           IS_SANDBOX: process.env.IS_SANDBOX ?? '1',
-        },
+        }),
         settingSources: [],
         // Resume the just-completed conversation for context, but FORK it: the
         // TITLE_PROMPT Q&A is written to a throwaway forked session, never to the
@@ -856,12 +904,18 @@ export const claudeAgent: Agent = { runTurn };
  */
 function emitWorkspaceStatus(sessionId: string, turnId: string): void {
   const cwd = resolveWorkspaceDir(loadConfig().projectPath);
+  // A1: git executes repo-local config from the agent-writable workspace
+  // (core.fsmonitor, hooks), so this child must not inherit RUNNER_TOKEN either
+  // — a workspace fsmonitor command would run with the runner's env. Sanitize
+  // like every other child spawn, and disable the two repo-local code-execution
+  // knobs for good measure (they have no bearing on branch/dirty/ahead-behind).
   const git = (args: string[]): string =>
-    execFileSync('git', args, {
+    execFileSync('git', ['-c', 'core.fsmonitor=', '-c', 'core.hooksPath=/dev/null', ...args], {
       cwd,
       encoding: 'utf8',
       timeout: 3000,
       stdio: ['ignore', 'pipe', 'ignore'],
+      env: sanitizedExecEnv(process.env),
     }).trim();
 
   let branch: string;
