@@ -23,6 +23,16 @@ interface SseClient {
    * "attached" for idle detection, so it cannot keep the idle reaper from
    * suspending a session the user is only glancing at in the list (RV6). */
   passive: boolean;
+  /** E2: true while the client is still catching up on history via the async
+   * chunk-reader. broadcast() skips a replaying client (its persisted events
+   * arrive through replay instead), and the replay driver flips this to false in
+   * the same synchronous tick it writes `: replay-complete`, handing the client
+   * over to the live tail with no gap, no duplicate, and no reordering. */
+  replaying: boolean;
+  /** Idempotent teardown (clears the heartbeat, removes from `clients`, ends the
+   * socket). Stored on the client so broadcast()'s E3 backpressure cap can evict
+   * a wedged client synchronously without reaching into attachSseClient's closure. */
+  cleanup: () => void;
 }
 
 let db: Database.Database | null = null;
@@ -58,6 +68,25 @@ const MIGRATIONS: Record<number, (d: Database.Database) => void> = {};
  * buggy client can otherwise open unbounded streams and fan-out every event to
  * each (M33). The dashboard uses at most a few per session. */
 export const MAX_SSE_CLIENTS = 16;
+
+/** E2: how many rows the async replay reader pulls per chunk. Replay reads the
+ * log in bounded batches (never `.all()` over the whole log) and yields to the
+ * event loop between chunks, so a long session's after=0 attach can't blow up
+ * RSS or block live turns / /healthz / interrupts in one synchronous write burst.
+ * Each batch is fully consumed (materialized by `.all(... LIMIT ?)`) before any
+ * await, so no open SQLite iterator holds the single better-sqlite3 connection
+ * busy across a yield (which would make a concurrent appendEvent INSERT throw). */
+export const REPLAY_CHUNK_ROWS = 512;
+
+/** E3: cap on bytes a single LIVE SSE client may have buffered (res.writableLength)
+ * before broadcast() treats it as wedged and destroys the connection. A half-open
+ * socket or a reader that has stopped consuming otherwise accumulates every
+ * broadcast frame in runner RSS until the pod OOMs — which surfaces to users as
+ * "the session died". 4 MiB is far above any single frame or a healthy client's
+ * transient backlog, so only a genuinely stuck reader trips it; it then reconnects
+ * and replays from its last seq. The REPLAY path does NOT use this cap: replay
+ * awaits `drain`, which is its own backpressure. */
+export const MAX_SSE_CLIENT_BUFFER_BYTES = 4 * 1024 * 1024;
 
 /** Keep at most this many most-recent events (one session per pod). 0 disables
  * retention — the default, because pruning truncates after=0 replay history.
@@ -172,6 +201,19 @@ function getDb(): Database.Database {
   return db!;
 }
 
+/**
+ * Test-only: point the module at an already-opened database (or null to reset)
+ * and clear the connected-client set, so the SSE fan-out + async replay can be
+ * exercised against a temp DB. The production EVENTS_DB_PATH is hard-coded under
+ * /session (unwritable off-pod), so tests build their own DB and inject it here
+ * rather than importing that path. Not part of the runner API — internal runner
+ * code never calls it, and it is unreachable over HTTP.
+ */
+export function __setEventLogForTest(d: Database.Database | null): void {
+  db = d;
+  clients.clear();
+}
+
 /** Checkpoint the WAL and close the DB on shutdown so no events are lost. */
 export function closeEventLog(): void {
   if (!db) return;
@@ -223,21 +265,30 @@ export function appendEvent(
   return evt;
 }
 
-/** Read all events for a session with seq > afterSeq, ordered by seq. */
+/** A raw event row as stored in SQLite (payload is still a JSON string). */
+interface EventRow {
+  seq: number;
+  time: string;
+  session_id: string;
+  turn_id: string | null;
+  type: string;
+  payload: string;
+}
+
+/**
+ * Read all events for a session with seq > afterSeq, ordered by seq, parsing each
+ * payload into an Event. NOTE: this materializes the whole matching range in
+ * memory — the hot replay path (attachSseClient → streamReplayThenAttach) does
+ * NOT use it; it streams raw rows in bounded chunks (E2). Kept for callers that
+ * want fully-decoded events.
+ */
 export function readEventsAfter(sessionId: string, afterSeq: number): Event[] {
   const d = getDb();
   const rows = d
     .prepare(
       'SELECT seq, time, session_id, turn_id, type, payload FROM events WHERE session_id = ? AND seq > ? ORDER BY seq ASC',
     )
-    .all(sessionId, afterSeq) as Array<{
-    seq: number;
-    time: string;
-    session_id: string;
-    turn_id: string | null;
-    type: string;
-    payload: string;
-  }>;
+    .all(sessionId, afterSeq) as EventRow[];
   return rows.map((r) => ({
     seq: r.seq,
     time: r.time,
@@ -292,16 +343,133 @@ function broadcast(evt: Event): void {
   // Serialize the frame once — it is identical for every client.
   const frame = sseFrame(evt);
   for (const client of clients) {
+    // E2: a client still replaying history receives its persisted events through
+    // the replay chunk-reader, not the live broadcast. Skipping it here is what
+    // keeps replay and live from interleaving (and prevents duplicates): an event
+    // appended DURING replay is persisted BEFORE this broadcast (appendEvent's
+    // append-before-stream invariant), so the replay reader picks it up from
+    // SQLite by seq; the client is switched live only at the replay handoff. A
+    // seq-0 persist-failure event (B4) is never in the log, so a client mid-replay
+    // simply doesn't see that one — exactly as under the old synchronous replay,
+    // where no appendEvent could run mid-replay at all; every already-attached
+    // (non-replaying) client still gets it live.
+    if (client.replaying) continue;
     if (!shouldDeliver(evt.seq, client.afterSeq)) continue;
-    writeSse(client.res, frame);
+    const res = client.res;
+    if (res.writableEnded || res.destroyed) continue;
+    // E3: evict a client that has buffered more than the cap. Ignoring
+    // res.write()'s backpressure signal lets a wedged reader accumulate every
+    // frame in runner RSS until the pod OOMs; destroy it instead (a healthy
+    // client reconnects and replays from its last seq). Only the LIVE path caps
+    // this way — replay awaits `drain`, which is its own backpressure.
+    if (res.writableLength > MAX_SSE_CLIENT_BUFFER_BYTES) {
+      console.error(
+        `broadcast: SSE client buffered ${res.writableLength}B > ${MAX_SSE_CLIENT_BUFFER_BYTES}B cap; ` +
+          'destroying wedged stream (it can reconnect and replay from its last seq)',
+      );
+      res.destroy();
+      client.cleanup();
+      continue;
+    }
+    res.write(frame);
   }
 }
 
-/** Send historical replay to a freshly connected client (seq > afterSeq). */
-function replayTo(client: SseClient, sessionId: string): void {
-  const events = readEventsAfter(sessionId, client.afterSeq);
-  for (const evt of events) {
-    writeSse(client.res, sseFrame(evt));
+/**
+ * E2: build an SSE `data:` frame directly from a raw event row, WITHOUT
+ * JSON.parse-ing the payload and re-stringifying the whole event. The payload
+ * column already holds a JSON document (appendEvent stored JSON.stringify(payload)),
+ * so it is spliced in verbatim. Field order and the omit-turnId-when-NULL rule
+ * match how a live Event serializes via sseFrame → JSON.stringify (seq, time,
+ * sessionId, turnId?, type, payload), so replay and live frames are byte-identical
+ * for the same event. Because JSON.stringify escapes embedded newlines, the frame
+ * stays a single `data:` line, which the Go client's SSE scanner requires.
+ */
+function rawFrame(row: EventRow): string {
+  const turnPart = row.turn_id != null ? `"turnId":${JSON.stringify(row.turn_id)},` : '';
+  return (
+    `data: {"seq":${row.seq},"time":${JSON.stringify(row.time)},` +
+    `"sessionId":${JSON.stringify(row.session_id)},${turnPart}` +
+    `"type":${JSON.stringify(row.type)},"payload":${row.payload}}\n\n`
+  );
+}
+
+/** Resolve on the socket's next `drain`, or immediately if it closes/errors —
+ * so the replay loop unblocks and then notices the disconnect and aborts. */
+function onceDrainOrClose(res: ServerResponse): Promise<void> {
+  return new Promise((resolve) => {
+    const done = (): void => {
+      res.off('drain', done);
+      res.off('close', done);
+      res.off('error', done);
+      resolve();
+    };
+    res.once('drain', done);
+    res.once('close', done);
+    res.once('error', done);
+  });
+}
+
+/** Yield a macrotask so a large replay can't monopolize the event loop. */
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+/**
+ * E2: stream historical replay to a freshly attached client in bounded chunks,
+ * then atomically hand the client over to the live tail.
+ *
+ * Correctness rests on appendEvent's append-before-stream invariant (persist to
+ * SQLite, THEN broadcast) plus a synchronous handoff:
+ *   - The client is in `clients` from attach time (so idle detection / the M33
+ *     cap see it immediately) but carries replaying=true, so broadcast() skips it
+ *     for every live event during replay — no interleave, no duplicate.
+ *   - Each chunk is read with `.all(... LIMIT ?)` (fully materialized, no open
+ *     iterator held across an await) starting from a cursor; rows are written in
+ *     ascending seq; the cursor advances to the last written seq. An event
+ *     appended during replay has a seq greater than everything read so far, so a
+ *     later chunk read picks it up — delivered exactly once, in order, via replay.
+ *   - When a chunk read returns zero rows the client is caught up. The handoff —
+ *     set afterSeq=cursor, replaying=false, write `: replay-complete` — runs in
+ *     ONE synchronous tick with NO await between the zero-row read and the flip,
+ *     so no appendEvent can slip in unseen: anything appended after the handoff
+ *     has seq > cursor and is delivered live by broadcast().
+ * Aborts on disconnect (isCancelled / socket closed) at every iteration so a
+ * client that leaves mid-replay stops the loop and never gets re-registered.
+ */
+async function streamReplayThenAttach(
+  client: SseClient,
+  sessionId: string,
+  isCancelled: () => boolean,
+): Promise<void> {
+  const d = getDb();
+  const stmt = d.prepare(
+    'SELECT seq, time, session_id, turn_id, type, payload FROM events ' +
+      'WHERE session_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?',
+  );
+  const res = client.res;
+  let cursor = client.afterSeq;
+
+  for (;;) {
+    if (isCancelled() || res.writableEnded || res.destroyed) return;
+    const rows = stmt.all(sessionId, cursor, REPLAY_CHUNK_ROWS) as EventRow[];
+    if (rows.length === 0) {
+      // Handoff — MUST stay synchronous (no await) through the end of this block.
+      client.afterSeq = cursor;
+      client.replaying = false;
+      writeSse(res, ': replay-complete\n\n');
+      return;
+    }
+    for (const row of rows) {
+      if (isCancelled() || res.writableEnded || res.destroyed) return;
+      const ok = res.write(rawFrame(row));
+      cursor = row.seq;
+      // Replay backpressure: let the socket drain before queueing more (this IS
+      // the replay path's flow control — it never uses the E3 destroy cap).
+      if (!ok) await onceDrainOrClose(res);
+    }
+    // Yield between chunks so live turns / health checks keep flowing.
+    await yieldToEventLoop();
   }
 }
 
@@ -343,15 +511,12 @@ export function attachSseClient(
     }
   }, 30_000);
 
-  const client: SseClient = { res, afterSeq, passive };
+  // E2: register the client immediately (so idle detection and the M33 cap count
+  // it right away — RV6) but mark it replaying, so broadcast() withholds live
+  // events until the async replay catches it up and writes `: replay-complete`.
+  const client: SseClient = { res, afterSeq, passive, replaying: true, cleanup: () => {} };
   clients.add(client);
   onClientsChanged?.();
-  replayTo(client, sessionId);
-  // Replay/live boundary (Workstream C): replayTo is synchronous, so this comment
-  // lands immediately after the last historical frame and before any live event
-  // can be broadcast. The CLI surfaces it as a stream.live marker so the TUI knows
-  // the catch-up is done and stops showing "loading transcript…".
-  writeSse(res, ': replay-complete\n\n');
 
   let cleanedUp = false;
   const cleanup = (): void => {
@@ -368,8 +533,21 @@ export function attachSseClient(
       }
     }
   };
+  client.cleanup = cleanup;
   res.on('close', cleanup);
   res.on('error', cleanup);
+
+  // Stream history in bounded chunks, then hand off to the live tail. The handoff
+  // writes the `: replay-complete` boundary the CLI surfaces as a stream.live
+  // marker (TUI stops showing "loading transcript…"). Kicked off async so a long
+  // replay yields to the event loop instead of blocking it. A replay that throws
+  // (e.g. DB closed under a disconnecting client) must not become an unhandled
+  // rejection that crashes the runner, so it falls through to cleanup.
+  void streamReplayThenAttach(client, sessionId, () => cleanedUp).catch((err) => {
+    console.error(`attachSseClient: replay failed for ${sessionId}:`, err);
+    cleanup();
+  });
+
   return cleanup;
 }
 
