@@ -271,6 +271,21 @@ test('a tool the guardrail blocks (errored, never running) is still audited', ()
   assert.equal(audited[0].tool, 'bash');
 });
 
+// ORACLE (H6): opencode tool output is capped at the emit site with the same
+// capToolOutput the claude path uses — an uncapped result would bloat the
+// SQLite log, the SSE stream, and the TUI expansion alike.
+test('oversized opencode tool output is capped like the claude path', () => {
+  const { emit, events } = capture();
+  const m = createOpencodeTurnMapper(SID, emit);
+  m.handle(messageUpdated('assistant', ASSISTANT));
+  events.length = 0;
+  m.handle(toolPart('t1', 'running', {}));
+  m.handle(toolPart('t1', 'completed', { output: 'x'.repeat(200 * 1024) }));
+  const out = events.find((e) => e.type === 'tool.completed')?.payload.output as string;
+  assert.ok(out.length < 100 * 1024, `output not capped: ${out.length} bytes`);
+  assert.ok(out.includes('bytes truncated'), 'expected the truncation marker');
+});
+
 test('a re-sent terminal tool part fires tool.completed only once', () => {
   const { emit, events } = capture();
   const m = createOpencodeTurnMapper(SID, emit);

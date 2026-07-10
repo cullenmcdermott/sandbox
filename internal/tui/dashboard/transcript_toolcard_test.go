@@ -163,6 +163,102 @@ func TestToolCardDiffPreservedAfterApproval(t *testing.T) {
 	}
 }
 
+// TestExpandedOutputSanitized (H4): control sequences in captured output must
+// not survive into the frame — cursor movement / erase-line would execute
+// inside the composited frame and smear the transcript. CR progress rewrites
+// collapse to their final state; SGR color runs survive (RemapANSI maps them).
+func TestExpandedOutputSanitized(t *testing.T) {
+	m := toolCardTM(t)
+	out := "downloading 10%\rdownloading 100%\n\x1b[1A\x1b[2Kdone \x1b[32mok\x1b[0m\x1b]0;title\x07"
+	c := &toolCard{tool: "Bash", arg: "dl", status: toolOK, summary: "exit 0", output: out, expanded: true}
+	got := m.renderToolCard(c, 60)
+	if strings.Contains(got, "\r") {
+		t.Errorf("expanded card leaked a CR:\n%q", got)
+	}
+	for _, esc := range []string{"\x1b[1A", "\x1b[2K", "\x1b]0;"} {
+		if strings.Contains(got, esc) {
+			t.Errorf("expanded card leaked control sequence %q:\n%q", esc, got)
+		}
+	}
+	plain := stripANSICodes(got)
+	if strings.Contains(plain, "downloading 10%") || !strings.Contains(plain, "downloading 100%") {
+		t.Errorf("CR rewrite did not keep only the final line state:\n%q", plain)
+	}
+	if !strings.Contains(plain, "ok") {
+		t.Errorf("SGR-styled text was lost by sanitization:\n%q", plain)
+	}
+}
+
+// TestExpandedOutputTabsExpanded (H5): tabs measure width 0 in lipgloss but
+// render up to 8 columns in a terminal, so they must become spaces before
+// truncation for the no-overflow budget to hold — both for captured output
+// and for diff lines (via styleDiffLine).
+func TestExpandedOutputTabsExpanded(t *testing.T) {
+	m := toolCardTM(t)
+	c := &toolCard{tool: "Bash", arg: "cat", status: toolOK, summary: "exit 0",
+		output: "\tindented\nx\ty", expanded: true}
+	got := m.renderToolCard(c, 60)
+	if strings.Contains(got, "\t") {
+		t.Errorf("expanded output leaked a raw tab:\n%q", got)
+	}
+	plain := stripANSICodes(got)
+	if !strings.Contains(plain, "        indented") {
+		t.Errorf("leading tab was not expanded to the 8-column stop:\n%q", plain)
+	}
+	if !strings.Contains(plain, "x       y") {
+		t.Errorf("mid-line tab was not expanded to the next stop:\n%q", plain)
+	}
+
+	input := json.RawMessage(`{"file_path":"a.go","old_string":"\tif x {","new_string":"\tif y {"}`)
+	d := &toolCard{tool: "Edit", arg: "a.go", input: input, status: toolOK, expanded: true}
+	if got := m.renderToolCard(d, 60); strings.Contains(got, "\t") {
+		t.Errorf("expanded diff leaked a raw tab:\n%q", got)
+	}
+}
+
+// TestToggleSkipsInexpandableCards (H7): ctrl+o must not flip a card that has
+// nothing to reveal — that stranded expanded=true, popping the card open by
+// itself when a later completion delivered output. The toggle skips to the
+// most recent expandable card instead; collapse of an already-open card
+// always works.
+func TestToggleSkipsInexpandableCards(t *testing.T) {
+	m := toolCardTM(t)
+	m.startToolCard("Bash", "make")
+	m.finishToolCard(toolOK, "3 lines", "Bash", "one\ntwo\nthree", "")
+	expandable := m.blocks[len(m.blocks)-1]
+	// A newer card with nothing to reveal: no output, no diff, arg fits in full.
+	m.startToolCard("Bash", "true")
+	m.finishToolCard(toolOK, "done", "Bash", "", "")
+	bare := m.blocks[len(m.blocks)-1]
+
+	if !m.toggleLatestToolCard() {
+		t.Fatal("toggle found no card; expected it to skip to the expandable one")
+	}
+	if bare.tool.expanded {
+		t.Error("content-less card was toggled")
+	}
+	if !expandable.tool.expanded {
+		t.Error("expandable card was not toggled")
+	}
+	if !m.toggleLatestToolCard() {
+		t.Fatal("second toggle found no card")
+	}
+	if expandable.tool.expanded {
+		t.Error("second toggle did not collapse the expanded card")
+	}
+}
+
+// TestToggleNoExpandableCardFallsThrough (H7): when every card is content-less
+// the toggle reports false so ctrl+o falls through to $EDITOR composition.
+func TestToggleNoExpandableCardFallsThrough(t *testing.T) {
+	m := toolCardTM(t)
+	m.startToolCard("Bash", "true")
+	m.finishToolCard(toolOK, "done", "Bash", "", "")
+	if m.toggleLatestToolCard() {
+		t.Error("toggle claimed a card with nothing to expand")
+	}
+}
+
 // TestToolCardNoOverflowNarrow is the §1c construction guarantee: at narrow
 // widths the two-line layout (collapsed AND expanded) budgets from the measured
 // remaining width and never renders a line wider than the terminal.

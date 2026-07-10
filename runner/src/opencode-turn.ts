@@ -35,6 +35,7 @@ import type { Event, Part, AssistantMessage } from '@opencode-ai/sdk';
 
 import type { Agent } from './agent.js';
 import { appendEvent } from './events.js';
+import { capToolOutput } from './mapping.js';
 import { appendAudit } from './audit.js';
 import { getRegistry, type RunnerConfig } from './session.js';
 import type { EventType } from './types.js';
@@ -310,7 +311,11 @@ export function createOpencodeTurnMapper(ocSession: string, emit: Emit, audit?: 
         if ((st.status === 'completed' || st.status === 'error') && !toolSettled.has(part.id)) {
           toolSettled.add(part.id);
           if (st.status === 'completed') {
-            emit('tool.completed', { tool: part.tool, output: st.output, toolUseId: part.callID });
+            // Cap the captured output at the source, same as the claude path
+            // (mapping.ts) — an uncapped opencode result would bloat the SQLite
+            // log, the SSE stream, and the TUI's ctrl+o expansion alike (H6).
+            const output = typeof st.output === 'string' ? capToolOutput(st.output) : st.output;
+            emit('tool.completed', { tool: part.tool, output, toolUseId: part.callID });
           } else {
             emit('tool.failed', { tool: part.tool, error: st.error, toolUseId: part.callID });
           }

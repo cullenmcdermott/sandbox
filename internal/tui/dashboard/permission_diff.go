@@ -48,8 +48,10 @@ func (m *TranscriptModel) buildPermissionBox(width int) string {
 		shown := condenseDiff(p.diffLines, maxDiff)
 		for _, l := range shown {
 			// styleDiffLine (transcript_render.go) is shared with the expanded tool
-			// card so both surfaces color the diff identically.
-			lines = append(lines, styleDiffLine(truncate(l, max(4, width-6))))
+			// card so both surfaces color the diff identically. Style before
+			// truncating: styleDiffLine expands tabs (H5), and truncating first
+			// would measure the pre-expansion width and overflow the box.
+			lines = append(lines, truncate(styleDiffLine(l), max(4, width-6)))
 		}
 	}
 

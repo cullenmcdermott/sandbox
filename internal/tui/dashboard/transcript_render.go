@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -502,16 +503,9 @@ func (m *TranscriptModel) renderToolCard(c *toolCard, width int) string {
 	head := lipgloss.NewStyle().Foreground(theme.TextSecondary).Render(name)
 	// argTruncated records whether the head could not show the argument in full,
 	// so expansion only offers to reveal it when there is actually more to see.
-	argTruncated := false
-	if c.arg != "" {
-		fullArg := collapseSpaces(c.arg)
-		if argBudget := avail - lipgloss.Width(name) - 2; argBudget >= 3 {
-			shown := truncate(fullArg, argBudget)
-			head += lipgloss.NewStyle().Foreground(theme.TextMuted).Render("(" + shown + ")")
-			argTruncated = shown != fullArg
-		} else {
-			argTruncated = true // no room to show the arg at all
-		}
+	argShown, argTruncated := headArg(c.arg, avail-lipgloss.Width(name)-2)
+	if argShown != "" {
+		head += lipgloss.NewStyle().Foreground(theme.TextMuted).Render("(" + argShown + ")")
 	}
 	headLine := bullet + " " + head
 	if lipgloss.Width(headLine) > width {
@@ -566,6 +560,42 @@ func (m *TranscriptModel) renderToolCard(c *toolCard, width int) string {
 	return strings.Join(lines, "\n")
 }
 
+// headArg budgets a tool card's argument for the "Name(arg)" head line: the
+// collapsed arg ellipsized to budget columns, or "" with truncated=true when
+// budget < 3 leaves no room to show it at all. truncated is the signal that
+// expansion has more of the argument to reveal — shared by renderToolCard and
+// toolCardExpandable so the ctrl+o hint, the toggle gate (H7), and the
+// expanded arg-reveal can never disagree.
+func headArg(arg string, budget int) (shown string, truncated bool) {
+	if arg == "" {
+		return "", false
+	}
+	if budget < 3 {
+		return "", true
+	}
+	full := collapseSpaces(arg)
+	shown = truncate(full, budget)
+	return shown, shown != full
+}
+
+// toolCardExpandable reports whether ctrl+o would reveal anything for c at the
+// transcript's current render width — the same width math and toolExpandBody
+// call the renderer makes (renderItem's blockToolCard case), so a card whose
+// elbow shows no expand hint is also not toggleable (H7).
+func (m *TranscriptModel) toolCardExpandable(c *toolCard) bool {
+	w := m.width - 2 - gutterInset
+	if w < 10 {
+		w = 10
+	}
+	nameStr := c.tool
+	if nameStr == "" {
+		nameStr = "tool"
+	}
+	name := truncate(nameStr, max(1, w-2))
+	_, argTruncated := headArg(c.arg, w-2-lipgloss.Width(name)-2)
+	return len(m.toolExpandBody(c, w-elbowChromeW, argTruncated)) > 0
+}
+
 // tool-card expansion caps: the condensed edit-diff line cap, and the head/tail
 // line window for captured output so a huge dump can't blow up a single card.
 const (
@@ -617,26 +647,156 @@ func (m *TranscriptModel) toolExpandBody(c *toolCard, width int, argTruncated bo
 // clampOutputLines splits captured tool output into display lines, keeping the
 // first toolExpandHeadLines and last toolExpandTailLines with a "… N lines
 // hidden …" marker between them when longer. Trailing blank lines are trimmed.
+// Output is sanitized for in-frame display (H4) and tabs are expanded (H5) so
+// the truncation backstop downstream sees the real display width.
 func clampOutputLines(out string) []string {
-	out = strings.TrimRight(out, "\n")
+	out = strings.TrimRight(sanitizeToolOutput(out), "\n")
 	if out == "" {
 		return nil
 	}
 	lines := strings.Split(out, "\n")
-	if len(lines) <= toolExpandHeadLines+toolExpandTailLines+1 {
-		return lines
+	if len(lines) > toolExpandHeadLines+toolExpandTailLines+1 {
+		hidden := len(lines) - toolExpandHeadLines - toolExpandTailLines
+		res := make([]string, 0, toolExpandHeadLines+toolExpandTailLines+1)
+		res = append(res, lines[:toolExpandHeadLines]...)
+		res = append(res, "… "+formatInt(hidden)+" lines hidden …")
+		res = append(res, lines[len(lines)-toolExpandTailLines:]...)
+		lines = res
 	}
-	hidden := len(lines) - toolExpandHeadLines - toolExpandTailLines
-	res := make([]string, 0, toolExpandHeadLines+toolExpandTailLines+1)
-	res = append(res, lines[:toolExpandHeadLines]...)
-	res = append(res, "… "+formatInt(hidden)+" lines hidden …")
-	res = append(res, lines[len(lines)-toolExpandTailLines:]...)
-	return res
+	for i, l := range lines {
+		lines[i] = expandTabs(l)
+	}
+	return lines
+}
+
+// sanitizeToolOutput normalizes captured terminal output for in-frame display
+// (H4): CRLF becomes LF, a lone CR keeps only the text after the last one on
+// its line (the final state a terminal shows for progress-bar rewrites), and
+// every escape sequence except SGR color runs is dropped — cursor movement and
+// erase-line controls would otherwise execute inside the composited frame and
+// smear the transcript. SGR survives for kit.RemapANSI to map onto the palette.
+func sanitizeToolOutput(s string) string {
+	if !strings.ContainsAny(s, "\r\x1b\b") {
+		return s
+	}
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		l = strings.TrimRight(l, "\r")
+		if j := strings.LastIndexByte(l, '\r'); j >= 0 {
+			l = l[j+1:]
+		}
+		lines[i] = stripNonSGR(l)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// stripNonSGR removes every ESC-introduced sequence except SGR (ESC[…m) from a
+// single line, plus any stray C0 control bytes other than tab (tabs are
+// expanded later by expandTabs).
+func stripNonSGR(s string) string {
+	if !strings.ContainsAny(s, "\x1b\a\b\v\f") {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		c := s[i]
+		if c == '\x1b' {
+			j := ansiSeqEnd(s, i)
+			if j-i >= 3 && s[i+1] == '[' && s[j-1] == 'm' {
+				b.WriteString(s[i:j]) // SGR survives
+			}
+			i = j
+			continue
+		}
+		if c < 0x20 && c != '\t' {
+			i++
+			continue
+		}
+		b.WriteByte(c)
+		i++
+	}
+	return b.String()
+}
+
+// ansiSeqEnd returns the index just past the escape sequence starting at
+// s[i] == ESC: CSI runs to their final byte (0x40–0x7e), string-introducer
+// sequences (OSC/DCS/APC/PM/SOS) to BEL or ST, anything else as a 2-byte pair.
+func ansiSeqEnd(s string, i int) int {
+	j := i + 1
+	if j >= len(s) {
+		return j
+	}
+	switch s[j] {
+	case '[':
+		j++
+		for j < len(s) && (s[j] < 0x40 || s[j] > 0x7e) {
+			j++
+		}
+		if j < len(s) {
+			j++
+		}
+		return j
+	case ']', 'P', '_', '^', 'X':
+		j++
+		for j < len(s) {
+			if s[j] == '\a' {
+				return j + 1
+			}
+			if s[j] == '\x1b' && j+1 < len(s) && s[j+1] == '\\' {
+				return j + 2
+			}
+			j++
+		}
+		return j
+	default:
+		return j + 1
+	}
+}
+
+// expandTabs replaces tabs with spaces to the next 8-column stop (H5).
+// lipgloss.Width measures "\t" as 0 but terminals expand it, so a tab that
+// survives into the frame renders up to 8 columns wider than every width
+// budget downstream believes. Columns are counted ANSI-aware but per-rune
+// (a wide rune drifts a stop by one column — cosmetic).
+func expandTabs(s string) string {
+	if !strings.Contains(s, "\t") {
+		return s
+	}
+	const tabStop = 8
+	var b strings.Builder
+	b.Grow(len(s) + (tabStop-1)*strings.Count(s, "\t"))
+	col := 0
+	for i := 0; i < len(s); {
+		switch s[i] {
+		case '\x1b': // zero-width escape: copy through
+			j := ansiSeqEnd(s, i)
+			b.WriteString(s[i:j])
+			i = j
+		case '\t':
+			n := tabStop - col%tabStop
+			for k := 0; k < n; k++ {
+				b.WriteByte(' ')
+			}
+			col += n
+			i++
+		default:
+			_, size := utf8.DecodeRuneInString(s[i:])
+			b.WriteString(s[i : i+size])
+			col++
+			i += size
+		}
+	}
+	return b.String()
 }
 
 // styleDiffLine colors a unified-diff line by its prefix ("+" add, "−" del, "…"
 // elision, " " context). Shared by the permission box and the expanded tool card.
+// Tabs are expanded first (H5) so callers' truncation sees the real width —
+// tab-indented diff hunks (every Go file) otherwise overflow the budget.
 func styleDiffLine(l string) string {
+	l = expandTabs(l)
 	var c color.Color
 	switch {
 	case strings.HasPrefix(l, "+"):

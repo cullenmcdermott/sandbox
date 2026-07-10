@@ -350,6 +350,105 @@ test('stream_event content_block_delta(text) → message.delta', () => {
   assert.deepEqual(events[0].payload, { role: 'assistant', content: 'partial', delta: true });
 });
 
+// ORACLE (D6): input_json_delta events are attributed to the tool_use block
+// opened at their content-block index — toolUseId + parentToolUseId ride the
+// tool.delta payload so the client can target the exact card instead of
+// guessing "newest pending". Main-thread and subagent streams have independent
+// index spaces, so the same index must not cross-attribute.
+test('stream_event input_json_delta → tool.delta carries toolUseId + parentToolUseId', () => {
+  const { events, emit } = collector();
+  const streamTools = new Map<string, string>();
+  // Main-thread tool_use opens at index 1.
+  mapMessage(
+    asMsg({
+      type: 'stream_event',
+      event: {
+        type: 'content_block_start',
+        index: 1,
+        content_block: { type: 'tool_use', id: 'tu_main', name: 'Bash', input: {} },
+      },
+    }),
+    emit,
+    streamTools,
+  );
+  // A subagent's tool_use opens at the SAME index in its own stream.
+  mapMessage(
+    asMsg({
+      type: 'stream_event',
+      parent_tool_use_id: 'task_1',
+      event: {
+        type: 'content_block_start',
+        index: 1,
+        content_block: { type: 'tool_use', id: 'tu_child', name: 'Read', input: {} },
+      },
+    }),
+    emit,
+    streamTools,
+  );
+  mapMessage(
+    asMsg({
+      type: 'stream_event',
+      event: { type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{"cmd' } },
+    }),
+    emit,
+    streamTools,
+  );
+  mapMessage(
+    asMsg({
+      type: 'stream_event',
+      parent_tool_use_id: 'task_1',
+      event: { type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{"file' } },
+    }),
+    emit,
+    streamTools,
+  );
+  const deltas = events.filter((e) => e.type === 'tool.delta');
+  assert.equal(deltas.length, 2);
+  assert.equal(deltas[0].payload.toolUseId, 'tu_main');
+  assert.equal(deltas[0].payload.parentToolUseId, undefined);
+  assert.equal(deltas[1].payload.toolUseId, 'tu_child');
+  assert.equal(deltas[1].payload.parentToolUseId, 'task_1');
+});
+
+// ORACLE (D6): a non-tool block reusing a tool_use block's index clears the
+// stale attribution; a delta at that index degrades to id-less rather than
+// pointing at the wrong tool.
+test('stream_event index reuse by a text block clears the tool attribution', () => {
+  const { events, emit } = collector();
+  const streamTools = new Map<string, string>();
+  mapMessage(
+    asMsg({
+      type: 'stream_event',
+      event: {
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'tool_use', id: 'tu_old', name: 'Bash', input: {} },
+      },
+    }),
+    emit,
+    streamTools,
+  );
+  mapMessage(
+    asMsg({
+      type: 'stream_event',
+      event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+    }),
+    emit,
+    streamTools,
+  );
+  mapMessage(
+    asMsg({
+      type: 'stream_event',
+      event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: 'x' } },
+    }),
+    emit,
+    streamTools,
+  );
+  const delta = events.find((e) => e.type === 'tool.delta');
+  assert.ok(delta, 'expected a tool.delta');
+  assert.equal(delta!.payload.toolUseId, undefined, 'stale tool_use id must not survive index reuse');
+});
+
 // ORACLE: an unknown SDK message type emits nothing and returns {}.
 test('unknown message type → no events', () => {
   const { events, emit } = collector();

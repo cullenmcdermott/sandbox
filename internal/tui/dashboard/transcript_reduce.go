@@ -159,14 +159,21 @@ func (m *TranscriptModel) drainPendingTools(summary string) {
 // toggleLatestToolCard flips the expansion of the most recent flat tool card
 // (ctrl+o on an empty composer). Expanding reveals the card's available content —
 // the edit diff, the captured output, or the full argument — under the elbow.
-// Bumps the card's version so the list re-renders, and returns whether a card was
-// toggled (false when there is no tool card to expand, so ctrl+o falls through to
-// $EDITOR composition). Per-card focus navigation is a follow-up; toggling the
-// latest card is the smallest correct affordance.
+// Cards with nothing to expand are skipped (H7): toggling one was a silent
+// no-op that stranded expanded=true, making the card pop open by itself when a
+// later tool.completed delivered output. Already-expanded cards stay
+// toggleable regardless, so collapse always works. Bumps the card's version so
+// the list re-renders, and returns whether a card was toggled (false when
+// there is no expandable card, so ctrl+o falls through to $EDITOR
+// composition). Per-card focus navigation is a follow-up; toggling the latest
+// expandable card is the smallest correct affordance.
 func (m *TranscriptModel) toggleLatestToolCard() bool {
 	for i := len(m.blocks) - 1; i >= 0; i-- {
 		b := m.blocks[i]
 		if b.kind == blockToolCard && b.tool != nil {
+			if !b.tool.expanded && !m.toolCardExpandable(b.tool) {
+				continue
+			}
 			b.tool.expanded = !b.tool.expanded
 			b.Bump()
 			m.syncItems()
@@ -622,14 +629,28 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 	case session.EventToolDelta:
 		// tool.delta streams the tool's INPUT JSON as the model types it
 		// (input_json_delta) — it is NOT tool output. Show it as a live preview
-		// on the newest running card so the argument materializes in real time;
+		// on the card it belongs to so the argument materializes in real time;
 		// the finalized tool.started (deduped onto the same card) overwrites arg
-		// with the cleanly-parsed value. The event carries no toolUseId, so we
-		// target the most-recently-started card.
+		// with the cleanly-parsed value. The runner attributes each delta to its
+		// tool_use block (D6), so target by id; a parented (subagent-child)
+		// delta whose id has no flat card is dropped rather than animating onto
+		// a main-thread card's argument. Only an id-less delta (pre-D6 runner)
+		// falls back to the newest-pending heuristic.
 		var p session.ToolPayload
 		_ = json.Unmarshal(ev.Payload, &p)
-		if p.PartialJSON != "" && len(m.pendingTools) > 0 {
-			idx := m.pendingTools[len(m.pendingTools)-1]
+		if p.PartialJSON != "" {
+			idx := -1
+			switch {
+			case p.ToolUseID != "":
+				if i, ok := m.flatTools[p.ToolUseID]; ok {
+					idx = i
+				}
+			case p.ParentToolUseID != "":
+				// Parented but id-less: never guess — the newest pending flat
+				// card is a main-thread card by construction.
+			case len(m.pendingTools) > 0:
+				idx = m.pendingTools[len(m.pendingTools)-1]
+			}
 			if idx >= 0 && idx < len(m.blocks) && m.blocks[idx].tool != nil {
 				c := m.blocks[idx].tool
 				// Accumulate the fragments in a Builder — never string concat

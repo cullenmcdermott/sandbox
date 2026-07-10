@@ -37,7 +37,7 @@ import type { Agent } from './agent.js';
 import { CLAUDE_CONFIG_DIR } from './types.js';
 import { TITLE_PROMPT, sanitizeTitle, shouldGenerateTitle } from './title.js';
 import { SessionGrants, resolutionOutcome } from './grants.js';
-import { mapMessage as mapMessagePure } from './mapping.js';
+import { mapMessage as mapMessagePure, type StreamToolIndex } from './mapping.js';
 import { startTurnTrace } from './trace.js';
 
 // Tool-name-level "allow for this session" grants (permission scope:'session').
@@ -625,6 +625,9 @@ export async function runTurn(
       const options = buildOptions(cfg, turnId, clientResume, allowedToolsOverride, mode, model, effort, abort);
       const usedResume = options.resume;
       const q: Query = query({ prompt, options });
+      // Per-attempt content-block→tool_use-id attribution for tool.delta (D6);
+      // fresh per query() because block indexes restart with the stream.
+      const streamTools: StreamToolIndex = new Map();
       let rateLimitsFetched = false;
       let modelsFetched = false;
       let staleResume = false;
@@ -642,7 +645,7 @@ export async function runTurn(
             staleResume = true;
             continue;
           }
-          await mapMessage(msg, sessionId, turnId);
+          await mapMessage(msg, sessionId, turnId, streamTools);
           // Fetch the claude.ai plan rate-limit windows once per turn, triggered
           // by the SDK init message. The control channel (stdin) is open from
           // init until the result message closes it (single-user-turn mode), so
@@ -988,9 +991,18 @@ async function emitWorkspaceStatus(sessionId: string, turnId: string): Promise<v
 // and apply the registry-affecting observations it returns: persist the model
 // into session.json, capture the Claude session id, and emit workspace.status
 // (which shells out to git) at session start and after a completed turn.
-async function mapMessage(msg: SDKMessage, sessionId: string, turnId: string): Promise<void> {
+async function mapMessage(
+  msg: SDKMessage,
+  sessionId: string,
+  turnId: string,
+  streamTools?: StreamToolIndex,
+): Promise<void> {
   const reg = getRegistry();
-  const result = mapMessagePure(msg, (type, payload) => appendEvent(sessionId, turnId, type, payload));
+  const result = mapMessagePure(
+    msg,
+    (type, payload) => appendEvent(sessionId, turnId, type, payload),
+    streamTools,
+  );
   if (result.isInit) {
     // Persist the model into session.json so /status (and the dashboard list,
     // even when suspended) reports it (Seam C).

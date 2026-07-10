@@ -34,6 +34,41 @@ func newestToolCard(t *testing.T, m *TranscriptModel) *toolCard {
 	return m.blocks[idx].tool
 }
 
+// D6: an id-attributed tool.delta targets the exact card, not the newest
+// pending one; a parented (subagent-child) delta whose id has no flat card is
+// dropped rather than animating onto a main-thread card's argument.
+func TestToolDeltaTargetsCardByID(t *testing.T) {
+	m := d1Model(t)
+	toolStart(m, "Bash", "tu_a")
+	toolStart(m, "Write", "tu_b") // newest pending — the pre-D6 fallback target
+	cards := toolCards(m)
+	if len(cards) != 2 {
+		t.Fatalf("expected 2 cards, got %d", len(cards))
+	}
+	a, b := cards[0], cards[1]
+
+	m.handleEvent(session.Event{Type: session.EventToolDelta,
+		Payload: json.RawMessage(`{"partialJson":"{\"command\":\"make test\"}","toolUseId":"tu_a"}`)})
+	if !strings.Contains(a.arg, "make test") {
+		t.Errorf("id-attributed delta missed its card: arg=%q", a.arg)
+	}
+	if strings.Contains(b.arg, "make test") {
+		t.Errorf("delta leaked onto the newest pending card: arg=%q", b.arg)
+	}
+
+	// A subagent child's delta: id unknown to flatTools, parent set — dropped
+	// whether or not the child's own id rides along.
+	m.handleEvent(session.Event{Type: session.EventToolDelta,
+		Payload: json.RawMessage(`{"partialJson":"{\"file_path\":\"/child.go\"}","toolUseId":"tu_child","parentToolUseId":"task_1"}`)})
+	m.handleEvent(session.Event{Type: session.EventToolDelta,
+		Payload: json.RawMessage(`{"partialJson":"{\"file_path\":\"/child.go\"}","parentToolUseId":"task_1"}`)})
+	for _, c := range []*toolCard{a, b} {
+		if strings.Contains(c.arg, "child.go") {
+			t.Errorf("subagent-child delta animated onto a main-thread card (%s): arg=%q", c.tool, c.arg)
+		}
+	}
+}
+
 // E1 behavior pin: streaming several small tool.delta fragments onto a running
 // card still materializes a non-empty live arg preview, and the accumulation
 // buffer holds the full concatenated JSON (the path the finalized content reads).

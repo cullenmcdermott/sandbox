@@ -65,11 +65,27 @@ export function capToolOutput(s: string): string {
 }
 
 /**
+ * Per-turn streaming state: maps `${parentToolUseId}:${blockIndex}` → the
+ * tool_use id opened by content_block_start at that index, so input_json_delta
+ * events (which carry only the block index) can be attributed to the right
+ * tool card (D6). Keyed with the parent id because a subagent's stream and the
+ * main thread's interleave with independent content-block index spaces.
+ * Callers create one per turn and pass it to every mapMessage call.
+ */
+export type StreamToolIndex = Map<string, string>;
+
+function streamToolKey(parentToolUseId: string | undefined, index: number): string {
+  return `${parentToolUseId ?? ''}:${index}`;
+}
+
+/**
  * Map a single SDKMessage to normalized events via `emit`. Pure aside from the
  * emit callback: no I/O, no registry access, no sqlite. Returns the registry
  * observations the caller must apply (model, claude session id, init/completed).
+ * streamTools carries the per-turn content-block→tool_use-id attribution (D6);
+ * omitting it degrades tool.delta to id-less (pre-D6) behavior.
  */
-export function mapMessage(msg: SDKMessage, emit: EmitFn): MapResult {
+export function mapMessage(msg: SDKMessage, emit: EmitFn, streamTools?: StreamToolIndex): MapResult {
   switch (msg.type) {
     case 'system': {
       if (msg.subtype === 'init') {
@@ -111,6 +127,7 @@ export function mapMessage(msg: SDKMessage, emit: EmitFn): MapResult {
         msg.event,
         emit,
         (msg as { parent_tool_use_id?: string | null }).parent_tool_use_id ?? undefined,
+        streamTools,
       );
       return {};
     }
@@ -252,11 +269,20 @@ function handleStreamEvent(
   event: BetaRawContentBlockStartEvent | BetaRawContentBlockDeltaEvent | { type: string },
   emit: EmitFn,
   parentToolUseId?: string,
+  streamTools?: StreamToolIndex,
 ): void {
   switch (event.type) {
     case 'content_block_start': {
       const e = event as BetaRawContentBlockStartEvent;
       const block = e.content_block;
+      // Track (parent, index) → tool_use id for D6; overwrite/clear on every
+      // block start so a later message reusing the index can't inherit a stale
+      // id (indexes restart per assistant message within the stream).
+      if (block.type === 'tool_use') {
+        streamTools?.set(streamToolKey(parentToolUseId, e.index), (block as BetaToolUseBlock).id);
+      } else {
+        streamTools?.delete(streamToolKey(parentToolUseId, e.index));
+      }
       switch (block.type) {
         case 'text':
           emit('message.started', { role: 'assistant', content: '' });
@@ -293,7 +319,16 @@ function handleStreamEvent(
           emit('reasoning.delta', { content: delta.thinking, delta: true });
           break;
         case 'input_json_delta':
-          emit('tool.delta', { partialJson: delta.partial_json, delta: true });
+          // D6: attribute the streamed input to its tool_use block so the TUI
+          // can target the exact card instead of guessing "newest pending" —
+          // a subagent's streaming input otherwise animates onto a main-thread
+          // card's argument.
+          emit('tool.delta', {
+            partialJson: delta.partial_json,
+            delta: true,
+            toolUseId: streamTools?.get(streamToolKey(parentToolUseId, e.index)),
+            parentToolUseId,
+          });
           break;
         default:
           break;
