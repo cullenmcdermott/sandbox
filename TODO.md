@@ -24,11 +24,11 @@
 > [`docs/review-2026-07-07.md`](docs/review-2026-07-07.md) (bracketed ids like
 > `[A1]`/`[D1]`/`[H1]` point into it). The 2026-07-07 sweep is nearly
 > burned down — remaining: §1f the A1 `/proc` residual + the hook-shape
-> forward-compat item + [A3] SECURITY.md; §2b [D6] + [D7-D12]; §2c [H4-H7];
-> §1d [C3]-[C11]; §4 [E7-E10] + the older measure-first items; §10 [F3-F7].
-> *(Batches 1-5, 2026-07-08→09: [A1] [F1] [F2] [C2] · [D1] [D2] [D4]
+> forward-compat item + [A3] SECURITY.md; §2b [D7-D12]; §4 [E7-E10] + the
+> older measure-first items; §10 [F3-F7].
+> *(Batches 1-6, 2026-07-08→09: [A1] [F1] [F2] [C2] · [D1] [D2] [D4]
 > [B1-B4] · [C1] [H1] [H2/H3] · [E1] [E2] [E3] [E5] [E6] · [A2] [B5-B9]
-> [D3] [D5] [E4] — all in the done log.)*
+> [D3] [D5] [E4] · [H4-H7] [D6] [C3-C11] — all in the done log.)*
 >
 > **Opus-ready map:** §1c–§1d residuals, §2a–§2d, §4, §7a and the §5 GC
 > follow-ups carry pointers + fix direction — pick a cluster and go. Drafted,
@@ -88,19 +88,16 @@ row-model consolidation moved to §2a where it belongs.
 - [x] **[H2/H3] eviction side effects fixed — done 2026-07-09** (done log):
   armed `/loop`/`queuedPrompt` protected; eviction keeps the warm model;
   Busy rows stamped to watch baseline; lapse toast wording cause-agnostic.
-- [ ] **Re-create with a different account patches the Secret but not the Sandbox
-  env → auth breaks silently (MED) [C3].** `backend.go:391,444-488` vs the
-  `AlreadyExists` pod template (`buildEnv:1433-1461`). Patch the pod-template env
-  on the AlreadyExists path, or reject a shape-changing re-create.
-- [ ] **Assorted client reliability (LOW→MED-LOW) [C4-C11]:** observer connect to
-  opencode opens 3 forwards not 1 (switch order, `session.go:286-296`); ssh config
-  paths unquoted → spaced state dir breaks all sync (`ssh.go:123,134`); backgrounded
-  `CreateInputs`/reaper unbounded → hung mutagen wedges the first turn
-  (`session.go:458,506`); rollback can delete a pre-existing PVC (`backend.go:297-307`);
-  data race on `Session.projectPath` (`session.go:244-248`, trips `-race`);
-  `suspend` probe unbounded ~40s (`commands.go:97`); `models.Limit` sync-fetches
-  models.dev inside the reducer, freezes UI ~5s (`models.go:186-227`);
-  `IdleTimeout` override no-ops when a reaper already runs (`reaper.go:71-74`).
+- [x] **[C3] shape-changing re-create rejected — done 2026-07-09** (done log):
+  desired vs baked pod-template env compared (`anthropicEnvShape`) BEFORE any
+  Secret mutation; same-shape account swaps still patch in place. Supersedes
+  the old strip-on-account-removal behavior (which could brick resume).
+- [x] **[C4-C11] assorted client reliability — done 2026-07-09** (done log):
+  observer forwards 1 port not 3; ssh config paths quoted; background connect
+  phase bounded 60s with a timeout advisory; pre-existing PVC survives
+  rollback; `projectPath` race fixed; suspend probe capped 5s; `models.Limit`
+  refreshes models.dev async (never blocks the reducer); reaper replaced on
+  spec mismatch so `IdleTimeout`/`ReaperImage` overrides apply.
 
 - [ ] **Concurrent sessions on one project share one local sync endpoint, no
   dedup (LOW-MED).** Mutagen session name keys on SessionID only; two agents on
@@ -307,10 +304,11 @@ changes go through `schema/events.json` + `just gen` (never hand-edit `*.gen.*`)
 - [x] **[D5] opencode replay shows user prompts — done 2026-07-09** (done
   log): the turn adapter echoes the prompt as `message.* role:user`
   (Claude-parity path; existing reducer dedup prevents double-print).
-- [ ] **`tool.delta` carries no `toolUseId`/`parentToolUseId` → live input preview
-  attaches to the wrong card (MED) [D6].** `mapping.ts:295-297` drops the
-  in-scope `parentToolUseId`; the TUI targets the newest pending flat card. Thread
-  the ids and target by id. Distinct from gap 1 (text/thinking deltas).
+- [x] **[D6] tool.delta attributed by id — done 2026-07-09** (done log): the
+  mapper tracks `(parent, blockIndex) → tool_use id` per turn and stamps both
+  ids on every `tool.delta`; the TUI targets by `flatTools` and drops parented
+  deltas with no flat card. Distinct from gap 1 (text/thinking deltas), which
+  stays open.
 - [ ] **Event-model LOW residuals [D7-D12]:** hook-blocked tools emit two
   `tool.failed` (double FIFO pop, `claude.ts:302-306`); runner omits the schema's
   `required` `ToolPayload.tool` and never emits schematized `exitCode`
@@ -329,16 +327,10 @@ there. HIGH items are the at-a-glance tells; most are renderer-local.
 - [ ] **Tool-card follow-ups** (the two-line ⏺/⎿ idiom + ctrl+o expansion
   landed — done log): per-card focus/expand for older cards
   (space/toggleSubagents has the same latest-only gap); `⎿ exit 0 · 42 lines`
-  combo needs exit-code plumbing (§2b gap 5). **2026-07-07 regression residuals
-  from 9e1d03b** (detail [`docs/review-2026-07-07.md`](docs/review-2026-07-07.md)
-  §H): expanded output renders unsanitized `\r`/non-SGR control sequences into the
-  frame → smears the transcript (MED, new exposure; `transcript_render.go:536-560`,
-  strip in `clampOutputLines`/`toolExpandBody`) [H4]; tabs measure width 0 but
-  expand to 8 cols → expanded Go diffs overflow the budget
-  (`transcript_render.go:552`, `permission_diff.go:52`) [H5]; opencode tool output
-  is uncapped (`opencode-turn.ts:296`, cap only on the claude path
-  `mapping.ts:222`) [H6]; ctrl+o toggles content-less cards with no feedback +
-  strands `expanded=true` (`transcript_reduce.go:98-110`) [H7].
+  combo needs exit-code plumbing (§2b gap 5). *(The 2026-07-07 [H4-H7]
+  regression residuals — control-sequence smearing, tab overflow, uncapped
+  opencode output, ctrl+o stranding on content-less cards — all fixed
+  2026-07-09, done log.)*
 - [ ] **Kill the full-height `▌` role gutter bars; quiet user prompts (HIGH).**
   Colored bars down every message line + bold-green user text is the largest
   departure from CC's look. Assistant: single `⏺ ` bullet + 2-space hanging

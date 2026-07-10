@@ -958,3 +958,90 @@ orchestrator.
   their prompt too. The prompt-less observer path (external client owns
   input) is untouched. Tests: transcript_d5_test.go (replay order, no
   double-print, turn.failed payload), opencode-turn.test.ts echo pin.
+
+## 2026-07-09 — handoff-review batch 6 (§2c H4-H7, §2b D6, §1d C3-C11)
+
+Fable, inline (no fan-out — token-budget sensitivity); every fix carries a
+regression test; `just check` green end-to-end (incl. race-twice + e2e).
+
+- **§2c [H4] — expanded tool output sanitized (MED).** New
+  `sanitizeToolOutput` in `clampOutputLines`: CRLF→LF, lone-CR keeps only the
+  final line state (progress-bar rewrites), and `stripNonSGR` drops every
+  escape except SGR color runs (via a shared `ansiSeqEnd` scanner) — cursor-up
+  /erase-line sequences no longer execute inside the composited frame and
+  smear the transcript. SGR still flows to `kit.RemapANSI` for theming.
+  Test: TestExpandedOutputSanitized.
+- **§2c [H5] — tabs expanded before truncation (MED-LOW).** `expandTabs`
+  (ANSI-aware 8-column stops) applied in `clampOutputLines` and inside
+  `styleDiffLine`; `permission_diff.go` reordered to style-then-truncate so
+  the box budget sees post-expansion width. Covers expanded Edit diffs of
+  tab-indented (Go) files AND the pre-existing permission-box variant.
+  Test: TestExpandedOutputTabsExpanded.
+- **§2c [H7] — ctrl+o skips inexpandable cards (LOW).** `toggleLatestToolCard`
+  gates on new `toolCardExpandable` (same width math + `toolExpandBody` call
+  as the renderer, via the extracted `headArg` helper renderToolCard now
+  shares) — no more silently-swallowed ctrl+o or stranded `expanded=true`
+  popping a card open when output arrives later; falls through to $EDITOR
+  when nothing is expandable; collapse of an open card always works.
+  Tests: TestToggleSkipsInexpandableCards, TestToggleNoExpandableCardFallsThrough.
+- **§2c [H6] — opencode tool output capped (LOW).** `opencode-turn.ts` wraps
+  `st.output` in the same `capToolOutput` the claude path uses (64KB,
+  head+tail + truncation marker) at the emit site. Test: opencode-turn cap pin.
+- **§2b [D6] — tool.delta attributed by id (MED).** No schema change needed
+  (ToolPayload already carries the optional ids): `mapping.ts` tracks
+  `(parentToolUseId, blockIndex) → tool_use id` per turn (`StreamToolIndex`,
+  fresh per query() attempt in claude.ts; non-tool block starts clear a
+  reused index) and stamps `toolUseId`+`parentToolUseId` onto every
+  `tool.delta`. TUI targets the exact card via `flatTools`; a parented delta
+  with no flat card is DROPPED (subagent input no longer animates onto a
+  main-thread card's arg); only id-less (pre-D6 runner) deltas fall back to
+  newest-pending. Tests: mapping.test.ts (cross-stream attribution + index
+  reuse), TestToolDeltaTargetsCardByID.
+- **§1d [C3] — shape-changing re-create rejected (MED).** The pod template
+  bakes the credential env SHAPE (oauth vs api-key env var; per-session vs
+  shared source Secret) at first create. CreateSession now compares the
+  desired shape (`anthropicEnvShape`) against the existing Sandbox BEFORE
+  mutating the Secret and rejects mismatches with a destroy-and-recreate
+  error (+ belt-and-suspenders check on the Sandbox AlreadyExists branch).
+  Consciously supersedes the old strip-on-account-removal behavior — stripping
+  a key the baked non-Optional SecretKeyRef still references would brick the
+  next resume. Same-shape account swaps still patch bytes+label in place.
+  Tests: TestCreateSessionRejectsAuthShapeChange,
+  TestCreateSessionSameShapeAccountSwapPatchesSecret.
+- **§1d [C4] — observer connect forwards 1 port (MED-LOW).** `case !full`
+  moved above `case opencode` in Connect's forward switch: background
+  observer streams to opencode sessions no longer carry unused SSH+opencode
+  forwards (3→1 SPDY streams per row).
+- **§1d [C5] — ssh config paths quoted (LOW-MED).** `IdentityFile %q` +
+  `Include %q`; legacy unquoted include lines still recognized so older
+  configs don't get a duplicate prepended. A spaced state dir
+  (macOS `Application Support`, the documented WithStateDir shape) now
+  produces a valid config. Test: TestSSHConfigQuotesSpacedPaths.
+- **§1d [C6] — background connect phase bounded (LOW-MED).** One 60s
+  `WithTimeoutCause` deadline over flush+CreateInputs+reaper so a wedged
+  mutagen daemon can't hang `task.finish` and turn the AwaitSync gate into
+  "prompt submitted, nothing happens"; the deadline (vs a closeHandles
+  cancel, which stays silent) surfaces as an explicit advisory.
+- **§1d [C7] — pre-existing PVC survives rollback (LOW).** Rollback guard now
+  keys on `secretPreexisted || pvcPreexisted`; a prior session's workspace
+  PVC can no longer be deleted as collateral of a failed re-create whose
+  Secret happened to be fresh. Cost: at most an orphaned fresh Secret.
+  Test: TestCreateSessionPreexistingPVCSurvivesRollback.
+- **§1d [C8] — projectPath race fixed (LOW).** Write + fresh-path read +
+  ProjectPath() all under `s.mu`; Connect uses a captured local afterwards.
+- **§1d [C9] — suspend probe capped at 5s (LOW).** Same explicit
+  `WithTimeout(5s)` destroy already used; a half-dead node no longer stalls
+  suspend ~40s.
+- **§1d [C10] — models.Limit never blocks on the network (LOW).** `load()`
+  serves the fresh disk cache synchronously; on a cold/stale cache it serves
+  the stale table / static fallback immediately and refreshes models.dev in a
+  background goroutine (`refresh` + `awaitRefresh` test seam) — the first
+  session.started/usage event of the day no longer freezes the TUI reducer up
+  to 5s. Test: TestColdLimitDoesNotBlockOnNetwork (+ prime() in the fetch
+  tests).
+- **§1d [C11] — reaper override honored (LOW).** EnsureReaper compares the
+  live Job's container image/pull-policy/args against the desired spec
+  (`reaperSpecMatches`) and delete+recreates on mismatch — a reconnect with a
+  different IdleTimeout/ReaperImage is applied instead of silently
+  first-writer-wins; the idle clock lives runner-side so nothing is lost.
+  Test: TestEnsureReaperReplacesRunningJobOnSpecMismatch.
