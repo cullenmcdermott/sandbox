@@ -680,13 +680,16 @@ func TestCreateSessionPatchesCredentialOnExists(t *testing.T) {
 	}
 }
 
-// TestCreateSessionStripsCredentialOnAccountRemoval guards the stale-credential
-// gap on the AlreadyExists path: re-creating a session id WITHOUT an account
-// must strip the old anthropic-credential key and account label from the
-// existing Secret — otherwise logout/rotation label enumeration would
-// false-positive on a session that no longer uses the account, and a stale
-// credential copy would linger. All other keys are preserved.
-func TestCreateSessionStripsCredentialOnAccountRemoval(t *testing.T) {
+// TestCreateSessionRejectsAuthShapeChange guards the C3 re-create contract: the
+// pod template bakes the credential env SHAPE (env var name + source Secret) at
+// first create, so a re-create that changes it — here account → accountless,
+// which flips the source from the per-session Secret to the shared fallback —
+// must be REJECTED before any Secret mutation. Silently accepting it broke auth
+// (the running pod keeps the old env), and the former strip-the-credential
+// behavior could brick the next resume: the baked SecretKeyRef is not Optional,
+// so a pod referencing a stripped key never starts. The existing Secret must be
+// left fully intact by the rejected call.
+func TestCreateSessionRejectsAuthShapeChange(t *testing.T) {
 	ctx := context.Background()
 	b := newTestBackend(t)
 
@@ -706,31 +709,75 @@ func TestCreateSessionStripsCredentialOnAccountRemoval(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get secret: %v", err)
 	}
-	origToken := before.Data[secretKeyRunnerToken]
 
-	// Re-create the same id with no account: the shared-Secret fallback path.
+	// Re-create the same id with no account: the source Secret changes
+	// (per-session → shared fallback), i.e. a shape change → reject.
 	noAccount := withAccount
 	noAccount.AnthropicAccountID = ""
 	noAccount.AnthropicCredential = nil
-	if _, err := b.CreateSession(ctx, noAccount); err != nil {
-		t.Fatalf("second create: %v", err)
+	_, err = b.CreateSession(ctx, noAccount)
+	if err == nil {
+		t.Fatal("expected a shape-change re-create to be rejected")
+	}
+	if !strings.Contains(err.Error(), "different auth shape") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 
+	// The rejected call must not have mutated the Secret (or rolled anything
+	// back — the session pre-existed).
 	after, err := b.core.CoreV1().Secrets("agent-sessions").Get(ctx, sessionSecretName("claude-sdk-strip"), metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get secret after: %v", err)
 	}
-	if _, ok := after.Data[secretKeyAnthropicCredential]; ok {
-		t.Error("anthropic-credential key must be stripped when re-created without an account")
+	if string(after.Data[secretKeyAnthropicCredential]) != "sk-ant-oat-OLD" {
+		t.Error("rejected re-create mutated the anthropic-credential key")
 	}
-	if _, ok := after.Labels[labelAnthropicAccount]; ok {
-		t.Error("account label must be stripped when re-created without an account")
+	if after.Labels[labelAnthropicAccount] != "acct-old" {
+		t.Error("rejected re-create mutated the account label")
 	}
-	if string(after.Data[secretKeyRunnerToken]) != string(origToken) {
-		t.Error("runner-token must be preserved across the credential strip")
+	if string(after.Data[secretKeyRunnerToken]) != string(before.Data[secretKeyRunnerToken]) {
+		t.Error("runner-token changed across a rejected re-create")
 	}
-	if string(after.Data[secretKeySSHAuthorizedKey]) != withAccount.SSHPublicKey {
-		t.Error("ssh key must be preserved across the credential strip")
+	if _, gerr := b.agents.AgentsV1alpha1().Sandboxes("agent-sessions").Get(ctx, "claude-sdk-strip", metav1.GetOptions{}); gerr != nil {
+		t.Errorf("pre-existing Sandbox must survive the rejected re-create: %v", gerr)
+	}
+}
+
+// TestCreateSessionSameShapeAccountSwapPatchesSecret pins the still-allowed
+// re-create: a DIFFERENT account of the SAME shape (both oauth, both reading
+// the per-session Secret) patches the credential bytes + account label in
+// place — the C3 shape gate must not block it.
+func TestCreateSessionSameShapeAccountSwapPatchesSecret(t *testing.T) {
+	ctx := context.Background()
+	b := newTestBackend(t)
+
+	spec := session.Spec{
+		ID:                  "claude-sdk-swap",
+		ProjectPath:         "/tmp",
+		Backend:             "claude-sdk",
+		RunnerImage:         "test:latest",
+		SSHPublicKey:        "ssh-ed25519 AAAAKEY user@host",
+		AnthropicAccountID:  "acct-old",
+		AnthropicCredential: []byte("sk-ant-oat-OLD"),
+	}
+	if _, err := b.CreateSession(ctx, spec); err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+	swapped := spec
+	swapped.AnthropicAccountID = "acct-new"
+	swapped.AnthropicCredential = []byte("sk-ant-oat-NEW")
+	if _, err := b.CreateSession(ctx, swapped); err != nil {
+		t.Fatalf("same-shape account swap must succeed: %v", err)
+	}
+	after, err := b.core.CoreV1().Secrets("agent-sessions").Get(ctx, sessionSecretName("claude-sdk-swap"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get secret: %v", err)
+	}
+	if string(after.Data[secretKeyAnthropicCredential]) != "sk-ant-oat-NEW" {
+		t.Error("account swap did not patch the credential bytes")
+	}
+	if after.Labels[labelAnthropicAccount] != "acct-new" {
+		t.Error("account swap did not patch the account label")
 	}
 }
 

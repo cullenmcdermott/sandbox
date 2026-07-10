@@ -38,6 +38,15 @@ func newTestProvider(url, dir string) *provider {
 	}
 }
 
+// prime triggers the provider's first load — which, on a cold/stale cache,
+// serves the fallback and kicks the async network refresh (C10) — and waits
+// for that refresh to settle, so tests can assert on fetched values
+// deterministically.
+func prime(p *provider) {
+	_ = p.limit("prime")
+	p.awaitRefresh()
+}
+
 func TestOnlineFetch(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -46,6 +55,7 @@ func TestOnlineFetch(t *testing.T) {
 	defer srv.Close()
 
 	p := newTestProvider(srv.URL, t.TempDir())
+	prime(p)
 	got := p.limit("claude-opus-4-8")
 	if got.ContextLimit != 1000000 {
 		t.Errorf("ContextLimit = %d, want 1000000", got.ContextLimit)
@@ -110,6 +120,7 @@ func TestMultiProviderDeterministicCanonical(t *testing.T) {
 	defer srv.Close()
 
 	p := newTestProvider(srv.URL, t.TempDir())
+	prime(p)
 	for i := 0; i < 64; i++ { // many calls: the old map-range nondeterminism would surface
 		got := p.limit("claude-opus-4-8")
 		if got.ContextLimit != 1000000 || got.InputPrice != 5 || got.OutputPrice != 25 {
@@ -165,6 +176,7 @@ func TestLookupCoversNonClaudeAndClaude(t *testing.T) {
 	for _, c := range cases {
 		// fresh provider per case so each performs its own resolution.
 		p := newTestProvider(srv.URL, t.TempDir())
+		prime(p)
 		if got := p.limit(c.id); got != c.want {
 			t.Errorf("%s: limit(%q) = %+v, want %+v", c.name, c.id, got, c.want)
 		}
@@ -180,6 +192,7 @@ func TestUnknownNonClaudeStillFallsBack(t *testing.T) {
 	defer srv.Close()
 
 	p := newTestProvider(srv.URL, t.TempDir())
+	prime(p)
 	got := p.limit("big-pickle") // real-world example from the review
 	if got != (Info{ContextLimit: staticContextLimit}) {
 		t.Errorf("limit(big-pickle) = %+v, want {200000, 0, 0}", got)
@@ -243,6 +256,7 @@ func TestNormalizationOnline(t *testing.T) {
 	for _, c := range cases {
 		// fresh provider per case so each performs its own resolution.
 		p := newTestProvider(srv.URL, t.TempDir())
+		prime(p)
 		if got := p.limit(c.id).ContextLimit; got != c.want {
 			t.Errorf("limit(%q).ContextLimit = %d, want %d", c.id, got, c.want)
 		}
@@ -270,8 +284,9 @@ func TestCacheHitAfterServerStops(t *testing.T) {
 	}))
 	dir := t.TempDir()
 
-	// First provider fetches online and writes the cache.
+	// First provider fetches online (async, C10) and writes the cache.
 	p1 := newTestProvider(srv.URL, dir)
+	prime(p1)
 	if got := p1.limit("claude-opus-4-8").ContextLimit; got != 1000000 {
 		t.Fatalf("online ContextLimit = %d, want 1000000", got)
 	}
@@ -300,9 +315,32 @@ func TestStaleCacheUsedWhenFetchFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Stale cache + unreachable server: fetch fails, stale cache is used.
+	// Stale cache + unreachable server: fetch fails, stale cache is used —
+	// synchronously, on the very first call (it's disk-local).
 	p := newTestProvider("http://127.0.0.1:0", dir)
 	if got := p.limit("claude-opus-4-8").ContextLimit; got != 1000000 {
 		t.Errorf("stale-cache ContextLimit = %d, want 1000000", got)
+	}
+}
+
+// C10 regression: the first limit() on a cold cache must NOT block on the
+// network — it is called from TUI reducer paths, and a slow/hanging models.dev
+// froze the UI up to the 5s HTTP timeout. The static fallback is served
+// immediately; the refresh happens in the background.
+func TestColdLimitDoesNotBlockOnNetwork(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release // hang until the test ends
+	}))
+	defer func() { close(release); srv.Close() }()
+
+	p := newTestProvider(srv.URL, t.TempDir())
+	start := time.Now()
+	got := p.limit("claude-opus-4-8")
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("cold limit() blocked %v on the hanging fetch", d)
+	}
+	if got.ContextLimit != 1000000 { // static fallback knows opus is 1M
+		t.Errorf("fallback ContextLimit = %d, want 1000000", got.ContextLimit)
 	}
 }

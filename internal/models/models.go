@@ -59,9 +59,10 @@ type provider struct {
 	ttl       time.Duration // when 0, read cacheTTL var
 	client    *http.Client  // when nil, build from httpTimeout
 
-	mu     sync.Mutex
-	table  table // parsed models.dev table, nil until first load
-	loaded bool  // whether an in-memory load was attempted this process
+	mu          sync.Mutex
+	table       table         // parsed models.dev table, nil until first load
+	loaded      bool          // whether an in-memory load was attempted this process
+	refreshDone chan struct{} // non-nil once an async refresh was kicked; closed when it settles
 }
 
 // defaultProvider is the package-level instance backing Limit.
@@ -194,49 +195,81 @@ func lookupEntry(tbl table, key string) (Info, bool) {
 	return Info(tbl[best][key]), true // modelEntry and Info are field-identical
 }
 
-// load returns the parsed table, fetching+caching as needed. It never returns
-// an error: on total failure it returns nil and callers use the static fallback.
+// load returns the parsed table, reading the disk cache and kicking an async
+// network refresh as needed. It never returns an error: when no table is
+// available yet it returns nil and callers use the static fallback. It never
+// blocks on the network (C10): Limit is called from TUI reducer paths, and
+// holding p.mu across a fetch froze the UI up to httpTimeout on the first
+// cold/stale-cache call of the day.
 func (p *provider) load() table {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 
 	if p.loaded {
+		defer p.mu.Unlock()
 		return p.table
 	}
 	p.loaded = true
 
 	cp := p.effCachePath()
 
-	// Fresh cache within TTL: use it without fetching.
+	// Fresh cache within TTL: use it, no fetch needed. Disk-local ⇒ fast
+	// enough to stay synchronous.
 	if cp != "" {
 		if info, err := os.Stat(cp); err == nil && time.Since(info.ModTime()) < p.effTTL() {
 			if tbl, err := readCache(cp); err == nil {
 				p.table = tbl
-				return p.table
+				p.mu.Unlock()
+				return tbl
 			}
 		}
 	}
 
-	// Fetch. On success, rewrite the cache.
-	if raw, tbl, err := p.fetch(); err == nil {
-		if cp != "" {
-			writeCache(cp, raw)
-		}
-		p.table = tbl
-		return p.table
-	}
-
-	// Fetch failed: fall back to a stale cache if present.
+	// Stale or missing cache: serve the stale cache (or nil → static fallback)
+	// NOW and refresh from the network in the background. Later Limit calls
+	// pick up the refreshed table.
 	if cp != "" {
 		if tbl, err := readCache(cp); err == nil {
 			p.table = tbl
-			return p.table
 		}
 	}
+	tbl := p.table
+	done := make(chan struct{})
+	p.refreshDone = done
+	p.mu.Unlock()
 
-	// Nothing available; static fallback will be used.
-	p.table = nil
-	return nil
+	go func() {
+		defer close(done)
+		p.refresh(cp)
+	}()
+	return tbl
+}
+
+// refresh fetches models.dev, rewrites the cache, and swaps the in-memory
+// table. On failure the stale cache / static fallback already being served
+// stays in force — same silent degradation as before, just off the caller's
+// goroutine.
+func (p *provider) refresh(cp string) {
+	raw, tbl, err := p.fetch()
+	if err != nil {
+		return
+	}
+	if cp != "" {
+		writeCache(cp, raw)
+	}
+	p.mu.Lock()
+	p.table = tbl
+	p.mu.Unlock()
+}
+
+// awaitRefresh blocks until the async refresh kicked by the first load (if
+// any) settles. Test seam; production callers never need it.
+func (p *provider) awaitRefresh() {
+	p.mu.Lock()
+	done := p.refreshDone
+	p.mu.Unlock()
+	if done != nil {
+		<-done
+	}
 }
 
 func (p *provider) fetch() ([]byte, table, error) {

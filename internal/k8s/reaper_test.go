@@ -3,6 +3,7 @@ package k8s
 import (
 	"context"
 	"testing"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -57,20 +58,22 @@ func TestEnsureReaperCreatesWhenAbsent(t *testing.T) {
 	}
 }
 
-// EnsureReaper with a still-running Job must be a no-op (no delete, no recreate).
+// EnsureReaper with a still-running Job whose spec matches the desired one must
+// be a no-op (no delete, no recreate).
 func TestEnsureReaperNoOpWhenRunning(t *testing.T) {
 	ctx := context.Background()
 	b, core := newReaperBackend()
 
 	name := reaperJobName("sess-2")
-	running := &batchv1.Job{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        name,
-			Namespace:   ReaperNamespace,
-			Annotations: map[string]string{"marker": "original"},
-		},
-		// No terminal condition -> running.
-	}
+	// Seed with the spec EnsureReaper(ReaperOptions{}) resolves to, so the C11
+	// spec comparison sees a match; no terminal condition -> running.
+	running := buildReaperJob(name, "sess-2", ReaperOptions{
+		Image:            DefaultReaperImage,
+		IdleTimeout:      15 * time.Minute,
+		PollInterval:     30 * time.Second,
+		SessionNamespace: "agent-sessions",
+	})
+	running.Annotations = map[string]string{"marker": "original"}
 	if _, err := core.BatchV1().Jobs(ReaperNamespace).Create(ctx, running, metav1.CreateOptions{}); err != nil {
 		t.Fatalf("seed running job: %v", err)
 	}
@@ -102,6 +105,36 @@ func TestEnsureReaperNoOpWhenRunning(t *testing.T) {
 	}
 	if got.Annotations["marker"] != "original" {
 		t.Errorf("running reaper Job was replaced; marker = %q", got.Annotations["marker"])
+	}
+}
+
+// C11: EnsureReaper with a still-running Job whose flags differ (e.g. a
+// reconnect with a different IdleTimeout — a documented override) must replace
+// it, not silently leave the stale flags in force.
+func TestEnsureReaperReplacesRunningJobOnSpecMismatch(t *testing.T) {
+	ctx := context.Background()
+	b, core := newReaperBackend()
+
+	name := reaperJobName("sess-4")
+	running := buildReaperJob(name, "sess-4", ReaperOptions{
+		Image:            DefaultReaperImage,
+		IdleTimeout:      15 * time.Minute,
+		PollInterval:     30 * time.Second,
+		SessionNamespace: "agent-sessions",
+	})
+	if _, err := core.BatchV1().Jobs(ReaperNamespace).Create(ctx, running, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("seed running job: %v", err)
+	}
+
+	if err := b.EnsureReaper(ctx, session.Ref{ID: "sess-4"}, ReaperOptions{IdleTimeout: time.Hour}); err != nil {
+		t.Fatalf("EnsureReaper: %v", err)
+	}
+	got, err := core.BatchV1().Jobs(ReaperNamespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if !containsArg(got.Spec.Template.Spec.Containers[0].Args, "--idle-timeout", "1h0m0s") {
+		t.Errorf("running reaper with stale flags was not replaced: %v", got.Spec.Template.Spec.Containers[0].Args)
 	}
 }
 

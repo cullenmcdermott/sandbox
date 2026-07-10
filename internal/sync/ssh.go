@@ -120,7 +120,10 @@ func (c *SSHConfig) block(sessionID string, localPort int, identityFile string) 
 	fmt.Fprintf(&b, "    HostName 127.0.0.1\n")
 	fmt.Fprintf(&b, "    Port %d\n", localPort)
 	fmt.Fprintf(&b, "    User root\n")
-	fmt.Fprintf(&b, "    IdentityFile %s\n", identityFile)
+	// Quoted (C5): the state dir is caller-configurable (client.WithStateDir)
+	// and macOS app dirs contain spaces — unquoted, the whole config goes
+	// invalid and every sync fails obscurely.
+	fmt.Fprintf(&b, "    IdentityFile %q\n", identityFile)
 	fmt.Fprintf(&b, "    IdentitiesOnly yes\n")
 	fmt.Fprintf(&b, "    StrictHostKeyChecking no\n")
 	fmt.Fprintf(&b, "    UserKnownHostsFile /dev/null\n")
@@ -131,7 +134,11 @@ func (c *SSHConfig) block(sessionID string, localPort int, identityFile string) 
 // ensureInclude makes sure the user's ~/.ssh/config begins with an Include of
 // our dedicated file. It is idempotent.
 func (c *SSHConfig) ensureInclude() error {
-	includeLine := "Include " + c.path
+	// Quoted (C5) so a state dir with spaces stays valid; the unquoted form is
+	// still accepted below so configs written by older versions don't get a
+	// duplicate include prepended.
+	includeLine := fmt.Sprintf("Include %q", c.path)
+	legacyLine := "Include " + c.path
 	data, err := os.ReadFile(c.userConfig)
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("ssh: read user config: %w", err)
@@ -139,7 +146,7 @@ func (c *SSHConfig) ensureInclude() error {
 	// C7: check line-by-line for an exact match to avoid substring collisions
 	// (e.g. "Include /foo/bar-old" would incorrectly match "Include /foo/bar").
 	for _, line := range strings.SplitAfter(string(data), "\n") {
-		if strings.TrimRight(line, "\r\n") == includeLine {
+		if t := strings.TrimRight(line, "\r\n"); t == includeLine || t == legacyLine {
 			return nil
 		}
 	}

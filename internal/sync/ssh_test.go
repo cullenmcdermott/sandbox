@@ -2,6 +2,7 @@ package sync
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,13 +52,14 @@ func TestSSHConfigUpsertAndRemove(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read user config: %v", err)
 	}
-	if !strings.Contains(string(uc), "Include "+include) {
+	if !strings.Contains(string(uc), fmt.Sprintf("Include %q", include)) {
 		t.Errorf("user config missing include:\n%s", uc)
 	}
 
-	// Include file has the host block with the right port and identity.
+	// Include file has the host block with the right port and identity (C5:
+	// the identity path is quoted so a spaced state dir stays valid).
 	body, _ := os.ReadFile(include)
-	for _, want := range []string{"Host sandbox-abc", "Port 12345", "IdentityFile /keys/id_ed25519", "StrictHostKeyChecking no"} {
+	for _, want := range []string{"Host sandbox-abc", "Port 12345", `IdentityFile "/keys/id_ed25519"`, "StrictHostKeyChecking no"} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("include missing %q:\n%s", want, body)
 		}

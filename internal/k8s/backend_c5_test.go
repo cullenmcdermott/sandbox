@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
@@ -138,6 +139,36 @@ func TestCreateSessionRollsBackSecretAndPVCOnSandboxFailure(t *testing.T) {
 	}
 	if _, err := core.CoreV1().PersistentVolumeClaims("agent-sessions").Get(ctx, "test-rollback-sandbox", metav1.GetOptions{}); err == nil {
 		t.Error("PVC was orphaned after a Sandbox create failure (rollback did not run)")
+	}
+}
+
+// TestCreateSessionPreexistingPVCSurvivesRollback verifies C7: when the PVC
+// pre-existed (a prior session's workspace) but the Secret was freshly created,
+// a later Sandbox-create failure must NOT roll back — the old guard keyed to
+// the Secret alone would have deleted the pre-existing PVC (workspace data) as
+// collateral. The freshly created Secret may be orphaned; that is the cheaper
+// failure.
+func TestCreateSessionPreexistingPVCSurvivesRollback(t *testing.T) {
+	ctx := context.Background()
+	agents := agentsfake.NewSimpleClientset()
+	core := fake.NewSimpleClientset()
+	b := NewForClients(agents, core, "agent-sessions")
+
+	// Seed a pre-existing PVC (prior session's workspace); no Secret.
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "test-c7", Namespace: "agent-sessions"}}
+	if _, err := core.CoreV1().PersistentVolumeClaims("agent-sessions").Create(ctx, pvc, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("seed pvc: %v", err)
+	}
+	agents.PrependReactor("create", "sandboxes", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, fmt.Errorf("simulated Sandbox create failure")
+	})
+
+	spec := session.Spec{ID: "test-c7", ProjectPath: "/tmp", Backend: "claude-sdk", RunnerImage: "test:latest"}
+	if _, err := b.CreateSession(ctx, spec); err == nil {
+		t.Fatal("CreateSession should surface the Sandbox create error")
+	}
+	if _, err := core.CoreV1().PersistentVolumeClaims("agent-sessions").Get(ctx, "test-c7", metav1.GetOptions{}); err != nil {
+		t.Errorf("pre-existing PVC was deleted as rollback collateral (C7): %v", err)
 	}
 }
 

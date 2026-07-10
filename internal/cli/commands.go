@@ -93,14 +93,18 @@ func newSuspendCmd() *cobra.Command {
 			// Warn if a turn is in flight. The active turn id lives in the runner
 			// (not the Sandbox CRD), so ask the runner directly. Best-effort — any
 			// failure (unreachable / already suspended) is non-fatal; the 60s
-			// SIGTERM grace period is the real safeguard.
-			if rc, cleanup, err := c.DialRunner(ctx, ref); err == nil {
-				st, sErr := rc.SessionState(ctx, ref)
+			// SIGTERM grace period is the real safeguard. Bounded like destroy's
+			// probe (C9): the raw command ctx let a half-dead node stall the
+			// suspend ~40s on port-forward + HTTP client timeouts.
+			probeCtx, probeCancel := context.WithTimeout(ctx, 5*time.Second)
+			if rc, cleanup, err := c.DialRunner(probeCtx, ref); err == nil {
+				st, sErr := rc.SessionState(probeCtx, ref)
 				cleanup()
 				if sErr == nil && st.ActiveTurnID != "" {
 					fmt.Fprintf(cmd.ErrOrStderr(), "warning: session %q has an active turn (%s); it will be interrupted by the SIGTERM flush\n", args[0], st.ActiveTurnID)
 				}
 			}
+			probeCancel()
 			// Suspend pauses file sync as part of the lifecycle (the pod's SSH
 			// forward is gone while suspended).
 			if err := c.Suspend(ctx, session.ID(args[0])); err != nil {

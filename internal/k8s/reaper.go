@@ -3,6 +3,7 @@ package k8s
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -48,9 +49,13 @@ type ReaperOptions struct {
 }
 
 // EnsureReaper creates a reaper Job for the session if one is not already
-// watching. The Job polls the runner's /idle endpoint and suspends the Sandbox
-// after IdleTimeout of continuous idle, then self-cleans via TTL. Idempotent:
-// a still-running reaper is left alone; a finished one is replaced.
+// watching with the desired spec. The Job polls the runner's /idle endpoint and
+// suspends the Sandbox after IdleTimeout of continuous idle, then self-cleans
+// via TTL. Idempotent: a still-running reaper with a matching spec is left
+// alone; a finished one — or a live one whose image/pull-policy/args differ
+// (C11: IdleTimeout/ReaperImage are documented per-Connect overrides, so a
+// mismatch must not be a silent first-writer-wins) — is replaced. The idle
+// clock lives runner-side, so replacing a live reaper loses no idle history.
 func (b *Backend) EnsureReaper(ctx context.Context, ref session.Ref, opts ReaperOptions) error {
 	if opts.Image == "" {
 		opts.Image = DefaultReaperImage
@@ -67,16 +72,19 @@ func (b *Backend) EnsureReaper(ctx context.Context, ref session.Ref, opts Reaper
 
 	jobs := b.core.BatchV1().Jobs(ReaperNamespace)
 	name := reaperJobName(string(ref.ID))
+	desired := buildReaperJob(name, string(ref.ID), opts)
 
 	existing, err := jobs.Get(ctx, name, metav1.GetOptions{})
 	if err == nil {
-		if !jobFinished(existing) {
-			return nil // a reaper is already watching this session
+		if !jobFinished(existing) && reaperSpecMatches(existing, desired) {
+			return nil // a reaper with the desired spec is already watching
 		}
-		// Replace a finished reaper (e.g. one that suspended a prior activation).
+		// Replace a finished reaper (e.g. one that suspended a prior activation)
+		// or a live one running stale flags. Job specs are immutable, so
+		// replace = delete + recreate.
 		policy := metav1.DeletePropagationBackground
 		if derr := jobs.Delete(ctx, name, metav1.DeleteOptions{PropagationPolicy: &policy}); derr != nil && !k8serrors.IsNotFound(derr) {
-			return fmt.Errorf("k8s: delete finished reaper %s: %w", name, derr)
+			return fmt.Errorf("k8s: delete reaper %s: %w", name, derr)
 		}
 		if werr := waitJobGone(ctx, jobs, name); werr != nil {
 			return werr
@@ -85,11 +93,23 @@ func (b *Backend) EnsureReaper(ctx context.Context, ref session.Ref, opts Reaper
 		return fmt.Errorf("k8s: get reaper %s: %w", name, err)
 	}
 
-	job := buildReaperJob(name, string(ref.ID), opts)
-	if _, err := jobs.Create(ctx, job, metav1.CreateOptions{}); err != nil && !k8serrors.IsAlreadyExists(err) {
+	if _, err := jobs.Create(ctx, desired, metav1.CreateOptions{}); err != nil && !k8serrors.IsAlreadyExists(err) {
 		return fmt.Errorf("k8s: create reaper %s: %w", name, err)
 	}
 	return nil
+}
+
+// reaperSpecMatches reports whether the existing Job runs the same reaper
+// contract as the desired one: image, pull policy, and args (which encode the
+// namespace, idle-timeout, and poll interval).
+func reaperSpecMatches(existing, desired *batchv1.Job) bool {
+	e, d := existing.Spec.Template.Spec.Containers, desired.Spec.Template.Spec.Containers
+	if len(e) != 1 || len(d) != 1 {
+		return false
+	}
+	return e[0].Image == d[0].Image &&
+		e[0].ImagePullPolicy == d[0].ImagePullPolicy &&
+		slices.Equal(e[0].Args, d[0].Args)
 }
 
 func reaperJobName(sid string) string { return "reap-" + sid }

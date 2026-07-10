@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -154,7 +155,11 @@ func (s *Session) Ref() Ref { return s.ref }
 
 // ProjectPath returns the project path (known after Create or a successful
 // Connect).
-func (s *Session) ProjectPath() string { return s.projectPath }
+func (s *Session) ProjectPath() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.projectPath
+}
 
 // Runner returns the live runner client from the last successful Connect, or nil
 // if not connected (or after Close). The explicit nil return avoids handing back
@@ -223,6 +228,7 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 	s.fresh = false
 	freshBackend := s.freshBackend
 	freshPrivPath := s.sshPrivPath
+	freshProjectPath := s.projectPath
 	s.mu.Unlock()
 
 	stage(StageCheck)
@@ -231,7 +237,7 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 		// Synthesize the state Create already established rather than round-trip to
 		// the API server. waitForPodReady below still blocks on genuine pod
 		// readiness, so this only elides the status probe, not the readiness gate.
-		st = session.State{ID: s.ref.ID, Status: session.StatusCreating, Backend: freshBackend, ProjectPath: s.projectPath}
+		st = session.State{ID: s.ref.ID, Status: session.StatusCreating, Backend: freshBackend, ProjectPath: freshProjectPath}
 	} else {
 		sp := tr.start("connect.status")
 		var serr error
@@ -241,11 +247,16 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 			return nil, serr
 		}
 	}
+	// C8: projectPath is read lock-free elsewhere (ProjectPath()); guard the
+	// write like the neighboring fields and use the captured local below.
+	s.mu.Lock()
 	if opt.ProjectPath != "" {
 		s.projectPath = opt.ProjectPath
 	} else if s.projectPath == "" {
 		s.projectPath = st.ProjectPath
 	}
+	projectPath := s.projectPath
+	s.mu.Unlock()
 
 	switch st.Status {
 	case session.StatusGone:
@@ -284,13 +295,15 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 	var err error
 	fwdSpan := tr.start("connect.port_forward")
 	switch {
-	case opencode:
-		handles, err = s.c.backend.PortForward(ctx, s.ref, k8s.ForwardSpecsWithOpencode(0, 0, 0))
 	case !full:
 		// Observer mode reads only the runner event stream and never runs mutagen
-		// sync, so the SSH forward is pure waste — forward the runner HTTP port
-		// only.
+		// sync or the opencode client, so the SSH and opencode forwards are pure
+		// waste — forward the runner HTTP port only, whatever the backend (C4:
+		// this case must be tested before the opencode one, or every background
+		// observer stream to an opencode session carries 3 forwards).
 		handles, err = s.c.backend.PortForward(ctx, s.ref, k8s.ForwardSpecsRunnerOnly(0))
+	case opencode:
+		handles, err = s.c.backend.PortForward(ctx, s.ref, k8s.ForwardSpecsWithOpencode(0, 0, 0))
 	default:
 		handles, err = s.c.backend.PortForward(ctx, s.ref, k8s.ForwardSpecs(0, 0))
 	}
@@ -372,7 +385,7 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 			s.startBackgroundSync(tr, syncpkg.Spec{}, false, false, reaperImage, reaperPullPolicy, idleTimeout)
 		default:
 			syncSpan := tr.start("connect.project_sync")
-			created, spec, serr := s.c.startProjectSync(ctx, string(s.ref.ID), s.projectPath, privPath, handles[1].LocalPort())
+			created, spec, serr := s.c.startProjectSync(ctx, string(s.ref.ID), projectPath, privPath, handles[1].LocalPort())
 			syncSpan.end()
 			if serr != nil {
 				syncWarning = appendWarning(syncWarning, fmt.Sprintf("file sync unavailable: %v", serr))
@@ -455,7 +468,13 @@ func protocolVersionWarning(rc *runner.Client) string {
 // upstream) only the reaper is ensured; created marks this session's first-ever
 // sync (gate the flush) versus a reconnect (detached flush).
 func (s *Session) startBackgroundSync(tr *tracer, spec syncpkg.Spec, created, doSync bool, reaperImage, reaperPullPolicy string, idleTimeout time.Duration) {
-	bgCtx, cancel := context.WithCancel(context.Background())
+	// C6: the whole background phase gets one generous overall deadline. The
+	// first flush is bounded (12s below) but CreateInputs (7 mutagen execs) and
+	// the reaper retry loop were not — a wedged mutagen daemon would hang this
+	// goroutine forever, task.finish would never run, and the AwaitSync gate
+	// would turn every StartTurn into "prompt submitted, nothing happens" with
+	// no advisory.
+	bgCtx, cancel := context.WithTimeoutCause(context.Background(), bgSyncOverallTimeout, errBgSyncTimeout)
 	task := &syncTask{done: make(chan struct{})}
 	s.mu.Lock()
 	s.bgCancel = cancel
@@ -520,9 +539,24 @@ func (s *Session) startBackgroundSync(tr *tracer, spec syncpkg.Spec, created, do
 				warn = appendWarning(warn, w)
 			}
 		}
+		// A timed-out background phase must be visible: the bgCtx.Err() guards
+		// above suppress per-step errors on cancellation (closeHandles), which
+		// would otherwise also swallow the deadline case.
+		if context.Cause(bgCtx) == errBgSyncTimeout {
+			warn = appendWarning(warn, fmt.Sprintf("background sync/reaper setup timed out after %s (file sync may be unavailable)", bgSyncOverallTimeout))
+		}
 		task.finish(warn)
 	}()
 }
+
+// bgSyncOverallTimeout bounds Connect's whole background phase (C6): generous
+// enough for a slow first upload's flush + 7 config-sync creates + reaper
+// retries, but finite so a hung mutagen daemon can't wedge the AwaitSync gate.
+const bgSyncOverallTimeout = 60 * time.Second
+
+// errBgSyncTimeout distinguishes the C6 deadline from an ordinary cancel
+// (closeHandles), which must stay silent.
+var errBgSyncTimeout = errors.New("background sync setup timed out")
 
 // AwaitSync blocks until Connect's background file-sync + idle-reaper work (see
 // startBackgroundSync) has settled, returning any non-fatal advisory to surface
