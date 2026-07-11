@@ -100,6 +100,15 @@ func (m *Model) render() string {
 		)
 	}
 
+	if m.convert != nil {
+		overlay := m.renderConvertModal()
+		return lipgloss.Place(m.width, m.height,
+			lipgloss.Center, lipgloss.Center,
+			overlay,
+			pageWhitespace(),
+		)
+	}
+
 	if m.confirm != nil {
 		overlay := m.renderConfirm()
 		return lipgloss.Place(m.width, m.height,
@@ -580,6 +589,50 @@ func (m *Model) renderConfirm() string {
 		Content:     body,
 		BorderColor: theme.Coral,
 		Background:  theme.Raised,
+		PadV:        1,
+		PadH:        3,
+	})
+}
+
+// renderConvertModal renders the convert-to-branch prompt: the git facts from
+// Status, the two editable fields (branch + commit message), an optional inline
+// error, and the key hints — framed by the shared kit card (design §4.6 step 3).
+func (m *Model) renderConvertModal() string {
+	cm := m.convert
+	if cm == nil {
+		return ""
+	}
+	title := lipgloss.NewStyle().Foreground(theme.Malibu).Bold(true).Render("convert to branch")
+
+	var facts string
+	if cm.dirty {
+		files := "file"
+		if cm.changed != 1 {
+			files = "files"
+		}
+		facts = fmt.Sprintf("%s · %d changed %s (will be committed)", cm.curBranch, cm.changed, files)
+	} else {
+		facts = cm.curBranch + " · clean (rename only, no commit)"
+	}
+	factsLine := lipgloss.NewStyle().Foreground(theme.TextDim).Render(facts)
+
+	branchView := lipgloss.NewStyle().Foreground(theme.TextBright).Render(cm.branch.View())
+	messageView := lipgloss.NewStyle().Foreground(theme.TextBright).Render(cm.message.View())
+
+	body := title + "\n" + factsLine + "\n\n" + branchView + "\n" + messageView
+	if cm.inlineErr != "" {
+		body += "\n\n" + kit.ErrorBlock(cm.inlineErr, "", "")
+	}
+	body += "\n\n" + kit.KbdRow(
+		[2]string{"tab", "field"},
+		[2]string{"↵", "convert"},
+		[2]string{"esc", "cancel"},
+	)
+
+	return kit.Card(kit.CardOpts{
+		Content:     body,
+		BorderColor: theme.Charple,
+		Background:  theme.Surface,
 		PadV:        1,
 		PadH:        3,
 	})

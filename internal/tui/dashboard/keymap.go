@@ -43,6 +43,7 @@ type KeyMap struct {
 	// Session organization
 	GroupToggle key.Binding
 	Rename      key.Binding
+	Branch      key.Binding
 }
 
 // DefaultKeyMap returns the canonical keybinding set.
@@ -71,6 +72,7 @@ func DefaultKeyMap() KeyMap {
 		Switcher:        key.NewBinding(key.WithKeys("ctrl+k"), key.WithHelp("^k", "quick switch")),
 		GroupToggle:     key.NewBinding(key.WithKeys("g"), key.WithHelp("g", "group view")),
 		Rename:          key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "rename")),
+		Branch:          key.NewBinding(key.WithKeys("b"), key.WithHelp("b", "branch")),
 	}
 }
 
@@ -92,6 +94,6 @@ func (km KeyMap) FullHelp() [][]key.Binding {
 		{km.Up, km.Down, km.Top, km.Bottom, km.Attach, km.Detach, km.NextAttention},
 		{km.Filter, km.SortCycle, km.SortFlip, km.AttentionToggle, km.GroupToggle},
 		{km.New, km.Suspend, km.Resume, km.Approve, km.Deny, km.Destroy},
-		{km.Rename, km.Help, km.Switcher, km.Quit},
+		{km.Rename, km.Branch, km.Help, km.Switcher, km.Quit},
 	}
 }

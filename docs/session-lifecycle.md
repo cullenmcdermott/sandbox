@@ -38,6 +38,23 @@ project at a glance; the random suffix guarantees distinct pods. Reconnecting is
 done by **explicit ID** via `attach`, `status`, etc. — not by re-deriving from
 the path.
 
+### Per-session git worktrees (create / convert / destroy)
+For a git project, `sandbox claude` creates the session on its own git worktree
+at `~/.local/share/sandbox/worktrees/<id>`, on an auto-branch `sandbox/<id>` cut
+from `HEAD` — so two sessions on one repo never cross-feed edits (the worktree,
+not the repo root, is the Mutagen endpoint and pod cwd). `--worktree auto` (the
+default) makes this conditional on the project being a git work tree; `on`
+requires it, `off` disables it. **Destroy** captures any dirty worktree with a
+WIP commit to its branch *before* `git worktree remove` (work is never silently
+discarded — I2), leaving the branch behind for the user. Idle **suspend/resume**
+never touch the worktree — it is a laptop artifact that persists across the pod
+going away. In the dashboard, `b` on a selected session opens the
+**convert-to-branch** modal: it renames `sandbox/<id>` onto a human-approved,
+title-derived branch name (e.g. `feat/fix-login-flow`) and commits the pending
+work, so the session's edits land on a named, mergeable ref. Orphaned worktrees
+(no live session) are reaped by `sandbox worktree gc`. Full design:
+`docs/worktree-lifecycle-design.md`.
+
 ### Idle clock lives in the runner, not the reaper
 The runner tracks `idleSince`: set the moment the session becomes idle
 (turn-done AND attachedClients==0), cleared when a turn starts or a client

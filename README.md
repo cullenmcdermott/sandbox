@@ -249,7 +249,7 @@ cd runner && npm install --ignore-scripts && ./node_modules/.bin/tsc --noEmit
 | Command | Description |
 |---|---|
 | `sandbox` | Open the command-center dashboard (session list, attention routing, attach) |
-| `sandbox claude [prompt]` | Start a **new** Claude Agent SDK session for the current project and open the TUI (`--model <id\|alias>` sets the session model; switch in-session with `/model`). To resume an existing one, use `sandbox attach` |
+| `sandbox claude [prompt]` | Start a **new** Claude Agent SDK session for the current project and open the TUI (`--model <id\|alias>` sets the session model; switch in-session with `/model`; `--worktree auto\|on\|off` controls per-session git worktree isolation). To resume an existing one, use `sandbox attach` |
 | `sandbox opencode` | Start a **new** OpenCode-backend session (external `opencode serve` + attach) |
 | `sandbox attach <id>` | Reconnect to a running/suspended session and replay history |
 | `sandbox trace <id>` | Replay a session's normalized event timeline (`--json`, `--since`, `--tool` filters) |
@@ -260,6 +260,7 @@ cd runner && npm install --ignore-scripts && ./node_modules/.bin/tsc --noEmit
 | `sandbox cancel <id>` | Interrupt the active turn |
 | `sandbox rename <id> <name>` | Set a persistent display title for a session |
 | `sandbox shell <id>` | Open a debug shell into the session pod |
+| `sandbox worktree gc` | Garbage-collect orphaned per-session git worktrees (`--dry-run` to preview); dirty worktrees are committed to their branch before removal, never discarded |
 | `sandbox destroy <id>` | Delete the session and its PVC (irreversible) |
 
 ## Testing

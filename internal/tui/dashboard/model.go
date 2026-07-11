@@ -264,6 +264,15 @@ type Model struct {
 	// keys until resolved.
 	confirm *confirmPrompt
 
+	// worktreeOps, when non-nil, is the injected convert-to-branch git surface
+	// backing the `b` keymap. nil disables the flow (unit-test / library
+	// default). Wired by the CLI via WithWorktreeOps.
+	worktreeOps WorktreeOps
+
+	// convert, when non-nil, is the active convert-to-branch modal. It captures
+	// keys until esc/enter resolves it (see worktree.go).
+	convert *convertModal
+
 	// destroyHook, when non-nil, is called after a successful backend.Destroy
 	// to perform irreversible local cleanup (SSH alias removal, key deletion,
 	// index entry removal). Wired by the CLI via WithDestroyHook (C2: TUI destroy
@@ -809,6 +818,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, toastTickCmd())
 		}
 		return m, tea.Batch(cmds...)
+
+	case worktreeStatusMsg:
+		return m, m.openConvertModal(msg)
+
+	case convertResultMsg:
+		return m, m.handleConvertResult(msg)
 
 	case actionResultMsg:
 		if msg.err != nil {

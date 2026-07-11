@@ -81,6 +81,7 @@ func NewRoot() *cobra.Command {
 					SyncReaper:        dashboardSyncReaper(),
 					IdleTimeout:       defaultReaperIdleTimeout,
 					AccountStore:      newDashboardAccountStore(),
+					WorktreeOps:       newWorktreeOps(c),
 				})
 			})
 		},
@@ -100,6 +101,7 @@ func NewRoot() *cobra.Command {
 	cmd.AddCommand(newDestroyCmd())
 	cmd.AddCommand(newShellCmd())
 	cmd.AddCommand(newRenameCmd())
+	cmd.AddCommand(newWorktreeCmd())
 	cmd.AddCommand(newReapCmd())
 	cmd.AddCommand(newTraceCmd())
 	cmd.AddCommand(newAuthCmd())

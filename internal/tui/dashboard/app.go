@@ -303,6 +303,12 @@ type RunOptions struct {
 	// concrete impl (internal/cli) holds the Keychain-backed store; only metadata
 	// crosses this seam.
 	AccountStore AccountStore
+
+	// WorktreeOps backs the dashboard's convert-to-branch flow (`b` keymap). nil
+	// disables the flow. The concrete impl (internal/cli) wraps the client SDK's
+	// per-session worktree git surface; only branch/message strings cross this
+	// seam (no LLM, no git internals).
+	WorktreeOps WorktreeOps
 }
 
 // applyOpts threads RunOptions into the dashboard model.
@@ -342,6 +348,9 @@ func (a *App) applyOpts(opts []RunOptions) {
 	}
 	if opts[0].AccountStore != nil {
 		a.accountStore = opts[0].AccountStore
+	}
+	if opts[0].WorktreeOps != nil {
+		a.dashboard = a.dashboard.WithWorktreeOps(opts[0].WorktreeOps)
 	}
 }
 

@@ -15,11 +15,12 @@ import (
 
 func newClaudeRemoteCmd() *cobra.Command {
 	var (
-		runnerImage string
-		reaperImage string
-		nameFlag    string
-		modelFlag   string
-		accountFlag string
+		runnerImage  string
+		reaperImage  string
+		nameFlag     string
+		modelFlag    string
+		accountFlag  string
+		worktreeFlag string
 	)
 	cmd := &cobra.Command{
 		Use:   "claude [prompt]",
@@ -29,7 +30,7 @@ func newClaudeRemoteCmd() *cobra.Command {
 			if len(args) > 0 {
 				prompt = args[0]
 			}
-			return runStartSession(cmd, session.BackendClaudeSDK, prompt, runnerImage, reaperImage, nameFlag, modelFlag, accountFlag)
+			return runStartSession(cmd, session.BackendClaudeSDK, prompt, runnerImage, reaperImage, nameFlag, modelFlag, accountFlag, worktreeFlag)
 		},
 	}
 	cmd.Flags().StringVar(&runnerImage, "runner-image", client.DefaultRunnerImage, "runner container image")
@@ -37,6 +38,7 @@ func newClaudeRemoteCmd() *cobra.Command {
 	cmd.Flags().StringVar(&nameFlag, "name", "", "custom display name for the session (overrides the auto title)")
 	cmd.Flags().StringVar(&modelFlag, "model", "", "model id/alias for the session default (e.g. opus, sonnet, haiku); empty uses the account default. Switch in-session with /model")
 	cmd.Flags().StringVar(&accountFlag, "account", "", "stored Anthropic account (id or label from `sandbox auth list`) to run the session on; empty uses the default account, or the shared cluster Secret when none are stored")
+	cmd.Flags().StringVar(&worktreeFlag, "worktree", "auto", "per-session git worktree isolation: auto (worktree iff the project is a git repo), on (require a git repo), off (never)")
 	return cmd
 }
 
@@ -47,9 +49,10 @@ func newClaudeRemoteCmd() *cobra.Command {
 // typed into the opencode TUI itself.
 func newOpencodeCmd() *cobra.Command {
 	var (
-		runnerImage string
-		reaperImage string
-		nameFlag    string
+		runnerImage  string
+		reaperImage  string
+		nameFlag     string
+		worktreeFlag string
 	)
 	cmd := &cobra.Command{
 		Use:   "opencode",
@@ -58,13 +61,31 @@ func newOpencodeCmd() *cobra.Command {
 			// opencode manages its own model selection, so there is no --model
 			// flag here (TODO.md): pass an empty model. opencode has no Anthropic
 			// account step either, so the account selector is always empty.
-			return runStartSession(cmd, session.BackendOpenCode, "", runnerImage, reaperImage, nameFlag, "", "")
+			return runStartSession(cmd, session.BackendOpenCode, "", runnerImage, reaperImage, nameFlag, "", "", worktreeFlag)
 		},
 	}
 	cmd.Flags().StringVar(&runnerImage, "runner-image", client.DefaultRunnerImage, "runner container image")
 	cmd.Flags().StringVar(&reaperImage, "reaper-image", k8s.DefaultReaperImage, "idle-reaper container image")
 	cmd.Flags().StringVar(&nameFlag, "name", "", "custom display name for the session (overrides the auto title)")
+	cmd.Flags().StringVar(&worktreeFlag, "worktree", "auto", "per-session git worktree isolation: auto (worktree iff the project is a git repo), on (require a git repo), off (never)")
 	return cmd
+}
+
+// parseWorktreeMode maps the `--worktree` flag string onto a client.WorktreeMode,
+// rejecting any value other than auto|on|off (mirrors how the other enum-ish
+// flags fail closed on an unknown value). Empty and "auto" both select the
+// default WorktreeAuto.
+func parseWorktreeMode(s string) (client.WorktreeMode, error) {
+	switch s {
+	case "", "auto":
+		return client.WorktreeAuto, nil
+	case "on":
+		return client.WorktreeOn, nil
+	case "off":
+		return client.WorktreeOff, nil
+	default:
+		return client.WorktreeAuto, fmt.Errorf("invalid --worktree %q: want auto, on, or off", s)
+	}
 }
 
 // resolveProjectPath returns the absolute, symlink-resolved current working
@@ -93,8 +114,14 @@ func resolveProjectPath() (string, error) {
 // keeping a parallel session engine.
 //
 // account is the raw `--account` selector (id|label, may be ""); it is honored
-// only for the claude backend (opencode has no Anthropic account step).
-func runStartSession(cmd *cobra.Command, backendName, prompt, runnerImage, reaperImage, name, model, account string) error {
+// only for the claude backend (opencode has no Anthropic account step). worktree
+// is the raw `--worktree` selector (auto|on|off), validated here.
+func runStartSession(cmd *cobra.Command, backendName, prompt, runnerImage, reaperImage, name, model, account, worktree string) error {
+	worktreeMode, err := parseWorktreeMode(worktree)
+	if err != nil {
+		return err
+	}
+
 	c, backend, err := newClientAndBackend()
 	if err != nil {
 		return err
@@ -111,6 +138,7 @@ func runStartSession(cmd *cobra.Command, backendName, prompt, runnerImage, reape
 		ProjectPath: projectPath,
 		RunnerImage: runnerImage,
 		Model:       model,
+		Worktree:    worktreeMode,
 	}
 	// Resolve the Anthropic account → per-session credential (fail closed): a
 	// requested account that can't be resolved/read is a hard error, never a
@@ -152,7 +180,7 @@ func runStartSession(cmd *cobra.Command, backendName, prompt, runnerImage, reape
 			newDashboardCreator(c, runnerImage, reaperImage),
 			dashSess,
 			prompt,
-			dashboard.RunOptions{DestroyHook: newLocalDestroyHook(c), PreDestroyHook: newPreDestroySyncStop(c), TitleStore: indexTitleStore{}, SnapshotStore: indexSnapshotStore{}, EventCache: newIndexEventCache(), ObserverConnector: newDashboardObserverConnector(c, reaperImage), SyncProber: dashboardSyncProber(), SyncReaper: dashboardSyncReaper(), IdleTimeout: defaultReaperIdleTimeout, AccountStore: newDashboardAccountStore()},
+			dashboard.RunOptions{DestroyHook: newLocalDestroyHook(c), PreDestroyHook: newPreDestroySyncStop(c), TitleStore: indexTitleStore{}, SnapshotStore: indexSnapshotStore{}, EventCache: newIndexEventCache(), ObserverConnector: newDashboardObserverConnector(c, reaperImage), SyncProber: dashboardSyncProber(), SyncReaper: dashboardSyncReaper(), IdleTimeout: defaultReaperIdleTimeout, AccountStore: newDashboardAccountStore(), WorktreeOps: newWorktreeOps(c)},
 		)
 	})
 }

@@ -75,6 +75,12 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleRenameKey(ks)
 	}
 
+	// The convert-to-branch modal captures all keys while open (esc/enter
+	// resolve it, everything else edits the fields).
+	if m.convert != nil {
+		return m, m.handleConvertKey(msg)
+	}
+
 	// When the initial cluster seed failed, the list shows an error + retry in
 	// place of skeleton bars. r re-issues the seed + watch (with no sessions to
 	// resume, this takes precedence over the resume binding harmlessly).
@@ -103,6 +109,17 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Rename selected session.
 	if key.Matches(msg, m.keys.Rename) {
 		m.openRename()
+		return m, nil
+	}
+
+	// Convert-to-branch (`b`): probe the selected session's worktree facts, then
+	// open the modal (or toast when it has no worktree). Gated on the injected
+	// WorktreeOps so it is a no-op in the library/unit-test default.
+	if m.worktreeOps != nil && key.Matches(msg, m.keys.Branch) {
+		sel := m.selectedRowSession()
+		if sel != nil {
+			return m, m.worktreeStatusCmd(sel.ID())
+		}
 		return m, nil
 	}
 
