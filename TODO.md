@@ -152,13 +152,11 @@ in [`docs/review-2026-07-07.md`](docs/review-2026-07-07.md) §A/§B (id in brack
   the runner (or mount `/proc` with `hidepid=2`); pod-spec + Dockerfile work,
   coordinate with the §7b base-image spike. Until then A1 is
   raised-bar-not-closed; comments in `claude.ts` say so.
-- [ ] **Migrate the PreToolUse block result off the legacy `decision:'block'`
-  shape (LOW, forward-compat).** The SDK also exposes
-  `hookSpecificOutput.permissionDecision:'deny'`; if a future SDK bump drops the
-  legacy path, Bash enforcement silently dies while the F2 tests stay green
-  (they pin what we return, not what the SDK honors). `claude.ts:349-354`,
-  `runner/test/pretooluse-guard.test.ts`. Consider pinning the SDK version
-  (cross-ref the carry-forward caveat below).
+- [x] **PreToolUse block result modernized — done 2026-07-11** (done log):
+  returns `hookSpecificOutput.permissionDecision:'deny'` AND keeps the
+  legacy `decision:'block'` alongside (both shapes verified against the
+  pinned SDK's `sdk.d.ts`); guard tests pin the combined shape. SDK version
+  unchanged (the pin question stays in the carry-forward caveat below).
 - [x] **[A2] event log + SSE redact secrets — done 2026-07-09** (done log):
   shared `redact.ts`; `appendEvent` masks `turn.started`/`tool.*`/
   `permission.*` + role-user `message.*` (the D5 echo) before persist AND
@@ -311,15 +309,19 @@ changes go through `schema/events.json` + `just gen` (never hand-edit `*.gen.*`)
   ids on every `tool.delta`; the TUI targets by `flatTools` and drops parented
   deltas with no flat card. Distinct from gap 1 (text/thinking deltas), which
   stays open.
-- [ ] **Event-model LOW residuals [D7-D12]:** hook-blocked tools emit two
-  `tool.failed` (double FIFO pop, `claude.ts:302-306`); runner omits the schema's
-  `required` `ToolPayload.tool` and never emits schematized `exitCode`
-  (§2c exit-code plumbing); `session.State.Status` dual vocabulary in the public
-  SDK (`client.go:174-188` vs `types.go:156-163`, cross-ref §8); `TurnInput`
-  mirror drift (`Advisor` absent TS-side; `Resume` mistyped as `TurnID`);
-  pre-cycle `session.error` + retitle-during-headless-turn invisible
-  (`opencode-observer.ts:142-153,210`); usage double-emit + cache-token/ctx% edge
-  (`mapping.ts:321-366`, `readmodel.go:145-149`).
+- [x] **[D7/D8/D10/D11/D12] event-model LOW sweep — done 2026-07-11** (done
+  log): single id-carrying `tool.failed` (SDK tool_result is the terminal);
+  `ToolPayload.tool` recovered via the id→name map on
+  completed/failed/delta; `TurnRequestBody` mirrors `Advisor` + documents
+  `Resume`'s real semantics; observer title passthrough exempt from the
+  headless guard + pre-cycle `session.error` → synthetic failed turn;
+  exactly one `usage.updated` per result with real cost, cache-only turns
+  move ctx%. Deliberately NOT done here: `exitCode` (§2c plumbing, the
+  hook/mapping seam correlation is nontrivial).
+- [ ] **[D9] `session.State.Status` dual vocabulary in the public SDK** —
+  `client.go:174-188` vs `types.go:156-163`; deferred INTO §8's De-Claude
+  coordinated break (one vocabulary lands with the `ApprovalPolicy`/
+  `AgentSessionID` renames, not piecemeal).
 
 ### 2c. Design/layout changes (renderer)
 
@@ -547,14 +549,14 @@ done log.)
 - [x] **[E6] live reasoning wrap is incremental — done 2026-07-09** (done
   log): complete-lines prefix cache keyed by width+theme epoch; only the
   trailing partial re-wraps per frame.
-- [ ] **Streaming tail re-hashes + copies the whole buffer per delta (MED-LOW)
-  [E7].** `transcript_list.go:240-254` `fnv(entire buf)` + string→[]byte copy;
-  running-FNV over delta bytes, or key on `buf.Len()` (monotonic).
-- [ ] **LOW perf [E8-E10]:** Go SSE consumer double-copies each line
-  (`client.go:403-422`, use `scanner.Bytes()`); `appendEvent` re-prepares its
-  INSERT per event (✓, `events.ts:201-207`, prepare once); host event-cache
-  reopens the ndjson file per cached event + no size cap
-  (`sync_support.go:252-258`, hold an open handle + cap the tail).
+- [x] **[E7] streaming-tail O(1) change key — done 2026-07-11** (done log):
+  buffer LENGTH (+ mode + theme epoch) replaces the full-buffer hash+copy;
+  safe because the live buffer is append-only within a tail's life (audited
+  every reset site). Bench: ~89ns constant vs O(L) per delta.
+- [x] **[E8-E10] LOW perf trio — done 2026-07-11** (done log): SSE scan loop
+  zero-copy via `scanner.Bytes()`+`CutPrefix`; `events.ts` per-connection
+  prepared-statement cache; host event-cache holds one open O_APPEND handle
+  per session + 8 MiB tail cap with atomic compaction.
 
 ## 5) New-session startup speed (ordered by likely win)
 

@@ -1122,3 +1122,49 @@ review. Detail: docs/review-2026-07-07.md §F.
   to the A1 fix); stale pre-A2 wording replaced. Fable restored the
   permission-id entropy known-gap the draft dropped (shortId = 32 bits,
   `events.ts:661` — still true, bearer token is the containing factor).
+
+- **§2b [D7/D8/D10/D11/D12] + §1f hook-shape — event-model LOW sweep.**
+  D7: `makePreToolUseBashHook` emits nothing — the SDK's
+  `tool_result(is_error)` is the single terminal (id-carrying; the old
+  synthetic second `tool.failed` FIFO-corrupted card matching); guard test
+  pins hook silence. Hook-shape: block result returns
+  `hookSpecificOutput.permissionDecision:'deny'` + legacy `decision:'block'`
+  together (both verified in the pinned SDK's sdk.d.ts). D8:
+  `StreamToolIndex` → `{byIndex, names}`; id→name captured at both
+  content_block_start and full-message tool_use; tool.completed/failed/delta
+  now carry the schema-required `tool` (names deliberately NOT cleared on
+  index reuse — a late tool_result still needs its name). exitCode deferred
+  to §2c (hook-seam correlation). D10: `TurnRequestBody.advisor` added;
+  `resume` documented as the AGENT session id (Go rename waits for §8
+  AgentSessionID); compile-time mirror test added. D11: title passthrough
+  hoisted above the headless-turn guard; pre-cycle `session.error` →
+  synthetic turn.failed + error + status error, foreign sessions ignored
+  (3 new observer tests). D12: `emitResultUsage` — exactly one usage.updated
+  per result, real cost on success AND failure (failure previously dropped
+  cost as 0); readmodel refreshes input/cache counters when ANY of the three
+  is >0 so cache-only turns move ctx%, all-zero still can't clobber. Runner
+  suite 244→251.
+- **§4 [E7] — streaming-tail O(1) change key (MED-LOW).** `ensureStreamTail`
+  keys on buffer LENGTH + mode + theme epoch instead of hashing (and
+  copying) the whole live buffer per delta. Safe by construction: the empty-
+  assistant-buf case nils the tail item (fresh Versioned on regrow) and
+  reasoning.started syncs at length 0 before regrowth, so consecutive calls
+  always see strictly-growing lengths — audited every Reset site
+  (transcript_stream/reduce/commands). BenchmarkEnsureStreamTail: ~89ns,
+  3 allocs, constant in buffer size (was O(L) hash + full string copy).
+- **§4 [E8] — SSE consumer zero-copy scan loop.** `scanner.Bytes()` +
+  `bytes.HasPrefix`/`CutPrefix`; safe because `json.RawMessage` copies the
+  payload before the next Scan reuses the buffer.
+- **§4 [E9] — events.ts prepared-statement cache.** `prepared(db, sql)`
+  keyed to the open Database instance (reset on close/reopen so a Statement
+  can't outlive its handle); INSERT/readEventsAfter/lastSeq reuse it;
+  append-before-stream untouched. Test: rebind-after-reopen.
+- **§4 [E10] — host event-cache: persistent handle + 8 MiB tail cap.** New
+  `index.CacheWriter` (`OpenCacheWriter`/`Append`/`Close`); `indexEventCache`
+  caches one writer per session (was ~5 syscalls per cached event);
+  `LoadCachedEvents` reads only the final 8 MiB (drops the partial leading
+  line); `compactCacheTail` stages the tail in a temp file + atomic rename.
+  Durability unchanged (no user-space buffering before, none now). Known
+  accepted edge: a second process's compaction can strand another process's
+  open handle on the unlinked inode — best-effort cache, self-heals via
+  runner replay. Test: TestEventCacheCapsTail (~16 MiB → bounded tail).
