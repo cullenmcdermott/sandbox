@@ -102,6 +102,13 @@ function sessionTitle(title: string, id = OC): Event {
   return { type: 'session.updated', properties: { info: { id, title } } } as unknown as Event;
 }
 
+function sessionError(message: string, sessionID: string | undefined = OC): Event {
+  return {
+    type: 'session.error',
+    properties: { sessionID, error: { name: 'ProviderError', data: { message } } },
+  } as unknown as Event;
+}
+
 const types = (calls: Calls) => calls.emitted.map((e) => e.type);
 
 test('observer frames an interactive assistant cycle as a synthetic turn', () => {
@@ -204,6 +211,51 @@ test('observer mirrors a live title change, suppressing the placeholder + repeat
 
   const titles = calls.emitted.filter((e) => e.type === 'session.title');
   assert.deepEqual(titles.map((e) => e.payload.title), ['Fix the JSON parser', 'Refactor the parser']);
+});
+
+// ORACLE (D11): a session.error BEFORE any assistant cycle (e.g. a provider auth
+// failure at turn start) has no open mapper, so it used to vanish and leave the
+// dashboard idle. The observer now surfaces it as a synthetic failed turn.
+test('observer surfaces a pre-cycle session.error as a failed turn (D11)', () => {
+  const { deps, calls } = fakeDeps();
+  const h = createObserverHandler(deps);
+
+  assert.equal(h.cycleActive, false);
+  h.handle(sessionError('provider auth failed'));
+
+  assert.deepEqual(types(calls), ['turn.failed', 'error']);
+  assert.equal(calls.emitted[0].payload.message, 'provider auth failed');
+  assert.equal(calls.emitted[1].payload.message, 'provider auth failed');
+  assert.equal(calls.statuses.at(-1), 'error');
+  assert.deepEqual(calls.lastTurns, ['turn-1'], 'a synthetic turn id is stamped');
+  assert.equal(h.cycleActive, false, 'no cycle is opened by an error');
+});
+
+// A pre-cycle session.error for a FOREIGN opencode session is ignored (the
+// evSession gate), so an unrelated session's failure can't fail ours.
+test('observer ignores a pre-cycle session.error for a foreign session (D11)', () => {
+  const { deps, calls } = fakeDeps();
+  const h = createObserverHandler(deps);
+
+  h.handle(sessionError('not ours', 'ses_other'));
+  assert.deepEqual(types(calls), []);
+});
+
+// ORACLE (D11): a retitle DURING a runner-driven (headless) turn must still
+// surface — the title passthrough is exempt from the activeTurns suppression guard
+// that silences every other observed event.
+test('observer surfaces a title change during a headless turn (D11)', () => {
+  const { deps, calls } = fakeDeps({ activeTurnsSize: () => 1 });
+  const h = createObserverHandler(deps);
+
+  h.handle(sessionTitle('Fix the JSON parser'));
+  const titles = calls.emitted.filter((e) => e.type === 'session.title');
+  assert.deepEqual(titles.map((e) => e.payload.title), ['Fix the JSON parser']);
+
+  // Non-title events during a headless turn stay suppressed (runTurn is the writer).
+  h.handle(asstMsg('m1'));
+  h.handle(sessionIdle());
+  assert.deepEqual(types(calls), ['session.title'], 'only the title passes through');
 });
 
 test('observer holds off until the opencode session id is resolved', () => {

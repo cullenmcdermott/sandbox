@@ -33,7 +33,7 @@ import type { Event } from '@opencode-ai/sdk';
 
 import { appendEvent } from './events.js';
 import { appendAudit } from './audit.js';
-import { createOpencodeTurnMapper, opencodeTurnClient } from './opencode-turn.js';
+import { createOpencodeTurnMapper, errToString, opencodeTurnClient } from './opencode-turn.js';
 import { getRegistry } from './session.js';
 import type { EventType } from './types.js';
 
@@ -136,20 +136,18 @@ export function createObserverHandler(deps: ObserverDeps) {
       }
     },
     handle(ev: Event): void {
-      // A runner-driven /turns request is the single writer for its own turn —
-      // don't double-map while one is active. Pure interactive opencode never
-      // registers a turn, so this only guards the headless seam (tests / k8sit).
-      if (deps.activeTurnsSize() > 0) return;
-
       const e = ev as unknown as { type?: string; properties?: Record<string, unknown> };
       const type = e.type;
       const props = e.properties ?? {};
       const oc = deps.ocSession();
       if (!oc) return; // session id not resolved yet (warmup still in flight)
 
-      // Title passthrough — independent of the turn cycle. opencode mutates the
-      // title live (it auto-generates one a beat after the first turn), so mirror
-      // every non-placeholder change, not just the first.
+      // Title passthrough — independent of the turn cycle AND exempt from the
+      // headless-turn suppression guard below (D11): opencode can retitle a session
+      // DURING a runner-driven turn, and that rename must still surface — the guard
+      // previously short-circuited it. opencode mutates the title live (it
+      // auto-generates one a beat after the first turn), so mirror every
+      // non-placeholder change, not just the first.
       if (type === 'session.updated' || type === 'session.created') {
         const info = (props.info as { id?: string; title?: string }) ?? {};
         if (info.id === oc && typeof info.title === 'string') {
@@ -162,6 +160,12 @@ export function createObserverHandler(deps: ObserverDeps) {
         return;
       }
 
+      // A runner-driven /turns request is the single writer for its own turn —
+      // don't double-map while one is active. Pure interactive opencode never
+      // registers a turn, so this only guards the headless seam (tests / k8sit).
+      // The title passthrough above is deliberately exempt (D11).
+      if (deps.activeTurnsSize() > 0) return;
+
       // Everything below is gated to our opencode session (a user can open extra
       // sessions inside the opencode TUI; their events are not ours to surface).
       const evSession = eventSessionId(props);
@@ -172,6 +176,22 @@ export function createObserverHandler(deps: ObserverDeps) {
       // (stays "active"); a wedged/quiet stream lets it go stale so the reaper
       // can reclaim the pod instead of being blocked by a pinned 'busy'.
       deps.noteObserverEvent?.();
+
+      // Pre-cycle session.error (D11): a session.error that arrives before any
+      // assistant message.updated (e.g. a provider auth failure at turn start) has
+      // no open cycle mapper to map it, so it would vanish and the dashboard would
+      // sit idle. Surface it as a synthetic failed turn (turn.failed + error +
+      // status error) so the failure is visible. A session.error DURING a cycle is
+      // handled by the cycle's mapper below.
+      if (activeTurnId === undefined && type === 'session.error') {
+        const turnId = deps.nextTurnId();
+        deps.setLastTurn(turnId);
+        const message = errToString((props as { error?: unknown }).error);
+        deps.emit(turnId, 'turn.failed', { message });
+        deps.emit(turnId, 'error', { message });
+        deps.setStatus('error');
+        return;
+      }
 
       // Cycle start: the first assistant message.updated of a cycle. opencode
       // always emits message.updated(role) before that message's parts, so this

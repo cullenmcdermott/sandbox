@@ -142,7 +142,12 @@ func (rm *sessionReadModel) ApplyEvent(ev session.Event) readModelResult {
 	case session.EventUsageUpdated:
 		var p session.UsagePayload
 		_ = json.Unmarshal(ev.Payload, &p)
-		if p.InputTokens > 0 {
+		// D12: refresh the input/cache counters when the event carries ANY token of
+		// them, not only when InputTokens>0. A provider can bill an entire turn as
+		// cache-read with zero fresh input (plausible on opencode) — gating on
+		// InputTokens alone left ctx% frozen for that case. Still skip an all-zero
+		// usage.updated so an intermediate zero-token event can't clobber the counts.
+		if p.InputTokens > 0 || p.CacheReadTokens > 0 || p.CacheWriteTokens > 0 {
 			rm.InputTokens = p.InputTokens
 			rm.CacheReadTokens = p.CacheReadTokens
 			rm.CacheWriteTokens = p.CacheWriteTokens

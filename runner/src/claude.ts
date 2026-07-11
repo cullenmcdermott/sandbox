@@ -37,7 +37,7 @@ import type { Agent } from './agent.js';
 import { CLAUDE_CONFIG_DIR } from './types.js';
 import { TITLE_PROMPT, sanitizeTitle, shouldGenerateTitle } from './title.js';
 import { SessionGrants, resolutionOutcome } from './grants.js';
-import { mapMessage as mapMessagePure, type StreamToolIndex } from './mapping.js';
+import { mapMessage as mapMessagePure, newStreamToolIndex, type StreamToolIndex } from './mapping.js';
 import { startTurnTrace } from './trace.js';
 
 // Tool-name-level "allow for this session" grants (permission scope:'session').
@@ -340,28 +340,42 @@ export function buildOptions(
 // makePreToolUseBashHook builds the SDK PreToolUse(Bash) hook — the primary
 // enforcement path for the Bash blocklist (the SDK Bash tool is what agents use
 // constantly; the /exec passthrough and opencode plugin gate the other two
-// surfaces). A blocked command returns the SDK's `decision:'block'` shape (which
-// stops the tool call) and records a tool.failed event; anything else permits.
-// The `emit` seam defaults to the live event log but is injectable so the guard
-// can be unit-tested without an open SQLite database (F2).
+// surfaces). A blocked command returns the SDK's deny shape (which stops the tool
+// call); anything else permits.
+//
+// §1f (hook-shape forward-compat): the block result now uses the modern
+// `hookSpecificOutput.permissionDecision:'deny'` shape and keeps the legacy
+// top-level `decision:'block'` alongside it (belt-and-braces — SyncHookJSONOutput
+// permits both), so the guard survives an SDK that honors either form.
+//
+// D7 (no double tool.failed): the hook deliberately emits NOTHING. A denied tool
+// call is surfaced by the SDK's own `tool_result(is_error)`, which the mapper turns
+// into exactly one tool.failed carrying the tool_use_id (and, per D8, the tool
+// name). The hook previously also appended a synthetic id-less tool.failed — a
+// SECOND terminal for the same call that FIFO-corrupted the TUI's card matching.
+// The injectable `emit` seam is retained solely so the guard test can pin that the
+// hook stays silent (a re-introduced synthetic emit would regress D7).
 export function makePreToolUseBashHook(
   sessionId: string,
   turnId: string,
   emit: (type: 'tool.failed', payload: Record<string, unknown>) => void =
     (type, payload) => appendEvent(sessionId, turnId, type, payload),
 ): HookCallback {
+  void emit; // deliberately unused (D7): the SDK's tool_result is the single terminal.
   return async (input: HookInput): Promise<SyncHookJSONOutput> => {
     if (input.hook_event_name !== 'PreToolUse') return { continue: true };
     const command = String((input.tool_input as { command?: unknown })?.command ?? '');
     if (bashCommandBlocked(command)) {
-      emit('tool.failed', {
-        tool: 'Bash',
-        input: input.tool_input,
-        error: `blocked by PreToolUse hook: command matches a host/cluster/credential pattern`,
-      });
+      const reason = `Command blocked by sandbox PreToolUse(Bash) hook: matches a host/cluster/credential operation pattern. Use an approved profile to allow this command.`;
       return {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'deny',
+          permissionDecisionReason: reason,
+        },
+        // Legacy shape kept for compat with SDKs that read the top-level fields.
         decision: 'block',
-        reason: `Command blocked by sandbox PreToolUse(Bash) hook: matches a host/cluster/credential operation pattern. Use an approved profile to allow this command.`,
+        reason,
         continue: false,
       };
     }
@@ -627,7 +641,7 @@ export async function runTurn(
       const q: Query = query({ prompt, options });
       // Per-attempt content-block→tool_use-id attribution for tool.delta (D6);
       // fresh per query() because block indexes restart with the stream.
-      const streamTools: StreamToolIndex = new Map();
+      const streamTools: StreamToolIndex = newStreamToolIndex();
       let rateLimitsFetched = false;
       let modelsFetched = false;
       let staleResume = false;

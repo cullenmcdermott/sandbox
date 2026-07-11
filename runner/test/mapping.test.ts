@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
-import { mapMessage, todoUpdatedPayload, capToolOutput, type EmitFn } from '../src/mapping.js';
+import { mapMessage, newStreamToolIndex, todoUpdatedPayload, capToolOutput, type EmitFn } from '../src/mapping.js';
 import { assertMapperInvariants } from './backend-contract.js';
 
 /** Collect emitted events into a list for assertions. */
@@ -238,6 +238,83 @@ test('user tool_result (error) → tool.failed with error populated', () => {
   assert.equal(events[0].payload.error, 'boom: file not found');
 });
 
+// ORACLE (D8): ToolPayload.tool is schema-required, but a tool_result carries only
+// tool_use_id. The name captured on the matching tool.started (threaded via the
+// per-turn StreamToolIndex) is recovered onto tool.completed/failed.
+test('user tool_result carries the schema-required tool name via streamTools (D8)', () => {
+  const { events, emit } = collector();
+  const streamTools = newStreamToolIndex();
+  // Full-message tool_use populates id→name...
+  mapMessage(
+    asMsg({
+      type: 'assistant',
+      message: {
+        content: [{ type: 'tool_use', id: 'toolu_x', name: 'Bash', input: { command: 'ls' } }],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    }),
+    emit,
+    streamTools,
+  );
+  // ...so the later id-only tool_result recovers `tool: 'Bash'`.
+  mapMessage(
+    asMsg({
+      type: 'user',
+      message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_x', content: 'ok' }] },
+    }),
+    emit,
+    streamTools,
+  );
+  const completed = events.find((e) => e.type === 'tool.completed');
+  assert.ok(completed, 'expected a tool.completed');
+  assert.equal(completed!.payload.tool, 'Bash', 'tool name recovered from tool.started');
+  // An error result recovers the name too.
+  mapMessage(
+    asMsg({
+      type: 'user',
+      message: {
+        content: [{ type: 'tool_result', tool_use_id: 'toolu_x', content: 'boom', is_error: true }],
+      },
+    }),
+    emit,
+    streamTools,
+  );
+  const failed = events.find((e) => e.type === 'tool.failed');
+  assert.equal(failed!.payload.tool, 'Bash');
+});
+
+// ORACLE (D8): the streaming content_block_start(tool_use) also populates the
+// id→name map, so tool.delta — which schema-requires `tool` but only knows the
+// block index — carries the tool name too.
+test('stream_event tool.delta carries the schema-required tool name (D8)', () => {
+  const { events, emit } = collector();
+  const streamTools = newStreamToolIndex();
+  mapMessage(
+    asMsg({
+      type: 'stream_event',
+      event: {
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'tool_use', id: 'tu_d', name: 'Edit', input: {} },
+      },
+    }),
+    emit,
+    streamTools,
+  );
+  mapMessage(
+    asMsg({
+      type: 'stream_event',
+      event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"f' } },
+    }),
+    emit,
+    streamTools,
+  );
+  const delta = events.find((e) => e.type === 'tool.delta');
+  assert.ok(delta, 'expected a tool.delta');
+  assert.equal(delta!.payload.tool, 'Edit');
+  assert.equal(delta!.payload.toolUseId, 'tu_d');
+});
+
 // ORACLE: capToolOutput leaves within-cap output untouched, and truncates an
 // oversized output to a bounded head+tail with a byte-count marker.
 test('capToolOutput leaves small output unchanged', () => {
@@ -276,8 +353,9 @@ test('user tool_result caps an oversized output', () => {
   assert.match(out, /… \d+ bytes truncated …/);
 });
 
-// ORACLE: a successful result message → turn.completed + usage.updated (x2:
-// one from the carried usage, one with the cost), and reports completed:true.
+// ORACLE (D12): a successful result message → turn.completed + EXACTLY ONE
+// usage.updated carrying the real cost (previously two back-to-back rows: one
+// stamped cost 0, one with the cost), and reports completed:true.
 test('result success → turn.completed + usage + completed observation', () => {
   const { events, emit } = collector();
   const res = mapMessage(
@@ -300,13 +378,15 @@ test('result success → turn.completed + usage + completed observation', () => 
   );
   const types = events.map((e) => e.type);
   assert.ok(types.includes('turn.completed'), 'expected turn.completed');
-  assert.ok(types.includes('usage.updated'), 'expected usage.updated');
+  const usages = events.filter((e) => e.type === 'usage.updated');
+  assert.equal(usages.length, 1, 'D12: exactly one usage.updated (no back-to-back double)');
   const completed = events.find((e) => e.type === 'turn.completed');
   assert.equal(completed!.payload.result, 'all done');
   assert.equal(completed!.payload.numTurns, 3);
-  // The cost-bearing usage.updated carries totalCostUsd from total_cost_usd.
-  const costUsage = events.find((e) => e.type === 'usage.updated' && e.payload.totalCostUsd === 0.05);
-  assert.ok(costUsage, 'expected a usage.updated carrying total_cost_usd');
+  // The single usage.updated carries the real totalCostUsd + cache tokens.
+  assert.equal(usages[0].payload.totalCostUsd, 0.05);
+  assert.equal(usages[0].payload.cacheReadTokens, 10);
+  assert.equal(usages[0].payload.cacheWriteTokens, 20);
   assert.deepEqual(res, { completed: true });
   assertMapperInvariants(events); // same cross-backend contract as opencode
 });
@@ -320,7 +400,8 @@ test('result error → turn.failed + error', () => {
       type: 'result',
       subtype: 'error_max_turns',
       errors: ['hit the max turn limit'],
-      usage: { input_tokens: 1, output_tokens: 1 },
+      total_cost_usd: 0.02,
+      usage: { input_tokens: 7, output_tokens: 3, cache_read_input_tokens: 4 },
     }),
     emit,
   );
@@ -331,6 +412,11 @@ test('result error → turn.failed + error', () => {
   assert.ok(err, 'expected error');
   assert.equal(err!.payload.code, 'error_max_turns');
   assert.equal(err!.payload.message, 'hit the max turn limit');
+  // D12: a failed turn still reports its real cost (was dropped as totalCostUsd:0).
+  const usages = events.filter((e) => e.type === 'usage.updated');
+  assert.equal(usages.length, 1, 'exactly one usage.updated on a failed turn');
+  assert.equal(usages[0].payload.totalCostUsd, 0.02);
+  assert.equal(usages[0].payload.cacheReadTokens, 4);
   assert.deepEqual(res, {}, 'a failed result is not a normal completion');
   assertMapperInvariants(events); // same cross-backend contract as opencode
 });
@@ -357,7 +443,7 @@ test('stream_event content_block_delta(text) → message.delta', () => {
 // index spaces, so the same index must not cross-attribute.
 test('stream_event input_json_delta → tool.delta carries toolUseId + parentToolUseId', () => {
   const { events, emit } = collector();
-  const streamTools = new Map<string, string>();
+  const streamTools = newStreamToolIndex();
   // Main-thread tool_use opens at index 1.
   mapMessage(
     asMsg({
@@ -415,7 +501,7 @@ test('stream_event input_json_delta → tool.delta carries toolUseId + parentToo
 // pointing at the wrong tool.
 test('stream_event index reuse by a text block clears the tool attribution', () => {
   const { events, emit } = collector();
-  const streamTools = new Map<string, string>();
+  const streamTools = newStreamToolIndex();
   mapMessage(
     asMsg({
       type: 'stream_event',

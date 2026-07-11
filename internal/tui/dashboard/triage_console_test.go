@@ -435,6 +435,37 @@ func TestPhase3_UsageUpdatedReducer(t *testing.T) {
 	}
 }
 
+// D12: a provider can bill a whole turn as cache-read with zero fresh input
+// (plausible on opencode). The reducer used to gate the cache-token update on
+// InputTokens>0, so ctx% stayed frozen at 0. It must now move.
+func TestUsageUpdatedCacheOnlyMovesCtxPercent(t *testing.T) {
+	sess := makeSession("s1", StatusBusy)
+	sess.CtxLimit = 200000
+	ApplyRunnerEvent(&sess, mkEvent(session.EventUsageUpdated, session.UsagePayload{
+		InputTokens: 0, CacheReadTokens: 60000, CacheWriteTokens: 0, OutputTokens: 100, TotalCostUSD: 0.10,
+	}))
+	if sess.CacheReadTokens != 60000 {
+		t.Errorf("cache-read tokens not applied with InputTokens=0: %+v", sess)
+	}
+	if got := sess.CtxPercent(); got != 30 { // (0+60000+0)/200000 = 30%
+		t.Errorf("CtxPercent = %d, want 30 (cache-only usage must move ctx%%)", got)
+	}
+}
+
+// D12: an all-zero usage.updated (an intermediate zero-token event) must NOT
+// clobber previously-known token counts.
+func TestUsageUpdatedAllZeroDoesNotClobber(t *testing.T) {
+	sess := makeSession("s1", StatusBusy)
+	sess.CtxLimit = 200000
+	ApplyRunnerEvent(&sess, mkEvent(session.EventUsageUpdated, session.UsagePayload{
+		InputTokens: 50000, CacheReadTokens: 10000, OutputTokens: 1000, TotalCostUSD: 0.42,
+	}))
+	ApplyRunnerEvent(&sess, mkEvent(session.EventUsageUpdated, session.UsagePayload{})) // all zero
+	if sess.InputTokens != 50000 || sess.CacheReadTokens != 10000 {
+		t.Errorf("all-zero usage clobbered known counts: %+v", sess)
+	}
+}
+
 func TestPhase3_CtxLimitCachedOnSessionStarted(t *testing.T) {
 	sess := makeSession("s1", StatusIdle)
 	ApplyRunnerEvent(&sess, mkEvent(session.EventSessionStarted, session.SessionStartedPayload{Model: "opus-4.8"}))

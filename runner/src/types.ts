@@ -85,6 +85,14 @@ export interface SessionState {
  * `prompt` are optional; the server reads them via readBody<TurnRequestBody>. */
 export interface TurnRequestBody {
   prompt?: string;
+  /**
+   * The AGENT session id to continue (Go: TurnInput.Resume). Despite the Go type
+   * being `session.TurnID`, the runner treats this as the backend's own session
+   * identifier — the Claude SDK session UUID (claude.ts effectiveResume) or the
+   * opencode session id — NOT a turn id. An SDK consumer must pass the agent
+   * session id here, not a TurnID. (D10; the Go-side type is corrected under §8's
+   * AgentSessionID rename.)
+   */
   resume?: string;
   allowedTools?: string[];
   /**
@@ -107,6 +115,13 @@ export interface TurnRequestBody {
    * displays 'max' as "ultracode".
    */
   effort?: string;
+  /**
+   * Request the SDK "advisor" tool for this turn (the in-session /advisor toggle;
+   * Go: TurnInput.Advisor). Mirrors the Go type so the wire contract is complete
+   * (D10). A harmless no-op on the pinned @anthropic-ai/claude-agent-sdk, which
+   * exposes no advisor option — the runner does not yet read it.
+   */
+  advisor?: boolean;
 }
 
 /** POST /sessions/:id/turns response: the assigned turn id. */

@@ -65,17 +65,41 @@ export function capToolOutput(s: string): string {
 }
 
 /**
- * Per-turn streaming state: maps `${parentToolUseId}:${blockIndex}` → the
- * tool_use id opened by content_block_start at that index, so input_json_delta
- * events (which carry only the block index) can be attributed to the right
- * tool card (D6). Keyed with the parent id because a subagent's stream and the
- * main thread's interleave with independent content-block index spaces.
- * Callers create one per turn and pass it to every mapMessage call.
+ * Per-turn streaming state, created once per query() and passed to every
+ * mapMessage call. Two maps:
+ *
+ *   byIndex — `${parentToolUseId}:${blockIndex}` → the tool_use id opened by
+ *     content_block_start at that index, so input_json_delta events (which carry
+ *     only the block index) can be attributed to the right tool card (D6). Keyed
+ *     with the parent id because a subagent's stream and the main thread's
+ *     interleave with independent content-block index spaces.
+ *
+ *   names — tool_use id → tool name. The id-only tool_result (mapped to
+ *     tool.completed/failed by handleUserMessage) and tool.delta carry no name of
+ *     their own, but ToolPayload.tool is schema-required (D8); this lets those
+ *     emitters recover it. Populated at every tool_use content_block_start AND
+ *     full-message tool_use, both of which precede the tool_result, so the name is
+ *     available whether or not partial-message streaming is on.
  */
-export type StreamToolIndex = Map<string, string>;
+export interface StreamToolIndex {
+  byIndex: Map<string, string>;
+  names: Map<string, string>;
+}
+
+/** Fresh per-turn StreamToolIndex (block indexes + ids restart with each query()). */
+export function newStreamToolIndex(): StreamToolIndex {
+  return { byIndex: new Map(), names: new Map() };
+}
 
 function streamToolKey(parentToolUseId: string | undefined, index: number): string {
   return `${parentToolUseId ?? ''}:${index}`;
+}
+
+/** Resolve the schema-required tool name for an id-only tool event (D8): the
+ * per-turn names map, else '' when the id is unknown (no streamTools threaded, or
+ * a tool_result with no matching tool_use — the pre-D8 fallback). */
+function toolNameFor(streamTools: StreamToolIndex | undefined, toolUseId: string | undefined): string {
+  return (toolUseId && streamTools?.names.get(toolUseId)) || '';
 }
 
 /**
@@ -114,12 +138,12 @@ export function mapMessage(msg: SDKMessage, emit: EmitFn, streamTools?: StreamTo
       return {};
     }
     case 'assistant': {
-      handleAssistantMessage(msg, emit);
+      handleAssistantMessage(msg, emit, streamTools);
       emitUsage(msg.message.usage, emit);
       return {};
     }
     case 'user': {
-      handleUserMessage(msg, emit);
+      handleUserMessage(msg, emit, streamTools);
       return {};
     }
     case 'stream_event': {
@@ -169,6 +193,7 @@ export function todoUpdatedPayload(input: unknown): { todos: TodoItem[] } | unde
 function handleAssistantMessage(
   msg: Extract<SDKMessage, { type: 'assistant' }>,
   emit: EmitFn,
+  streamTools?: StreamToolIndex,
 ): void {
   const parentToolUseId =
     (msg as { parent_tool_use_id?: string | null }).parent_tool_use_id ?? undefined;
@@ -187,6 +212,8 @@ function handleAssistantMessage(
       }
       case 'tool_use': {
         const tu = block as BetaToolUseBlock;
+        // D8: remember id→name so the later id-only tool_result can carry `tool`.
+        streamTools?.names.set(tu.id, tu.name);
         emit('tool.started', {
           tool: tu.name,
           input: tu.input,
@@ -217,6 +244,7 @@ function handleAssistantMessage(
 function handleUserMessage(
   msg: Extract<SDKMessage, { type: 'user' }>,
   emit: EmitFn,
+  streamTools?: StreamToolIndex,
 ): void {
   const content = msg.message.content;
   const parentToolUseId =
@@ -243,12 +271,16 @@ function handleUserMessage(
             ? (block.content as Array<{ text?: string }>).map((c) => c?.text ?? '').join('')
             : '',
       );
+      // D8: a tool_result carries only tool_use_id, but ToolPayload.tool is
+      // schema-required — recover the name captured on the matching tool.started.
+      const tool = toolNameFor(streamTools, block.tool_use_id);
       if (block.is_error) {
         // Populate `error` (not just `output`) so the documented
         // ToolPayload.Error field carries the failure reason. A consumer that
         // renders only `error` (the Go TUI) would otherwise show a bare "✗"
         // with no message for every SDK-path tool failure.
         emit('tool.failed', {
+          tool,
           output: outputStr,
           error: outputStr,
           toolUseId: block.tool_use_id,
@@ -256,6 +288,7 @@ function handleUserMessage(
         });
       } else {
         emit('tool.completed', {
+          tool,
           output: outputStr,
           toolUseId: block.tool_use_id,
           parentToolUseId,
@@ -277,11 +310,15 @@ function handleStreamEvent(
       const block = e.content_block;
       // Track (parent, index) → tool_use id for D6; overwrite/clear on every
       // block start so a later message reusing the index can't inherit a stale
-      // id (indexes restart per assistant message within the stream).
+      // id (indexes restart per assistant message within the stream). names is
+      // keyed by id (not index), so it is NOT cleared on index reuse — a
+      // tool_result for an already-finished tool still needs its name (D8).
       if (block.type === 'tool_use') {
-        streamTools?.set(streamToolKey(parentToolUseId, e.index), (block as BetaToolUseBlock).id);
+        const tu = block as BetaToolUseBlock;
+        streamTools?.byIndex.set(streamToolKey(parentToolUseId, e.index), tu.id);
+        streamTools?.names.set(tu.id, tu.name); // D8: id→name for the later tool_result
       } else {
-        streamTools?.delete(streamToolKey(parentToolUseId, e.index));
+        streamTools?.byIndex.delete(streamToolKey(parentToolUseId, e.index));
       }
       switch (block.type) {
         case 'text':
@@ -318,18 +355,22 @@ function handleStreamEvent(
         case 'thinking_delta':
           emit('reasoning.delta', { content: delta.thinking, delta: true });
           break;
-        case 'input_json_delta':
+        case 'input_json_delta': {
           // D6: attribute the streamed input to its tool_use block so the TUI
           // can target the exact card instead of guessing "newest pending" —
           // a subagent's streaming input otherwise animates onto a main-thread
           // card's argument.
+          const toolUseId = streamTools?.byIndex.get(streamToolKey(parentToolUseId, e.index));
           emit('tool.delta', {
+            // D8: ToolPayload.tool is schema-required; recover it from the id.
+            tool: toolNameFor(streamTools, toolUseId),
             partialJson: delta.partial_json,
             delta: true,
-            toolUseId: streamTools?.get(streamToolKey(parentToolUseId, e.index)),
+            toolUseId,
             parentToolUseId,
           });
           break;
+        }
         default:
           break;
       }
@@ -353,14 +394,10 @@ function handleResultMessage(
       numTurns: msg.num_turns,
       durationMs: msg.duration_ms,
     });
-    emitUsage(msg.usage, emit);
-    emit('usage.updated', {
-      inputTokens: msg.usage.input_tokens,
-      outputTokens: msg.usage.output_tokens,
-      cacheReadTokens: msg.usage.cache_read_input_tokens ?? 0,
-      cacheWriteTokens: msg.usage.cache_creation_input_tokens ?? 0,
-      totalCostUsd: msg.total_cost_usd,
-    });
+    // D12: exactly ONE usage.updated for the terminal result, carrying the real
+    // cost. Previously emitUsage() stamped totalCostUsd:0 and THEN this re-emitted
+    // with the cost — two back-to-back usage rows for every successful turn.
+    emitResultUsage(msg.usage, msg.total_cost_usd, emit);
     return { completed: true };
   }
   emit('turn.failed', {
@@ -375,8 +412,32 @@ function handleResultMessage(
     message: msg.errors.join('; ') || `turn failed: ${msg.subtype}`,
     code: msg.subtype,
   });
-  emitUsage(msg.usage, emit);
+  // D12: a failed turn was still billed — emit its real cost. emitUsage would
+  // stamp totalCostUsd:0, silently dropping the cost the provider charged.
+  emitResultUsage(msg.usage, msg.total_cost_usd, emit);
   return {};
+}
+
+/** Emit the single terminal usage.updated for a result message, carrying the
+ * real total cost (D12). Shared by the success and failure branches so both
+ * report cost and neither double-emits. */
+function emitResultUsage(
+  usage: {
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_input_tokens?: number | null;
+    cache_creation_input_tokens?: number | null;
+  },
+  totalCostUsd: number | undefined,
+  emit: EmitFn,
+): void {
+  emit('usage.updated', {
+    inputTokens: usage.input_tokens,
+    outputTokens: usage.output_tokens,
+    cacheReadTokens: usage.cache_read_input_tokens ?? 0,
+    cacheWriteTokens: usage.cache_creation_input_tokens ?? 0,
+    totalCostUsd: totalCostUsd ?? 0,
+  });
 }
 
 function emitUsage(

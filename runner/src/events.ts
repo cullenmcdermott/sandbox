@@ -67,6 +67,38 @@ interface SseClient {
 let db: Database.Database | null = null;
 const clients = new Set<SseClient>();
 
+/**
+ * E9: prepared-statement cache. better-sqlite3 does NOT cache prepared statements,
+ * so calling `db.prepare(sql)` on the per-event hot path (appendEvent's INSERT
+ * fires once per streamed delta) re-parses the SQL every time. Prepare each SQL
+ * once and reuse the Statement, keyed to the currently-open database instance so a
+ * reopen (openEventLog assigns a NEW `db`) transparently re-prepares against the
+ * new handle rather than reusing a Statement bound to a closed one. Reset on
+ * close/reopen. This changes nothing about the append-before-stream invariant — it
+ * is a pure parse-cost optimization on the same INSERT-then-broadcast path.
+ */
+let stmtCache = new Map<string, Database.Statement>();
+let stmtCacheDb: Database.Database | null = null;
+function prepared(d: Database.Database, sql: string): Database.Statement {
+  if (stmtCacheDb !== d) {
+    stmtCache = new Map();
+    stmtCacheDb = d;
+  }
+  let stmt = stmtCache.get(sql);
+  if (!stmt) {
+    stmt = d.prepare(sql);
+    stmtCache.set(sql, stmt);
+  }
+  return stmt;
+}
+function resetStmtCache(): void {
+  stmtCache = new Map();
+  stmtCacheDb = null;
+}
+
+const INSERT_EVENT_SQL =
+  'INSERT INTO events (time, session_id, turn_id, type, payload) VALUES (?, ?, ?, ?, ?)';
+
 /** Current event-log schema version, stamped into SQLite's `user_version` and
  * read back on every open. Bump it — and register a step in MIGRATIONS — when
  * the table shape changes. openEventLog refuses a database stamped NEWER than
@@ -267,6 +299,7 @@ function getDb(): Database.Database {
 export function __setEventLogForTest(d: Database.Database | null): void {
   db = d;
   clients.clear();
+  resetStmtCache(); // E9: drop statements bound to the previous db
 }
 
 /** Checkpoint the WAL and close the DB on shutdown so no events are lost. */
@@ -279,6 +312,7 @@ export function closeEventLog(): void {
     /* best effort during shutdown */
   }
   db = null;
+  resetStmtCache(); // E9: statements are bound to the now-closed db
 }
 
 /**
@@ -305,11 +339,8 @@ export function appendEvent(
   const payloadJson = JSON.stringify(outPayload);
   let seq = 0;
   try {
-    const info = d
-      .prepare(
-        'INSERT INTO events (time, session_id, turn_id, type, payload) VALUES (?, ?, ?, ?, ?)',
-      )
-      .run(time, sessionId, turnId ?? null, type, payloadJson);
+    // E9: reuse the cached prepared INSERT (append-before-stream is unchanged).
+    const info = prepared(d, INSERT_EVENT_SQL).run(time, sessionId, turnId ?? null, type, payloadJson);
     seq = Number(info.lastInsertRowid);
   } catch (err) {
     // R11: SQLite write failure must not crash the turn loop. Log and continue
@@ -390,11 +421,10 @@ interface EventRow {
  */
 export function readEventsAfter(sessionId: string, afterSeq: number): Event[] {
   const d = getDb();
-  const rows = d
-    .prepare(
-      'SELECT seq, time, session_id, turn_id, type, payload FROM events WHERE session_id = ? AND seq > ? ORDER BY seq ASC',
-    )
-    .all(sessionId, afterSeq) as EventRow[];
+  const rows = prepared(
+    d,
+    'SELECT seq, time, session_id, turn_id, type, payload FROM events WHERE session_id = ? AND seq > ? ORDER BY seq ASC',
+  ).all(sessionId, afterSeq) as EventRow[];
   return rows.map((r) => ({
     seq: r.seq,
     time: r.time,
@@ -408,9 +438,9 @@ export function readEventsAfter(sessionId: string, afterSeq: number): Event[] {
 /** Highest seq seen for a session (0 if none). */
 export function lastSeq(sessionId: string): number {
   const d = getDb();
-  const row = d
-    .prepare('SELECT MAX(seq) AS maxSeq FROM events WHERE session_id = ?')
-    .get(sessionId) as { maxSeq: number | null } | undefined;
+  const row = prepared(d, 'SELECT MAX(seq) AS maxSeq FROM events WHERE session_id = ?').get(
+    sessionId,
+  ) as { maxSeq: number | null } | undefined;
   return row?.maxSeq ?? 0;
 }
 
