@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -411,10 +412,6 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 		// deleted must NOT sync — an empty alpha under two-way-safe would look like a
 		// mass delete and could storm the pod's files away. Skip file sync with a
 		// warning (the runner surface still works); the reaper still runs.
-		// TODO(§4.5/§1d): the same-path non-git collision warning (another live
-		// session already syncing this ProjectPath) is not emitted here — it needs a
-		// syncManager().List() scan of existing sandbox-*-project alphas; deferred to
-		// the §9 non-git-collision follow-up rather than paying the List cost inline.
 		worktreeMissing := worktreeMissingForSync(workspacePath, projectPath)
 
 		// Foreground: only the load-bearing project sync — the one the agent needs
@@ -438,6 +435,14 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 			syncWarning = appendWarning(syncWarning, fmt.Sprintf("file sync unavailable (ssh key): %v", kerr))
 			s.startBackgroundSync(tr, syncpkg.Spec{}, false, false, reaperImage, reaperPullPolicy, idleTimeout)
 		default:
+			// Non-git same-path collision warning (design §4.5/§1d): a non-worktree
+			// session syncs the repo root itself, so if another live session already
+			// syncs this directory their two-way syncs cross-feed edits. Warn-only
+			// (signed-off resolution 4: never refuse). One List exec per Connect, off
+			// the hot path; silent when mutagen is absent.
+			if w := s.sameDirSyncWarning(ctx, workspacePath, projectPath, string(s.ref.ID)); w != "" {
+				syncWarning = appendWarning(syncWarning, w)
+			}
 			syncSpan := tr.start("connect.project_sync")
 			created, spec, serr := s.c.startProjectSync(ctx, string(s.ref.ID), workspacePath, privPath, handles[1].LocalPort())
 			syncSpan.end()
@@ -481,6 +486,54 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 	}
 	stage(StageAttach)
 	return conn, nil
+}
+
+// sameDirSyncWarning detects the non-git same-path sync collision (design
+// §4.5/§4.9): a NON-worktree session (workspacePath == projectPath — the pod
+// syncs the repo root itself, not an isolated per-session worktree) shares its
+// Mutagen alpha with any other live session syncing the same directory, so their
+// two-way-safe syncs cross-feed each other's edits. A git worktree gives each
+// session its own alpha and avoids this; a non-git (or WorktreeOff) project
+// can't, so we warn — never refuse (signed-off resolution 4).
+//
+// It scans the host's live Mutagen sync sessions (one `mutagen sync list` per
+// Connect, off the hot path) for another session's "-project" sync and resolves
+// that session's alpha path from the local index (the worktree dir when set,
+// else the repo root). A missing Mutagen binary/daemon makes List error, which
+// degrades silently to no warning (never an error). Returns "" when there is no
+// collision or the session is worktree-isolated.
+func (s *Session) sameDirSyncWarning(ctx context.Context, workspacePath, projectPath, ourID string) string {
+	if workspacePath == "" || workspacePath != projectPath {
+		return "" // worktree-isolated (or unknown path): no shared-alpha collision
+	}
+	sessions, err := s.c.syncManager().List(ctx)
+	if err != nil || len(sessions) == 0 {
+		return "" // mutagen absent, or nothing else syncing → silent
+	}
+	seen := map[string]bool{ourID: true}
+	for _, ss := range sessions {
+		if seen[ss.SessionID] || !strings.HasSuffix(ss.Name, "-project") {
+			continue
+		}
+		seen[ss.SessionID] = true
+		if strings.Contains(strings.ToLower(ss.Status), "paused") {
+			continue // a suspended session isn't actively cross-feeding right now
+		}
+		// The other session's alpha is its worktree dir when it has one, else its
+		// repo root — the same rule Connect uses to pick workspacePath.
+		entry, lerr := s.c.index.Load(ss.SessionID)
+		if lerr != nil {
+			continue // can't resolve its path (created on another host) → skip
+		}
+		alpha := entry.WorktreePath
+		if alpha == "" {
+			alpha = entry.ProjectPath
+		}
+		if alpha == workspacePath {
+			return "another live session is syncing this directory; concurrent edits will cross-feed — consider a git repo for worktree isolation"
+		}
+	}
+	return ""
 }
 
 // appendWarning joins a new advisory onto an existing Connection.Warning,

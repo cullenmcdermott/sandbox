@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -52,14 +54,32 @@ func localSSHConfig() (*syncpkg.SSHConfig, error) {
 
 // dashboardSyncProber builds the dashboard's per-session sync-health probe,
 // backed by the Mutagen sync manager. It maps a SyncState to its short token and
-// degrades to "unknown" on any error so the indicator never blocks the UI.
+// degrades to "unknown" on any error so the indicator never blocks the UI. For a
+// conflicted sync it also formats a capped per-file detail list + a resolution
+// hint (§1d) — the internal/sync parsing lives in the sync package; this adapter
+// only shapes the typed summary into the dashboard's decoupled SyncHealth.
 func dashboardSyncProber() dashboard.SyncProber {
-	return func(ctx context.Context, id session.ID) string {
-		st, err := syncManager().StatusSummary(ctx, string(id))
+	// conflictFileCap bounds how many conflicting files the detail pane lists
+	// before collapsing the rest into a "+N more" line, so a mass conflict can't
+	// flood the pane.
+	const conflictFileCap = 5
+	return func(ctx context.Context, id session.ID) dashboard.SyncHealth {
+		st, summary, err := syncManager().StatusDetail(ctx, string(id))
 		if err != nil {
-			return "unknown"
+			return dashboard.SyncHealth{Status: "unknown"}
 		}
-		return st.String()
+		h := dashboard.SyncHealth{Status: st.String()}
+		if st == syncpkg.SyncConflicted && summary.Total > 0 {
+			for i, cf := range summary.Files {
+				if i >= conflictFileCap {
+					h.Conflicts = append(h.Conflicts, fmt.Sprintf("+%d more", summary.Total-conflictFileCap))
+					break
+				}
+				h.Conflicts = append(h.Conflicts, cf.Describe())
+			}
+			h.Hint = syncpkg.ConflictResolutionHint
+		}
+		return h
 	}
 }
 
@@ -145,6 +165,56 @@ func (indexTitleStore) SaveClaudeSessionID(id session.ID, claudeID string) {
 	}
 	entry.ClaudeSessionID = claudeID
 	_ = idx.Save(string(id), entry)
+	// Record the provenance to the append-only audit log (§1d). Done here, at the
+	// single point a new mapping is learned, so the log grows once per session —
+	// not on every event — and outlives the index entry a later destroy removes.
+	appendTranscriptAudit(string(id), claudeID, entry.ProjectPath)
+}
+
+// transcriptAuditRecord is one line of the append-only transcript audit log
+// (§1d). The pod syncs each session's Claude transcript into the UNSCOPED
+// ~/.claude/projects tree, where it becomes locally `claude --resume`-able with
+// no built-in link back to the sandbox session that produced it. This record
+// ties the resumable Claude SDK session id to its sandbox session (and project),
+// so that provenance is auditable even after `destroy` deletes the index entry.
+type transcriptAuditRecord struct {
+	Time            time.Time `json:"time"`
+	SandboxSession  string    `json:"sandboxSession"`
+	ClaudeSessionID string    `json:"claudeSessionId"`
+	ProjectPath     string    `json:"projectPath,omitempty"`
+}
+
+// appendTranscriptAudit appends one mapping line to
+// <remote-sessions>/transcript-audit.jsonl. Best-effort and side-effect-free on
+// failure: an audit line is nice-to-have provenance, never load-bearing, so any
+// error (no home dir, unwritable log) is swallowed. It does NOT change what the
+// transcript sync copies — it only records the mapping the sync leaves implicit.
+func appendTranscriptAudit(sandboxID, claudeID, projectPath string) {
+	if claudeID == "" {
+		return
+	}
+	root, err := index.DefaultRoot()
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return
+	}
+	line, err := json.Marshal(transcriptAuditRecord{
+		Time:            time.Now(),
+		SandboxSession:  sandboxID,
+		ClaudeSessionID: claudeID,
+		ProjectPath:     projectPath,
+	})
+	if err != nil {
+		return
+	}
+	f, err := os.OpenFile(filepath.Join(root, "transcript-audit.jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = f.Write(append(line, '\n'))
 }
 
 // LoadAutoTitle returns the persisted runner-generated auto title, or "".

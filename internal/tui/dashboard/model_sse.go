@@ -61,10 +61,13 @@ type RunnerEventBatchMsg struct {
 	gen uint64
 }
 
-// syncStatusMsg carries one warm session's freshly-probed sync health.
+// syncStatusMsg carries one warm session's freshly-probed sync health. conflicts
+// and hint are populated only when status == "conflicted" (§1d).
 type syncStatusMsg struct {
-	id     session.ID
-	status string
+	id        session.ID
+	status    string
+	conflicts []string
+	hint      string
 }
 
 // idleStatusMsg carries one warm session's freshly-probed idle-since time.
@@ -177,7 +180,8 @@ func (m *Model) probeSyncCmd(id session.ID) tea.Cmd {
 		return nil
 	}
 	return func() tea.Msg {
-		return syncStatusMsg{id: id, status: prober(context.Background(), id)}
+		h := prober(context.Background(), id)
+		return syncStatusMsg{id: id, status: h.Status, conflicts: h.Conflicts, hint: h.Hint}
 	}
 }
 

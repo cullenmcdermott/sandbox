@@ -52,3 +52,74 @@ func TestParseSyncState(t *testing.T) {
 		})
 	}
 }
+
+func TestConflictsFrom(t *testing.T) {
+	cases := []struct {
+		name string
+		json string
+		want []Conflict
+	}{
+		{
+			name: "both-sides-same-path",
+			json: `[{"status":"Watching for changes","conflicts":[{"alphaChanges":[{"path":"a.go"}],"betaChanges":[{"path":"a.go"}]}]}]`,
+			want: []Conflict{{Path: "a.go", Alpha: true, Beta: true}},
+		},
+		{
+			name: "local-only",
+			json: `[{"conflicts":[{"alphaChanges":[{"path":"b.go"}]}]}]`,
+			want: []Conflict{{Path: "b.go", Alpha: true}},
+		},
+		{
+			name: "pod-only",
+			json: `[{"conflicts":[{"betaChanges":[{"path":"c.go"}]}]}]`,
+			want: []Conflict{{Path: "c.go", Beta: true}},
+		},
+		{
+			name: "two-distinct-paths-order-preserved",
+			json: `[{"conflicts":[{"alphaChanges":[{"path":"z.go"}],"betaChanges":[{"path":"z.go"}]},{"betaChanges":[{"path":"a.go"}]}]}]`,
+			want: []Conflict{{Path: "z.go", Alpha: true, Beta: true}, {Path: "a.go", Beta: true}},
+		},
+		{
+			// Defensive: an unrecognized/older shape (root-only, no changes) still
+			// yields a generic entry so the count is honest.
+			name: "unparseable-shape-generic-entry",
+			json: `[{"conflicts":[{"root":"x"}]}]`,
+			want: []Conflict{{Path: "(path unavailable)"}},
+		},
+		{
+			name: "no-conflicts",
+			json: `[{"status":"Watching for changes"}]`,
+			want: nil,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := conflictsFrom(decodeSessions([]byte(c.json)))
+			if len(got) != len(c.want) {
+				t.Fatalf("conflictsFrom(%s) = %+v, want %+v", c.name, got, c.want)
+			}
+			for i := range got {
+				if got[i] != c.want[i] {
+					t.Errorf("conflictsFrom(%s)[%d] = %+v, want %+v", c.name, i, got[i], c.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestConflictDescribe(t *testing.T) {
+	cases := []struct {
+		c    Conflict
+		want string
+	}{
+		{Conflict{Path: "a.go", Alpha: true, Beta: true}, "a.go (both sides changed it)"},
+		{Conflict{Path: "a.go", Alpha: true}, "a.go (changed locally)"},
+		{Conflict{Path: "a.go", Beta: true}, "a.go (changed on the pod)"},
+		{Conflict{Path: "a.go"}, "a.go"},
+	}
+	for _, c := range cases {
+		if got := c.c.Describe(); got != c.want {
+			t.Errorf("Describe(%+v) = %q, want %q", c.c, got, c.want)
+		}
+	}
+}

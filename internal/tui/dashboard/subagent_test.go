@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"charm.land/lipgloss/v2"
+
 	"github.com/cullenmcdermott/sandbox/internal/session"
 )
 
@@ -109,6 +111,34 @@ func TestSubagentParallelNestUnderCorrectParent(t *testing.T) {
 	}
 	if len(b.children) != 1 || b.children[0].tool != "Read" {
 		t.Errorf("tu_b children = %+v, want [Read]", b.children)
+	}
+}
+
+// TestSubagentChildToolWidthSafe pins §1c: a subagent child tool line — with a
+// long arg AND a long result summary — must never exceed the render width, at any
+// terminal width (the old arg≤w/2 + summary≤w/3 budgeting could sum past it).
+func TestSubagentChildToolWidthSafe(t *testing.T) {
+	m := NewTranscript(&fakeRunnerClient{}, transcriptSession(), nil)
+
+	longArg := "internal/tui/dashboard/very/deep/path/to/some/file/that/keeps/going.go"
+	longSummary := "142 matches across 37 files in the workspace and then even more text"
+	children := []*toolCard{
+		{tool: "Grep", arg: longArg, summary: longSummary, status: toolOK},
+		{tool: "Bash", arg: longArg, status: toolRunning},                       // running detail path
+		{tool: "MultiEditWithAVeryLongToolName", arg: longArg, status: toolErr}, // name floods the budget
+		{tool: "", arg: "", status: toolOK},                                     // degenerate: no name/arg
+	}
+	for _, width := range []int{8, 12, 20, 30, 40, 80} {
+		m.width, m.height = width, 30
+		for _, c := range children {
+			line := m.renderChildTool("├", c, width)
+			if strings.Contains(line, "\n") {
+				t.Errorf("width=%d tool=%q: child line contains a newline", width, c.tool)
+			}
+			if got := lipgloss.Width(line); got > width {
+				t.Errorf("width=%d tool=%q: rendered width %d exceeds budget\n%q", width, c.tool, got, line)
+			}
+		}
 	}
 }
 

@@ -462,6 +462,21 @@ func (m *Model) renderDetailLines(width, height int) []string {
 		lines = append(lines, kit.KV(kv.k, kv.v, detailKVWidth))
 	}
 
+	// Conflict detail (§1d): when the sync is conflicted, list the conflicting
+	// files (Gold, matching the conflict glyph) and a one-line resolution hint
+	// under the KV block so the user knows exactly what to fix and how. Both come
+	// pre-formatted from the sync prober; render verbatim, width-clamped.
+	if s.SyncStatus == "conflicted" && len(s.SyncConflicts) > 0 {
+		for _, cf := range s.SyncConflicts {
+			lines = append(lines, lipgloss.NewStyle().Foreground(theme.Gold).
+				Render("  ⇄ "+truncate(cf, max(8, width-4))))
+		}
+		if s.SyncHint != "" {
+			lines = append(lines, lipgloss.NewStyle().Foreground(theme.TextMuted).
+				Render("  "+truncate(s.SyncHint, max(8, width-2))))
+		}
+	}
+
 	// Unread badge: events that arrived since this warm session was last viewed.
 	if u := s.Unread(); u > 0 {
 		badge := lipgloss.NewStyle().Foreground(theme.Gold).Bold(true).

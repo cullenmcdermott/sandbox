@@ -350,7 +350,7 @@ func TestSyncPollUpdatesSession(t *testing.T) {
 	sess.State.ID = id
 	sess.State.Status = session.StatusRunning
 	m.sessions = []Session{sess}
-	m.WithSyncProber(func(_ context.Context, _ session.ID) string { return "stalled" })
+	m.WithSyncProber(func(_ context.Context, _ session.ID) SyncHealth { return SyncHealth{Status: "stalled"} })
 
 	_, _ = m.Update(syncStatusMsg{id: id, status: "stalled"})
 

@@ -196,8 +196,21 @@ func (m *TranscriptModel) renderSubagentCard(sub *subagentCard, width int) strin
 	return strings.Join(lines, "\n")
 }
 
-// renderChildTool renders one indented child tool line of a subagent card.
+// renderChildTool renders one indented child tool line of a subagent card:
+//
+//	├ ✓ Grep  spdy  · 7 matches
+//
+// Width is budgeted by construction like the top-level two-line tool card (§2c /
+// §1c): the tree chrome + status icon + name take what they need from the
+// measured remaining width, then the arg and the result/running detail each get
+// whatever columns are left (ANSI-aware), with a final truncate backstop — so a
+// child line never overflows even at very narrow terminal widths. Previously the
+// arg (≤w/2) and summary (≤w/3) were appended with independent per-segment caps
+// that could still sum past the line width.
 func (m *TranscriptModel) renderChildTool(branch string, c *toolCard, width int) string {
+	if width < 4 {
+		width = 4
+	}
 	var icon string
 	iconStyle := lipgloss.NewStyle().Foreground(theme.Malibu)
 	switch c.status {
@@ -211,19 +224,56 @@ func (m *TranscriptModel) renderChildTool(branch string, c *toolCard, width int)
 		icon = "✗"
 		iconStyle = lipgloss.NewStyle().Foreground(theme.Coral)
 	}
-	// A2.4 (Calm), same treatment as the flat tool card: name TextSecondary
-	// (not bold Malibu), arg TextMuted — only the status icon keeps its color.
+	muted := lipgloss.NewStyle().Foreground(theme.TextMuted)
+
+	// Tree chrome + status icon: a fixed prefix whose real (ANSI-aware) width
+	// anchors every later budget.
 	line := lipgloss.NewStyle().Foreground(theme.TextDim).Render("   "+branch+" ") +
-		iconStyle.Render(icon) + " " +
-		lipgloss.NewStyle().Foreground(theme.TextSecondary).Render(c.tool)
-	if c.arg != "" {
-		line += "  " + lipgloss.NewStyle().Foreground(theme.TextMuted).Render(truncate(c.arg, max(8, width/2)))
+		iconStyle.Render(icon) + " "
+	used := lipgloss.Width(line)
+
+	// Name (A2.4 Calm: TextSecondary, not bold Malibu). Takes what it needs from
+	// the remaining width.
+	nameStr := c.tool
+	if nameStr == "" {
+		nameStr = "tool"
 	}
+	name := truncate(nameStr, max(1, width-used))
+	line += lipgloss.NewStyle().Foreground(theme.TextSecondary).Render(name)
+	used += lipgloss.Width(name)
+
+	// Arg (TextMuted): only shown if at least a few columns remain after the
+	// two-space separator.
+	if c.arg != "" {
+		const sep = "  "
+		avail := width - used - len(sep)
+		if avail >= 3 {
+			a := truncate(collapseSpaces(c.arg), avail)
+			line += muted.Render(sep + a)
+			used += len(sep) + lipgloss.Width(a)
+		}
+	}
+
+	// Result summary / running detail: whatever columns are still free.
+	detail := ""
 	switch {
 	case c.summary != "":
-		line += lipgloss.NewStyle().Foreground(theme.TextMuted).Render("  · " + truncate(c.summary, max(8, width/3)))
+		detail = "· " + c.summary
 	case c.status == toolRunning:
-		line += lipgloss.NewStyle().Foreground(theme.TextMuted).Render("  · running")
+		detail = "· running"
+	}
+	if detail != "" {
+		const sep = "  "
+		avail := width - used - len(sep)
+		if avail >= 3 {
+			line += muted.Render(sep + truncate(detail, avail))
+		}
+	}
+
+	// Backstop: styled runes and multi-cell glyphs can still nudge the line past
+	// the budget, so clamp the whole rendered line (ANSI-aware) as a last resort.
+	if lipgloss.Width(line) > width {
+		line = truncate(line, width)
 	}
 	return line
 }

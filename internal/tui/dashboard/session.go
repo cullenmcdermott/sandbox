@@ -155,8 +155,14 @@ type Session struct {
 	RecentTools []ToolRef
 
 	// SyncStatus is the coarse Mutagen sync health for this session, polled while
-	// warm: "synced"/"syncing"/"stalled"/"unknown". "" = no data yet.
+	// warm: "synced"/"syncing"/"stalled"/"conflicted"/"unknown". "" = no data yet.
 	SyncStatus string
+	// SyncConflicts and SyncHint carry the per-file conflict detail + resolution
+	// hint the detail pane renders when SyncStatus == "conflicted" (§1d). Empty
+	// otherwise. Formatted upstream (the sync prober) so this package stays
+	// decoupled from mutagen's conflict shape.
+	SyncConflicts []string
+	SyncHint      string
 
 	// IdleSince is when the runner started counting this session idle (zero = not
 	// idle-counting, e.g. a turn is active). Drives the "suspends in ~X" hint.

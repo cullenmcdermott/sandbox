@@ -89,10 +89,21 @@ type ConnectResult struct {
 // "" when there is none.
 type Connector func(ctx context.Context, ref session.Ref, projectPath string, onStage func(ConnectStage, string)) (ConnectResult, error)
 
-// SyncProber reports a coarse sync health for a session, decoupling the
-// dashboard from internal/sync. Returns a short token: "synced"/"syncing"/
-// "stalled"/"unknown".
-type SyncProber func(ctx context.Context, id session.ID) string
+// SyncHealth is a session's sync-health reading, decoupling the dashboard from
+// internal/sync. Status is the short token ("synced"/"syncing"/"stalled"/
+// "conflicted"/"unknown"). Conflicts and Hint are populated only for the
+// "conflicted" status: Conflicts holds a few already-formatted per-file detail
+// lines and Hint a one-line resolution reminder — the dashboard renders both
+// verbatim in the detail pane, staying ignorant of mutagen's conflict shape.
+type SyncHealth struct {
+	Status    string
+	Conflicts []string
+	Hint      string
+}
+
+// SyncProber reports a session's sync health, decoupling the dashboard from
+// internal/sync. The zero SyncHealth (empty Status) is treated as no reading.
+type SyncProber func(ctx context.Context, id session.ID) SyncHealth
 
 // OrphanSync is a sandbox mutagen sync session whose pod endpoint is unreachable
 // — a GC candidate. Identifier addresses the mutagen session; SessionID is the
