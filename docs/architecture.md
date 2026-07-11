@@ -148,7 +148,7 @@ remote-sessions/ssh/config            per-session Host aliases (Include'd from ~
                                       one-time migration moves it in from the old sibling
                                       location dir(stateDir)/ssh and rewrites the Include)
 remote-sessions/worktrees/<id>/       per-session git worktree (path reserved; created in a
-                                      later wave — see docs/worktree-lifecycle-design.md)
+                                      later wave — see docs/archive/worktree-lifecycle-design.md)
 anthropic-accounts.json               Anthropic account metadata + default id (never secret bytes)
 anthropic-secrets/                    per-account 0600 secret files (file backend only; macOS
                                       uses the Keychain, service "sandbox-anthropic")

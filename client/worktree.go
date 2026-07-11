@@ -11,7 +11,7 @@ import (
 )
 
 // worktree.go holds the DETERMINISTIC git side of the per-session worktree
-// lifecycle (design docs/worktree-lifecycle-design.md §4.3/§4.7/§4.9): detect a
+// lifecycle (design docs/archive/worktree-lifecycle-design.md §4.3/§4.7/§4.9): detect a
 // git project, add a worktree on an auto-branch at Create, roll it back if the
 // cluster create fails, and capture-then-remove it at Destroy. No LLM ever runs
 // here (I3) — the LLM only proposes branch names/messages in the TUI (a later

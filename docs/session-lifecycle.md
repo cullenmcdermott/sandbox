@@ -53,7 +53,7 @@ going away. In the dashboard, `b` on a selected session opens the
 title-derived branch name (e.g. `feat/fix-login-flow`) and commits the pending
 work, so the session's edits land on a named, mergeable ref. Orphaned worktrees
 (no live session) are reaped by `sandbox worktree gc`. Full design:
-`docs/worktree-lifecycle-design.md`.
+`docs/archive/worktree-lifecycle-design.md`.
 
 ### Idle clock lives in the runner, not the reaper
 The runner tracks `idleSince`: set the moment the session becomes idle

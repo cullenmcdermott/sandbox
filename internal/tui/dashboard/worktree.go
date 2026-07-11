@@ -1,7 +1,7 @@
 package dashboard
 
 // worktree.go implements the TUI half of convert-to-branch (design
-// docs/worktree-lifecycle-design.md §4.6, resolution 8): the `b` keymap gathers
+// docs/archive/worktree-lifecycle-design.md §4.6, resolution 8): the `b` keymap gathers
 // deterministic git facts through the WorktreeOps seam, opens an editable modal
 // whose branch/message are DETERMINISTICALLY prefilled from the session title
 // (already LLM-generated — there is no propose turn), and runs the approved

@@ -1168,3 +1168,53 @@ review. Detail: docs/review-2026-07-07.md §F.
   accepted edge: a second process's compaction can strand another process's
   open handle on the unlinked inode — best-effort cache, self-heals via
   runner replay. Test: TestEventCacheCapsTail (~16 MiB → bounded tail).
+
+## 2026-07-11 — §9 per-session git worktree lifecycle (waves 1-4, design → archive)
+
+/loop-driven: one Opus implementer per wave, Fable review + full `just check`
+gate between waves. Design (all 10 questions pre-resolved):
+docs/archive/worktree-lifecycle-design.md — Status block carries the layout
+amendment. Commits b84f696, 633fe6d, fdcd208, d59690c.
+
+- **Wave 1 — `Spec.WorkspacePath` split + state-dir break.** WorkspacePath
+  (pod bind-mount / SDK cwd / both mutagen endpoints) split from ProjectPath
+  (repo root: grouping/display/index); `SANDBOX_PROJECT_ROOT` env +
+  PROJECT_PATH fallback so Status/List recover both on any pod generation.
+  `ssh/` nested INSIDE stateDir (amendment: beats the sibling-diagram layout
+  for WithStateDir containment; one-time dir-rename migration + ~/.ssh/config
+  Include rewrite, C5 quoting preserved); `worktreesRoot()` reserved;
+  `index.List` skips non-session dirs. Closed the §8 WithStateDir item.
+- **Wave 2 — worktree engine.** `WorktreeMode` (Auto default/Off/On) on
+  CreateOptions; `worktree add -b sandbox/<id> <stateDir>/worktrees/<id>
+  HEAD` before the cluster create, deferred rollback (WithoutCancel + 30s)
+  on create failure; unborn-HEAD repos fall back under Auto (Fable-added
+  edge + test); index persists path/branch/repo-root; Destroy gains
+  capture-then-remove BEFORE RemoveLocalState (dirty → WIP commit
+  `--no-gpg-sign`, failed commit blocks removal, branch always survives);
+  Connect skips file sync with a warning when the worktree dir is gone
+  (empty-alpha delete-storm guard; doubles as §4.10 B1 cross-machine
+  behavior). Sentinels ErrNotAGitRepo/ErrWorktreeExists/ErrWorktreeDirty.
+- **Wave 3 — deterministic convert/status/reap surface.**
+  `Session.WorktreeStatus` (live branch/dirty/changed); `ConvertToBranch`
+  (check-ref-format up front → taken-target check BEFORE the commit so a
+  collision never strands a stray commit → commit-if-dirty under the
+  approved message → `branch -m`, never -M → index updated);
+  `Client.ReapWorktrees` (classifies every dir: live/junk/unreadable →
+  skipped, clean orphan → removed, dirty orphan → WIP-commit then removed;
+  cluster List failure is fatal — never reap blind; prune per repo root;
+  DryRun pure). Sentinels ErrNoWorktree/ErrInvalidBranchName/
+  ErrBranchNameTaken. All temp-repo tested; sdktest pins the full surface.
+- **Wave 4 — human half.** Dashboard `b` → convert modal behind a narrow
+  `WorktreeOps` RunOptions seam (dashboard never imports client; sentinel
+  mapping at the cli wiring): editable branch/message prefilled
+  deterministically from the LLM-generated session title
+  (`feat/<slug>`; resolution 8 — no proposal turn touches the transcript),
+  ErrBranchNameTaken/ErrWorktreeDirty keep the modal with inline errors;
+  rides `Open(id)` so convert works on suspended sessions. CLI
+  `sandbox worktree gc [--dry-run]` prints the reap report;
+  `--worktree auto|on|off` on claude/opencode (fail-closed parse).
+  README + session-lifecycle updated.
+
+Known residuals (tracked in TODO §1d/§3): non-git same-path collision
+warning; B2 move-session-to-machine unbuilt; dashboard row Branch field
+deliberately not updated on convert (pod-side source has no .git).

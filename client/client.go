@@ -110,7 +110,7 @@ const (
 )
 
 // WorktreeMode selects per-session git worktree behavior at Create (design
-// docs/worktree-lifecycle-design.md §4.3/§7).
+// docs/archive/worktree-lifecycle-design.md §4.3/§7).
 type WorktreeMode int
 
 const (

@@ -99,11 +99,13 @@ row-model consolidation moved to §2a where it belongs.
   refreshes models.dev async (never blocks the reducer); reaper replaced on
   spec mismatch so `IdleTimeout`/`ReaperImage` overrides apply.
 
-- [ ] **Concurrent sessions on one project share one local sync endpoint, no
-  dedup (LOW-MED).** Mutagen session name keys on SessionID only; two agents on
-  the same repo silently cross-feed edits (same-file race → perpetual
-  conflicts). `internal/sync/sync.go:202` (`projectName`). Cross-ref §9
-  worktrees — per-session worktrees are plausibly the fix; design together.
+- [ ] **Concurrent-session sync collision — FIXED for git projects by §9
+  worktrees (2026-07-11); non-git residual (LOW).** Each git session now
+  syncs its own worktree alpha, so nothing cross-feeds. Remaining: non-git
+  projects sharing a `ProjectPath` still collide — emit a
+  `Connection.Warning` when another live session already syncs the same
+  path (needs a `syncManager().List()` alpha scan; code TODO at the
+  Connect missing-worktree guard, `client/session.go`).
 - [ ] **Mutagen conflict detail in the TUI.** The `SyncConflicted` worst-of
   distinction landed (done log); still open: per-file/side detail + a textual
   resolution hint (needs parsing the mutagen `conflicts[]` JSON shape,
@@ -873,19 +875,20 @@ naming-break, and Shell items each stand alone.
   `projectPath` into the Creator. None exists.
 - [ ] **Tekken-style agent-picker modal** — animations + per-agent
   ascii/ansi portrait.
-- [ ] **Per-session git worktree lifecycle — design ACCEPTED 2026-07-07,
-  IMPLEMENT.** [`docs/worktree-lifecycle-design.md`](docs/worktree-lifecycle-design.md)
-  — all 10 open questions resolved in its Status block (headlines:
-  `Spec.WorkspacePath` split; worktree-keyed transcripts accepted;
-  `WorktreeAuto` default; WIP-commit on dirty destroy; **TUI owns the
-  branch-name proposal prompt** — SDK ships only the deterministic
-  `ConvertToBranch`; cross-machine = B1 only; worktree root under the state
-  dir + `ssh/` moves inside it in the same pre-OSS break, resolving the §8
-  WithStateDir item). Implementation order: Spec split → auto-worktree at
-  Create → capture-then-remove teardown/reap (`ReapWorktrees`, destroy hook)
-  → `ConvertToBranch` → TUI proposal prompt + confirm modal + `sandbox
-  worktree gc`. SDK-first; update sdktest pins in-change. Fixes §1d's sync
-  collision for git projects (distinct mutagen alphas).
+- [x] **Per-session git worktree lifecycle — IMPLEMENTED 2026-07-11** (done
+  log; design archived to
+  [`docs/archive/worktree-lifecycle-design.md`](docs/archive/worktree-lifecycle-design.md)
+  with a layout amendment in its Status block): waves 1-4
+  (`b84f696`..`d59690c`) — `Spec.WorkspacePath` split + `SANDBOX_PROJECT_ROOT`
+  discovery; `WorktreeAuto` default worktree at Create with rollback;
+  capture-then-remove Destroy + `ReapWorktrees`; `WorktreeStatus`/
+  `ConvertToBranch`; dashboard `b` convert modal (title-derived prefill) +
+  `sandbox worktree gc` + `--worktree` flag; `ssh/` nested into the state
+  dir with one-time migration (closed the §8 WithStateDir item). Fixes
+  §1d's sync collision for git projects. Residuals: non-git same-path
+  collision warning still open (§1d, code TODO in Connect); B2
+  move-session-to-machine not built (B1 shipped); WIP/convert commits are
+  `--no-gpg-sign` by design.
 
 ## 10) Harness / tests / docs / ops
 

@@ -1,6 +1,6 @@
 # Per-session git worktree lifecycle — design
 
-**Status:** ACCEPTED (maintainer sign-off 2026-07-07) — the §9 open questions
+**Status:** IMPLEMENTED 2026-07-11 (waves 1-4, commits b84f696..d59690c; maintainer sign-off 2026-07-07) — the §9 open questions
 are resolved (see archive/decision-proposals-2026-07-06.md §4): (1) add
 `Spec.WorkspacePath`, `ProjectPath` stays the repo root; (2) transcripts key
 off the worktree path — accepted; (3) `WorktreeAuto` default from day one;

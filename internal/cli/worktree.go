@@ -21,7 +21,7 @@ type worktreeReaper interface {
 }
 
 // newWorktreeCmd is the parent of the per-session worktree maintenance verbs
-// (design docs/worktree-lifecycle-design.md §4.8). Today it hosts `gc`.
+// (design docs/archive/worktree-lifecycle-design.md §4.8). Today it hosts `gc`.
 func newWorktreeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "worktree",
