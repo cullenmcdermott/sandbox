@@ -69,22 +69,25 @@ var (
 // --- client: Session method set ----------------------------------------------
 
 var (
-	_ func(*client.Session, context.Context, client.ConnectOptions) (*client.Connection, error) = (*client.Session).Connect
-	_ func(*client.Session) error                                                               = (*client.Session).Close
-	_ func(*client.Session) client.ID                                                           = (*client.Session).ID
-	_ func(*client.Session) client.Ref                                                          = (*client.Session).Ref
-	_ func(*client.Session) string                                                              = (*client.Session).ProjectPath
-	_ func(*client.Session) client.RunnerClient                                                 = (*client.Session).Runner
-	_ func(*client.Session, context.Context, client.TurnInput) (client.TurnRef, error)          = (*client.Session).StartTurn
-	_ func(*client.Session, context.Context, client.TurnRef) error                              = (*client.Session).Interrupt
-	_ func(*client.Session, context.Context) error                                              = (*client.Session).CancelTurn
-	_ func(*client.Session, context.Context, uint64) (<-chan client.Event, error)               = (*client.Session).Events
-	_ func(*client.Session, context.Context, uint64) (<-chan client.Event, error)               = (*client.Session).EventsPassive
-	_ func(*client.Session, context.Context, client.PermissionDecision) error                   = (*client.Session).ResolvePermission
-	_ func(*client.Session, context.Context) (client.State, error)                              = (*client.Session).SessionState
-	_ func(*client.Session, context.Context) (client.IdleStatus, error)                         = (*client.Session).Idle
-	_ func(*client.Session, context.Context, string) (client.ExecResult, error)                 = (*client.Session).Exec
-	_ func(*client.Session) string                                                              = (*client.Session).WorktreePath
+	_ func(*client.Session, context.Context, client.ConnectOptions) (*client.Connection, error)  = (*client.Session).Connect
+	_ func(*client.Session) error                                                                = (*client.Session).Close
+	_ func(*client.Session) client.ID                                                            = (*client.Session).ID
+	_ func(*client.Session) client.Ref                                                           = (*client.Session).Ref
+	_ func(*client.Session) string                                                               = (*client.Session).ProjectPath
+	_ func(*client.Session) client.RunnerClient                                                  = (*client.Session).Runner
+	_ func(*client.Session, context.Context, client.TurnInput) (client.TurnRef, error)           = (*client.Session).StartTurn
+	_ func(*client.Session, context.Context, client.TurnRef) error                               = (*client.Session).Interrupt
+	_ func(*client.Session, context.Context) error                                               = (*client.Session).CancelTurn
+	_ func(*client.Session, context.Context, uint64) (<-chan client.Event, error)                = (*client.Session).Events
+	_ func(*client.Session, context.Context, uint64) (<-chan client.Event, error)                = (*client.Session).EventsPassive
+	_ func(*client.Session, context.Context, client.PermissionDecision) error                    = (*client.Session).ResolvePermission
+	_ func(*client.Session, context.Context) (client.State, error)                               = (*client.Session).SessionState
+	_ func(*client.Session, context.Context) (client.IdleStatus, error)                          = (*client.Session).Idle
+	_ func(*client.Session, context.Context, string) (client.ExecResult, error)                  = (*client.Session).Exec
+	_ func(*client.Session) string                                                               = (*client.Session).WorktreePath
+	_ func(*client.Session, context.Context) (client.WorktreeStatus, error)                      = (*client.Session).WorktreeStatus
+	_ func(*client.Session, context.Context, client.ConvertOptions) (client.BranchResult, error) = (*client.Session).ConvertToBranch
+	_ func(*client.Client, context.Context, client.ReapOptions) ([]client.ReapedWorktree, error) = (*client.Client).ReapWorktrees
 )
 
 // --- client: per-session worktree surface (wave 2) --------------------------
@@ -100,6 +103,41 @@ var (
 	_ error = client.ErrNotAGitRepo
 	_ error = client.ErrWorktreeExists
 	_ error = client.ErrWorktreeDirty
+	// Wave 3: the deterministic git-surface sentinels.
+	_ error = client.ErrNoWorktree
+	_ error = client.ErrInvalidBranchName
+	_ error = client.ErrBranchNameTaken
+)
+
+// --- client: per-session worktree surface (wave 3) --------------------------
+
+// Option/result struct-literal pins: removing or retyping a field breaks these.
+var (
+	_ = client.WorktreeStatus{
+		Path:    "/wt",
+		Branch:  "sandbox/x",
+		Dirty:   true,
+		Changed: []string{"a.go"},
+	}
+	_ = client.ConvertOptions{
+		BranchName: "feat/x",
+		Message:    "msg",
+	}
+	_ = client.BranchResult{
+		Branch:    "feat/x",
+		Committed: true,
+		CommitSHA: "deadbeef",
+	}
+	_ = client.ReapOptions{
+		DryRun: true,
+	}
+	_ = client.ReapedWorktree{
+		SessionID: "x",
+		Path:      "/wt",
+		Branch:    "sandbox/x",
+		Action:    "removed",
+		CommitSHA: "deadbeef",
+	}
 )
 
 // --- client: option/result structs keep their fields -------------------------

@@ -96,5 +96,26 @@ var (
 	// defaults to a silent WIP commit to the session branch rather than returning
 	// this (I2 never-lose), so it is part of the stable error vocabulary for
 	// callers that opt into a block-instead-of-commit policy in a later wave.
+	// ConvertToBranch returns it when the worktree is dirty but ConvertOptions.Message
+	// is empty — a commit message is required to capture the work before renaming.
 	ErrWorktreeDirty = errors.New("sandbox: worktree has uncommitted changes")
+
+	// ErrNoWorktree is returned by Session.WorktreeStatus / Session.ConvertToBranch
+	// when the session has no per-session worktree (non-git fallback / WorktreeOff),
+	// or when its recorded worktree directory is missing on disk. It is the clear
+	// signal that there is no deterministic git surface to act on for this session.
+	ErrNoWorktree = errors.New("sandbox: session has no worktree")
+
+	// ErrInvalidBranchName is returned by Session.ConvertToBranch when
+	// ConvertOptions.BranchName is not a valid git branch ref (rejected up front by
+	// `git check-ref-format --branch`) — so the caller learns the name is bad before
+	// any commit or rename runs, never mid-flow.
+	ErrInvalidBranchName = errors.New("sandbox: invalid git branch name")
+
+	// ErrBranchNameTaken is returned by Session.ConvertToBranch when the requested
+	// target branch already exists: convert renames the session's auto-branch with
+	// `git branch -m` and deliberately never force-renames (no -M), so an existing
+	// target is a hard error the human resolves by choosing another name. Any work
+	// committed before the rename stays on the original branch (never lost).
+	ErrBranchNameTaken = errors.New("sandbox: target branch name already exists")
 )

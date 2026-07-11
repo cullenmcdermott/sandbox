@@ -264,3 +264,381 @@ func worktreeCommitAll(ctx context.Context, git gitRunner, path, msg string) err
 	}
 	return nil
 }
+
+// --- Wave 3: the remaining deterministic SDK git surface (design §7) ----------
+//
+// WorktreeStatus, ConvertToBranch, and ReapWorktrees complete the deterministic
+// git surface. Like the wave-2 ops, NO LLM ever runs here (I3): ConvertToBranch
+// takes already-approved strings (the TUI/caller owns the LLM proposal + human
+// confirmation), and every git invocation is pure and testable against a temp repo.
+
+// WorktreeStatus holds the deterministic git facts about a session's worktree,
+// gathered for the convert-to-branch modal / diff view (design §7). It carries no
+// LLM-generated content — just what git reports.
+type WorktreeStatus struct {
+	Path    string   // the local worktree dir
+	Branch  string   // current branch (sandbox/<id> until converted), via rev-parse --abbrev-ref
+	Dirty   bool     // true when there are uncommitted changes
+	Changed []string // porcelain paths of changed files (for the diff/modal)
+}
+
+// WorktreeStatus returns the deterministic git facts for the session's worktree:
+// current branch (read live via `git rev-parse --abbrev-ref HEAD`, so a post-convert
+// rename is reflected — the index branch is not trusted blindly), dirty flag, and
+// the porcelain changed-file list. It returns ErrNoWorktree when the session has no
+// recorded worktree (non-git fallback / WorktreeOff) or its directory is missing on
+// disk. Read-only: it never mutates the worktree.
+func (s *Session) WorktreeStatus(ctx context.Context) (WorktreeStatus, error) {
+	path, _, _, err := s.resolveWorktree()
+	if err != nil {
+		return WorktreeStatus{}, err
+	}
+	git := s.c.git()
+	branchOut, berr := git(ctx, path, "rev-parse", "--abbrev-ref", "HEAD")
+	if berr != nil {
+		return WorktreeStatus{}, fmt.Errorf("sandbox: read worktree branch: %w", berr)
+	}
+	branch := strings.TrimSpace(string(branchOut))
+	porcelain, serr := worktreeStatusPorcelain(ctx, git, path)
+	if serr != nil {
+		return WorktreeStatus{}, fmt.Errorf("sandbox: read worktree status: %w", serr)
+	}
+	changed := parsePorcelainPaths(porcelain)
+	return WorktreeStatus{
+		Path:    path,
+		Branch:  branch,
+		Dirty:   len(changed) > 0,
+		Changed: changed,
+	}, nil
+}
+
+// ConvertOptions parameterizes ConvertToBranch. Both strings are ALREADY human-
+// approved (LLM-proposed + confirmed in the TUI); ConvertToBranch validates and
+// executes them but never generates them.
+type ConvertOptions struct {
+	BranchName string // human-approved target branch, e.g. "feat/foo"; validated as a git ref
+	Message    string // human-approved commit message; empty allowed only when the worktree is clean
+}
+
+// BranchResult reports the outcome of ConvertToBranch.
+type BranchResult struct {
+	Branch    string // the final (renamed) branch name
+	Committed bool   // whether a commit was created (only when the worktree was dirty)
+	CommitSHA string // the new commit's SHA when Committed, else ""
+}
+
+// ConvertToBranch runs the DETERMINISTIC git half of convert-to-branch (design
+// §4.6 step 4): it validates BranchName up front, commits any dirty state under
+// Message, then renames the session's auto-branch (sandbox/<id>) onto BranchName.
+// It takes already-approved strings — no LLM, no prompting.
+//
+// Order and failure modes:
+//   - BranchName is validated with `git check-ref-format --branch` first, so a bad
+//     name is rejected before anything mutates (ErrInvalidBranchName).
+//   - An existing target branch is a hard error (ErrBranchNameTaken); it never
+//     force-renames (no -M). This is checked BEFORE the commit so a taken name
+//     doesn't leave a stray commit behind.
+//   - A dirty worktree with an empty Message is ErrWorktreeDirty (a message is
+//     required to capture the work). A dirty worktree with a Message is committed
+//     with --no-gpg-sign (same signing-agent reliability rationale as the wave-2
+//     WIP commit — the human can amend/sign afterward), then renamed.
+//   - A clean worktree is a pure rename (Committed=false, CommitSHA="").
+//
+// On success the local index entry's WorktreeBranch is updated to the new name.
+func (s *Session) ConvertToBranch(ctx context.Context, opt ConvertOptions) (BranchResult, error) {
+	path, _, _, err := s.resolveWorktree()
+	if err != nil {
+		return BranchResult{}, err
+	}
+	git := s.c.git()
+
+	// 1. Validate the target name up front (reject before any mutation).
+	if _, verr := git(ctx, path, "check-ref-format", "--branch", opt.BranchName); verr != nil {
+		return BranchResult{}, fmt.Errorf("%w: %q", ErrInvalidBranchName, opt.BranchName)
+	}
+
+	// 2. Resolve the current branch (the rename source). Read live so a prior
+	//    convert is reflected rather than trusting the index blindly.
+	curOut, cerr := git(ctx, path, "rev-parse", "--abbrev-ref", "HEAD")
+	if cerr != nil {
+		return BranchResult{}, fmt.Errorf("sandbox: read worktree branch: %w", cerr)
+	}
+	current := strings.TrimSpace(string(curOut))
+
+	// 3. Reject a taken target BEFORE committing, so a collision never leaves a
+	//    stray commit on the source branch (no -M force — the human picks another).
+	if branchExists(ctx, git, path, opt.BranchName) {
+		return BranchResult{}, fmt.Errorf("%w: %s", ErrBranchNameTaken, opt.BranchName)
+	}
+
+	// 4. Capture dirty state, if any. Empty message + dirty is refused (§7).
+	result := BranchResult{Branch: opt.BranchName}
+	porcelain, serr := worktreeStatusPorcelain(ctx, git, path)
+	if serr != nil {
+		return BranchResult{}, fmt.Errorf("sandbox: read worktree status: %w", serr)
+	}
+	if strings.TrimSpace(string(porcelain)) != "" {
+		if strings.TrimSpace(opt.Message) == "" {
+			return BranchResult{}, fmt.Errorf("%w: a commit message is required to convert a dirty worktree", ErrWorktreeDirty)
+		}
+		if cErr := worktreeCommitAll(ctx, git, path, opt.Message); cErr != nil {
+			return BranchResult{}, cErr
+		}
+		shaOut, shaErr := git(ctx, path, "rev-parse", "HEAD")
+		if shaErr != nil {
+			return BranchResult{}, fmt.Errorf("sandbox: read commit sha: %w", shaErr)
+		}
+		result.Committed = true
+		result.CommitSHA = strings.TrimSpace(string(shaOut))
+	}
+
+	// 5. Rename the auto-branch onto the approved name. history is preserved.
+	if _, rerr := git(ctx, path, "branch", "-m", current, opt.BranchName); rerr != nil {
+		return BranchResult{}, fmt.Errorf("sandbox: git branch -m %s %s: %w", current, opt.BranchName, rerr)
+	}
+
+	// 6. Reflect the rename in the local index so reap/teardown target the new name.
+	if entry, lerr := s.c.index.Load(string(s.ref.ID)); lerr == nil {
+		entry.WorktreeBranch = opt.BranchName
+		_ = s.c.index.Save(string(s.ref.ID), entry)
+	}
+	return result, nil
+}
+
+// resolveWorktree loads the session's recorded worktree from the local index and
+// returns its path, branch, and repo root. It errors ErrNoWorktree when there is
+// no worktree recorded (non-git / WorktreeOff) or the directory is gone on disk —
+// the shared precondition for the deterministic per-session git surface.
+func (s *Session) resolveWorktree() (path, branch, repoRoot string, err error) {
+	entry, lerr := s.c.index.Load(string(s.ref.ID))
+	if lerr != nil || entry.WorktreePath == "" {
+		return "", "", "", fmt.Errorf("%w: %s", ErrNoWorktree, s.ref.ID)
+	}
+	if !pathExists(entry.WorktreePath) {
+		return "", "", "", fmt.Errorf("%w: directory %s is missing", ErrNoWorktree, entry.WorktreePath)
+	}
+	return entry.WorktreePath, entry.WorktreeBranch, entry.RepoRoot, nil
+}
+
+// branchExists reports whether refs/heads/<name> resolves in the worktree's repo.
+// A non-zero exit from show-ref --verify --quiet means the ref does not exist.
+func branchExists(ctx context.Context, git gitRunner, dir, name string) bool {
+	_, err := git(ctx, dir, "show-ref", "--verify", "--quiet", "refs/heads/"+name)
+	return err == nil
+}
+
+// parsePorcelainPaths extracts the changed-file paths from `git status --porcelain`
+// output. Each line is `XY <path>` (two status columns, a space, then the path); a
+// rename is `XY <old> -> <new>`, for which the NEW path is reported. Blank lines
+// are skipped.
+func parsePorcelainPaths(out []byte) []string {
+	var paths []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if len(line) < 4 {
+			continue
+		}
+		// Columns 0-1 are the status, column 2 is a space; the path starts at 3.
+		p := strings.TrimSpace(line[3:])
+		if p == "" {
+			continue
+		}
+		if idx := strings.Index(p, " -> "); idx >= 0 {
+			p = p[idx+len(" -> "):]
+		}
+		paths = append(paths, p)
+	}
+	return paths
+}
+
+// ReapOptions parameterizes ReapWorktrees.
+type ReapOptions struct {
+	// DryRun classifies and reports what would happen without mutating anything
+	// (no commits, no removals, no index or prune changes).
+	DryRun bool
+}
+
+// ReapedWorktree reports the disposition of one enumerated worktree directory.
+type ReapedWorktree struct {
+	SessionID string // the worktree dir's basename (== session id)
+	Path      string // the worktree dir
+	Branch    string // the session/worktree branch, when known
+	Action    string // "removed" | "committed-then-removed" | "skipped"
+	CommitSHA string // set when dirty work was captured before removal
+}
+
+// Reap action / skip labels.
+const (
+	reapRemoved            = "removed"
+	reapCommittedRemoved   = "committed-then-removed"
+	reapSkipped            = "skipped"
+	reapWIPMessagePrefixed = "sandbox: WIP at reap"
+)
+
+// ReapWorktrees GCs orphaned per-session worktrees under worktreesRoot() (design
+// §4.8). A worktree is an orphan when its session is neither live in the cluster
+// (backend.List) nor otherwise reachable; a worktree whose session still exists is
+// reported as "skipped" (never touched). For each orphan:
+//
+//   - clean → `git worktree remove` + drop the local index entry ("removed").
+//   - dirty → NEVER deleted outright (I2): a WIP commit is made to its branch
+//     first (reusing the wave-2 worktreeCommitAll), then removed
+//     ("committed-then-removed", CommitSHA set). A failed WIP commit leaves the
+//     worktree untouched and is reported "skipped".
+//   - a directory that is not a resolvable git worktree (junk) → "skipped", left
+//     in place.
+//
+// After removals it runs `git worktree prune` once per distinct repo root
+// (silently — no fabricated "pruned" entries). RepoRoot comes from the index entry
+// when present, else it is discovered from the dir via `git rev-parse
+// --git-common-dir`; a dir with no resolvable repo is skipped. DryRun classifies
+// and reports the would-be action without mutating anything.
+//
+// Reporting choice: EVERY enumerated dir is reported (including live-session and
+// junk dirs as "skipped"), so a caller (e.g. `sandbox worktree gc`) sees the full
+// classification rather than a silent subset.
+func (c *Client) ReapWorktrees(ctx context.Context, opt ReapOptions) ([]ReapedWorktree, error) {
+	root := c.worktreesRoot()
+	dirents, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil // nothing created yet
+		}
+		return nil, fmt.Errorf("sandbox: enumerate worktrees: %w", err)
+	}
+
+	// Liveness signal: a session present in the cluster listing (any status,
+	// including suspended) is NOT an orphan — its worktree is a live laptop
+	// artifact (§4.9). A List failure is fatal: reaping without knowing which
+	// sessions are live risks removing a live session's worktree.
+	states, lerr := c.backend.List(ctx)
+	if lerr != nil {
+		return nil, fmt.Errorf("sandbox: list sessions for reap: %w", lerr)
+	}
+	live := make(map[string]bool, len(states))
+	for _, st := range states {
+		live[string(st.ID)] = true
+	}
+
+	git := c.git()
+	var reaped []ReapedWorktree
+	pruneRoots := map[string]bool{} // distinct repo roots that had a removal
+
+	for _, de := range dirents {
+		if !de.IsDir() {
+			continue
+		}
+		id := de.Name()
+		dir := filepath.Join(root, id)
+		rec := ReapedWorktree{SessionID: id, Path: dir}
+
+		// Live session ⇒ never touch its worktree.
+		if live[id] {
+			rec.Action = reapSkipped
+			rec.Branch = c.reapBranchHint(id)
+			reaped = append(reaped, rec)
+			continue
+		}
+
+		// Resolve the repo root (for `worktree remove`/`prune`) and branch. Prefer
+		// the index entry; fall back to git discovery for an index-less dir.
+		repoRoot, branch := c.reapRepoRoot(ctx, git, id, dir)
+		rec.Branch = branch
+		if repoRoot == "" {
+			// Not a resolvable git worktree (junk, or a removed repo): leave it.
+			rec.Action = reapSkipped
+			reaped = append(reaped, rec)
+			continue
+		}
+
+		// Classify dirty vs clean.
+		porcelain, serr := worktreeStatusPorcelain(ctx, git, dir)
+		if serr != nil {
+			// Can't read status ⇒ don't risk a mutation; report skipped.
+			rec.Action = reapSkipped
+			reaped = append(reaped, rec)
+			continue
+		}
+		dirty := strings.TrimSpace(string(porcelain)) != ""
+
+		if opt.DryRun {
+			if dirty {
+				rec.Action = reapCommittedRemoved
+			} else {
+				rec.Action = reapRemoved
+			}
+			reaped = append(reaped, rec)
+			continue
+		}
+
+		if dirty {
+			// Never delete dirty work outright (I2): WIP-commit to its branch first.
+			msg := fmt.Sprintf("%s (%s)", reapWIPMessagePrefixed, id)
+			if cErr := worktreeCommitAll(ctx, git, dir, msg); cErr != nil {
+				// Commit failed ⇒ leave the worktree and its work in place.
+				rec.Action = reapSkipped
+				reaped = append(reaped, rec)
+				continue
+			}
+			if shaOut, shaErr := git(ctx, dir, "rev-parse", "HEAD"); shaErr == nil {
+				rec.CommitSHA = strings.TrimSpace(string(shaOut))
+			}
+			rec.Action = reapCommittedRemoved
+		} else {
+			rec.Action = reapRemoved
+		}
+
+		// Remove the worktree dir (best-effort, mirroring teardownWorktree: no
+		// --force — the capture step above already handled the dirty case) and drop
+		// the local index entry. The branch is preserved (it IS the work).
+		_, _ = git(ctx, repoRoot, "worktree", "remove", dir)
+		_ = os.RemoveAll(dir) // in case `worktree remove` didn't take
+		_ = c.index.Delete(id)
+		pruneRoots[repoRoot] = true
+		reaped = append(reaped, rec)
+	}
+
+	// Prune stale admin entries once per distinct repo root (silently — §4.8).
+	if !opt.DryRun {
+		for repoRoot := range pruneRoots {
+			_, _ = git(ctx, repoRoot, "worktree", "prune")
+		}
+	}
+	return reaped, nil
+}
+
+// reapRepoRoot resolves the main repo root and branch for a worktree dir during a
+// reap. It prefers the recorded index entry; for an index-less dir it discovers
+// the repo via `git rev-parse --git-common-dir` (the parent of the common .git dir
+// is the main repo root) and reads the branch live. It returns ("", "") when the
+// dir is not a resolvable git worktree (junk) — the caller then skips it.
+func (c *Client) reapRepoRoot(ctx context.Context, git gitRunner, id, dir string) (repoRoot, branch string) {
+	if entry, err := c.index.Load(id); err == nil && entry.WorktreePath != "" && entry.RepoRoot != "" {
+		return entry.RepoRoot, entry.WorktreeBranch
+	}
+	// Index-less: discover from the dir itself. A non-worktree dir fails here.
+	commonOut, cerr := git(ctx, dir, "rev-parse", "--git-common-dir")
+	if cerr != nil {
+		return "", ""
+	}
+	common := strings.TrimSpace(string(commonOut))
+	if common == "" {
+		return "", ""
+	}
+	if !filepath.IsAbs(common) {
+		common = filepath.Join(dir, common)
+	}
+	repoRoot = filepath.Dir(filepath.Clean(common))
+	if branchOut, berr := git(ctx, dir, "rev-parse", "--abbrev-ref", "HEAD"); berr == nil {
+		branch = strings.TrimSpace(string(branchOut))
+	}
+	return repoRoot, branch
+}
+
+// reapBranchHint returns the recorded branch for a live-session worktree, best
+// effort, purely for the reap report (never runs git against the live session).
+func (c *Client) reapBranchHint(id string) string {
+	if entry, err := c.index.Load(id); err == nil {
+		return entry.WorktreeBranch
+	}
+	return ""
+}
