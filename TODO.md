@@ -892,10 +892,24 @@ naming-break, and Shell items each stand alone.
   + `client/sync.go`. §8's `Destroy` sync-before-destroy flip has no regression
   net. Unblocked once §8 narrows `Backend`: fake-backed table test per method +
   a `Destroy` call-order spy.
-- [ ] **`server.ts` HTTP layer dark; "e2e" is fake-on-both-sides (HIGH) [F4].**
-  Route dispatch, bearer enforcement, 409 gate, SSE `after=` untested runner-side;
-  `internal/e2e`'s fake runner faithfulness to `server.ts` is unchecked. Add a
-  `node:test` suite booting `createServer` (401/404/409/replay).
+- [x] **[F4] `server.ts` HTTP layer covered — done 2026-07-11** (done log):
+  `createRunnerServer` extracted (listen-free seam); 17-test `node:test` suite
+  boots the real router + real sqlite event log — bearer auth, 404s, every
+  409 `turnRejectReason` path, SSE `after=` replay incl. the B5 clamp, B9
+  typed 400s. Residual promoted below.
+- [ ] **`internal/e2e`'s fake runner faithfulness to `server.ts` unchecked
+  (MED, [F4] residual).** The real-server suite landed; what remains is
+  cross-checking that the Go e2e harness's fake runner matches the real
+  routes' shapes (status codes, error bodies, replay semantics) so the
+  build-tagged e2e can't drift green. `internal/e2e`, `runner/test/server-http.test.ts`.
+- [ ] **Oversized request body surfaces as ECONNRESET, not the mapped 413
+  (LOW, found by the F4 suite).** `httputil.ts` `readBody` calls
+  `req.destroy()` synchronously right after rejecting with
+  `BodyTooLargeError`; the B9 catch in `createRunnerServer` runs a microtask
+  later, after the socket is gone — the reject is safe (turn never reaches the
+  agent) but clients see a reset instead of `413 {error:"request body too
+  large"}`. Fix: respond (or drain) before destroying. Pinned as-is by the
+  suite's oversized-body test — update that test with the fix.
 - [x] **[F5] port-forward lifecycle covered — done 2026-07-11** (done log):
   retry decision extracted pure (`classifyForwardReconnect` +
   `nextForwardBackoff`) + table tests over every branch and the full backoff

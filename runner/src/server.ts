@@ -6,7 +6,7 @@
 // session. The id in the path is validated against the configured session so
 // a wrong id returns 404 rather than cross-session leakage.
 
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
 import { readBody, BodyTooLargeError, InvalidJsonError } from './httputil.js';
 import { appendEvent, attachSseClient, lastSeq, sseTotalClientCount, MAX_SSE_CLIENTS } from './events.js';
 import { getRegistry, loadConfig, toStatusResponse } from './session.js';
@@ -134,14 +134,16 @@ export function permissionResolveResponse(
 
 // --- Router ---------------------------------------------------------------
 
-export function startServer(): void {
-  const cfg = loadConfig();
-  // Resolve the agent backend up front so an unknown SANDBOX_BACKEND fails at
-  // startup rather than on the first turn. Both shipping backends (claude-sdk,
-  // opencode-server) implement the turn seam; null is reserved for any future
-  // supervise-only backend, whose /turns route then 409s.
-  const agent = selectAgent(cfg.backend);
-  const server = createServer((req, res) => {
+/**
+ * Build the runner's node:http server around `handle`, wiring the B9 typed-body
+ * error mapping. Does NOT listen — exported (F4) so a test can boot the real
+ * router on an ephemeral port with an injected cfg + stub agent, exercising
+ * bearer-auth enforcement, route dispatch, the 409 turn gate, and SSE `after=`
+ * replay against the same code path production runs. startServer() adds the
+ * .listen(PORT); nothing about routing changes.
+ */
+export function createRunnerServer(cfg: ReturnType<typeof loadConfig>, agent: Agent | null): Server {
+  return createServer((req, res) => {
     handle(req, res, cfg, agent).catch((err) => {
       const message = err instanceof Error ? err.message : String(err);
       // B9: readBody's typed rejections are client faults, not server bugs — map
@@ -155,6 +157,16 @@ export function startServer(): void {
       if (!res.writableEnded) res.end(JSON.stringify({ error: message }));
     });
   });
+}
+
+export function startServer(): void {
+  const cfg = loadConfig();
+  // Resolve the agent backend up front so an unknown SANDBOX_BACKEND fails at
+  // startup rather than on the first turn. Both shipping backends (claude-sdk,
+  // opencode-server) implement the turn seam; null is reserved for any future
+  // supervise-only backend, whose /turns route then 409s.
+  const agent = selectAgent(cfg.backend);
+  const server = createRunnerServer(cfg, agent);
   server.listen(PORT, () => {
     console.log(`runner listening on :${PORT} (session=${cfg.sessionId})`);
   });

@@ -250,9 +250,22 @@ function saveSessionStateTo(state: SessionState, path: string): void {
   renameSync(tmp, path);
 }
 
-/** Persist session.json atomically to the production path (SESSION_JSON_PATH). */
+/** Destination for saveSessionState(). Defaults to the production path; a test
+ * can point it at a writable temp file so routes that persist state (registerTurn
+ * → setStatus, setLastTurn) run for real off-pod, where /session is read-only.
+ * Mirrors events.ts's __setEventLogForTest seam; production never touches it. */
+let sessionJsonPath = SESSION_JSON_PATH;
+
+/** Test-only: redirect saveSessionState() to `path` (or null to restore the
+ * production SESSION_JSON_PATH). Not part of the runner API. */
+export function __setSessionJsonPathForTest(path: string | null): void {
+  sessionJsonPath = path ?? SESSION_JSON_PATH;
+}
+
+/** Persist session.json atomically to the configured path (SESSION_JSON_PATH,
+ * unless a test redirected it via __setSessionJsonPathForTest). */
 export function saveSessionState(state: SessionState): void {
-  saveSessionStateTo(state, SESSION_JSON_PATH);
+  saveSessionStateTo(state, sessionJsonPath);
 }
 
 export function toStatusResponse(state: SessionState, activeTurnId = ''): StatusResponse {

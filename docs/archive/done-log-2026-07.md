@@ -1067,3 +1067,20 @@ review. Detail: docs/review-2026-07-07.md §F.
   TestForwardBackoffProgression, TestRunForwardCloseCausesDone,
   TestRunForwardCloseIsIdempotentAndDoneClosesOnce,
   TestRunForwardConcurrentErrorAndClose.
+
+- **§10 [F4] — runner HTTP layer covered by a real-server suite (HIGH).**
+  `startServer` split: exported `createRunnerServer(cfg, agent)` builds the
+  router + B9 error-mapping without listening (routing byte-identical);
+  `session.ts` gained `__setSessionJsonPathForTest` (mirror of
+  `__setEventLogForTest`) so the turn-accept persistence path runs off-pod.
+  New `runner/test/server-http.test.ts`: 17 tests booting the real server on
+  an ephemeral port with a real better-sqlite3 event log — healthz
+  unauth+protocolVersion, 401 missing/wrong bearer, 404 unknown route/wrong
+  session (no cross-session leak), the full 409 turn-gate matrix (concurrent
+  turn, opencode synthetic-busy, supervise-only null agent), B9 typed 400s
+  (malformed JSON, missing prompt), SSE `after=` contiguous replay +
+  replay-complete boundary + live flow, the B5 bogus-cursor clamp, R8 400 on
+  bad cursors. Runner suite 227→244, 0 skip under RUNNER_REQUIRE_SQLITE=1.
+  Found (logged in TODO §10): oversized bodies reset the socket before the
+  mapped 413 can be written (`httputil.ts` destroys synchronously); the
+  fake-runner-faithfulness half of F4 promoted as a MED residual.
