@@ -58,6 +58,25 @@ func TestStreamTailAndFinalizedSameHeight(t *testing.T) {
 	}
 }
 
+// BenchmarkEnsureStreamTail exercises the streaming-tail change-key hot path (§4
+// E7) against a large in-flight message: each iteration grows the live buffer by
+// one byte (a delta) and refreshes the tail. Keying on buffer LENGTH instead of a
+// hash+copy of the whole buffer makes this O(1) with zero per-delta O(buffer)
+// allocations regardless of how large the message has grown — ReportAllocs shows
+// the win (the old content-hash path allocated a full []byte copy every delta).
+func BenchmarkEnsureStreamTail(b *testing.B) {
+	m := NewTranscript(&fakeRunnerClient{}, transcriptSession(), nil)
+	m.streaming = true
+	m.assistantBuf.WriteString(strings.Repeat("x", 100*1024)) // 100 KB in flight
+	m.ensureStreamTail(false)                                 // prime m.streamItem
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		m.assistantBuf.WriteByte('y') // a streamed delta grows the buffer
+		m.ensureStreamTail(false)
+	}
+}
+
 // --- T1: event coalescing (lag) -------------------------------------------
 
 // TestWaitForEventCoalescesBatch verifies a burst of already-buffered events is

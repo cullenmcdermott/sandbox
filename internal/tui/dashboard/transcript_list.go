@@ -232,21 +232,28 @@ func (m *TranscriptModel) commitItems() {
 }
 
 // ensureStreamTail creates (once) and refreshes the ephemeral streaming tail for
-// the given mode, bumping its version only when the live buffer (or the theme
-// epoch, or the mode) changed. Cheap: it hashes only the live buffer, never
-// history. The mode is folded in so a thinking→text handoff can't collide keys at
-// identical text; the epoch is folded in so a /theme swap mid-stall re-renders the
-// tail with the new palette (§1c).
+// the given mode, bumping its version only when the live buffer grew (or the theme
+// epoch, or the mode changed). Cheap and O(1): the change key is the live buffer's
+// LENGTH, not its content, so we never re-hash (or copy) the whole buffer per delta
+// (§4 E7 — a 100 KB message used to hash+copy O(L) bytes on every one of its deltas).
+//
+// Keying on length is faithful because within a single streaming tail's life the
+// active buffer is append-only: every message/reasoning boundary recreates the tail
+// (commitItems nils m.streamItem whenever neither streaming nor reasoning is live),
+// so a delta can only ever grow the buffer, never rewrite it at an equal length —
+// a length change is therefore exactly a content change. The mode is folded in so a
+// thinking→text handoff can't collide keys; the epoch is folded in so a /theme swap
+// mid-stall re-renders the tail with the new palette (§1c).
 func (m *TranscriptModel) ensureStreamTail(reasoning bool) {
 	if m.streamItem == nil {
 		m.streamItem = &blockCard{Versioned: list.NewVersioned(), m: m, streaming: true}
 	}
 	m.streamItem.streamReasoning = reasoning
-	mode, buf := "stream", m.assistantBuf.String()
+	mode, n := "stream", m.assistantBuf.Len()
 	if reasoning {
-		mode, buf = "think", m.reasoningBuf.String()
+		mode, n = "think", m.reasoningBuf.Len()
 	}
-	fp := fnvStr(fmt.Sprintf("%s\x00e%d", mode, theme.Epoch()), buf)
+	fp := fnvStr(fmt.Sprintf("%s\x00e%d\x00n%d", mode, theme.Epoch(), n))
 	if fp != m.streamItem.streamFP {
 		m.streamItem.streamFP = fp
 		m.streamItem.Bump()
