@@ -1107,3 +1107,18 @@ review. Detail: docs/review-2026-07-07.md §F.
   regression net: sync-terminate → destroy, index entry removed only on
   success and preserved on failure), TestDialRunner (runner-only forward
   specs; cleanup and token-failure paths close the forward exactly once).
+
+- **§1f [A3] — SECURITY.md posture rewrite (INFO).** Revised in place (the
+  file predated A2 and missed the A3 asks): 0.0.0.0-binds table
+  (runner 8787 / sshd 22 / opencode 4096) with the containment split —
+  default-deny ingress + bearer token stop off-pod callers, nothing stops
+  in-pod processes (the A1 mechanism); the example 443-to-any egress named
+  plainly as the exfiltration channel with Cilium `toFQDNs` as the hardening
+  path; the A1 residual documented with exact guarantees (env-strip raises
+  the bar; /proc/1/environ recovery remains until uid separation); verified
+  controls list, every claim carrying file:line evidence. Corrections found
+  during verification: the review's "drop-ALL caps" was imprecise (12 caps
+  re-added incl. SETUID + DAC_OVERRIDE — documented truthfully, and relevant
+  to the A1 fix); stale pre-A2 wording replaced. Fable restored the
+  permission-id entropy known-gap the draft dropped (shortId = 32 bits,
+  `events.ts:661` — still true, bearer token is the containing factor).

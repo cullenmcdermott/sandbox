@@ -163,10 +163,12 @@ in [`docs/review-2026-07-07.md`](docs/review-2026-07-07.md) §A/§B (id in brack
   shared `redact.ts`; `appendEvent` masks `turn.started`/`tool.*`/
   `permission.*` + role-user `message.*` (the D5 echo) before persist AND
   broadcast.
-- [ ] **SECURITY.md: 0.0.0.0 binds + open-443 egress example (INFO) [A3].**
-  Runner/sshd/opencode bind all interfaces (`server.ts:77` etc.);
-  `networkpolicy-egress-allow.yaml:48-59` permits 443 to any public host — the
-  exfil channel behind A1/A2. Document prominently; point at FQDN-scoped egress.
+- [x] **[A3] SECURITY.md posture rewrite — done 2026-07-11** (done log):
+  0.0.0.0-binds table + what the ingress policy does/doesn't contain, open-443
+  egress named plainly as the exfil channel + `toFQDNs` hardening path, the A1
+  `/proc/1/environ` residual with exact guarantees, verified controls list
+  (every claim carries file:line), corrected the stale "drop-ALL caps" claim
+  (12 caps re-added incl. SETUID/DAC_OVERRIDE).
 - [x] **[B1] opencode `serve` spawn-error listener — done 2026-07-08** (done
   log): `'error'` + `'exit'` share one per-child respawn scheduler.
 - [x] **[B2] 409 gate covers observer-synthetic opencode busy — done
