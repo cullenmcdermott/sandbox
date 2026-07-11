@@ -896,10 +896,11 @@ naming-break, and Shell items each stand alone.
   Route dispatch, bearer enforcement, 409 gate, SSE `after=` untested runner-side;
   `internal/e2e`'s fake runner faithfulness to `server.ts` is unchecked. Add a
   `node:test` suite booting `createServer` (401/404/409/replay).
-- [ ] **Port-forward lifecycle 0% covered (HIGH) [F5].** `portforward.go`
-  retry loop + `Done` signaling (site of C1 and the §1d `ForwardDone` seam).
-  Extract the retry decision to a pure func + table-test; unit-test `Done` closes
-  once.
+- [x] **[F5] port-forward lifecycle covered — done 2026-07-11** (done log):
+  retry decision extracted pure (`classifyForwardReconnect` +
+  `nextForwardBackoff`) + table tests over every branch and the full backoff
+  ceiling; C1 Close-seam invariants (Done-after-Close, done-closes-once,
+  error-churn vs concurrent Close) pinned under `-race`.
 - [ ] **MED coverage [F6/F7]:** opencode cred-rotation warning
   (`backend.go:1530-1584`) + the §7c opencode double-`message.completed`/observer
   leak have no pinning test; `waitHealthy` (`connect.go:41-66`), `reaperTick`

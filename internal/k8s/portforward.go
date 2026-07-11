@@ -131,6 +131,52 @@ var (
 	forwardReconnectBackoffMax     = 10 * time.Second
 )
 
+// forwardReconnectAction is the decision runForward makes after re-resolving the
+// pod that backed a dropped forward. Extracting it as a pure classifier keeps the
+// retry semantics table-testable without a cluster (mirrors reaper.go's pure
+// predicate split).
+type forwardReconnectAction int
+
+const (
+	// forwardUseNewPod: the re-resolve succeeded; retarget the forward at the
+	// freshly-resolved pod and reconnect.
+	forwardUseNewPod forwardReconnectAction = iota
+	// forwardRetryStale: a transient resolve failure (reschedule gap with the
+	// Sandbox still present, or an API-server blip). Keep the stale pod and retry
+	// with backoff.
+	forwardRetryStale
+	// forwardTerminal: the session's Sandbox is gone for good (NotFound). The pod
+	// will never come back, so stop retrying and surface the terminal state.
+	forwardTerminal
+)
+
+// classifyForwardReconnect decides how runForward should react to a pod
+// re-resolve result. A successful resolve (nil error, non-nil pod) retargets the
+// forward; a typed NotFound means the session is permanently gone and the loop
+// must stop; anything else — including a nil error with a nil pod — is treated as
+// transient, so the loop keeps the stale pod and retries. This preserves the
+// exact switch that lived inline in runForward (§1d).
+func classifyForwardReconnect(rp *corev1.Pod, rerr error) forwardReconnectAction {
+	switch {
+	case rerr == nil && rp != nil:
+		return forwardUseNewPod
+	case k8serrors.IsNotFound(rerr):
+		return forwardTerminal
+	default:
+		return forwardRetryStale
+	}
+}
+
+// nextForwardBackoff returns the reconnect wait for the following attempt: the
+// current backoff doubled, capped at max. Pure so the capped-exponential
+// progression is table-testable.
+func nextForwardBackoff(current, max time.Duration) time.Duration {
+	if current *= 2; current > max {
+		current = max
+	}
+	return current
+}
+
 // runForward establishes and maintains a port-forward for the lifetime of ctx.
 // forwardOnce (client-go's pf.ForwardPorts()) blocks until the forward dies; if
 // it exits while ctx is still live (pod rescheduled, SPDY stream dropped, a
@@ -164,10 +210,10 @@ func (b *Backend) runForward(ctx context.Context, pod *corev1.Pod, localPort, re
 			// Re-resolve the pod: after a restart the old pod name is gone, so a
 			// reconnect must target whatever pod now backs the session.
 			rp, rerr := b.resolvePodForForward(ctx, pod)
-			switch {
-			case rerr == nil && rp != nil:
+			switch classifyForwardReconnect(rp, rerr) {
+			case forwardUseNewPod:
 				pod = rp
-			case k8serrors.IsNotFound(rerr):
+			case forwardTerminal:
 				// The session's Sandbox is gone for good (e.g. `sandbox destroy`
 				// from another shell): the pod will never come back. Stop here
 				// instead of hammering the vanished pod at the capped ≤10s cadence
@@ -177,7 +223,7 @@ func (b *Backend) runForward(ctx context.Context, pod *corev1.Pod, localPort, re
 				// NOT NotFound, so they stay on the retry path below.
 				h.err = fmt.Errorf("port-forward %d→%d: session gone: %w", localPort, remotePort, rerr)
 				return
-			default:
+			case forwardRetryStale:
 				// Transient/rescheduling resolve failure: keep the stale pod and
 				// retry with backoff, exactly as before.
 			}
@@ -224,9 +270,7 @@ func (b *Backend) runForward(ctx context.Context, pod *corev1.Pod, localPort, re
 			return
 		case <-time.After(backoff):
 		}
-		if backoff *= 2; backoff > forwardReconnectBackoffMax {
-			backoff = forwardReconnectBackoffMax
-		}
+		backoff = nextForwardBackoff(backoff, forwardReconnectBackoffMax)
 	}
 }
 

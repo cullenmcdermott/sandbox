@@ -1045,3 +1045,25 @@ regression test; `just check` green end-to-end (incl. race-twice + e2e).
   different IdleTimeout/ReaperImage is applied instead of silently
   first-writer-wins; the idle clock lives runner-side so nothing is lost.
   Test: TestEnsureReaperReplacesRunningJobOnSpecMismatch.
+
+## 2026-07-11 — handoff-review batch 7 (§8 SDK narrowing, §10 F3-F5 coverage, small sweep)
+
+Opus build, Fable-verified, landed slice-by-slice as each agent's work passed
+review. Detail: docs/review-2026-07-07.md §F.
+
+- **§10 [F5] — port-forward lifecycle covered; retry decision extracted pure
+  (HIGH).** The reconnect re-resolve switch in `runForward` became
+  `classifyForwardReconnect(pod, err)` (`forwardUseNewPod` / `forwardRetryStale`
+  / `forwardTerminal`) and the capped-exponential wait became
+  `nextForwardBackoff` — 1:1 behavior-preserving, mirroring the reap.go
+  pure-decision split. Tests pin every classifier branch (typed + wrapped
+  NotFound terminal; plain error / context.Canceled / nil-err-nil-pod all
+  retry-stale; NotFound wins over a stray non-nil pod), the full
+  500ms→1s→2s→4s→8s→10s ceiling, and the C1 Close-seam invariants under
+  `-race`: Done fires only after Close, `h.done` closes exactly once under
+  16×10 concurrent Close() calls, and error-churn racing concurrent Close
+  still tears down with a non-nil terminal `h.err`. Tests:
+  TestClassifyForwardReconnect, TestNextForwardBackoff,
+  TestForwardBackoffProgression, TestRunForwardCloseCausesDone,
+  TestRunForwardCloseIsIdempotentAndDoneClosesOnce,
+  TestRunForwardConcurrentErrorAndClose.
