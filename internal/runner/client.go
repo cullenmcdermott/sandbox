@@ -400,13 +400,18 @@ func (c *Client) events(ctx context.Context, ref session.Ref, afterSeq uint64, p
 			case lastRead <- struct{}{}:
 			default:
 			}
-			line := scanner.Text()
+			// scanner.Bytes() returns a slice into the scanner's internal buffer that
+			// is only valid until the next Scan; we fully consume it in this iteration
+			// (json.Unmarshal copies into ev.Payload's json.RawMessage, and the
+			// prefix checks don't retain it), so no copy is needed here (§4 E8) — the
+			// old scanner.Text() + []byte(data) allocated the line twice per event.
+			line := scanner.Bytes()
 			// Replay/live boundary (Workstream C): the runner writes this comment
 			// once it has replayed all history to us. Surface it as a client-internal
 			// stream.live marker so the TUI flips out of "loading transcript…" into
 			// the live tail. It is not a persisted event (no seq), so it bypasses the
 			// data: decode path below.
-			if strings.HasPrefix(line, ": replay-complete") {
+			if bytes.HasPrefix(line, []byte(": replay-complete")) {
 				select {
 				case decoded <- session.Event{Type: session.EventStreamLive, SessionID: ref.ID}:
 				case <-ctx.Done():
@@ -414,12 +419,12 @@ func (c *Client) events(ctx context.Context, ref session.Ref, afterSeq uint64, p
 				}
 				continue
 			}
-			if !strings.HasPrefix(line, "data: ") {
+			data, ok := bytes.CutPrefix(line, []byte("data: "))
+			if !ok {
 				continue
 			}
-			data := strings.TrimPrefix(line, "data: ")
 			var ev session.Event
-			if err := json.Unmarshal([]byte(data), &ev); err != nil {
+			if err := json.Unmarshal(data, &ev); err != nil {
 				continue // skip malformed events
 			}
 			select {

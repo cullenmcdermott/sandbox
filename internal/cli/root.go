@@ -75,7 +75,7 @@ func NewRoot() *cobra.Command {
 					PreDestroyHook:    newPreDestroySyncStop(c),
 					TitleStore:        indexTitleStore{},
 					SnapshotStore:     indexSnapshotStore{},
-					EventCache:        indexEventCache{},
+					EventCache:        newIndexEventCache(),
 					ObserverConnector: newDashboardObserverConnector(c, ""),
 					SyncProber:        dashboardSyncProber(),
 					SyncReaper:        dashboardSyncReaper(),

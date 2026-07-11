@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/cullenmcdermott/sandbox/client"
@@ -239,9 +240,22 @@ func (indexSnapshotStore) SaveSnapshot(id session.ID, snap dashboard.SessionSnap
 // per-session events.ndjson: the foreground transcript loads it on a cold open to
 // rebuild history instantly and appends each non-delta event it streams. Best
 // effort — a cache miss/failure just falls back to a full runner replay.
-type indexEventCache struct{}
+//
+// It caches one open append handle per session (opened lazily on first append)
+// rather than reopening the file per cached event, which the perf review flagged as
+// ~5 syscalls on every event from both the foreground stream and every warm feed
+// (§4 E10). Handles stay open for the process lifetime (the dashboard tracks only a
+// handful of sessions); the OS reclaims them on exit.
+type indexEventCache struct {
+	mu      sync.Mutex
+	writers map[session.ID]*index.CacheWriter
+}
 
-func (indexEventCache) LoadEvents(id session.ID) ([]session.Event, error) {
+func newIndexEventCache() *indexEventCache {
+	return &indexEventCache{writers: make(map[session.ID]*index.CacheWriter)}
+}
+
+func (c *indexEventCache) LoadEvents(id session.ID) ([]session.Event, error) {
 	idx, err := newIndex()
 	if err != nil {
 		return nil, err
@@ -249,12 +263,32 @@ func (indexEventCache) LoadEvents(id session.ID) ([]session.Event, error) {
 	return idx.LoadCachedEvents(string(id))
 }
 
-func (indexEventCache) AppendEvent(id session.ID, ev session.Event) error {
-	idx, err := newIndex()
+func (c *indexEventCache) AppendEvent(id session.ID, ev session.Event) error {
+	w, err := c.writer(id)
 	if err != nil {
 		return err
 	}
-	return idx.AppendCachedEvent(string(id), ev)
+	return w.Append(ev)
+}
+
+// writer returns the session's persistent append handle, opening (and caching) it
+// on first use so later appends skip the per-event open/close (§4 E10).
+func (c *indexEventCache) writer(id session.ID) (*index.CacheWriter, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if w := c.writers[id]; w != nil {
+		return w, nil
+	}
+	idx, err := newIndex()
+	if err != nil {
+		return nil, err
+	}
+	w, err := idx.OpenCacheWriter(string(id))
+	if err != nil {
+		return nil, err
+	}
+	c.writers[id] = w
+	return w, nil
 }
 
 // newPreDestroySyncStop returns a callback that stops file sync for a session.
