@@ -109,6 +109,23 @@ const (
 	StatusGone      = session.StatusGone
 )
 
+// WorktreeMode selects per-session git worktree behavior at Create (design
+// docs/worktree-lifecycle-design.md §4.3/§7).
+type WorktreeMode int
+
+const (
+	// WorktreeAuto (the zero value / default) creates a per-session worktree iff
+	// ProjectPath is inside a git work tree and git is present; otherwise it falls
+	// back to the no-worktree behavior (WorkspacePath == ProjectPath), never
+	// erroring.
+	WorktreeAuto WorktreeMode = iota
+	// WorktreeOff never creates a worktree — exactly today's behavior.
+	WorktreeOff
+	// WorktreeOn requires a worktree: a non-git ProjectPath (or missing git) is
+	// ErrNotAGitRepo.
+	WorktreeOn
+)
+
 const (
 	// DefaultRunnerImage is the runner container image used when CreateOptions /
 	// WithRunnerImage does not specify one.
@@ -204,6 +221,11 @@ type Client struct {
 	// to the mutagen-CLI runner); a test injects a fake to observe/stub the
 	// Mutagen calls the orchestration paths make.
 	syncRunner syncpkg.Runner
+
+	// gitExec backs the per-session worktree git ops (client/worktree.go). Nil in
+	// production (git() defaults it to the real binary); a test may inject a stub,
+	// though the worktree ops are primarily exercised against real temp repos.
+	gitExec gitRunner
 }
 
 // New builds a Client. With no options it loads kubeconfig from the standard
@@ -340,13 +362,18 @@ type CreateOptions struct {
 	// ID optionally pins the session id (for idempotent create — re-creating with
 	// the same ID is a no-op at the cluster layer). Empty mints a fresh unique id.
 	ID ID
+	// Worktree selects per-session git worktree behavior (default WorktreeAuto):
+	// a git ProjectPath gets an isolated worktree at <stateDir>/worktrees/<id> on
+	// branch sandbox/<id>, so concurrent sessions on one repo don't cross-feed
+	// edits. See WorktreeMode.
+	Worktree WorktreeMode
 }
 
 // Create provisions a new session: it mints an id (unless ID is set), prepares
 // the per-session SSH key, creates the Sandbox + PVC, and records the session in
 // the local index. It does NOT wait for the pod or connect — call
 // Session.Connect for that.
-func (c *Client) Create(ctx context.Context, opt CreateOptions) (*Session, error) {
+func (c *Client) Create(ctx context.Context, opt CreateOptions) (_ *Session, err error) {
 	// §10 observability: time create end-to-end (and the ssh-key + cluster-create
 	// phases below) under one correlation id. tr is nil unless SANDBOX_TRACE is
 	// set, so this is a no-op when off.
@@ -400,11 +427,34 @@ func (c *Client) Create(ctx context.Context, opt CreateOptions) (*Session, error
 		return nil, fmt.Errorf("prepare ssh key: %w", err)
 	}
 
-	// Normalize WorkspacePath early so every downstream consumer (bind-mount,
-	// PROJECT_PATH env, Mutagen endpoints) can read it directly rather than
-	// re-deriving the ProjectPath fallback. Until per-session worktrees land,
-	// the workspace IS the repo root, so they are equal.
+	// Per-session worktree (design §4.3): after id minting, before the cluster
+	// create, add an isolated git worktree for a git ProjectPath so concurrent
+	// sessions on one repo don't share a Mutagen alpha (§1d). WorkspacePath — the
+	// bind-mount / PROJECT_PATH env / both Mutagen endpoints — becomes the worktree
+	// dir; ProjectPath (grouping/display/index) stays the repo root. A non-git
+	// project (WorktreeAuto) or WorktreeOff falls back: workspace IS the repo root,
+	// so they are equal (today's behavior). If anything after the worktree is
+	// created fails (notably the cluster create below), the deferred rollback tears
+	// the fresh worktree down so a failed Create leaves no residue.
 	workspacePath := opt.ProjectPath
+	var wt worktreeInfo
+	if opt.Worktree != WorktreeOff {
+		info, werr := c.createWorktree(ctx, opt.Worktree, opt.ProjectPath, string(sid))
+		if werr != nil {
+			return nil, werr
+		}
+		if info.Path != "" {
+			wt = info
+			workspacePath = info.Path
+			defer func() {
+				if err != nil {
+					rbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), worktreeRollbackTimeout)
+					defer cancel()
+					c.rollbackWorktree(rbCtx, wt)
+				}
+			}()
+		}
+	}
 
 	spec := session.Spec{
 		ID:                  sid,
@@ -441,12 +491,18 @@ func (c *Client) Create(ctx context.Context, opt CreateOptions) (*Session, error
 		SandboxName:      string(sid),
 		CreatedAt:        now,
 		LastActivity:     now,
+		// Persist the worktree (empty for a non-git / WorktreeOff session) so
+		// Destroy/reap can capture-then-remove it without re-discovering git.
+		WorktreePath:   wt.Path,
+		WorktreeBranch: wt.Branch,
+		RepoRoot:       wt.RepoRoot,
 	})
 
 	// Stamp the fresh-path shortcuts so the first Connect skips the redundant
 	// cluster Status Get and SSH-key regeneration this call already performed (§5).
 	sess := c.newSession(ref, opt.ProjectPath)
 	sess.workspacePath = workspacePath
+	sess.worktreePath = wt.Path
 	sess.fresh = true
 	sess.freshBackend = backendName
 	sess.sshPrivPath = privPath
@@ -504,6 +560,12 @@ func (c *Client) Destroy(ctx context.Context, id ID) error {
 	if err := c.backend.Destroy(ctx, Ref{ID: id}); err != nil {
 		return err
 	}
+	// Capture-then-remove the per-session worktree (design §4.7/§4.9): a dirty
+	// worktree is WIP-committed to its branch (never silently discarded — I2), then
+	// removed and pruned. Best-effort — the cluster is already gone, so a git
+	// failure must not fail Destroy. Runs BEFORE RemoveLocalState, which drops the
+	// index entry that records where the worktree lives.
+	c.teardownWorktree(ctx, id)
 	c.RemoveLocalState(id)
 	return nil
 }

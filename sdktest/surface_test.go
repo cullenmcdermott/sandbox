@@ -84,6 +84,22 @@ var (
 	_ func(*client.Session, context.Context) (client.State, error)                              = (*client.Session).SessionState
 	_ func(*client.Session, context.Context) (client.IdleStatus, error)                         = (*client.Session).Idle
 	_ func(*client.Session, context.Context, string) (client.ExecResult, error)                 = (*client.Session).Exec
+	_ func(*client.Session) string                                                              = (*client.Session).WorktreePath
+)
+
+// --- client: per-session worktree surface (wave 2) --------------------------
+
+var (
+	// WorktreeMode enum + the three modes. Retyping the constant or dropping a
+	// mode breaks a consumer here first.
+	_ client.WorktreeMode = client.WorktreeAuto
+	_ client.WorktreeMode = client.WorktreeOff
+	_ client.WorktreeMode = client.WorktreeOn
+
+	// Worktree sentinel errors a consumer branches on with errors.Is.
+	_ error = client.ErrNotAGitRepo
+	_ error = client.ErrWorktreeExists
+	_ error = client.ErrWorktreeDirty
 )
 
 // --- client: option/result structs keep their fields -------------------------
@@ -100,6 +116,7 @@ var _ = client.CreateOptions{
 	AnthropicCredential: []byte("secret"),
 	StorageClass:        "fast",
 	StorageGiB:          10,
+	Worktree:            client.WorktreeAuto,
 }
 
 var _ = client.ConnectOptions{

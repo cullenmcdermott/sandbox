@@ -77,4 +77,24 @@ var (
 	// other sources; failing fast here beats an apiserver Invalid error surfacing
 	// mid-create. The error carries no credential material.
 	ErrInvalidAnthropicAccountID = errors.New("sandbox: anthropic account id is not a valid kubernetes label value")
+
+	// ErrNotAGitRepo is returned by Create when CreateOptions.Worktree is
+	// WorktreeOn but ProjectPath is not inside a git work tree (or the git binary
+	// is unavailable), so a per-session worktree cannot be created. Under
+	// WorktreeAuto the same condition instead falls back silently to the no-worktree
+	// behavior (WorkspacePath == ProjectPath), never surfacing this error.
+	ErrNotAGitRepo = errors.New("sandbox: project path is not a git repository")
+
+	// ErrWorktreeExists is returned by Create when the target per-session worktree
+	// path or its auto-branch (sandbox/<id>) already exists, so `git worktree add`
+	// refuses. It signals a residue from a prior create with the same id — destroy
+	// the stale session (or reap the worktree) and retry.
+	ErrWorktreeExists = errors.New("sandbox: worktree path or branch already exists")
+
+	// ErrWorktreeDirty is returned by a teardown/convert path that would discard
+	// uncommitted work in a worktree and was not authorized to capture it. Destroy
+	// defaults to a silent WIP commit to the session branch rather than returning
+	// this (I2 never-lose), so it is part of the stable error vocabulary for
+	// callers that opt into a block-instead-of-commit policy in a later wave.
+	ErrWorktreeDirty = errors.New("sandbox: worktree has uncommitted changes")
 )

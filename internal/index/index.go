@@ -75,10 +75,20 @@ type Entry struct {
 	// (session.started event). It is the id `claude --resume <id>` expects, and
 	// the key used to write a local ~/.claude/history.jsonl entry so a k8s session
 	// shows up in the interactive resume picker on the laptop.
-	ClaudeSessionID string    `json:"claudeSessionId,omitempty"`
-	Namespace       string    `json:"namespace"`
-	SandboxName     string    `json:"sandboxName"`
-	RunnerToken     string    `json:"-"` // stored separately, not in JSON
+	ClaudeSessionID string `json:"claudeSessionId,omitempty"`
+	Namespace       string `json:"namespace"`
+	SandboxName     string `json:"sandboxName"`
+	RunnerToken     string `json:"-"` // stored separately, not in JSON
+	// WorktreePath, WorktreeBranch, and RepoRoot record the session's per-session
+	// git worktree (empty for a non-git / WorktreeOff session). They let teardown
+	// and reaping reason about the worktree without re-running git discovery:
+	// WorktreePath is the local worktree dir (also the Mutagen alpha / pod cwd),
+	// WorktreeBranch is its auto-branch (sandbox/<id>) that preserves committed
+	// work after the dir is removed, and RepoRoot is the parent repo's toplevel
+	// (`git -C RepoRoot worktree remove/prune` targets it).
+	WorktreePath    string    `json:"worktreePath,omitempty"`
+	WorktreeBranch  string    `json:"worktreeBranch,omitempty"`
+	RepoRoot        string    `json:"repoRoot,omitempty"`
 	CreatedAt       time.Time `json:"createdAt"`
 	LastActivity    time.Time `json:"lastActivity"`
 	LastEventSeq    uint64    `json:"lastEventSeq"`
@@ -215,6 +225,15 @@ func mergeEntry(prev, next Entry) Entry {
 	}
 	if next.SandboxName == "" {
 		next.SandboxName = prev.SandboxName
+	}
+	if next.WorktreePath == "" {
+		next.WorktreePath = prev.WorktreePath
+	}
+	if next.WorktreeBranch == "" {
+		next.WorktreeBranch = prev.WorktreeBranch
+	}
+	if next.RepoRoot == "" {
+		next.RepoRoot = prev.RepoRoot
 	}
 	if next.CreatedAt.IsZero() {
 		next.CreatedAt = prev.CreatedAt

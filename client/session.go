@@ -106,6 +106,11 @@ type Session struct {
 	// accessors, so writes take the lock — C8).
 	projectPath   string
 	workspacePath string
+	// worktreePath is the session's local git worktree dir (design §4.3), stamped
+	// by Client.Create when a worktree was created; "" for a non-git / WorktreeOff
+	// session. WorktreePath() falls back to the persisted index entry for an
+	// Open'd/attached session that never carried the Create stamp. Guarded by mu.
+	worktreePath string
 
 	mu      sync.Mutex
 	handles []session.ForwardHandle
@@ -164,6 +169,23 @@ func (s *Session) ProjectPath() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.projectPath
+}
+
+// WorktreePath returns the session's local git worktree dir, or "" when the
+// session has no worktree (non-git fallback / WorktreeOff). It reads the stamp
+// Client.Create left, falling back to the persisted index entry for a session
+// opened/attached without that stamp (design §7).
+func (s *Session) WorktreePath() string {
+	s.mu.Lock()
+	p := s.worktreePath
+	s.mu.Unlock()
+	if p != "" {
+		return p
+	}
+	if entry, err := s.c.index.Load(string(s.ref.ID)); err == nil {
+		return entry.WorktreePath
+	}
+	return ""
 }
 
 // Runner returns the live runner client from the last successful Connect, or nil
@@ -272,6 +294,7 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 		s.workspacePath = s.projectPath
 	}
 	workspacePath := s.workspacePath
+	projectPath := s.projectPath
 	s.mu.Unlock()
 
 	switch st.Status {
@@ -383,6 +406,17 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 			idleTimeout = DefaultIdleTimeout
 		}
 
+		// Missing-worktree guard (design §4.9): a worktree session (workspacePath is
+		// a distinct worktree dir, not the repo root) whose local worktree was
+		// deleted must NOT sync — an empty alpha under two-way-safe would look like a
+		// mass delete and could storm the pod's files away. Skip file sync with a
+		// warning (the runner surface still works); the reaper still runs.
+		// TODO(§4.5/§1d): the same-path non-git collision warning (another live
+		// session already syncing this ProjectPath) is not emitted here — it needs a
+		// syncManager().List() scan of existing sandbox-*-project alphas; deferred to
+		// the §9 non-git-collision follow-up rather than paying the List cost inline.
+		worktreeMissing := worktreeMissingForSync(workspacePath, projectPath)
+
 		// Foreground: only the load-bearing project sync — the one the agent needs
 		// staged before it can work on the repo. The 7 non-load-bearing
 		// config/transcript syncs, the bounded first-sync flush, and the idle
@@ -391,10 +425,14 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 		// prepared on the fresh path rather than re-reading it.
 		privPath := freshPrivPath
 		var kerr error
-		if privPath == "" {
+		if !worktreeMissing && privPath == "" {
 			privPath, _, kerr = s.c.ensureSSHKey(string(s.ref.ID))
 		}
 		switch {
+		case worktreeMissing:
+			syncWarning = appendWarning(syncWarning, fmt.Sprintf(
+				"file sync skipped: this session's worktree (%s) is missing — sync is bound to the worktree/machine that created the session; recreate the worktree manually or destroy the session", workspacePath))
+			s.startBackgroundSync(tr, syncpkg.Spec{}, false, false, reaperImage, reaperPullPolicy, idleTimeout)
 		case kerr != nil:
 			// No usable SSH key → no file sync at all, but the reaper must still run.
 			syncWarning = appendWarning(syncWarning, fmt.Sprintf("file sync unavailable (ssh key): %v", kerr))
