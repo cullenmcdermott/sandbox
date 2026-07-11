@@ -54,10 +54,21 @@ type Spec struct {
 	// valid Kubernetes DNS label (lowercase, [a-z0-9-], max 63).
 	ID ID `json:"id"`
 
-	// ProjectPath is the absolute local path of the project (e.g.
-	// "/Users/cullen/git/homelab"). The runner mirrors this path inside the
-	// pod so Claude project transcript keys stay compatible.
+	// ProjectPath is the absolute local path of the project's repo root (e.g.
+	// "/Users/cullen/git/homelab"). It is the identity/display path: NewID
+	// hashes it to group a repo's sessions, and it is what the local index and
+	// UI show. It is NOT necessarily the path the pod runs in — that is
+	// WorkspacePath (they differ once a per-session worktree exists).
 	ProjectPath string `json:"projectPath"`
+
+	// WorkspacePath is the absolute local path bind-mounted into the pod as the
+	// agent's working directory and used as BOTH Mutagen sync endpoints. It is
+	// the SDK cwd, so the pod's transcript directory and the local Mutagen alpha
+	// path match (resumable transcripts). Empty means "same as ProjectPath":
+	// there is no separate worktree, so the workspace IS the repo root. A
+	// per-session git worktree (a later wave) points this at the worktree dir
+	// while ProjectPath stays the repo root.
+	WorkspacePath string `json:"workspacePath,omitempty"`
 
 	// Backend selects which agent backend the runner uses ("claude-sdk",
 	// "opencode-server", "codex-app-server").
@@ -168,8 +179,12 @@ type State struct {
 	ID          ID     `json:"id"`
 	Backend     string `json:"backend"`
 	ProjectPath string `json:"projectPath"`
-	Model       string `json:"model,omitempty"`
-	Status      Status `json:"status"`
+	// WorkspacePath is the pod's bind-mount / SDK cwd, recovered from the pod's
+	// PROJECT_PATH env. Empty means it equals ProjectPath (no worktree). See
+	// Spec.WorkspacePath. Attach resolves the local Mutagen endpoint from this.
+	WorkspacePath string `json:"workspacePath,omitempty"`
+	Model         string `json:"model,omitempty"`
+	Status        Status `json:"status"`
 	// ClaudeSession is populated from the runner's session.json (the upstream
 	// Claude SDK session id) but is not yet read anywhere in the Go CLI; it is
 	// carried for future resume/inspection features.

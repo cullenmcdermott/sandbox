@@ -98,9 +98,14 @@ type ConnectOptions struct {
 // can be (re)connected: calling Connect again resumes the pod if needed,
 // re-forwards, and returns a fresh client — prior forwards are closed.
 type Session struct {
-	c           *Client
-	ref         Ref
-	projectPath string
+	c   *Client
+	ref Ref
+	// projectPath is the repo root (grouping/display); workspacePath is the pod
+	// bind-mount / SDK cwd used as both Mutagen endpoints. They are equal until a
+	// per-session worktree exists. Both are guarded by mu (read lock-free via the
+	// accessors, so writes take the lock — C8).
+	projectPath   string
+	workspacePath string
 
 	mu      sync.Mutex
 	handles []session.ForwardHandle
@@ -229,6 +234,7 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 	freshBackend := s.freshBackend
 	freshPrivPath := s.sshPrivPath
 	freshProjectPath := s.projectPath
+	freshWorkspacePath := s.workspacePath
 	s.mu.Unlock()
 
 	stage(StageCheck)
@@ -237,7 +243,7 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 		// Synthesize the state Create already established rather than round-trip to
 		// the API server. waitForPodReady below still blocks on genuine pod
 		// readiness, so this only elides the status probe, not the readiness gate.
-		st = session.State{ID: s.ref.ID, Status: session.StatusCreating, Backend: freshBackend, ProjectPath: freshProjectPath}
+		st = session.State{ID: s.ref.ID, Status: session.StatusCreating, Backend: freshBackend, ProjectPath: freshProjectPath, WorkspacePath: freshWorkspacePath}
 	} else {
 		sp := tr.start("connect.status")
 		var serr error
@@ -255,7 +261,17 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 	} else if s.projectPath == "" {
 		s.projectPath = st.ProjectPath
 	}
-	projectPath := s.projectPath
+	// Resolve the workspace path (Mutagen alpha / pod cwd): the value stamped at
+	// Create wins, else the one discovered from cluster status, else the repo
+	// root (no worktree ⇒ workspace == ProjectPath). Kept distinct from
+	// ProjectPath so a worktree session syncs the worktree, not the repo root.
+	if s.workspacePath == "" {
+		s.workspacePath = st.WorkspacePath
+	}
+	if s.workspacePath == "" {
+		s.workspacePath = s.projectPath
+	}
+	workspacePath := s.workspacePath
 	s.mu.Unlock()
 
 	switch st.Status {
@@ -385,7 +401,7 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 			s.startBackgroundSync(tr, syncpkg.Spec{}, false, false, reaperImage, reaperPullPolicy, idleTimeout)
 		default:
 			syncSpan := tr.start("connect.project_sync")
-			created, spec, serr := s.c.startProjectSync(ctx, string(s.ref.ID), projectPath, privPath, handles[1].LocalPort())
+			created, spec, serr := s.c.startProjectSync(ctx, string(s.ref.ID), workspacePath, privPath, handles[1].LocalPort())
 			syncSpan.end()
 			if serr != nil {
 				syncWarning = appendWarning(syncWarning, fmt.Sprintf("file sync unavailable: %v", serr))

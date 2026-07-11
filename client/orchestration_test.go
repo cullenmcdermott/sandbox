@@ -191,6 +191,14 @@ func TestClientCreate(t *testing.T) {
 		if be.gotSpec.ProjectPath != "/work/repo" || be.gotSpec.SSHPublicKey == "" {
 			t.Errorf("CreateSession spec = %+v, want ProjectPath + SSHPublicKey set", be.gotSpec)
 		}
+		// Wave-1 worktree split: WorkspacePath is normalized to equal ProjectPath
+		// (no worktree yet), and the same value is stamped onto the session.
+		if be.gotSpec.WorkspacePath != "/work/repo" {
+			t.Errorf("spec WorkspacePath = %q, want /work/repo (== ProjectPath)", be.gotSpec.WorkspacePath)
+		}
+		if sess.workspacePath != "/work/repo" {
+			t.Errorf("session workspacePath = %q, want /work/repo", sess.workspacePath)
+		}
 		if be.gotSpec.Backend != session.BackendClaudeSDK {
 			t.Errorf("spec backend = %q, want default claude-sdk", be.gotSpec.Backend)
 		}

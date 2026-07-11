@@ -16,6 +16,19 @@ in the session transcript; the SDK surface stays the deterministic
 in the same pre-OSS break. Implementation is unblocked: Spec split →
 auto-worktree at Create → capture-then-remove teardown/reap →
 convert-to-branch → TUI proposal prompt.
+
+> **Implementation amendment (2026-07-11, wave 1):** the state-dir layout
+> landed as `ssh/` and `worktrees/` nested INSIDE `stateDir` (default
+> `~/.local/share/sandbox/remote-sessions/{ssh,worktrees}`), not as siblings
+> of it under the app dir as the §4.1 diagram shows. Rationale: it is the
+> only layout where the decision-(10) "move `ssh/` inside the state root"
+> actually relocates anything, it honors §8's stated goal (a `WithStateDir`
+> consumer keeps every artifact inside their configured dir, which the
+> literal `dir(stateDir)` derivation violates), and it keeps `WithStateDir`
+> semantics + the index location byte-identical for existing installs. A
+> best-effort one-time migration renames the old sibling `ssh/` inward and
+> rewrites the `~/.ssh/config` Include line. `index.List` skips dirs without
+> a `session.json`.
 **Owner ask:** TODO.md §9 "Per-session git worktree lifecycle" (promoted from inbox 2026-07-04).
 **Cross-ref:** TODO.md §1d "Concurrent sessions on one project share one local sync endpoint, no dedup" (`internal/sync/sync.go:197` — the collision is analyzed in §3 below and, spoiler, per-session worktrees fix it for git projects).
 **SDK-first:** every new capability is specified as a `client/` addition first; the CLI/TUI dogfood it (CLAUDE.md "New capability goes HERE first, not in `internal/cli`").

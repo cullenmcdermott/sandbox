@@ -244,6 +244,11 @@ func TestCreateSessionSecretAndEnv(t *testing.T) {
 	if got := envValue(env, "PROJECT_PATH"); got != "/Users/cullen/git/homelab" {
 		t.Errorf("PROJECT_PATH: got %q, want /Users/cullen/git/homelab", got)
 	}
+	// No worktree ⇒ PROJECT_PATH (workspace/cwd) and SANDBOX_PROJECT_ROOT (repo
+	// root) are the same value; both are recorded so Status/List can recover them.
+	if got := envValue(env, "SANDBOX_PROJECT_ROOT"); got != "/Users/cullen/git/homelab" {
+		t.Errorf("SANDBOX_PROJECT_ROOT: got %q, want /Users/cullen/git/homelab", got)
+	}
 	rt := envVar(env, "RUNNER_TOKEN")
 	if rt == nil || rt.ValueFrom == nil || rt.ValueFrom.SecretKeyRef == nil ||
 		rt.ValueFrom.SecretKeyRef.Name != sessionSecretName("claude-sdk-env") {
@@ -275,6 +280,84 @@ func TestCreateSessionSecretAndEnv(t *testing.T) {
 	if !mounted {
 		t.Errorf("ssh-key should be mounted at %s", sshAuthorizedKeyMountPath)
 	}
+}
+
+// TestWorkspacePathSplit: when Spec.WorkspacePath differs from ProjectPath (a
+// per-session worktree), the pod's bind-mount and cwd track WorkspacePath while
+// ProjectPath is carried separately for display/grouping. PROJECT_PATH (the
+// runner's SDK cwd) = WorkspacePath; SANDBOX_PROJECT_ROOT = ProjectPath.
+func TestWorkspacePathSplit(t *testing.T) {
+	spec := session.Spec{
+		Backend:       "claude-sdk",
+		ProjectPath:   "/Users/cullen/git/homelab",
+		WorkspacePath: "/Users/cullen/.local/share/sandbox/remote-sessions/worktrees/claude-sdk-abc",
+	}
+
+	// The workspace subtree is bind-mounted at WorkspacePath (subPath keyed off it).
+	var mount *corev1.VolumeMount
+	for _, m := range runnerVolumeMounts(spec) {
+		if m.Name == "session" && m.MountPath == spec.WorkspacePath {
+			mm := m
+			mount = &mm
+		}
+	}
+	if mount == nil {
+		t.Fatalf("no bind-mount at the workspace path %q", spec.WorkspacePath)
+	}
+	if want := "workspace" + spec.WorkspacePath; mount.SubPath != want {
+		t.Errorf("bind-mount subPath = %q, want %q", mount.SubPath, want)
+	}
+
+	env := buildEnv(spec, "claude-sdk-abc")
+	if got := envValue(env, "PROJECT_PATH"); got != spec.WorkspacePath {
+		t.Errorf("PROJECT_PATH = %q, want the workspace path %q", got, spec.WorkspacePath)
+	}
+	if got := envValue(env, "SANDBOX_PROJECT_ROOT"); got != spec.ProjectPath {
+		t.Errorf("SANDBOX_PROJECT_ROOT = %q, want the repo root %q", got, spec.ProjectPath)
+	}
+}
+
+// TestStatusRecoversWorkspaceAndRoot: Status/List reconstruct both paths from
+// the pod env — WorkspacePath from PROJECT_PATH, ProjectPath from
+// SANDBOX_PROJECT_ROOT — and fall back to PROJECT_PATH for the repo root when a
+// pre-existing pod predates SANDBOX_PROJECT_ROOT.
+func TestStatusRecoversWorkspaceAndRoot(t *testing.T) {
+	b := newTestBackend(t)
+
+	mkSandbox := func(name string, env []corev1.EnvVar) *agentv1alpha1.Sandbox {
+		return &agentv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Spec: agentv1alpha1.SandboxSpec{
+				PodTemplate: agentv1alpha1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: runnerContainerName, Env: env}},
+					},
+				},
+			},
+		}
+	}
+
+	t.Run("both envs present: distinct workspace and root", func(t *testing.T) {
+		st := b.statusFromSandbox(context.Background(), mkSandbox("s1", []corev1.EnvVar{
+			{Name: "PROJECT_PATH", Value: "/wt/claude-sdk-abc"},
+			{Name: "SANDBOX_PROJECT_ROOT", Value: "/repo"},
+		}))
+		if st.WorkspacePath != "/wt/claude-sdk-abc" {
+			t.Errorf("WorkspacePath = %q, want /wt/claude-sdk-abc", st.WorkspacePath)
+		}
+		if st.ProjectPath != "/repo" {
+			t.Errorf("ProjectPath = %q, want /repo", st.ProjectPath)
+		}
+	})
+
+	t.Run("legacy pod without SANDBOX_PROJECT_ROOT falls back to PROJECT_PATH", func(t *testing.T) {
+		st := b.statusFromSandbox(context.Background(), mkSandbox("s2", []corev1.EnvVar{
+			{Name: "PROJECT_PATH", Value: "/repo"},
+		}))
+		if st.WorkspacePath != "/repo" || st.ProjectPath != "/repo" {
+			t.Errorf("fallback: workspace=%q root=%q, want both /repo", st.WorkspacePath, st.ProjectPath)
+		}
+	})
 }
 
 // TestBuildEnvAnthropicAuth: the claude-sdk pod gets exactly one Anthropic

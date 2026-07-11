@@ -151,15 +151,17 @@ func WithContext(name string) Option { return func(o *options) { o.contextName =
 // WithRESTConfig injects a pre-built *rest.Config, bypassing kubeconfig loading.
 func WithRESTConfig(rc *rest.Config) Option { return func(o *options) { o.restConfig = rc } }
 
-// WithStateDir overrides the local state directory (session index + per-session
-// SSH keys). Defaults to ~/.local/share/sandbox/remote-sessions.
+// WithStateDir overrides the local state directory, which holds every
+// per-client artifact under one root: the session index + per-session SSH keys
+// (<stateDir>/<id>/), the per-session SSH alias config (<stateDir>/ssh/config,
+// Include'd from ~/.ssh/config on the first Connect), and future per-session git
+// worktrees (<stateDir>/worktrees/). Defaults to
+// ~/.local/share/sandbox/remote-sessions.
 //
-// Note the per-session SSH alias config is written to an "ssh" directory that
-// is a SIBLING of the state dir (dir(stateDir)/ssh/config — for the default,
-// ~/.local/share/sandbox/ssh/config) and an Include line for it is added to
-// ~/.ssh/config on the first Connect. Point WithStateDir at a dedicated
-// subdirectory (e.g. <appdir>/remote-sessions) so the ssh dir lands inside
-// your app's directory rather than beside it.
+// The ssh dir used to live as a SIBLING of the state dir; the first Connect
+// after this change best-effort migrates it inward and rewrites the ~/.ssh/config
+// Include line, so a WithStateDir consumer no longer needs to nest their path to
+// keep the ssh dir inside their app directory.
 func WithStateDir(dir string) Option { return func(o *options) { o.stateDir = dir } }
 
 // WithRunnerImage sets the default runner image for Create (overridable per call).
@@ -398,9 +400,16 @@ func (c *Client) Create(ctx context.Context, opt CreateOptions) (*Session, error
 		return nil, fmt.Errorf("prepare ssh key: %w", err)
 	}
 
+	// Normalize WorkspacePath early so every downstream consumer (bind-mount,
+	// PROJECT_PATH env, Mutagen endpoints) can read it directly rather than
+	// re-deriving the ProjectPath fallback. Until per-session worktrees land,
+	// the workspace IS the repo root, so they are equal.
+	workspacePath := opt.ProjectPath
+
 	spec := session.Spec{
 		ID:                  sid,
 		ProjectPath:         opt.ProjectPath,
+		WorkspacePath:       workspacePath,
 		Backend:             backendName,
 		RunnerImage:         runnerImage,
 		ImagePullPolicy:     opt.ImagePullPolicy,
@@ -437,6 +446,7 @@ func (c *Client) Create(ctx context.Context, opt CreateOptions) (*Session, error
 	// Stamp the fresh-path shortcuts so the first Connect skips the redundant
 	// cluster Status Get and SSH-key regeneration this call already performed (§5).
 	sess := c.newSession(ref, opt.ProjectPath)
+	sess.workspacePath = workspacePath
 	sess.fresh = true
 	sess.freshBackend = backendName
 	sess.sshPrivPath = privPath

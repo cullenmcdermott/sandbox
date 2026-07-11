@@ -897,17 +897,27 @@ func (b *Backend) Status(ctx context.Context, ref session.Ref) (session.State, e
 // The dashboard reconcile treats absence-from-the-snapshot as deletion, so a
 // dropped live session would be wrongly pruned.
 func (b *Backend) statusFromSandbox(ctx context.Context, sb *agentv1alpha1.Sandbox) session.State {
+	// Recover the identity fields the runner pod was created with. These are
+	// write-once container env (see buildEnv); reading them back here means a
+	// session attached from the list — not just one freshly created in this
+	// process — carries its real paths (needed for Mutagen sync) and Backend
+	// (needed to pick the claude vs opencode connect path). PROJECT_PATH is the
+	// pod's cwd / bind-mount = the WORKSPACE path (the local Mutagen alpha);
+	// SANDBOX_PROJECT_ROOT is the repo-root ProjectPath for display/grouping.
+	// Pre-existing pods created before SANDBOX_PROJECT_ROOT existed carry only
+	// PROJECT_PATH, so fall back to it (workspace == repo root there anyway).
+	workspace := sandboxEnv(sb, "PROJECT_PATH")
+	projectRoot := sandboxEnv(sb, "SANDBOX_PROJECT_ROOT")
+	if projectRoot == "" {
+		projectRoot = workspace
+	}
 	st := session.State{
-		ID:          session.ID(sb.Name),
-		SandboxName: sb.Name,
-		CreatedAt:   sb.CreationTimestamp.Time,
-		// Recover the identity fields the runner pod was created with. These are
-		// write-once container env (see buildEnv); reading them back here means a
-		// session attached from the list — not just one freshly created in this
-		// process — carries its real ProjectPath (needed for Mutagen sync) and
-		// Backend (needed to pick the claude vs opencode connect path).
-		ProjectPath: sandboxEnv(sb, "PROJECT_PATH"),
-		Backend:     sandboxEnv(sb, "SANDBOX_BACKEND"),
+		ID:            session.ID(sb.Name),
+		SandboxName:   sb.Name,
+		CreatedAt:     sb.CreationTimestamp.Time,
+		ProjectPath:   projectRoot,
+		WorkspacePath: workspace,
+		Backend:       sandboxEnv(sb, "SANDBOX_BACKEND"),
 	}
 
 	replicas := int32(1)
@@ -955,9 +965,9 @@ func (b *Backend) statusFromSandbox(ctx context.Context, sb *agentv1alpha1.Sandb
 
 // sandboxEnv returns the literal value of a runner-container env var from the
 // Sandbox's pod template, or "" if absent or set via valueFrom (SecretKeyRef).
-// Used to recover the identity fields (PROJECT_PATH, SANDBOX_BACKEND) the pod
-// was created with so Status/List report them for any session, not only those
-// created in the current process.
+// Used to recover the identity fields (PROJECT_PATH, SANDBOX_PROJECT_ROOT,
+// SANDBOX_BACKEND) the pod was created with so Status/List report them for any
+// session, not only those created in the current process.
 func sandboxEnv(sb *agentv1alpha1.Sandbox, name string) string {
 	for i := range sb.Spec.PodTemplate.Spec.Containers {
 		for _, e := range sb.Spec.PodTemplate.Spec.Containers[i].Env {
@@ -1402,10 +1412,11 @@ func buildSandbox(spec session.Spec) *agentv1alpha1.Sandbox {
 
 // runnerVolumeMounts returns the runner container's volume mounts. The session
 // PVC is always mounted at /session (holding workspace/ + state/). When the
-// session has an absolute project path, the workspace subtree is ALSO bind-
+// session has an absolute workspace path, the workspace subtree is ALSO bind-
 // mounted (via subPath) at that real host path — e.g. /Users/cullen/git/homelab
-// — so the Claude SDK runs with cwd equal to the host project path rather than
-// /session/workspace/<path>.
+// — so the Claude SDK runs with cwd equal to the host workspace path rather than
+// /session/workspace/<path>. The mount tracks WorkspacePath (the worktree dir
+// once one exists), not the repo-root ProjectPath.
 //
 // This is what makes a k8s-started session resumable on the laptop: the SDK keys
 // its on-disk transcript directory by cwd (~/.claude/projects/<cwd with '/'→'-'>),
@@ -1418,16 +1429,26 @@ func runnerVolumeMounts(spec session.Spec) []corev1.VolumeMount {
 		{Name: "session", MountPath: "/session"},
 		{Name: "ssh-key", MountPath: sshAuthorizedKeyMountPath, ReadOnly: true},
 	}
-	if strings.HasPrefix(spec.ProjectPath, "/") && spec.ProjectPath != "/" {
-		// subPath must be relative to the PVC root; ProjectPath starts with "/",
-		// so "workspace"+ProjectPath yields e.g. "workspace/Users/cullen/git/x".
+	wp := workspacePath(spec)
+	if strings.HasPrefix(wp, "/") && wp != "/" {
+		// subPath must be relative to the PVC root; the workspace path starts
+		// with "/", so "workspace"+wp yields e.g. "workspace/Users/cullen/git/x".
 		mounts = append(mounts, corev1.VolumeMount{
 			Name:      "session",
-			MountPath: spec.ProjectPath,
-			SubPath:   "workspace" + spec.ProjectPath,
+			MountPath: wp,
+			SubPath:   "workspace" + wp,
 		})
 	}
 	return mounts
+}
+
+// workspacePath resolves the pod's bind-mount / SDK cwd: Spec.WorkspacePath when
+// set, else Spec.ProjectPath (no worktree — the workspace IS the repo root).
+func workspacePath(spec session.Spec) string {
+	if spec.WorkspacePath != "" {
+		return spec.WorkspacePath
+	}
+	return spec.ProjectPath
 }
 
 // buildEnv builds the runner container's env, branching on the backend. Common
@@ -1451,7 +1472,14 @@ func buildEnv(spec session.Spec, name string) []corev1.EnvVar {
 		{Name: "IS_SANDBOX", Value: "1"},
 		{Name: "SANDBOX_SESSION_ID", Value: name},
 		{Name: "SANDBOX_BACKEND", Value: spec.Backend},
-		{Name: "PROJECT_PATH", Value: spec.ProjectPath},
+		// PROJECT_PATH is the pod's cwd / bind-mount (the runner reads it as the
+		// SDK cwd — see runner/src/session.ts, exec.ts). It is the WORKSPACE path
+		// (the worktree dir once one exists), which equals ProjectPath when there
+		// is no worktree. SANDBOX_PROJECT_ROOT carries the repo-root ProjectPath
+		// for display/grouping so Status/List can recover both after the fact
+		// (statusFromSandbox); older pods without it fall back to PROJECT_PATH.
+		{Name: "PROJECT_PATH", Value: workspacePath(spec)},
+		{Name: "SANDBOX_PROJECT_ROOT", Value: spec.ProjectPath},
 		// Lets the runner report an accurate countdown in session.terminating;
 		// mirrors the pod grace period.
 		{Name: "TERMINATION_GRACE_SECONDS", Value: fmt.Sprintf("%d", terminationGraceSeconds)},

@@ -6,6 +6,7 @@ package index
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -274,6 +275,13 @@ func (i *Index) List() ([]Entry, error) {
 	var result []Entry
 	for _, e := range entries {
 		if !e.IsDir() {
+			continue
+		}
+		// The state dir also holds non-session sibling dirs (ssh/, worktrees/);
+		// a dir with no session.json is simply not a session, so skip it silently
+		// rather than logging it as corrupt. Session ids are never "ssh"/"worktrees"
+		// (they are <backend>-<hash>-<rand>), so this cannot hide a real entry.
+		if _, serr := os.Stat(filepath.Join(i.root, e.Name(), "session.json")); errors.Is(serr, os.ErrNotExist) {
 			continue
 		}
 		entry, err := i.Load(e.Name())

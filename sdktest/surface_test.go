@@ -111,6 +111,19 @@ var _ = client.ConnectOptions{
 	OnPhase:               func(client.Stage, string) {},
 }
 
+// Spec/State are public via client aliases; pin the worktree data-model split
+// (repo-root ProjectPath vs bind-mount/sync WorkspacePath) so removing or
+// retyping either field breaks a consumer here first.
+var _ = client.Spec{
+	ProjectPath:   "/work/repo",
+	WorkspacePath: "/work/repo",
+}
+
+var _ = client.State{
+	ProjectPath:   "/work/repo",
+	WorkspacePath: "/work/repo",
+}
+
 var _ = client.Connection{
 	Runner:   nil,
 	Endpoint: "http://127.0.0.1:8787",

@@ -4,8 +4,9 @@
 // SSH), this module syncs to Kubernetes runner pods via SSH over
 // kubectl port-forward. The sync sessions are:
 //
-//  1. Project: local repo <-> remote <host project path>, two-way-safe (the pod
-//     bind-mounts the workspace at the real host path, so both endpoints match)
+//  1. Project: local workspace <-> remote <host workspace path>, two-way-safe
+//     (the pod bind-mounts the workspace at the real host path, so both
+//     endpoints match; the caller passes Spec.WorkspacePath into both)
 //  2. Config inputs: ~/.claude/skills etc -> remote /session/state/claude/, one-way
 //  3. Transcripts: remote /session/state/claude/projects -> local ~/.claude/projects, one-way
 package sync

@@ -134,17 +134,94 @@ func (c *Client) ensureSSHKey(id string) (privPath, authorizedKey string, err er
 	return privPath, auth, nil
 }
 
-// sshConfig returns the per-session SSH alias manager. The include file lives
-// in an "ssh" dir that is a sibling of the state dir (see WithStateDir), and is
-// Include'd from ~/.ssh/config.
+// sshConfig returns the per-session SSH alias manager. The include file lives at
+// <stateDir>/ssh/config — INSIDE the state dir alongside the session index and
+// (future) worktrees, so a WithStateDir consumer keeps every sandbox artifact
+// under one root — and is Include'd from ~/.ssh/config. A best-effort one-time
+// migration relocates a pre-existing include dir from its old sibling location.
 func (c *Client) sshConfig() (*syncpkg.SSHConfig, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
 	}
-	include := filepath.Join(filepath.Dir(c.stateDir), "ssh", "config")
+	include := filepath.Join(c.stateDir, "ssh", "config")
 	userCfg := filepath.Join(home, ".ssh", "config")
+	c.migrateSSHDir(include, userCfg)
 	return syncpkg.NewSSHConfig(include, userCfg), nil
+}
+
+// worktreesRoot returns the local root under which per-session git worktrees
+// live: <stateDir>/worktrees, a sibling of the per-session index/key dirs so a
+// WithStateDir consumer keeps everything under one root and reaping has one
+// place to enumerate. Path computation only — nothing creates it yet; a later
+// wave adds the per-session worktree at <worktreesRoot>/<id>.
+func (c *Client) worktreesRoot() string {
+	return filepath.Join(c.stateDir, "worktrees")
+}
+
+// migrateSSHDir performs the one-time relocation of the per-session ssh include
+// dir from its old home — a SIBLING of the state dir (dir(stateDir)/ssh) — to its
+// new home INSIDE the state dir (stateDir/ssh), and rewrites the Include line in
+// the user's ~/.ssh/config to point at the new path. Best-effort and idempotent:
+// it acts only when the old dir exists and the new one does not, so a fresh
+// install or an already-migrated one is a no-op. Every error is swallowed —
+// sshConfig's next Upsert re-creates the dir and re-adds the Include regardless.
+func (c *Client) migrateSSHDir(newInclude, userCfg string) {
+	newDir := filepath.Dir(newInclude)                       // <stateDir>/ssh
+	oldDir := filepath.Join(filepath.Dir(c.stateDir), "ssh") // sibling of the state dir
+	if oldDir == newDir {
+		return
+	}
+	if _, err := os.Stat(newDir); err == nil {
+		return // new location already present: fresh or already migrated
+	}
+	if _, err := os.Stat(oldDir); err != nil {
+		return // nothing legacy to migrate
+	}
+	if err := os.MkdirAll(filepath.Dir(newDir), 0o700); err != nil {
+		return
+	}
+	if err := os.Rename(oldDir, newDir); err != nil {
+		return
+	}
+	rewriteSSHInclude(userCfg, filepath.Join(oldDir, "config"), newInclude)
+}
+
+// rewriteSSHInclude replaces the "Include <oldConfig>" line in the user's ssh
+// config with the quoted new form (matching the C5 quoted-Include written by
+// SSHConfig.ensureInclude), collapsing any duplicate. Best-effort: a missing or
+// unwritable config is left untouched (the next Upsert re-adds the Include).
+func rewriteSSHInclude(userCfg, oldConfig, newInclude string) {
+	data, err := os.ReadFile(userCfg)
+	if err != nil {
+		return
+	}
+	quotedOld := fmt.Sprintf("Include %q", oldConfig)
+	legacyOld := "Include " + oldConfig
+	quotedNew := fmt.Sprintf("Include %q", newInclude)
+	var out []string
+	changed, seenNew := false, false
+	for _, line := range strings.Split(string(data), "\n") {
+		switch strings.TrimSpace(strings.TrimRight(line, "\r")) {
+		case quotedOld, legacyOld:
+			changed = true
+			if !seenNew {
+				out = append(out, quotedNew)
+				seenNew = true
+			}
+			continue
+		case quotedNew:
+			if seenNew {
+				changed = true
+				continue // drop the duplicate
+			}
+			seenNew = true
+		}
+		out = append(out, line)
+	}
+	if changed {
+		_ = os.WriteFile(userCfg, []byte(strings.Join(out, "\n")), 0o600)
+	}
 }
 
 // startProjectSync writes the SSH alias for the current port-forward and creates
@@ -156,7 +233,7 @@ func (c *Client) sshConfig() (*syncpkg.SSHConfig, error) {
 // was freshly created (this session's first-ever sync) so the caller can skip a
 // blocking initial flush on reconnect. The built Spec is returned so the caller
 // can hand it to the background CreateInputs without rebuilding it.
-func (c *Client) startProjectSync(ctx context.Context, id, projectPath, privPath string, sshLocalPort int) (created bool, spec syncpkg.Spec, err error) {
+func (c *Client) startProjectSync(ctx context.Context, id, workspacePath, privPath string, sshLocalPort int) (created bool, spec syncpkg.Spec, err error) {
 	cfg, err := c.sshConfig()
 	if err != nil {
 		return false, syncpkg.Spec{}, err
@@ -170,11 +247,12 @@ func (c *Client) startProjectSync(ctx context.Context, id, projectPath, privPath
 	}
 	spec = syncpkg.Spec{
 		SessionID: id,
-		// The pod bind-mounts the workspace at the real host project path, so both
-		// sync endpoints use the same absolute path (keeps the SDK cwd
-		// host-matching for resumable transcripts).
-		ProjectPath:  projectPath,
-		RemotePath:   projectPath,
+		// The pod bind-mounts the workspace at this real host path, so both sync
+		// endpoints use the same absolute path (keeps the SDK cwd host-matching
+		// for resumable transcripts). This is the WORKSPACE path (the worktree dir
+		// once one exists), not the repo-root ProjectPath.
+		ProjectPath:  workspacePath,
+		RemotePath:   workspacePath,
 		HomeDir:      home,
 		SSHHost:      syncpkg.Alias(id),
 		RemoteClaude: remoteClaudeDir,
