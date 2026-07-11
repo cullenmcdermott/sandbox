@@ -77,6 +77,71 @@ export interface SessionState {
   model?: string;
   /** True once the one-shot auto title has been generated for this session (T6). */
   title_generated?: boolean;
+  /** Persisted autopilot driver spec (the server-side /loop-/goal loop; see
+   * docs/server-side-loop-adr.md). Absent until the driver is first armed via
+   * PUT /sessions/:id/autopilot; retained with state:'stopped' after it
+   * terminates (never deleted — H3) so attach + reaper idle logic read a stable
+   * terminal record instead of inferring stop from a missing key. */
+  autopilot?: AutopilotSpec;
+}
+
+/** Why an armed autopilot driver terminated (AutopilotSpec.stopped_reason and
+ * the autopilot.state stopped event's `reason`). */
+export type AutopilotStopReason = 'sentinel' | 'budget' | 'user' | 'lapsed' | 'error';
+
+/** The autopilot driver spec, persisted per session in session.json (ADR §1).
+ * `state` is the explicit lifecycle field (H3): the spec always carries a
+ * non-null `kind` once armed, and `state` alone distinguishes a live driver
+ * (`armed`) from a terminated one (`stopped`, with `stopped_reason`). Every
+ * downstream rule (idle computation Q1, boot re-arm H1) keys off
+ * `state === 'armed'`, never off `kind`. Arming overwrites the spec wholesale
+ * and bumps `gen`; disarm sets state:'stopped' (reason 'user') and bumps `gen`. */
+export interface AutopilotSpec {
+  /** The driver flavour (never null once armed). */
+  kind: 'loop' | 'goal';
+  /** Explicit lifecycle field: 'armed' (live) or 'stopped' (terminated). */
+  state: 'armed' | 'stopped';
+  /** Set when state === 'stopped'; null while armed. */
+  stopped_reason: AutopilotStopReason | null;
+  /** The /loop or /goal prompt submitted each iteration. */
+  prompt: string;
+  /** Completion marker scanned in the just-completed assistant text; '' disables
+   * sentinel termination (the loop then runs to max_iterations/token_budget). */
+  sentinel: string;
+  /** Delay between iterations in ms (0 = immediate). */
+  interval_ms: number;
+  /** Per-turn overrides applied to every self-submitted turn. */
+  overrides: { model?: string; effort?: string; mode?: string };
+  /** Hard iteration ceiling (always enforced; default 50). */
+  max_iterations: number;
+  /** Optional hard token ceiling (input+output summed across the loop); null =
+   * no token cap. */
+  token_budget: number | null;
+  /** Completed-iteration counter. */
+  iterations: number;
+  /** RFC3339 instant the driver was armed (boot re-arm anchor when no turn has
+   * completed yet — H1). */
+  armed_at: string;
+  /** RFC3339 of the last completed self-submitted (or manual) turn, or null.
+   * The boot re-arm interval anchor (H1) and the staleness anchor (Q1). */
+  last_completed_at: string | null;
+  /** Monotonic generation; a disarm/rearm bumps it, dropping stale scheduled
+   * ticks (the gen guard). */
+  gen: number;
+}
+
+/** PUT /sessions/:id/autopilot request body (arm/replace the driver). All fields
+ * but `kind` and `prompt` are optional; the runner fills defaults (sentinel '',
+ * intervalMs 0, maxIterations 50, tokenBudget null, overrides {}). Validated at
+ * the route boundary (B9 typed errors). */
+export interface AutopilotRequestBody {
+  kind?: string;
+  prompt?: string;
+  sentinel?: string;
+  intervalMs?: number;
+  overrides?: { model?: string; effort?: string; mode?: string };
+  maxIterations?: number;
+  tokenBudget?: number | null;
 }
 
 // --- HTTP request/response bodies (camelCase per runner-api.md) -----------
@@ -169,6 +234,14 @@ export interface StatusResponse {
   /** The runner's PROTOCOL_VERSION (see events.gen.ts), so a status poll also
    * surfaces CLI/runner skew, not just /healthz. */
   protocolVersion: number;
+  /** Backend capability bits the CLI reads to pick a code path. `autopilot` is
+   * true when this backend has a runner-side autopilot driver (the server-side
+   * /loop-/goal loop): the TUI then arms that driver via PUT/DELETE
+   * /sessions/:id/autopilot and renders from autopilot.state events instead of
+   * running its local tea.Tick loop (ADR §Q3 precedence). False for backends
+   * without a runner driver (opencode/supervise-only), where the TUI keeps its
+   * local driver. */
+  capabilities: { autopilot: boolean };
 }
 
 /** Audit row appended to audit.jsonl (spec 8.5). */

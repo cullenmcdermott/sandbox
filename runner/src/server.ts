@@ -10,14 +10,21 @@ import { createServer, type IncomingMessage, type ServerResponse, type Server } 
 import { readBody, BodyTooLargeError, InvalidJsonError } from './httputil.js';
 import { appendEvent, attachSseClient, lastSeq, sseTotalClientCount, MAX_SSE_CLIENTS } from './events.js';
 import { getRegistry, loadConfig, toStatusResponse } from './session.js';
-import { PORT, PROTOCOL_VERSION, type PermissionRequestBody, type TurnRequestBody, type TurnResponse, type ExecRequestBody } from './types.js';
-import { selectAgent, type Agent } from './agent.js';
+import { PORT, PROTOCOL_VERSION, type PermissionRequestBody, type TurnRequestBody, type TurnResponse, type ExecRequestBody, type AutopilotRequestBody } from './types.js';
+import { type Agent } from './agent.js';
+import { startTurn, turnRejectReason } from './turns.js';
+import { type Autopilot, type AutopilotArmInput } from './autopilot.js';
 import { opencodeTurnClient } from './opencode-turn.js';
 import { markObservedTurnInterrupted } from './opencode-observer.js';
 import { runExec } from './exec.js';
 import { appendAudit } from './audit.js';
 import { bashCommandBlocked } from './guards.js';
 import { bearerTokenOk } from './auth.js';
+
+// Re-exported for the turn-gate unit tests (turn-gate.test.ts), which import it
+// from './server.js'. The definition moved to ./turns.ts so the shared
+// startTurn path and the autopilot driver reuse the exact same 409 gate.
+export { turnRejectReason };
 
 // --- Auth -----------------------------------------------------------------
 
@@ -54,37 +61,6 @@ function ok(res: ServerResponse, body: unknown, status = 200): void {
  * spinning up the http server. */
 export function healthzBody(): { status: 'ok'; protocolVersion: number } {
   return { status: 'ok', protocolVersion: PROTOCOL_VERSION };
-}
-
-/**
- * Decide whether a POST /turns must be rejected with 409, and with what message,
- * given the backend and the session's live state. Pure + exported so the gate is
- * unit-testable without the http server (F4: the HTTP layer is otherwise dark).
- *
- * Two ways a session can already be busy:
- *  - a registered runner turn (activeTurnCount > 0) — the R4 single-active-turn
- *    invariant; two overlapping query() calls interleave events.
- *  - B2: an interactive opencode turn. It runs INSIDE `opencode serve`, driven by
- *    the attached client, and never registers in activeTurns — it only surfaces
- *    as status:'busy' via the passive observer. Without this check a headless
- *    POST /turns is accepted mid-interactive-turn and opencode-turn.ts prompts the
- *    SAME session concurrently, freezing the observer's open-cycle mapper. Mirror
- *    of the interrupt route's `backend === 'opencode-server' && status === 'busy'`.
- *
- * Returns the 409 error message, or null when the turn may proceed.
- */
-export function turnRejectReason(
-  backend: string,
-  activeTurnCount: number,
-  status: string,
-): string | null {
-  if (activeTurnCount > 0) {
-    return 'a turn is already active; interrupt it before starting a new one';
-  }
-  if (backend === 'opencode-server' && status === 'busy') {
-    return 'the opencode session is busy; interrupt the active turn before starting a new one';
-  }
-  return null;
 }
 
 /**
@@ -132,6 +108,73 @@ export function permissionResolveResponse(
   return { status: 200, body: { permissionId, resolved: true } };
 }
 
+/**
+ * Validate + normalize a PUT /sessions/:id/autopilot body into an
+ * AutopilotArmInput (the arm() input; the driver fills state/gen/iterations/
+ * timestamps). Returns `{ error }` with a typed 400 message on any invalid field
+ * (B9 conventions), else `{ input }`. Defaults: sentinel '', intervalMs 0,
+ * maxIterations 50 (always enforced), tokenBudget null, overrides {}. Pure +
+ * exported so the validation is unit-testable without the http server.
+ */
+export function validateAutopilotBody(
+  body: AutopilotRequestBody | null,
+): { input: AutopilotArmInput } | { error: string } {
+  if (!body || typeof body !== 'object') return { error: 'body is required' };
+  if (body.kind !== 'loop' && body.kind !== 'goal') {
+    return { error: "kind must be 'loop' or 'goal'" };
+  }
+  if (typeof body.prompt !== 'string' || !body.prompt) {
+    return { error: 'prompt is required' };
+  }
+  if (body.sentinel !== undefined && typeof body.sentinel !== 'string') {
+    return { error: 'sentinel must be a string' };
+  }
+  let intervalMs = 0;
+  if (body.intervalMs !== undefined) {
+    if (typeof body.intervalMs !== 'number' || !Number.isFinite(body.intervalMs) || body.intervalMs < 0) {
+      return { error: 'intervalMs must be a non-negative number' };
+    }
+    intervalMs = body.intervalMs;
+  }
+  let maxIterations = 50;
+  if (body.maxIterations !== undefined) {
+    if (
+      typeof body.maxIterations !== 'number' ||
+      !Number.isInteger(body.maxIterations) ||
+      body.maxIterations < 1
+    ) {
+      return { error: 'maxIterations must be a positive integer' };
+    }
+    maxIterations = body.maxIterations;
+  }
+  let tokenBudget: number | null = null;
+  if (body.tokenBudget !== undefined && body.tokenBudget !== null) {
+    if (typeof body.tokenBudget !== 'number' || !Number.isFinite(body.tokenBudget) || body.tokenBudget <= 0) {
+      return { error: 'tokenBudget must be a positive number or null' };
+    }
+    tokenBudget = body.tokenBudget;
+  }
+  if (body.overrides !== undefined && (typeof body.overrides !== 'object' || body.overrides === null)) {
+    return { error: 'overrides must be an object' };
+  }
+  const ov = body.overrides ?? {};
+  return {
+    input: {
+      kind: body.kind,
+      prompt: body.prompt,
+      sentinel: body.sentinel ?? '',
+      interval_ms: intervalMs,
+      overrides: {
+        ...(typeof ov.model === 'string' ? { model: ov.model } : {}),
+        ...(typeof ov.effort === 'string' ? { effort: ov.effort } : {}),
+        ...(typeof ov.mode === 'string' ? { mode: ov.mode } : {}),
+      },
+      max_iterations: maxIterations,
+      token_budget: tokenBudget,
+    },
+  };
+}
+
 // --- Router ---------------------------------------------------------------
 
 /**
@@ -142,9 +185,13 @@ export function permissionResolveResponse(
  * replay against the same code path production runs. startServer() adds the
  * .listen(PORT); nothing about routing changes.
  */
-export function createRunnerServer(cfg: ReturnType<typeof loadConfig>, agent: Agent | null): Server {
+export function createRunnerServer(
+  cfg: ReturnType<typeof loadConfig>,
+  agent: Agent | null,
+  autopilot: Autopilot | null = null,
+): Server {
   return createServer((req, res) => {
-    handle(req, res, cfg, agent).catch((err) => {
+    handle(req, res, cfg, agent, autopilot).catch((err) => {
       const message = err instanceof Error ? err.message : String(err);
       // B9: readBody's typed rejections are client faults, not server bugs — map
       // an oversized body to 413 and malformed JSON to 400 instead of a blanket
@@ -159,20 +206,15 @@ export function createRunnerServer(cfg: ReturnType<typeof loadConfig>, agent: Ag
   });
 }
 
-export function startServer(): void {
+export function startServer(agent: Agent | null, autopilot: Autopilot | null = null): void {
   const cfg = loadConfig();
-  // Resolve the agent backend up front so an unknown SANDBOX_BACKEND fails at
-  // startup rather than on the first turn. Both shipping backends (claude-sdk,
-  // opencode-server) implement the turn seam; null is reserved for any future
-  // supervise-only backend, whose /turns route then 409s.
-  const agent = selectAgent(cfg.backend);
-  const server = createRunnerServer(cfg, agent);
+  const server = createRunnerServer(cfg, agent, autopilot);
   server.listen(PORT, () => {
     console.log(`runner listening on :${PORT} (session=${cfg.sessionId})`);
   });
 }
 
-async function handle(req: IncomingMessage, res: ServerResponse, cfg: ReturnType<typeof loadConfig>, agent: Agent | null): Promise<void> {
+async function handle(req: IncomingMessage, res: ServerResponse, cfg: ReturnType<typeof loadConfig>, agent: Agent | null, autopilot: Autopilot | null): Promise<void> {
   const url = new URL(req.url ?? '/', `http://localhost:${PORT}`);
   const path = url.pathname;
   const method = req.method ?? 'GET';
@@ -261,27 +303,54 @@ async function handle(req: IncomingMessage, res: ServerResponse, cfg: ReturnType
     }
     // R4/B2: reject concurrent turns — two overlapping query() calls against one
     // Claude session interleave events, and a headless POST into a busy opencode
-    // session drives the same session concurrently. Callers must interrupt the
-    // active turn first, then POST a new one. (Synchronous from here through
-    // registerTurn.)
-    const rejectReason = turnRejectReason(cfg.backend, reg.activeTurns.size, reg.state.status);
-    if (rejectReason) {
+    // session drives the same session concurrently. startTurn runs the same 409
+    // gate (turnRejectReason) the autopilot driver uses, then reserves the slot
+    // synchronously (no await between check and registerTurn) — callers must
+    // interrupt the active turn first, then POST a new one.
+    const started = startTurn(cfg, agent, body.prompt, {
+      ...(body.resume ? { resume: body.resume } : {}),
+      ...(body.allowedTools ? { allowedTools: body.allowedTools } : {}),
+      ...(body.mode ? { mode: body.mode } : {}),
+      ...(body.model ? { model: body.model } : {}),
+      ...(body.effort ? { effort: body.effort } : {}),
+    });
+    if ('rejected' in started) {
       res.writeHead(409, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: rejectReason }));
+      res.end(JSON.stringify({ error: started.rejected }));
       return;
     }
-    const turnId = reg.nextTurnId();
-    reg.setLastTurn(turnId);
-    const turn = reg.registerTurn(turnId, body.prompt);
-    // Fire and forget: the turn runs in the background, streaming events to
-    // SSE clients. The HTTP response returns immediately with the turnId.
-    agent.runTurn(cfg, turnId, body.prompt, body.resume, body.allowedTools, body.mode, body.model, body.effort, turn.abort).catch((err) => {
-      const message = err instanceof Error ? err.message : String(err);
-      appendEvent(sid, turnId, 'error', { message });
-      reg.finishTurn(turnId);
-    });
-    const turnResp: TurnResponse = { turnId };
+    const turnResp: TurnResponse = { turnId: started.turnId };
     return ok(res, turnResp);
+  }
+
+  // /sessions/:id/autopilot (PUT arm/replace, DELETE disarm). The runner-owned
+  // autopilot driver (server-side /loop-/goal loop). Only backends with a
+  // runner-side driver (claude-sdk today) expose it; opencode/supervise-only 409
+  // so the CLI falls back to its local tea.Tick driver.
+  const autopilotMatch = /^\/sessions\/([^/]+)\/autopilot$/.exec(path);
+  if (autopilotMatch && (method === 'PUT' || method === 'DELETE')) {
+    if (autopilotMatch[1] !== sid) return notFound(res, 'session not found');
+    if (!autopilot) {
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          error: `backend ${cfg.backend} has no runner-side autopilot driver; use the local driver`,
+        }),
+      );
+      return;
+    }
+    if (method === 'DELETE') {
+      // Disarm → stopped(user); the spec is retained (H3), never deleted. 404 when
+      // there is nothing to disarm (never armed).
+      if (!autopilot.disarm()) return notFound(res, 'no autopilot spec to disarm');
+      return ok(res, toStatusResponse(reg.state, reg.activeTurnId()));
+    }
+    // PUT: arm/replace. Validate the body (B9 typed 400s) before touching state.
+    const body = await readBody<AutopilotRequestBody>(req);
+    const validated = validateAutopilotBody(body);
+    if ('error' in validated) return badRequest(res, validated.error);
+    autopilot.arm(validated.input);
+    return ok(res, toStatusResponse(reg.state, reg.activeTurnId()));
   }
 
   // /sessions/:id/turns/:turn_id/interrupt (POST). The turn segment may be EMPTY

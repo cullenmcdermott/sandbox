@@ -40,6 +40,7 @@ const (
 	EventWorkspaceStatus      EventType = "workspace.status"
 	EventSessionTitle         EventType = "session.title"
 	EventModelsAvailable      EventType = "models.available"
+	EventAutopilotState       EventType = "autopilot.state"
 	EventError                EventType = "error"
 )
 
@@ -72,5 +73,6 @@ var AllEventTypes = []EventType{
 	EventWorkspaceStatus,
 	EventSessionTitle,
 	EventModelsAvailable,
+	EventAutopilotState,
 	EventError,
 }

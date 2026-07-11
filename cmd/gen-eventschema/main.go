@@ -93,6 +93,7 @@ var payloadOrder = []string{
 	"TodoUpdatedPayload",
 	"ErrorPayload",
 	"ContextCompactedPayload",
+	"AutopilotStatePayload",
 }
 
 func main() {

@@ -234,6 +234,20 @@ regenerated (or a hand-edited `*.gen.*`), and the Go drift test fails on a struc
 that diverges. Scope is event payloads only — HTTP request/response bodies and
 `IdleStatus` stay hand-written in both languages.
 
+**`autopilot.state`** is the event type for the runner-owned autopilot driver
+(the server-side `/loop`-`/goal` loop; see
+[`server-side-loop-adr.md`](server-side-loop-adr.md)). The runner drives the
+loop server-side — self-submitting the next turn on turn-completion plus an
+interval — and emits `autopilot.state` (`{ state, kind, reason, iteration, gen }`)
+on arm (`armed`, re-emitted on a boot re-arm), each iteration boundary
+(`ticked`), and termination (`stopped` with a `reason`). Because it is a
+normalized event in the SSE log, a fresh `sandbox attach` catches up the driver's
+state via `after=<seq>` replay like any other state, and the TUI renders the
+driver purely from these events rather than from local `tea.Tick` bookkeeping.
+The arm/disarm surface is `PUT/DELETE /sessions/:id/autopilot` (a lifecycle
+action distinct from submitting a turn), gated by the `capabilities.autopilot`
+bit in `GET /status`; both are HTTP bodies, hand-written outside the schema.
+
 ## Security model
 
 - **No cluster credentials in the pod:** `automountServiceAccountToken: false`.

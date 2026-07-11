@@ -58,6 +58,7 @@
     "workspace.status",
     "session.title",
     "models.available",
+    "autopilot.state",
     "error"
   ],
   "payloads": {
@@ -211,6 +212,16 @@
         {"json": "trigger", "type": "string", "optional": false, "doc": "'auto' (context-window pressure) or 'manual' (/compact)"},
         {"json": "preTokens", "type": "int", "optional": false, "doc": "effective token count before compaction"},
         {"json": "postTokens", "type": "int", "optional": true, "doc": "effective token count after compaction; 0/absent when the SDK did not report it"}
+      ]
+    },
+    "AutopilotStatePayload": {
+      "doc": "payload for autopilot.state events: a transition of the runner-owned autopilot driver (the server-side /loop-/goal loop; see docs/server-side-loop-adr.md). Emitted on arm (state:'armed' — re-emitted on a boot re-arm so a fresh `sandbox attach` re-renders the armed chip without special-casing), at each iteration boundary (state:'ticked', carrying the iteration count for the TUI's progress chip), and on termination (state:'stopped' with a reason). The TUI renders the driver PURELY from these events (armed chip, iteration counter, terminal toast/OS-notification), so a replayed stopped(sentinel) must not re-fire the OS notification — only the flip-to-live one does.",
+      "fields": [
+        {"json": "state", "type": "string", "optional": false, "doc": "'armed' | 'ticked' | 'stopped'"},
+        {"json": "kind", "type": "string", "optional": false, "doc": "'loop' | 'goal' — the driver flavour"},
+        {"json": "reason", "type": "string", "optional": true, "doc": "set on state:'stopped' — 'sentinel' | 'budget' | 'user' | 'lapsed' | 'error' (mirrors the spec's stopped_reason); absent otherwise"},
+        {"json": "iteration", "type": "int", "optional": false, "doc": "completed-iteration count at this transition (0 on the initial armed event)"},
+        {"json": "gen", "type": "int", "optional": false, "doc": "the driver generation; a disarm/rearm bumps it so a stale scheduled tick fired against an old gen is dropped"}
       ]
     }
   }

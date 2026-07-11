@@ -41,11 +41,22 @@ Returns the runner's `session.json` state:
   "lastTurnId": "turn-12",
   "activeTurnId": "",
   "lastActivity": "2026-06-18T22:30:00Z",
-  "model": "claude-sonnet-4-5-20250929"
+  "model": "claude-sonnet-4-5-20250929",
+  "protocolVersion": 1,
+  "capabilities": { "autopilot": true }
 }
 ```
 `model` is **optional**: it is omitted until the runner has seen the model id in
 the SDK's init message (i.e. before the first turn it is absent).
+
+`capabilities` is the backend capability map the CLI reads to pick a code path.
+`capabilities.autopilot` is **true** when this backend has a runner-side
+autopilot driver (the server-side `/loop`-`/goal` loop — see
+`PUT/DELETE /sessions/:id/autopilot` below): the TUI then arms **that** driver
+and renders from `autopilot.state` events instead of running its local
+`tea.Tick` loop, avoiding two drivers double-submitting turns. It is **false**
+for backends without a runner driver (`opencode-server`, supervise-only), where
+the TUI keeps its local driver. Today only `claude-sdk` reports `true`.
 
 `lastTurnId` vs `activeTurnId`: `lastTurnId` is the most recently *started* turn
 and persists after it finishes (it seeds the next turn id). `activeTurnId` is
@@ -102,6 +113,58 @@ Returns 200 with:
 ### `POST /sessions/:id/turns/:turn_id/interrupt`
 Cancels an active turn. Returns 200 with `{"turnId": "turn-13"}`. Returns 404
 if the turn is not found or no longer active.
+
+### `PUT /sessions/:id/autopilot`
+Arms (or replaces) the runner-owned autopilot driver — the server-side
+`/loop`-`/goal` loop that self-submits the next turn on turn-completion plus an
+interval, so a loop keeps running with the laptop closed (see
+[`server-side-loop-adr.md`](server-side-loop-adr.md)). Only backends that report
+`capabilities.autopilot: true` (claude-sdk today) accept it; the rest return
+**409** so the CLI falls back to its local `tea.Tick` driver. Request body:
+```json
+{
+  "kind": "loop",
+  "prompt": "keep working through TODO.md",
+  "sentinel": "ALL_DONE",
+  "intervalMs": 0,
+  "overrides": { "model": "opus", "effort": "high", "mode": "acceptEdits" },
+  "maxIterations": 50,
+  "tokenBudget": null
+}
+```
+`kind` (`loop` | `goal`) and `prompt` (non-empty string) are required; the rest
+are optional. `sentinel` is a completion marker scanned in each turn's completed
+assistant text — a match stops the loop (`''`/omitted disables it). `intervalMs`
+is the delay between iterations (default `0` = immediate). `overrides` are
+per-turn `model`/`effort`/`mode` applied to every self-submitted turn.
+`maxIterations` is a hard iteration ceiling — **always enforced**, default `50`.
+`tokenBudget` is an optional hard token ceiling (input+output summed across the
+loop; `null`/omitted = no cap). Hitting either ceiling stops the loop
+(`reason: "budget"`). Arming **overwrites** any prior spec wholesale and bumps
+the driver `gen`. Invalid fields return **400** with a typed message (e.g.
+`kind must be 'loop' or 'goal'`, `maxIterations must be a positive integer`).
+Returns **200** with the `/status` body (its `capabilities`/state reflect the
+now-armed driver). The driver submits the first turn immediately unless a turn
+is already in flight, in which case it defers (a manual turn counts as a free
+iteration). Driver transitions are emitted as `autopilot.state` events (see
+[Event Types](#event-types)); the loop lives inside the same permission mode,
+Bash guards, egress allowlist, and audit log as user-submitted turns.
+
+### `DELETE /sessions/:id/autopilot`
+Disarms the driver: sets the persisted spec to `state: "stopped"` with
+`reason: "user"` (the spec is **retained**, never deleted, so attach + reaper
+idle logic read a stable terminal record) and bumps `gen` so any pending tick is
+dropped. Returns **200** with the `/status` body, or **404**
+(`no autopilot spec to disarm`) when the driver was never armed. Backends without
+a runner-side driver return **409** as for `PUT`.
+
+While the driver is armed the session is reported **non-idle** on
+`GET /sessions/:id/idle` (so the reaper leaves the pod alone between iterations);
+it becomes idle-eligible again once the driver stops for any reason. A driver
+armed with no turn-completion for 30 minutes is auto-stopped (`reason: "lapsed"`)
+so a wedged loop can't keep the pod unreapable forever. On a runner restart, a
+persisted `state: "armed"` spec is re-armed automatically (re-emitting `armed`
+and re-scheduling the next turn anchored on the last completed turn).
 
 ### `POST /sessions/:id/permissions/:permission_id`
 Resolves a permission request. The session and permission ids come from the URL,
@@ -226,6 +289,19 @@ The `todo.updated` event surfaces the agent's plan/checklist. Payload:
 `{ todos: [{ content, status, activeForm }] }`, where `status` is one of
 `pending` | `in_progress` | `completed`. The runner emits it when the SDK uses
 the `TodoWrite` tool; the CLI renders the list with a per-item status glyph.
+
+The `autopilot.state` event reports a transition of the runner-owned autopilot
+driver (armed via `PUT /sessions/:id/autopilot`). Payload (see
+`schema/events.json` `AutopilotStatePayload`):
+`{ state, kind, reason, iteration, gen }`. `state` is `armed` (arm — also
+re-emitted on a boot re-arm so a fresh attach re-renders the armed chip via
+replay), `ticked` (each iteration boundary, carrying the `iteration` count), or
+`stopped` (termination, with `reason` one of `sentinel` | `budget` | `user` |
+`lapsed` | `error`). `kind` mirrors the spec (`loop` | `goal`); `gen` is the
+driver generation. The CLI renders the driver **purely** from these events (the
+armed chip, iteration counter, and terminal toast/OS-notification), so a
+*replayed* `stopped` must not re-fire the OS notification — only a flip-to-live
+one does.
 
 The `rate_limit.updated` event carries the claude.ai plan usage windows for the
 status line. Payload (see `schema/events.json` `RateLimitPayload` for the

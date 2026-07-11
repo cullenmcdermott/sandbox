@@ -60,6 +60,7 @@ func payloadRegistry() map[string]reflect.Type {
 		"TodoUpdatedPayload":      reflect.TypeOf(TodoUpdatedPayload{}),
 		"ErrorPayload":            reflect.TypeOf(ErrorPayload{}),
 		"ContextCompactedPayload": reflect.TypeOf(ContextCompactedPayload{}),
+		"AutopilotStatePayload":   reflect.TypeOf(AutopilotStatePayload{}),
 	}
 }
 

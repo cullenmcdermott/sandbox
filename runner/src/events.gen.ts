@@ -40,6 +40,7 @@ export type EventType =
   | 'workspace.status'
   | 'session.title'
   | 'models.available'
+  | 'autopilot.state'
   | 'error';
 
 /** Every event type, in schema order. */
@@ -70,6 +71,7 @@ export const ALL_EVENT_TYPES: EventType[] = [
   'workspace.status',
   'session.title',
   'models.available',
+  'autopilot.state',
   'error',
 ];
 
@@ -266,4 +268,18 @@ export interface ContextCompactedPayload {
   preTokens: number;
   /** effective token count after compaction; 0/absent when the SDK did not report it */
   postTokens?: number;
+}
+
+/** payload for autopilot.state events: a transition of the runner-owned autopilot driver (the server-side /loop-/goal loop; see docs/server-side-loop-adr.md). Emitted on arm (state:'armed' — re-emitted on a boot re-arm so a fresh `sandbox attach` re-renders the armed chip without special-casing), at each iteration boundary (state:'ticked', carrying the iteration count for the TUI's progress chip), and on termination (state:'stopped' with a reason). The TUI renders the driver PURELY from these events (armed chip, iteration counter, terminal toast/OS-notification), so a replayed stopped(sentinel) must not re-fire the OS notification — only the flip-to-live one does. */
+export interface AutopilotStatePayload {
+  /** 'armed' | 'ticked' | 'stopped' */
+  state: string;
+  /** 'loop' | 'goal' — the driver flavour */
+  kind: string;
+  /** set on state:'stopped' — 'sentinel' | 'budget' | 'user' | 'lapsed' | 'error' (mirrors the spec's stopped_reason); absent otherwise */
+  reason?: string;
+  /** completed-iteration count at this transition (0 on the initial armed event) */
+  iteration: number;
+  /** the driver generation; a disarm/rearm bumps it so a stale scheduled tick fired against an old gen is dropped */
+  gen: number;
 }

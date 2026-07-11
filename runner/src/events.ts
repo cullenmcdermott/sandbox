@@ -435,6 +435,52 @@ export function readEventsAfter(sessionId: string, afterSeq: number): Event[] {
   }));
 }
 
+/** The terminal outcome of a settled turn, read from the event log. Used by the
+ * autopilot driver on turn completion to scan the just-completed assistant text
+ * for the sentinel and to classify the outcome (completed vs failed vs
+ * interrupted). Returns the most-recent terminal event for `turnId`, or undefined
+ * when none exists yet (e.g. a runTurn that threw before emitting any terminal).
+ * resultText is the SDK result text on completed, the failure message on failed,
+ * and '' on interrupted. */
+export function readTurnOutcome(
+  sessionId: string,
+  turnId: string,
+): { status: 'completed' | 'failed' | 'interrupted'; resultText: string } | undefined {
+  const d = getDb();
+  const row = prepared(
+    d,
+    "SELECT type, payload FROM events WHERE session_id = ? AND turn_id = ? AND " +
+      "type IN ('turn.completed','turn.failed','turn.interrupted') ORDER BY seq DESC LIMIT 1",
+  ).get(sessionId, turnId) as { type: string; payload: string } | undefined;
+  if (!row) return undefined;
+  const p = JSON.parse(row.payload) as { result?: unknown; message?: unknown };
+  if (row.type === 'turn.completed') {
+    return { status: 'completed', resultText: typeof p.result === 'string' ? p.result : '' };
+  }
+  if (row.type === 'turn.failed') {
+    return { status: 'failed', resultText: typeof p.message === 'string' ? p.message : '' };
+  }
+  return { status: 'interrupted', resultText: '' };
+}
+
+/** Sum input+output tokens across every usage.updated event for a session. Backs
+ * the autopilot token_budget guard (a hard token ceiling). Log-derived so it is
+ * correct across a runner restart; called once per turn completion (low
+ * frequency), so the full-scan cost is acceptable. */
+export function sumTokens(sessionId: string): number {
+  const d = getDb();
+  const rows = prepared(
+    d,
+    "SELECT payload FROM events WHERE session_id = ? AND type = 'usage.updated'",
+  ).all(sessionId) as { payload: string }[];
+  let total = 0;
+  for (const r of rows) {
+    const p = JSON.parse(r.payload) as { inputTokens?: number; outputTokens?: number };
+    total += (p.inputTokens ?? 0) + (p.outputTokens ?? 0);
+  }
+  return total;
+}
+
 /** Highest seq seen for a session (0 if none). */
 export function lastSeq(sessionId: string): number {
   const d = getDb();

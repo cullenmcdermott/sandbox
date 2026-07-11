@@ -241,6 +241,24 @@ type TerminatingPayload struct {
 	TurnsAborted int    `json:"turnsAborted"` // in-flight turns aborted during shutdown
 }
 
+// AutopilotStatePayload is the payload for autopilot.state events: a transition
+// of the runner-owned autopilot driver (the server-side /loop-/goal loop; see
+// docs/server-side-loop-adr.md). The runner emits State "armed" on arm (and on a
+// boot re-arm — same shape, so a fresh attach re-renders the armed chip via
+// replay), "ticked" at each iteration boundary (carrying Iteration for the TUI's
+// progress chip), and "stopped" with a Reason on termination. Reason mirrors the
+// spec's stopped_reason (sentinel|budget|user|lapsed|error) and is empty except
+// on a stopped transition. Gen is the driver generation: a disarm/rearm bumps it
+// so a stale scheduled tick fired against an old gen is dropped. The TUI renders
+// the driver purely from these events.
+type AutopilotStatePayload struct {
+	State     string `json:"state"`            // "armed" | "ticked" | "stopped"
+	Kind      string `json:"kind"`             // "loop" | "goal"
+	Reason    string `json:"reason,omitempty"` // set on stopped: sentinel|budget|user|lapsed|error
+	Iteration int    `json:"iteration"`        // completed-iteration count at this transition
+	Gen       int    `json:"gen"`              // driver generation; disarm/rearm bumps it
+}
+
 // IdleStatus is the /sessions/:id/idle response: enough for an external reaper
 // to decide whether a session has been idle (turn-done AND detached) long
 // enough to suspend. IdleSince is the RFC3339 instant the session last became
