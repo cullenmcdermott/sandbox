@@ -16,6 +16,7 @@ import (
 	"github.com/cullenmcdermott/sandbox/internal/k8s"
 	"github.com/cullenmcdermott/sandbox/internal/runner"
 	"github.com/cullenmcdermott/sandbox/internal/session"
+	syncpkg "github.com/cullenmcdermott/sandbox/internal/sync"
 )
 
 // Public type aliases for the normalized session model. These are identical to
@@ -57,6 +58,44 @@ type RunnerClient interface {
 // The concrete runner client satisfies the public interface.
 var _ RunnerClient = (*runner.Client)(nil)
 
+// Backend is the cluster-side seam the SDK orchestration depends on: exactly the
+// Sandbox/PVC lifecycle, port-forward, reaper, and credential operations that
+// Create, Session.Connect, Suspend/Resume/Destroy, and DialRunner call — no
+// more. Narrowing Client's dependency to this interface (rather than the
+// concrete *internal/k8s.Backend) is what lets those orchestration paths be
+// unit-tested against an injected fake (see WithBackend). *internal/k8s.Backend
+// is the production implementation.
+//
+// Like WithBackend, this is not implementable by external modules today:
+// EnsureReaper's k8s.ReaperOptions cannot be named outside the main module
+// (tracked in TODO.md §8) — the seam's present value is in-module fake
+// injection, not a third-party backend.
+type Backend interface {
+	// Namespace is the namespace this backend addresses.
+	Namespace() string
+	// CreateSession provisions the Sandbox + PVC for a spec (Create).
+	CreateSession(ctx context.Context, spec Spec) (Ref, error)
+	// Status / List report observed session state.
+	Status(ctx context.Context, ref Ref) (State, error)
+	List(ctx context.Context) ([]State, error)
+	// Suspend / Resume / Destroy drive the pod lifecycle.
+	Suspend(ctx context.Context, ref Ref) error
+	Resume(ctx context.Context, ref Ref) error
+	Destroy(ctx context.Context, ref Ref) error
+	// StartWithProgress blocks until the pod is ready, reporting phase detail.
+	StartWithProgress(ctx context.Context, ref Ref, onPhase func(detail string)) error
+	// PortForward opens the requested local→pod forwards.
+	PortForward(ctx context.Context, ref Ref, ports []session.PortSpec) ([]session.ForwardHandle, error)
+	// RunnerToken / OpencodePassword fetch per-session secrets Connect needs.
+	RunnerToken(ctx context.Context, ref Ref) (string, error)
+	OpencodePassword(ctx context.Context, ref Ref) (string, error)
+	// EnsureReaper installs the idle reaper (Connect's background phase).
+	EnsureReaper(ctx context.Context, ref Ref, opts k8s.ReaperOptions) error
+}
+
+// The concrete k8s backend satisfies the narrowed public interface.
+var _ Backend = (*k8s.Backend)(nil)
+
 // Backend identifiers and lifecycle statuses, re-exported for convenience.
 const (
 	BackendClaudeSDK = session.BackendClaudeSDK
@@ -93,7 +132,7 @@ type options struct {
 	reaperImage      string
 	reaperPullPolicy string
 	idleTimeout      time.Duration
-	backend          *k8s.Backend
+	backend          Backend
 }
 
 // Option configures a Client built by New.
@@ -143,20 +182,26 @@ func WithReaperImagePullPolicy(p string) Option {
 // session (overridable per Connect).
 func WithIdleTimeout(d time.Duration) Option { return func(o *options) { o.idleTimeout = d } }
 
-// WithBackend injects an already-built *Backend, bypassing kubeconfig resolution
-// (advanced/testing — reuse a shared backend).
-func WithBackend(b *k8s.Backend) Option { return func(o *options) { o.backend = b } }
+// WithBackend injects an already-built Backend, bypassing kubeconfig resolution
+// (advanced/testing — reuse a shared backend, or inject a fake for orchestration
+// unit tests).
+func WithBackend(b Backend) Option { return func(o *options) { o.backend = b } }
 
 // Client is the entry point: it owns the Kubernetes backend, the local session
 // index, and default image/idle settings, and mints Sessions.
 type Client struct {
-	backend          *k8s.Backend
+	backend          Backend
 	index            *index.Index
 	stateDir         string
 	runnerImage      string
 	reaperImage      string
 	reaperPullPolicy string
 	idleTimeout      time.Duration
+
+	// syncRunner backs syncManager(). Nil in production (syncManager defaults it
+	// to the mutagen-CLI runner); a test injects a fake to observe/stub the
+	// Mutagen calls the orchestration paths make.
+	syncRunner syncpkg.Runner
 }
 
 // New builds a Client. With no options it loads kubeconfig from the standard
@@ -435,13 +480,20 @@ func (c *Client) Resume(ctx context.Context, id ID) error {
 	return nil
 }
 
-// Destroy destroys a session and its PVC (irreversible), then tears down its
-// file sync and removes local state (SSH alias, key dir, index entry).
+// Destroy stops the session's file sync, destroys the session and its PVC
+// (irreversible), then removes local state (SSH alias, key dir, index entry).
+//
+// Sync is stopped BEFORE the cluster destroy (mirroring the TUI's
+// PreDestroyHook ordering): the mutagen-over-SSH stream must be torn down while
+// the pod is still up, or it races the pod's disappearance into "connection
+// closed"/EOF errors and leaves orphaned mutagen sessions pointing at a dead
+// endpoint. Best-effort and recoverable, so it runs before — not gated on — the
+// destroy.
 func (c *Client) Destroy(ctx context.Context, id ID) error {
+	c.StopSync(ctx, id)
 	if err := c.backend.Destroy(ctx, Ref{ID: id}); err != nil {
 		return err
 	}
-	c.StopSync(ctx, id)
 	c.RemoveLocalState(id)
 	return nil
 }
@@ -450,7 +502,10 @@ func (c *Client) Destroy(ctx context.Context, id ID) error {
 // connected client plus a cleanup func that tears the forward down. For one-shot
 // runner calls (e.g. reading session state) outside a full Connect.
 func (c *Client) DialRunner(ctx context.Context, ref Ref) (RunnerClient, func(), error) {
-	handles, err := c.backend.PortForward(ctx, ref, k8s.ForwardSpecs(0, 0))
+	// One-shot runner calls only speak HTTP; the SSH forward exists solely for
+	// mutagen sync, which DialRunner never runs — so forward the runner port only
+	// rather than paying for an unused SSH SPDY stream.
+	handles, err := c.backend.PortForward(ctx, ref, k8s.ForwardSpecsRunnerOnly(0))
 	if err != nil {
 		return nil, nil, err
 	}

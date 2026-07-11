@@ -16,9 +16,15 @@ import (
 	syncpkg "github.com/cullenmcdermott/sandbox/internal/sync"
 )
 
-// syncManager returns a Mutagen sync Manager backed by the mutagen CLI.
+// syncManager returns a Mutagen sync Manager. It is backed by the mutagen CLI in
+// production; a test may inject an alternative runner via Client.syncRunner to
+// observe or stub the Mutagen calls the orchestration paths make.
 func (c *Client) syncManager() *syncpkg.Manager {
-	return syncpkg.New(syncpkg.NewExecRunner(""))
+	r := c.syncRunner
+	if r == nil {
+		r = syncpkg.NewExecRunner("")
+	}
+	return syncpkg.New(r)
 }
 
 // StopSync terminates all Mutagen sync sessions for a session. Best-effort.

@@ -1084,3 +1084,26 @@ review. Detail: docs/review-2026-07-07.md §F.
   Found (logged in TODO §10): oversized bodies reset the socket before the
   mapped 413 can be written (`httputil.ts` destroys synchronously); the
   fake-runner-faithfulness half of F4 promoted as a MED residual.
+
+- **§8 — public `client.Backend` interface narrowed (+ two decided client
+  behaviors) (HIGH enabler).** 12-method interface = exactly the
+  orchestration call sites (Namespace, CreateSession, Status, List, Suspend,
+  Resume, Destroy, StartWithProgress, PortForward, RunnerToken,
+  OpencodePassword, EnsureReaper); `WithBackend` takes it; `var _ Backend =
+  (*k8s.Backend)(nil)` + a new sdktest signature pin. Documented caveat: not
+  externally implementable while `EnsureReaper` names
+  `internal/k8s.ReaperOptions`. In the same change: `Destroy` stops sync
+  BEFORE the cluster destroy (mutagen stream torn down while the pod is
+  alive; best-effort, so not gated on destroy success) and `DialRunner`
+  forwards the runner HTTP port only (`ForwardSpecsRunnerOnly`), dropping the
+  unused SSH SPDY stream. Plus an unexported `Client.syncRunner` seam so
+  tests observe mutagen calls without a daemon.
+- **§10 [F3] — client orchestration covered (HIGH).** New
+  `client/orchestration_test.go`: `fakeBackend` + `fakeSyncRunner` share one
+  ordered call log; TestClientCreate (spec propagation, fresh-path shortcuts,
+  index save, validation-before-cluster, error propagation), Status/List,
+  Suspend/Resume (backend-error short-circuits skip the sync verb; success
+  order pinned), TestDestroyStopsSyncBeforeClusterDestroy (the §8 reorder
+  regression net: sync-terminate → destroy, index entry removed only on
+  success and preserved on failure), TestDialRunner (runner-only forward
+  specs; cleanup and token-failure paths close the forward exactly once).

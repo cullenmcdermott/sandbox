@@ -10,10 +10,13 @@ package sdktest
 // the same change and call the break out in the commit/PR — that is the
 // consumer-visible changelog entry.
 //
-// Known caveat (deliberately not pinned): client.WithBackend and
-// client.WithRESTConfig take *internal/k8s.Backend / *rest.Config; the former
-// cannot be named outside the main module at all, so it is unusable to
-// external consumers (tracked in TODO.md).
+// client.WithBackend now takes the exported client.Backend interface (pinned
+// below), so its signature is nameable here. Known caveat (deliberately not
+// pinned): client.Backend is not IMPLEMENTABLE outside the main module —
+// EnsureReaper's argument is internal/k8s.ReaperOptions, which an external
+// consumer cannot name — so the interface is an in-module fake-injection seam,
+// not yet a third-party backend contract (tracked in TODO.md §8). Likewise
+// client.WithRESTConfig takes *rest.Config.
 
 import (
 	"context"
@@ -36,6 +39,11 @@ var (
 	_ func(string) client.Option        = client.WithReaperImagePullPolicy
 	_ func(string) client.Option        = client.WithStateDir
 	_ func(time.Duration) client.Option = client.WithIdleTimeout
+
+	// WithBackend takes the narrowed public client.Backend interface (a change
+	// from the old *internal/k8s.Backend). Retyping it — or widening client.Backend
+	// so the k8s backend no longer satisfies it — breaks this pin.
+	_ func(client.Backend) client.Option = client.WithBackend
 )
 
 // --- client: Client method set ----------------------------------------------

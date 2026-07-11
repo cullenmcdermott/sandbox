@@ -821,11 +821,12 @@ Suggested batching: one tui/* PR (Register + palette + Finished + B-tier);
 one client-behavior PR (destroy ordering + DialRunner); the interface,
 naming-break, and Shell items each stand alone.
 
-- [ ] **Narrow public `client.Backend` interface** (exactly the methods
-  Create/Connect/Destroy orchestration uses; `internal/k8s.Backend`
-  satisfies it; `WithBackend` takes the interface) — enables fake-injection
-  unit tests for orchestration (zero coverage today) and the seam a future
-  non-k8s backend needs. Pin in sdktest. `client/client.go:141,150`.
+- [x] **Narrow public `client.Backend` interface — done 2026-07-11** (done
+  log): 12-method interface (exactly the orchestration call sites),
+  `WithBackend` takes it, concrete backend pinned by assertion + sdktest.
+  NOT yet externally implementable — `EnsureReaper` names
+  `internal/k8s.ReaperOptions`; export/replace that type when a third-party
+  backend is real (documented in the interface comment).
 - [ ] **De-Claude the turn/state model in ONE coordinated break:**
   `TurnInput.Mode` → owned `ApprovalPolicy` enum (mapped per-backend in the
   runner; non-honoring backends documented, not silent);
@@ -845,10 +846,10 @@ naming-break, and Shell items each stand alone.
 - [ ] tui/kit: palette race → `atomic.Pointer` swap (two tea.Programs must
   not share a plain map). `tui/kit/style.go:21`, `tui/kit/components.go:32`.
 - [ ] tui/list: drop dead `Item.Finished()`. `tui/list/list.go:12`.
-- [ ] client: `Destroy` stops sync BEFORE the cluster destroy (mirror the
-  TUI's PreDestroyHook ordering in the SDK). `client/client.go`.
-- [ ] client: `DialRunner` stops forwarding the unused SSH port.
-  `client/client.go`.
+- [x] client: `Destroy` sync-before-destroy reorder — done 2026-07-11 (done
+  log); pinned by the F3 call-order spy.
+- [x] client: `DialRunner` forwards the runner port only — done 2026-07-11
+  (done log); pinned by TestDialRunner.
 - [ ] kit.FormatTokens gains the `B` tier (caps at "1000M" today).
   `tui/kit/style.go`.
 - [x] WithStateDir ssh-dir layout — DECIDED via the §9 worktree sign-off
@@ -887,11 +888,13 @@ naming-break, and Shell items each stand alone.
 **2026-07-07 test-coverage additions** (two agents; detail in
 [`docs/review-2026-07-07.md`](docs/review-2026-07-07.md) §F, id in brackets):
 
-- [ ] **Client orchestration incl. the planned `Destroy` reorder is 0% covered
-  (HIGH) [F3].** All of `client/session.go` runtime + `client/client.go:411-469`
-  + `client/sync.go`. §8's `Destroy` sync-before-destroy flip has no regression
-  net. Unblocked once §8 narrows `Backend`: fake-backed table test per method +
-  a `Destroy` call-order spy.
+- [x] **[F3] client orchestration covered — done 2026-07-11** (done log):
+  fake `Backend` + fake mutagen `Runner` sharing one call-order log;
+  table tests over Create/Status/List/Suspend/Resume/Destroy/DialRunner;
+  the Destroy spy pins sync-terminate → destroy → local-state-removal (and
+  index preservation on backend failure). Residual: `Session.Connect`'s
+  runtime path itself still has no fake-backed test (needs a fake
+  RunnerClient/health seam) — fold into [F6]'s `waitHealthy` item.
 - [x] **[F4] `server.ts` HTTP layer covered — done 2026-07-11** (done log):
   `createRunnerServer` extracted (listen-free seam); 17-test `node:test` suite
   boots the real router + real sqlite event log — bearer auth, 404s, every
