@@ -1,20 +1,20 @@
 package cli
 
 import (
-	"context"
 	"fmt"
 	"os"
-	"os/signal"
-	"syscall"
 
 	"github.com/spf13/cobra"
-	"golang.org/x/term"
-	"k8s.io/client-go/tools/remotecommand"
 
-	"github.com/cullenmcdermott/sandbox/internal/k8s"
+	"github.com/cullenmcdermott/sandbox/client"
 	"github.com/cullenmcdermott/sandbox/internal/session"
 )
 
+// newShellCmd opens an interactive debug shell into a session pod. The heavy
+// lifting — SSH dialing, PTY allocation, raw mode, window-resize forwarding,
+// exit-code propagation — lives in the SDK (client.Session.Shell); this command
+// is a thin wrapper that only resolves the session, resumes it if suspended,
+// waits for the pod to be ready, and forwards the shell's exit code.
 func newShellCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "shell <session-id>",
@@ -22,13 +22,15 @@ func newShellCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			backend, err := newBackend()
+			// Share the one backend between the client (which drives Shell) and the
+			// direct resume/readiness calls below — the SDK's SSHTarget forward needs
+			// a running, ready pod but deliberately doesn't resume one itself.
+			cl, backend, err := newClientAndBackend()
 			if err != nil {
 				return err
 			}
 			ref := session.Ref{ID: session.ID(args[0])}
 
-			// Make sure the pod is up before attaching.
 			st, err := backend.Status(ctx, ref)
 			if err != nil {
 				return err
@@ -41,52 +43,21 @@ func newShellCmd() *cobra.Command {
 					return fmt.Errorf("resume session: %w", err)
 				}
 			}
+			// A just-resumed (or still-scheduling) pod is not immediately ready; the
+			// SSH port-forward needs it running before it can bind. StartWithProgress
+			// returns promptly for an already-ready pod.
+			if err := backend.StartWithProgress(ctx, ref, func(string) {}); err != nil {
+				return fmt.Errorf("wait for pod: %w", err)
+			}
 
-			return runShell(ctx, backend, ref)
+			code, err := cl.Open(ref.ID).Shell(ctx, client.ShellOptions{})
+			if err != nil {
+				return err
+			}
+			if code != 0 {
+				os.Exit(code)
+			}
+			return nil
 		},
 	}
-}
-
-// runShell streams an interactive /bin/bash in the pod, putting the local
-// terminal into raw mode and forwarding window resizes.
-func runShell(ctx context.Context, backend *k8s.Backend, ref session.Ref) error {
-	fd := int(os.Stdin.Fd())
-	tty := term.IsTerminal(fd)
-
-	var sizeQueue remotecommand.TerminalSizeQueue
-	if tty {
-		oldState, err := term.MakeRaw(fd)
-		if err != nil {
-			return fmt.Errorf("set raw terminal: %w", err)
-		}
-		defer func() { _ = term.Restore(fd, oldState) }()
-		sizeQueue = newTermSizeQueue(fd)
-	}
-
-	return backend.Exec(ctx, ref, []string{"/bin/bash"}, os.Stdin, os.Stdout, os.Stderr, tty, sizeQueue)
-}
-
-// termSizeQueue implements remotecommand.TerminalSizeQueue, emitting the
-// terminal size on startup and on every SIGWINCH.
-type termSizeQueue struct {
-	fd     int
-	resize chan os.Signal
-}
-
-func newTermSizeQueue(fd int) *termSizeQueue {
-	q := &termSizeQueue{fd: fd, resize: make(chan os.Signal, 1)}
-	signal.Notify(q.resize, syscall.SIGWINCH)
-	q.resize <- syscall.SIGWINCH // emit the initial size
-	return q
-}
-
-func (q *termSizeQueue) Next() *remotecommand.TerminalSize {
-	if _, ok := <-q.resize; !ok {
-		return nil
-	}
-	w, h, err := term.GetSize(q.fd)
-	if err != nil {
-		return nil
-	}
-	return &remotecommand.TerminalSize{Width: uint16(w), Height: uint16(h)}
 }

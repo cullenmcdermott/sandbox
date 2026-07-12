@@ -90,6 +90,14 @@ var (
 	_ func(*client.Session, context.Context) (client.WorktreeStatus, error)                      = (*client.Session).WorktreeStatus
 	_ func(*client.Session, context.Context, client.ConvertOptions) (client.BranchResult, error) = (*client.Session).ConvertToBranch
 	_ func(*client.Client, context.Context, client.ReapOptions) ([]client.ReapedWorktree, error) = (*client.Client).ReapWorktrees
+
+	// §8 interactive-shell surface: the one-call PTY Shell and the lower
+	// SSHTarget seam it is built on (the CLI `sandbox shell` dogfoods Shell). The
+	// interactive path can only be signature-pinned here — it needs a real pod
+	// and PTY — while SSHTarget resolution is behavior-tested in client's
+	// TestSSHTarget against a fake backend.
+	_ func(*client.Session, context.Context, client.ShellOptions) (int, error)  = (*client.Session).Shell
+	_ func(*client.Session, context.Context) (*client.SSHTarget, func(), error) = (*client.Session).SSHTarget
 )
 
 // --- client: per-session worktree surface (wave 2) --------------------------
@@ -166,6 +174,23 @@ var _ = client.ConnectOptions{
 	IdleTimeout:           time.Minute,
 	Observer:              true,
 	OnPhase:               func(client.Stage, string) {},
+}
+
+// §8 interactive-shell option/result structs: removing or retyping a field
+// breaks a consumer here first.
+var _ = client.ShellOptions{
+	Command: "uname -a",
+	Stdin:   nil,
+	Stdout:  nil,
+	Stderr:  nil,
+	Term:    "xterm-256color",
+}
+
+var _ = client.SSHTarget{
+	Host:         "127.0.0.1",
+	Port:         2222,
+	User:         "root",
+	IdentityFile: "/state/sess/id_ed25519",
 }
 
 // Spec/State are public via client aliases; pin the worktree data-model split
