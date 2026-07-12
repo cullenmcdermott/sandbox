@@ -19,6 +19,7 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
@@ -447,35 +448,131 @@ func (b *Backend) CreateSession(ctx context.Context, spec session.Spec) (_ sessi
 	// create/resume reconcile can detect the cluster Secret was rotated out from
 	// under the running pod (opencode sessions only; best-effort).
 	b.stampOpencodeCredsFreshness(ctx, sb, spec)
-	if _, err := b.agents.AgentsV1alpha1().Sandboxes(spec.Namespace).Create(ctx, sb, metav1.CreateOptions{}); err != nil {
+	// sbLive is the Sandbox as the API server sees it (with its assigned UID),
+	// captured for the ownerReferences pass below. On a fresh create it is the
+	// Create return value; on a re-create it is the existing object we Get.
+	sbLive, err := b.agents.AgentsV1alpha1().Sandboxes(spec.Namespace).Create(ctx, sb, metav1.CreateOptions{})
+	if err != nil {
 		if !k8serrors.IsAlreadyExists(err) {
 			return session.Ref{}, fmt.Errorf("k8s: create Sandbox %s: %w", name, err)
 		}
-		// Idempotent re-create against a session whose pod is already running: the
-		// existing Sandbox keeps its original creds stamp, so warn if the live
-		// Secret has since rotated (the running pod still holds the old key).
-		if spec.Backend == session.BackendOpenCode {
-			if existing, gerr := b.agents.AgentsV1alpha1().Sandboxes(spec.Namespace).Get(ctx, name, metav1.GetOptions{}); gerr == nil {
+		// Idempotent re-create against a session whose pod is already running:
+		// Get the existing Sandbox once and reuse it both for the creds/shape
+		// checks and as the owner-ref UID source.
+		existing, gerr := b.agents.AgentsV1alpha1().Sandboxes(spec.Namespace).Get(ctx, name, metav1.GetOptions{})
+		if gerr == nil {
+			sbLive = existing
+			if spec.Backend == session.BackendOpenCode {
+				// The existing Sandbox keeps its original creds stamp, so warn if the
+				// live Secret has since rotated (the running pod still holds the old key).
 				b.warnIfOpencodeCredsRotated(ctx, existing)
-			}
-		} else if existing, gerr := b.agents.AgentsV1alpha1().Sandboxes(spec.Namespace).Get(ctx, name, metav1.GetOptions{}); gerr == nil {
-			// C3: the existing pod template baked the credential env SHAPE — the
-			// env var name (oauth vs api-key) and its source Secret (per-session
-			// vs shared) — at first create; the Secret sync above only refreshes
-			// bytes. A re-create that changes the shape (e.g. an oauth session
-			// re-created with a console account) would inject the new credential
-			// under the OLD env var and break auth silently. Reject it loudly.
-			wantEnv, wantSrc := anthropicEnvShape(sb)
-			gotEnv, gotSrc := anthropicEnvShape(existing)
-			if wantEnv != gotEnv || wantSrc != gotSrc {
-				return session.Ref{}, fmt.Errorf(
-					"k8s: session %s already exists with a different auth shape (%s from Secret %q; this create wants %s from Secret %q) — destroy and re-create the session, or select a matching account",
-					name, gotEnv, gotSrc, wantEnv, wantSrc)
+			} else {
+				// C3: the existing pod template baked the credential env SHAPE — the
+				// env var name (oauth vs api-key) and its source Secret (per-session
+				// vs shared) — at first create; the Secret sync above only refreshes
+				// bytes. A re-create that changes the shape (e.g. an oauth session
+				// re-created with a console account) would inject the new credential
+				// under the OLD env var and break auth silently. Reject it loudly.
+				wantEnv, wantSrc := anthropicEnvShape(sb)
+				gotEnv, gotSrc := anthropicEnvShape(existing)
+				if wantEnv != gotEnv || wantSrc != gotSrc {
+					return session.Ref{}, fmt.Errorf(
+						"k8s: session %s already exists with a different auth shape (%s from Secret %q; this create wants %s from Secret %q) — destroy and re-create the session, or select a matching account",
+						name, gotEnv, gotSrc, wantEnv, wantSrc)
+				}
 			}
 		}
 	}
 
+	// Set ownerReferences (Secret + PVC → Sandbox) so a cluster-side
+	// `kubectl delete sandbox` outside the CLI cascades to the per-session Secret
+	// (a live runner bearer token) and PVC that List/Status/Destroy — which only
+	// enumerate Sandboxes — can never see and would otherwise orphan (§6). This
+	// runs only on resources THIS call created: a pre-existing Secret or PVC
+	// belongs to a prior CreateSession call (the PVC especially holds a prior
+	// session's workspace data — C7), so it must not be adopted or mutated here.
+	// Best-effort — a failed owner-ref patch degrades to the pre-owner-ref
+	// behavior (Destroy still cleans up; only an out-of-band delete leaks), so it
+	// must never fail an otherwise-successful create or tear down a live session.
+	if sbLive != nil && sbLive.UID != "" {
+		owner := sandboxOwnerRef(sbLive)
+		if !secretPreexisted {
+			b.setSecretOwnerRef(ctx, spec.Namespace, secret.Name, owner)
+		}
+		if !pvcPreexisted {
+			b.setPVCOwnerRef(ctx, spec.Namespace, name, owner)
+		}
+	}
+
 	return session.Ref{ID: spec.ID}, nil
+}
+
+// sandboxOwnerRef builds an ownerReference pointing at the given Sandbox, used to
+// GC the per-session Secret and PVC when the Sandbox is deleted out-of-band.
+func sandboxOwnerRef(sb *agentv1alpha1.Sandbox) metav1.OwnerReference {
+	return metav1.OwnerReference{
+		APIVersion: agentv1alpha1.GroupVersion.String(),
+		Kind:       "Sandbox",
+		Name:       sb.Name,
+		UID:        sb.UID,
+	}
+}
+
+// hasOwnerRef reports whether refs already contains an owner with the given UID,
+// so setting the owner ref is idempotent across re-create calls.
+func hasOwnerRef(refs []metav1.OwnerReference, uid types.UID) bool {
+	for _, r := range refs {
+		if r.UID == uid {
+			return true
+		}
+	}
+	return false
+}
+
+// setSecretOwnerRef patches the ownerReference onto the per-session Secret under
+// RetryOnConflict (the setReplicas/pin/syncSessionCredential idiom). Get+Update
+// preserves every other field (Data, Labels, existing owner refs), so a
+// concurrent credential reconcile does not race it into stripping the ref.
+// Best-effort: a persistent failure is warned, not returned — see the call site.
+func (b *Backend) setSecretOwnerRef(ctx context.Context, namespace, name string, owner metav1.OwnerReference) {
+	secrets := b.core.CoreV1().Secrets(namespace)
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		secret, getErr := secrets.Get(ctx, name, metav1.GetOptions{})
+		if getErr != nil {
+			return getErr
+		}
+		if hasOwnerRef(secret.OwnerReferences, owner.UID) {
+			return nil
+		}
+		secret.OwnerReferences = append(secret.OwnerReferences, owner)
+		_, updateErr := secrets.Update(ctx, secret, metav1.UpdateOptions{})
+		return updateErr
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not set ownerReference on Secret %s (out-of-band Sandbox delete may orphan it): %v\n", name, err)
+	}
+}
+
+// setPVCOwnerRef is setSecretOwnerRef for the per-session PVC. Called only when
+// the PVC was created by THIS call — never on a pre-existing PVC, whose workspace
+// data belongs to a prior session (C7).
+func (b *Backend) setPVCOwnerRef(ctx context.Context, namespace, name string, owner metav1.OwnerReference) {
+	pvcs := b.core.CoreV1().PersistentVolumeClaims(namespace)
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		pvc, getErr := pvcs.Get(ctx, name, metav1.GetOptions{})
+		if getErr != nil {
+			return getErr
+		}
+		if hasOwnerRef(pvc.OwnerReferences, owner.UID) {
+			return nil
+		}
+		pvc.OwnerReferences = append(pvc.OwnerReferences, owner)
+		_, updateErr := pvcs.Update(ctx, pvc, metav1.UpdateOptions{})
+		return updateErr
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not set ownerReference on PVC %s (out-of-band Sandbox delete may orphan it): %v\n", name, err)
+	}
 }
 
 // anthropicEnvShape extracts the Anthropic credential env shape from a Sandbox
