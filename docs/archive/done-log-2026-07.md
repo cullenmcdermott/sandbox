@@ -1218,3 +1218,65 @@ amendment. Commits b84f696, 633fe6d, fdcd208, d59690c.
 Known residuals (tracked in TODO §1d/§3): non-git same-path collision
 warning; B2 move-session-to-machine unbuilt; dashboard row Branch field
 deliberately not updated on convert (pod-side source has no .git).
+
+## 2026-07-11 — §1 burndown: server-side autopilot (§1e item 6) + §1c/§1d residuals
+
+/loop-driven, Opus implements / Fable reviews+gates. ADR archived as
+implemented: docs/archive/server-side-loop-adr.md. Commits 3c7aee1 (residual
+sweep), 9943f59 (runner half), 21a709f (client/TUI half).
+
+- **§1e item 6 — server-side autopilot loop.** Schema: `autopilot.state`
+  (state/kind/reason/iteration/gen) via `just gen` + hand-written Go payload.
+  Runner: `AutopilotSpec` persisted in session.json (explicit H3
+  state/stopped_reason, retained on stop, arm overwrites + bumps gen);
+  `PUT/DELETE /sessions/:id/autopilot` with typed 400s + 409 for driverless
+  backends; `capabilities.autopilot` in /status (single-sourced
+  `backendHasAutopilot`); driver in autopilot.ts behind an injectable host —
+  self-submits via the shared startTurn path (extracted turns.ts owns the
+  409 gate), sentinel/max_iterations(50)/token_budget stops, 409-defer
+  (manual turns = free iterations), 5× retry ladder (max(interval,30s)
+  doubling, 5m cap, gen-guarded, no iteration cost), 30m staleness lapse
+  (anchor max(last_completed_at, boot, armed_at)), boot re-arm anchored on
+  last_completed_at, persist-stopped-BEFORE-emit (crash-window rule); armed
+  spec holds the session non-idle (Q1). Fable review fix: DELETE on an
+  already-stopped spec preserves the original terminal record. Agent
+  deviations accepted: interrupts reschedule without iterating/scanning;
+  token accounting derives from summed usage.updated (restart-correct, no
+  new spec field). Runner suite 251→278. Client/TUI: RunnerClient
+  Arm/DisarmAutopilot (409→ErrAutopilotUnsupported, 404→ErrAutopilotNotArmed),
+  public aliases + Session conveniences + sdktest pins; capability probed
+  once at attach (5s-bounded — Fable fix, was unbounded); /loop//goal arm
+  the runner driver when capable (chip `N/50`, renders purely from
+  autopilot.state; background terminal toast/OS notification gated
+  !dup + !catchingUp so replays never re-notify), stop paths DELETE,
+  unexpected-unsupported drops the bit and falls back local. Fable fix:
+  two tests synchronously executed interval tea.Ticks (dashboard package
+  6s→307s — real 5m/5s sleeps inside execCmd); now assert synchronously
+  and drive the first iteration explicitly. NOT live-verified on a real
+  cluster yet.
+- **§1e — driver-spec re-arm.** `index.Entry.Driver` via a `DriverStore`
+  seam (all 3 RunOptions sites); bare `/loop` / `/goal` re-arms the recorded
+  spec across re-attach.
+- **§1c — subagent child tool lines width-safe.** `renderChildTool`
+  budgets by construction (measured ANSI-aware prefix → name/arg/detail take
+  remaining columns → whole-line truncate backstop), replacing independent
+  w/2+w/3 caps. Test: TestSubagentChildToolWidthSafe (widths 8-80).
+- **§1d — mutagen conflict per-file detail + hint.** `conflicts[]` decoded
+  typed (`mutagenConflict` alpha/beta changes → `Conflict{Path,Alpha,Beta}`,
+  defensive: unknown shape → count-only + "(path unavailable)");
+  `Manager.StatusDetail`; SyncProber → `SyncHealth{Status,Conflicts,Hint}`;
+  detail pane renders per-file lines (cap 5, "+N more") + the two-way-safe
+  resolution hint. Live conflicted-mutagen shape unverified — flagged.
+- **§1d — non-git same-path collision warning.** `sameDirSyncWarning` at
+  Connect for non-worktree sessions: scans mutagen List, resolves other
+  sessions' alphas from the index, warn-only, skips paused/self, silent
+  without mutagen. Closes the §1d collision item entirely (git = §9
+  worktrees, non-git = this warning).
+- **§1d — transcript provenance audit trail.** `transcript-audit.jsonl`
+  (state dir) appends deduped sandbox→claude-session-id mappings at the
+  point the mapping is learned; survives destroy (the index entry that
+  carried it does not). The unscoped ~/.claude merge stays by design.
+
+Still open in §1: statusline row-1 overflow (folds into §2c), port-forward
+mid-stream death detection (optional), §1f A1 uid-separation (gated on §7b),
+hook-shape SDK-version-pin caveat.

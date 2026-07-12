@@ -24,7 +24,7 @@ type AutopilotOverrides struct {
 
 // AutopilotRequest is the PUT /sessions/:id/autopilot request body — the
 // client-supplied portion of an arm/replace (see docs/runner-api.md and
-// docs/server-side-loop-adr.md §1). It mirrors the runner's AutopilotRequestBody
+// docs/archive/server-side-loop-adr.md §1). It mirrors the runner's AutopilotRequestBody
 // field-for-field (camelCase wire names): the runner fills the rest of the spec
 // (state, gen, iterations, armed_at, last_completed_at, stopped_reason).
 //

@@ -244,7 +244,7 @@ var ErrAutopilotNotArmed = errors.New("runner: no autopilot spec to disarm")
 
 // ArmAutopilot arms (or replaces) the runner-owned autopilot driver via
 // PUT /sessions/:id/autopilot (the server-side /loop-/goal loop; see
-// docs/server-side-loop-adr.md). It returns the runner's /status body reflecting
+// docs/archive/server-side-loop-adr.md). It returns the runner's /status body reflecting
 // the now-armed driver. A backend without a runner driver answers 409, mapped to
 // ErrAutopilotUnsupported so the caller can fall back to its local driver; a
 // malformed request answers 400, folded into the returned error by statusError.

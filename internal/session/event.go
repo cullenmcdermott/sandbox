@@ -243,7 +243,7 @@ type TerminatingPayload struct {
 
 // AutopilotStatePayload is the payload for autopilot.state events: a transition
 // of the runner-owned autopilot driver (the server-side /loop-/goal loop; see
-// docs/server-side-loop-adr.md). The runner emits State "armed" on arm (and on a
+// docs/archive/server-side-loop-adr.md). The runner emits State "armed" on arm (and on a
 // boot re-arm — same shape, so a fresh attach re-renders the armed chip via
 // replay), "ticked" at each iteration boundary (carrying Iteration for the TUI's
 // progress chip), and "stopped" with a Reason on termination. Reason mirrors the

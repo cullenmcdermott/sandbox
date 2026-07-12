@@ -1,6 +1,6 @@
 // The runner-owned autopilot driver (server-side /loop-/goal loop).
 //
-// docs/server-side-loop-adr.md is the contract. The driver self-submits the next
+// docs/archive/server-side-loop-adr.md is the contract. The driver self-submits the next
 // turn off its own turn-completion signal (not a polled wall clock): on arm it
 // submits immediately (unless a turn is in flight); on each completion it
 // increments iterations, scans the completed assistant text for the sentinel,

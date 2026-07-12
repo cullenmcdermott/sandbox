@@ -73,7 +73,7 @@ type RunnerClient interface {
 	Idle(ctx context.Context, ref Ref) (IdleStatus, error)
 	// ArmAutopilot arms (or replaces) the runner-owned autopilot driver — the
 	// server-side /loop-/goal loop that self-submits turns so a loop survives a
-	// closed laptop (docs/server-side-loop-adr.md). Returns the runner's /status
+	// closed laptop (docs/archive/server-side-loop-adr.md). Returns the runner's /status
 	// body; a backend without a driver returns ErrAutopilotUnsupported.
 	ArmAutopilot(ctx context.Context, ref Ref, req AutopilotRequest) (State, error)
 	// DisarmAutopilot disarms the runner-owned driver. Returns the /status body;

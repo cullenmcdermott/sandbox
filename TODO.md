@@ -68,10 +68,9 @@ row-model consolidation moved to §2a where it belongs.
 - [ ] **`statusline.go` row-1 segment-join tail can still overflow** — not a
   `spread()`-shaped fix (the shared `spread()` hardening landed); folds into
   the §2c statusline collapse.
-- [ ] **Subagent child tool lines still use the old arg≤w/2+summary≤w/3
-  budgeting (LOW).** Same latent overflow pattern the §2c two-line card
-  redesign fixed by construction for top-level cards. `renderChildTool`,
-  `subagent.go`.
+- [x] **Subagent child tool lines width-safe — done 2026-07-11** (done log):
+  budgeted by construction (measured prefix, remaining-width segments,
+  ANSI-aware whole-line backstop); pinned at widths 8-80.
 
 ### 1d. System reliability (2026-07-01 whole-system review; HIGHs all fixed — see done log)
 
@@ -99,21 +98,20 @@ row-model consolidation moved to §2a where it belongs.
   refreshes models.dev async (never blocks the reducer); reaper replaced on
   spec mismatch so `IdleTimeout`/`ReaperImage` overrides apply.
 
-- [ ] **Concurrent-session sync collision — FIXED for git projects by §9
-  worktrees (2026-07-11); non-git residual (LOW).** Each git session now
-  syncs its own worktree alpha, so nothing cross-feeds. Remaining: non-git
-  projects sharing a `ProjectPath` still collide — emit a
-  `Connection.Warning` when another live session already syncs the same
-  path (needs a `syncManager().List()` alpha scan; code TODO at the
-  Connect missing-worktree guard, `client/session.go`).
-- [ ] **Mutagen conflict detail in the TUI.** The `SyncConflicted` worst-of
-  distinction landed (done log); still open: per-file/side detail + a textual
-  resolution hint (needs parsing the mutagen `conflicts[]` JSON shape,
-  currently `[]any`).
-- [ ] **Transcript sync merges pod-agent history into local `~/.claude`
-  unscoped (LOW-MED).** By design (subPath bind), but pod conversations become
-  locally `--resume`-able with no tag or audit trail back to the sandbox
-  session. `internal/k8s/backend.go:1338-1375` (subPath bind), `internal/sync/sync.go:62`.
+- [x] **Concurrent-session sync collision — CLOSED 2026-07-11** (done log):
+  git projects isolated by §9 worktrees; non-git same-path sessions now get
+  a warn-only `Connection.Warning` at Connect (`sameDirSyncWarning`, index-
+  resolved alphas, silent without mutagen).
+- [x] **Mutagen conflict detail in the TUI — done 2026-07-11** (done log):
+  `conflicts[]` parsed typed (alpha/beta per path, defensive on shape drift);
+  `StatusDetail` + per-file lines + resolution hint in the detail pane
+  (capped at 5 + "+N more"). Shape unverified against a live conflicted
+  mutagen — falls back to count-only on drift.
+- [x] **Transcript provenance audit trail — done 2026-07-11** (done log):
+  the sandbox-session → claude-session-id mapping (already in the index but
+  deleted on destroy) now also appends to `transcript-audit.jsonl` in the
+  state dir, deduped, surviving destroy. The unscoped `~/.claude` merge
+  itself stays by design (subPath bind, resumability contract).
 - [ ] **Port-forward mid-stream death detection (SMALL, optional).** Terminal
   state + immediate `ErrSessionGone` reconnect-abort landed (done log);
   consuming the literal `ForwardHandle.Done()` channel needs a
@@ -126,18 +124,22 @@ The local driver is complete (items 1–5: detach-durable `/goal` continuation,
 sentinel termination, lapse toast, idle-reaper interval warn, esc contract —
 done log; the item-3 follow-up below is the one loose end).
 
-- [ ] **Record the driver spec in `internal/index` for a one-key re-arm on
-  re-attach (SMALL, follow-up to the lapse toast).** A lapsed loop currently
-  toasts and is gone; re-arming means retyping the /loop command.
-- [ ] **6. Server-side loop — ADR ACCEPTED 2026-07-07, IMPLEMENT.**
-  [`docs/server-side-loop-adr.md`](docs/server-side-loop-adr.md) — runner-
-  owned driver; all constants settled at sign-off (endpoint
-  `PUT/DELETE /sessions/:id/autopilot`; max_iterations default 50;
-  token_budget optional, shipped v1; capability bit in `/status`; retry 5×
-  backoff max(interval,30s)→5m cap; staleness N=30m; no H4 guard).
-  Order: schema (`autopilot.state` + `just gen`) → runner (spec persistence,
-  self-submit loop, guards, reaper non-idle, boot re-arm) → TUI (arm/disarm +
-  render-from-events, local tea.Tick kept as no-capability fallback) → tests.
+- [x] **Driver-spec re-arm — done 2026-07-11** (done log): last-armed spec
+  persisted via a `DriverStore` seam (`index.Entry.Driver`, survives
+  detach); bare `/loop` / `/goal` re-arms it without retyping.
+- [x] **6. Server-side loop — IMPLEMENTED 2026-07-11** (done log; ADR
+  archived to
+  [`docs/archive/server-side-loop-adr.md`](docs/archive/server-side-loop-adr.md)):
+  `autopilot.state` schema event; runner spec persistence + driver
+  (sentinel/budget/lapse/error stops, 409-defer to manual turns, 5× retry
+  ladder, boot re-arm anchored on `last_completed_at`,
+  persist-stopped-before-emit, armed ⇒ non-idle) +
+  `PUT/DELETE /sessions/:id/autopilot` + `/status` capability bit; SDK
+  `ArmAutopilot`/`DisarmAutopilot` + sdktest pins; TUI arms the runner
+  driver when capable, renders purely from `autopilot.state` (replay never
+  re-notifies), local tea.Tick kept as the no-capability fallback. NOT yet
+  live-verified on a real cluster (the laptop-closed overnight run —
+  maintainer eyeball).
 
 ### 1f. Security & runner-reliability hardening (2026-07-07 handoff review)
 

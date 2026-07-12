@@ -270,7 +270,7 @@ export interface ContextCompactedPayload {
   postTokens?: number;
 }
 
-/** payload for autopilot.state events: a transition of the runner-owned autopilot driver (the server-side /loop-/goal loop; see docs/server-side-loop-adr.md). Emitted on arm (state:'armed' — re-emitted on a boot re-arm so a fresh `sandbox attach` re-renders the armed chip without special-casing), at each iteration boundary (state:'ticked', carrying the iteration count for the TUI's progress chip), and on termination (state:'stopped' with a reason). The TUI renders the driver PURELY from these events (armed chip, iteration counter, terminal toast/OS-notification), so a replayed stopped(sentinel) must not re-fire the OS notification — only the flip-to-live one does. */
+/** payload for autopilot.state events: a transition of the runner-owned autopilot driver (the server-side /loop-/goal loop; see docs/archive/server-side-loop-adr.md). Emitted on arm (state:'armed' — re-emitted on a boot re-arm so a fresh `sandbox attach` re-renders the armed chip without special-casing), at each iteration boundary (state:'ticked', carrying the iteration count for the TUI's progress chip), and on termination (state:'stopped' with a reason). The TUI renders the driver PURELY from these events (armed chip, iteration counter, terminal toast/OS-notification), so a replayed stopped(sentinel) must not re-fire the OS notification — only the flip-to-live one does. */
 export interface AutopilotStatePayload {
   /** 'armed' | 'ticked' | 'stopped' */
   state: string;

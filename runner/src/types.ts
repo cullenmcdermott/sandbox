@@ -78,7 +78,7 @@ export interface SessionState {
   /** True once the one-shot auto title has been generated for this session (T6). */
   title_generated?: boolean;
   /** Persisted autopilot driver spec (the server-side /loop-/goal loop; see
-   * docs/server-side-loop-adr.md). Absent until the driver is first armed via
+   * docs/archive/server-side-loop-adr.md). Absent until the driver is first armed via
    * PUT /sessions/:id/autopilot; retained with state:'stopped' after it
    * terminates (never deleted — H3) so attach + reaper idle logic read a stable
    * terminal record instead of inferring stop from a missing key. */
