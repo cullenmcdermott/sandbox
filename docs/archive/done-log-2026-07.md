@@ -1419,3 +1419,50 @@ never wrong; malformed-row skip contract now pinned in sync + client).
   TestE2EFakeRunnerFaithfulness = 16-assertion route/status/body table.
   Not modeled (documented): seq-0 persist-failure bypass, delta compaction,
   heartbeats.
+
+## 2026-07-12 — batch 4: §2c renderer HIGHs, Session.Shell, sandbox doctor (f110dc3..ef0d6bf)
+
+/loop batch 4. `just check` green (one inline dead-code lint cleanup:
+fmtTokenLimit + styleSLLabel orphaned by the statusline collapse).
+
+- **§2c — the three HIGH renderer items (deliberate redesign; goldens
+  regenerated).** (1) Gutter bars gone: assistant `⏺ ` + 2-space hanging
+  indent (trimLeadingBlankLines guards glamour's doc-margin blank), user
+  dim `> ` non-bold; tool/subagent cards own their `⏺` head at column 0;
+  streaming tail keeps T1 parity. (2) Working band above the composer
+  (new liveLayout region): `✳ Thinking…|Writing…|Running <Tool>…
+  (elapsed · ↓tokens · esc to interrupt)`, `esc to steer` when queued,
+  `loading transcript…` while replaying; composer hint row no longer
+  double-reports working state. (3) Statusline = ONE budgeted row
+  (slSeg/budgetRow: required segments = model + mode chip, never shed —
+  the ⚠ bypass chip survives any width, closing the §1c row-1 overflow
+  residual; optional segments shed tail-first, ANSI-aware). Ctx gauge only
+  ≥60% AND known limit — the 200k chat fallback removed (dashboard parity).
+  Cost only ≥$0.10. Rate-limit row transient: 8s window after
+  rate_limit.updated (rlUpdatedAt via nowFunc), fading its last 3s.
+  redesign_2c_test.go pins grammar/indicator/statusline/ctx states.
+  Known smalls: transient row can linger one frame on a fully idle TUI
+  (no dedicated timer, by the no-interval-tick constraint); 8s/3s/$0.10
+  are chosen values. Pre-existing flagged: composer hint still says `esc
+  detach` during a turn (the working line now tells the truth beside it).
+  SF1 TUI half: dashboard Init fires reconcileListCmd.
+- **§8 — Session.Shell + SSHTarget.** `SSHTarget(ctx) (*SSHTarget, func(),
+  error)` = SSH-only forward (inverse of DialRunner) + ensureSSHKey
+  material for BYO-ssh consumers; `Shell(ctx, ShellOptions) (int, error)` =
+  crypto/ssh dial, remote PTY, raw mode, SIGWINCH, remote exit code
+  (transport → -1+err). InsecureIgnoreHostKey documented (matches mutagen
+  posture; localhost forward, ephemeral pod key). CLI shell = thin wrapper;
+  k8s-exec machinery deleted; resume-if-suspended stays CLI policy.
+  Deliberate change: wrapper now StartWithProgress-es even when running
+  (forward needs a ready pod). sdktest signature + struct pins. Live PTY
+  path unverified (needs a pod).
+- **§10 — sandbox doctor.** 10 checks, injectable deps: kubeconfig / API
+  (5s bounded) / agents.x-k8s.io group / namespace can FAIL and
+  short-circuit (one timeout total on dead network); mutagen (daemon
+  start, 4s) / ssh / opencode / claude / credential store (0 accounts =
+  INFO) / image refs are advisory-only (invariant test: advisory never
+  FAILs). Exit 1 only on FAIL. Cluster-check PASS paths unverified live.
+  Deliberate: builds its own clientcmd config (Backend prefers in-cluster
+  config — wrong for a host tool; documented).
+- **§5 residual** — startupSyncGC wired into runStartSession (claude +
+  opencode create paths).

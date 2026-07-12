@@ -65,9 +65,9 @@ row-model consolidation moved to §2a where it belongs.
 
 ### 1c. Rendering / layout residuals (2026-07-04 audit; parents fixed — done log)
 
-- [ ] **`statusline.go` row-1 segment-join tail can still overflow** — not a
-  `spread()`-shaped fix (the shared `spread()` hardening landed); folds into
-  the §2c statusline collapse.
+- [x] **`statusline.go` row-1 overflow — closed 2026-07-12** with the §2c
+  statusline collapse (budgeted `slSeg`/`budgetRow`, required segments kept,
+  optional shed tail-first; width-safe by construction).
 - [x] **Subagent child tool lines width-safe — done 2026-07-11** (done log):
   budgeted by construction (measured prefix, remaining-width segments,
   ANSI-aware whole-line backstop); pinned at widths 8-80.
@@ -336,27 +336,17 @@ there. HIGH items are the at-a-glance tells; most are renderer-local.
   regression residuals — control-sequence smearing, tab overflow, uncapped
   opencode output, ctrl+o stranding on content-less cards — all fixed
   2026-07-09, done log.)*
-- [ ] **Kill the full-height `▌` role gutter bars; quiet user prompts (HIGH).**
-  Colored bars down every message line + bold-green user text is the largest
-  departure from CC's look. Assistant: single `⏺ ` bullet + 2-space hanging
-  indent. User: dim `> ` prefix, drop Bold+Guac (user's words are the QUIETEST
-  element in CC, not the loudest). Frees role colors to mean status.
-  `transcript.go:962`.
-- [ ] **Working indicator: left-aligned line above the composer, with "esc to
-  interrupt" (HIGH).** Now right-aligned below the box and never mentions esc
-  — the most important in-turn action is undiscoverable while a turn runs (esc
-  DOES interrupt, `transcript.go:1637`). Target: `✳ Thinking… (12s · ↓820
-  tokens · esc to interrupt)` above the input; `· esc to steer` when a prompt
-  is queued. Context-aware verb is free: m.reasoning→"Thinking…", running
-  tool→"Running Bash…", m.streaming→"Writing…". `transcript.go:1402`, `:1970`.
-- [ ] **Statusline: collapse the permanent two-row gauge block (HIGH).**
-  Always-on model/cwd/branch/ctx-bar/cost row + rate-limit block-bar row reads
-  as a monitoring dashboard; CC's floor is near-zero chrome. Default to one
-  quiet row; ctx gauge only ≥60%; cost behind /cost or threshold; rate-limit
-  row transient after `rate_limit.updated` or behind /usage.
-  `statusline.go:380`. Related open item: **ctx% fallback inconsistency** —
-  chat assumes 200k when the model limit is unknown, dashboard hides the gauge
-  (`statusline.go:402`, `session.go:197`).
+- [x] **Gutter bars killed; quiet user prompts — done 2026-07-12** (done
+  log): assistant `⏺ ` + hanging indent, user dim `> `, goldens
+  regenerated deliberately.
+- [x] **Working indicator above the composer — done 2026-07-12** (done log):
+  `✳ <verb>… (elapsed · ↓tokens · esc to interrupt)`, `esc to steer` when
+  queued; context-aware verb; a new liveLayout band.
+- [x] **Statusline collapsed to one row — done 2026-07-12** (done log): one
+  budgeted width-safe row (model + mode chip never shed — closes the §1c
+  row-1 overflow residual); ctx gauge only ≥60% AND known limit (200k
+  fallback removed both places); cost ≥$0.10; rate-limit row transient 8s
+  after `rate_limit.updated` with fade.
 - [ ] **Permission prompt: numbered-option question panel (MED).** `[a]/[d]`
   hotkey hints → CC's signature `Do you want to run this command?` + numbered
   arrow-navigable options with ❯ selection (keep a/d as hidden accelerators).
@@ -570,12 +560,11 @@ done log.)
   (done log): context labels + scoped GC (legacy label-less syncs keep
   pre-MF3 reapability); prober-layer debounced Reconcile self-heal on
   stall; startup GC on bare-`sandbox`/`attach`; dev-reset/kind-down gc
-  first. STILL OPEN (small): fire `reconcileListCmd` in dashboard `Init`
-  (SF1's TUI half, `internal/tui/dashboard/model.go`) and add
-  `startupSyncGC()` to the `claude`/`opencode` create commands
-  (`internal/cli/claude_remote.go`). Unverified live: real-daemon heal of a
-  genuinely wedged transport; `kind-down`-after-gc leaves orphans if
-  sessions were live at teardown (pre-existing, noted).
+  first. The two SF1 residuals CLOSED 2026-07-12 in batch 4 (dashboard
+  `Init` fires `reconcileListCmd`; create commands run `startupSyncGC`).
+  Unverified live: real-daemon heal of a genuinely wedged transport;
+  `kind-down`-after-gc leaves orphans if sessions were live at teardown
+  (pre-existing, noted).
 
 ## 6) Codex backend + credential manager
 
@@ -829,11 +818,11 @@ naming-break, and Shell items each stand alone.
   session ⇒ one resume id). `internal/session/types.go:175-178`, `:144-153`,
   `client/session.go:62`. Cross-ref the §2d yolo flip (mode default changes
   runner-side independently).
-- [ ] **`Session.Shell` in the SDK (maintainer call — full interactive
-  shell, not just a primitive).** SDK gains the one-call interactive shell
-  (PTY handling included); `internal/cli/shell.go` becomes a thin wrapper.
-  Build it atop an ssh-target seam so non-interactive consumers can still
-  exec. Pin in sdktest.
+- [x] **`Session.Shell` + `SSHTarget` seam — done 2026-07-12** (done log):
+  SSH-only forward + per-session key as the reusable primitive; one-call
+  PTY shell atop it (raw mode, SIGWINCH, remote exit code); CLI shell is a
+  thin wrapper (transport moved k8s-exec → in-pod sshd); sdktest pins.
+  Live interactive path unverified against a real pod.
 - [x] tui/theme `Register(Theme)` + `Denied`/`*Subtle` tone vars — done
   2026-07-12 (done log).
 - [x] tui/kit palette race → whole-palette `atomic.Pointer` snapshot — done
@@ -924,13 +913,10 @@ naming-break, and Shell items each stand alone.
 - [ ] Ops: new CLI-created sessions use `:latest` and can hit the stale traefik
   manifest cache — bust the cache or pin digests CLI-side. (Resume path
   already fixed via digest pinning — see done log.)
-- [ ] **End-user host setup: `sandbox doctor` (promoted from inbox
-  2026-07-04; the "AICR" acronym is resolved — separate item below).** A
-  first-run check/setup path so the CLI "just works" on a fresh host:
-  kubeconfig + context, mutagen binary, ssh, runner/reaper image refs,
-  credential store. `just doctor` today only validates the Flox *dev* env
-  (`justfile:243-271`), nothing exists for an end user of the `sandbox`
-  binary itself (`sandbox doctor`?).
+- [x] **`sandbox doctor` — done 2026-07-12** (done log): 10-check host
+  readiness table (cluster checks can FAIL and short-circuit; binaries/
+  creds/images advisory WARN/INFO with remediation); PASS paths of the
+  cluster checks unverified against a live cluster.
 - [ ] **Research: NVIDIA AICR (github.com/nvidia/aicr) home use cases
   (maintainer, expanded 2026-07-07).** Maintainer works on AICR at work
   (GPU-cluster focus) and wants to find homelab use cases for components
