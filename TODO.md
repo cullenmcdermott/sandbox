@@ -202,13 +202,11 @@ resume.
 Block unification, the one-event-reducer, and the mechanical god-file split
 all landed (done log) — the items below are what remains.
 
-- [ ] **Declarative vertical layout regions (HIGH).** Stack arithmetic
-  hand-counted in 4+ places (layout(), renderTranscript(), previewView
-  `h-3-bannerH`, scrollbarDragTo `bodyTop=2`, App.modalRect) — any layout
-  change (status-line move, header removal, inline perm prompts) means finding
-  every copy; mouse hit-testing silently breaks. Fix: one per-frame
-  `[]region{name, height, render}` with body as flex; all consumers walk it.
-  `transcript.go:882`.
+- [x] **Declarative vertical layout regions — done 2026-07-12** (done log):
+  per-frame `[]region` band stack (body = flex) behind `liveLayout`/
+  `previewLayout`; render, list sizing, and scrollbar hit-test all walk it.
+  `App.modalRect` deliberately excluded (popup margin geometry, not a band).
+  Goldens byte-identical; §2c layout changes are now one-line band edits.
 - [ ] **Consolidate the two dashboard row models (from §1b).**
   `visibleSessions()` vs `visibleRows()` both interpret `m.cursor`; one row
   abstraction with a `sessionAt(cursor)` accessor for render+nav+actions.
@@ -735,12 +733,12 @@ side effect of `cd`.
 
 ### 7c. OpenCode operational items
 
-- [ ] CLI `opencode` still lacks `--model`, an initial-prompt arg, and a
-  `--provider` flag (cancel/suspend-warning correctness landed — see done
-  log). `claude_remote.go:23-71`. NOTE: the SDK half of provider selection
-  landed 2026-07-06 — `CreateOptions.OpencodeProvider`, validated fail-closed
-  (`ErrInvalidOpencodeProvider`, `client/client.go`) — the CLI flag just
-  threads it through `runStartSession`.
+- [x] CLI `opencode` `--model`/`--provider`/`[prompt]` — done 2026-07-12
+  (done log): provider threads to `CreateOptions.OpencodeProvider`
+  (fail-closed); the prompt positional is delivered as a headless first
+  turn via the turn adapter pre-attach (hard error, never silently
+  dropped). NOT yet live-verified on a cluster: create → headless turn →
+  `opencode attach --continue` picking up the in-flight turn.
 - [ ] Verify detach (Ctrl+]) + surrounding chrome behave identically for every
   backend's external pane.
 - [~] **Live-session verify sweep — opencode (2026-07-06 headless pass on
@@ -755,19 +753,14 @@ side effect of `cd`.
   whether the adapter should create sessions WITHOUT a title so retitle
   fires. (b) clickable spots — still needs interactive TUI eyeball, not
   automatable headless.
-- [ ] (LOW, pre-existing) `markObservedTurnInterrupted(id)` for an id that
-  never becomes the active turn cycle leaks its entry
-  (`runner/src/opencode-observer.ts:120`). (The `reset()` GC half landed —
-  done log.)
-- [ ] **Reasoning re-emitted as a trailing `message.completed` (opencode turn
-  adapter, live 2026-07-06).** Observed on omni-prod (big-pickle, reasoning
-  model): the reasoning text streams as `message.delta`s → `reasoning.completed`
-  → the REAL answer streams + `message.completed` → then a SECOND
-  `message.completed` carrying the reasoning text again (seq 41 vs 38 in the
-  capture) — a double-render in any client that appends per
-  `message.completed`. Likely the adapter/observer flushes the reasoning part
-  as a message at turn end. `runner/src/opencode-turn.ts` (part→event
-  mapping), cross-ref §2b gap 3 (thinking presentation).
+- [x] Observer `interruptedTurns` leak bounded — done 2026-07-12 (done log):
+  cap 8, oldest-first eviction; regression test.
+- [x] **Reasoning double-`message.completed` fixed — done 2026-07-12** (done
+  log): root cause = opencode `ReasoningPart` streams content in the same
+  `.text` field as `TextPart`, so its deltas were mis-registered as
+  assistant text and the idle flush re-emitted them; reasoning part ids now
+  tracked, deltas routed to `reasoning.delta`, flush guarded (both
+  orderings pinned). Live re-verify at next natural occurrence.
 - [ ] **Diagnose live: opencode looks stuck after disconnect/reconnect
   (maintainer report 2026-07-04; recipe below). 2026-07-06 live probes
   (omni-prod) EXONERATED the event layer:** (i) SSE dropped mid-flight
@@ -916,12 +909,14 @@ naming-break, and Shell items each stand alone.
   `nextForwardBackoff`) + table tests over every branch and the full backoff
   ceiling; C1 Close-seam invariants (Done-after-Close, done-closes-once,
   error-churn vs concurrent Close) pinned under `-race`.
-- [ ] **MED coverage [F6/F7]:** opencode cred-rotation warning
-  (`backend.go:1530-1584`) + the §7c opencode double-`message.completed`/observer
-  leak have no pinning test; `waitHealthy` (`connect.go:41-66`), `reaperTick`
-  (`reap.go`, a regression silently stops fleet idle-suspend), and the dashboard
-  `model_sse.go` command closures execute in no test (only their reduced messages
-  do). Copy the `reap.go` pure-decision split pattern.
+- [x] **[F6/F7] MED coverage — done 2026-07-12** (done log): cred-rotation
+  warning, `waitHealthy` (healthChecker seam), `Session.Connect` pre-dial
+  branches, `evaluateIdle` full branch table; §7c double-emit/leak pins
+  landed with their fixes. STILL OPEN residuals: `Session.Connect`'s happy
+  path + `reaperTick`'s wrapper glue need a runner-factory injection seam
+  on `Client` (documented in `client/health_connect_test.go`); the
+  dashboard `model_sse.go` command closures remain untested (excluded from
+  the batch — dashboard was under the §2a refactor).
 
 - [ ] **`docs/runner-api.md` shape gaps** (2026-07-07 docs sweep): `/healthz`
   body `{status,protocolVersion}` undocumented (consumed by `client.go:97`);

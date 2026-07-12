@@ -1325,3 +1325,53 @@ color-based t.Skip).
   `FormatTokens` gains the B tier with boundary promotion (999,950,000 →
   "1B"); boundary table tests. tui/list: dead `Item.Finished()` dropped;
   sdktest pin updated in the same change.
+
+## 2026-07-12 — batch 2: layout regions, §7c opencode trio, F6/F7 coverage (2967c48..0267985)
+
+/loop batch 2 (Opus implements, Fable reviews/gates/commits). `just check`
+green (one inline gofmt fix on a new test file; one review round-trip on the
+opencode prompt positional).
+
+- **§2a — declarative vertical layout regions (HIGH enabler).**
+  `region`/`vlayout` types in transcript_render.go; `liveLayout()` (header,
+  divider, body-flex, perm?, palette?, search?, gap, composer, statusline)
+  and `previewLayout()` (banner variant) replace the four hand-counted
+  copies; `scrollbarDragTo` reads `m.bodyTop()` over shared `headerBands()`.
+  `App.modalRect` deliberately NOT folded in — popup margin geometry, a
+  different axis; the scrollbar chain composes the two. Behavior-preserving:
+  goldens/T1 byte-identical; new invariant tests (flex arithmetic, exact
+  tiling when roomy, modalContent==frame height everywhere,
+  render/hit-test agreement, perm band shrinks body not frame). Undersized
+  frames still overflow by design (fitModal truncates), as before.
+- **§7c — CLI opencode flags + initial prompt.** `--model`
+  (provider/model), `--provider` (→ `CreateOptions.OpencodeProvider`,
+  fail-closed), `[prompt]` positional. Review round-trip: the positional
+  was initially inert (dashboard external-pane branch returns before the
+  initialPrompt handoff) — reworked to a headless first turn via the
+  existing `sandbox turn` precedent (StartWithProgress → DialRunner →
+  `startPromptTurn` seam → StartTurn) BEFORE the TUI attaches; hard error +
+  attach hint on failure, prompt cleared so it can't double-fire. 3 unit
+  tests on the seam. NOT live-verified: attach-picks-up-in-flight-turn
+  sequencing on a real cluster.
+- **§7c — reasoning double-`message.completed` root-caused + fixed.**
+  opencode `ReasoningPart` stores content in `.text` (same field as
+  TextPart) so its `message.part.delta`s are indistinguishable by field;
+  the mapper mis-registered them as assistant text and the `session.idle`
+  flush re-emitted the reasoning as a trailing `message.completed` (seq 41
+  vs 38 in the live capture). Fix: `reasoningParts` id set (from
+  part.updated type:reasoning), deltas → `reasoning.delta`,
+  `completeTextPart` + flush guarded, defensive delta-first undo. Both
+  orderings pinned. Observer path covered too (shared mapper).
+- **§7c — observer `interruptedTurns` leak bounded**: cap 8, oldest-first
+  eviction (Set insertion order), regression test.
+- **§10 [F6/F7] — coverage.** `waitHealthy` → `healthChecker` interface +
+  `waitHealthyWithin` (injected budget/interval, literals preserved);
+  tests: immediate/retry/deadline/cancel + 6 `Session.Connect` pre-dial
+  branches (incl. token-failure forward teardown).
+  `warnIfOpencodeCredsRotated`: fires-on-rotation (no key bytes leaked)/
+  silent-fresh/no-stamp/unreadable, fake clientset + stderr capture.
+  `evaluateIdle`: malformed IdleSince surfaces a parse error, M19 recheck
+  error blocks suspend, Suspend error propagates (not errReaped).
+  Residuals documented: Connect happy path + reaperTick wrapper need a
+  runner-factory seam; model_sse.go closures excluded (dashboard owned by
+  the §2a refactor this batch).
