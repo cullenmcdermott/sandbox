@@ -18,7 +18,14 @@ unexpected failures return 500.
 ## Endpoints
 
 ### `GET /healthz`
-Returns 200 if the runner process is alive. No auth required.
+Returns 200 if the runner process is alive. No auth required. Body:
+```json
+{ "status": "ok", "protocolVersion": 1 }
+```
+`protocolVersion` is the runner's `PROTOCOL_VERSION`. Because this route needs no
+bearer token, a client can hit it before it has one to distinguish "no runner
+listening" from "runner listening but protocol-skewed" (the CLI reads it in
+`internal/runner/client.go`).
 
 ### `GET /sessions`
 Returns a JSON array of session state objects. Because the runner serves exactly
@@ -112,10 +119,36 @@ Returns 200 with:
   "turnId": "turn-13"
 }
 ```
+A missing/empty `prompt` (or a non-string prompt) returns **400**
+`{"error": "prompt is required"}`. The runner rejects a turn with **409**
+(`{"error": "..."}`) in three cases — the single-active-turn invariant (R4) plus
+the backend gate — so a client must interrupt the active turn before starting a
+new one:
+
+| Condition | 409 `error` body |
+|---|---|
+| A registered runner turn is already active (any backend) | `a turn is already active; interrupt it before starting a new one` |
+| An interactive `opencode-server` turn is in flight (surfaces only as `status: busy` via the observer, no registered turn) | `the opencode session is busy; interrupt the active turn before starting a new one` |
+| A supervise-only backend that has no `Agent` (accepts no runner turns) | `backend <name> does not accept runner turns` |
+
+The first two are the authoritative `turnRejectReason` set (`runner/src/turns.ts`),
+shared verbatim by the autopilot driver's self-submit gate; the third is the
+no-Agent short-circuit in the route itself.
 
 ### `POST /sessions/:id/turns/:turn_id/interrupt`
 Cancels an active turn. Returns 200 with `{"turnId": "turn-13"}`. Returns 404
-if the turn is not found or no longer active.
+(`{"error": "turn not found or not active"}`) if the turn is not found or no
+longer active.
+
+**Empty turn segment.** The `:turn_id` segment may be **empty**
+(`…/turns//interrupt`): the client doesn't always know the live turn id when the
+user hits esc (it can fire before `POST /turns` returns or the first SSE event
+lands), so the TUI sends an empty segment. When the id is empty — or non-empty
+but not a live turn — the runner falls back to the session's **sole** active turn.
+The R4 single-active-turn invariant guarantees at most one, so "interrupt the
+active turn" is unambiguous without an id. (For an `opencode-server` session whose
+interactive turn runs inside `opencode serve` and thus never registers as a runner
+turn, a `busy` session is aborted directly and returns 200 rather than 404.)
 
 ### `PUT /sessions/:id/autopilot`
 Arms (or replaces) the runner-owned autopilot driver — the server-side

@@ -11,11 +11,12 @@ The `docs/oss-launch/` directory itself is internal working material — delete 
   `ghcr.io/cullenmcdermott/sandbox-reaper:latest`), both packages are public
   (anonymous pull verified 2026-07-01), and `--runner-image` / `--reaper-image`
   remain for bring-your-own-image users (README + `k8s/README.md` + SECURITY.md).
-- [ ] **Create the public GitHub repo** and push the initial commit. Note the
-  whole tree is currently uncommitted WIP (no HEAD) — review the staged set
-  before the first commit. `internal/tui/model.go` is already `git rm --cached`'d;
-  `runner/package-lock.json` is now committed; `/dist/` and `/mockup` are
-  gitignored so the 47MB + 5.8MB binaries can't slip in.
+- [ ] **Create the public GitHub repo** and push the existing history. The tree is
+  a real git repo with committed history on `main` (a HEAD exists) — the earlier
+  "uncommitted WIP / no HEAD" note is stale. Review the tracked set before the
+  public push. `internal/tui/model.go` is `git rm --cached`'d (untracked);
+  `runner/package-lock.json` is committed; `/dist/` and `/mockup` are gitignored so
+  the 47MB + 5.8MB binaries can't slip in.
 - [ ] **Remove (or promote) `docs/oss-launch/`** — it now holds only this
   checklist + `HARDENING-BACKLOG.md` (the superseded `ASSESSMENT.md` / `PLAN.md` /
   `TODO-ARCHIVE.md` were moved to `docs/archive/oss-launch/` on 2026-07-07). Don't

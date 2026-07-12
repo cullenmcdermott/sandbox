@@ -1,5 +1,17 @@
 # Hardening backlog (pre-prod)
 
+> **Status: referenced provenance backlog — NOT a second active backlog.** This
+> file is a point-in-time record (like the `docs/review-*.md` docs), preserved so
+> the C*/M*/BR* ids from the archived `PRODUCTION-REVIEW.md` stay resolvable. It is
+> **not** part of the single-backlog protocol: `TODO.md`'s "How to use this file"
+> preamble is the one canonical, actively-worked backlog. Do not schedule work
+> from this file directly — if an item here becomes active, add it to `TODO.md`
+> (with a `file:line` pointer) and let this entry remain as its provenance. As of
+> 2026-07-12 none of the items below are duplicated as open `TODO.md` entries;
+> `docs/runner-api.md` cross-references C10 (structured runner logging) here rather
+> than tracking it twice. At OSS-launch these become GitHub Issues (see
+> `LAUNCH-CHECKLIST.md`).
+
 Still-open production-readiness / hardening items, extracted from the internal
 `docs/design/PRODUCTION-REVIEW.md` before that working doc was archived out of the
 public tree. Each item below was **re-verified against the current code** during the

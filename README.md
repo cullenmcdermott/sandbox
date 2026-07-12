@@ -250,11 +250,15 @@ cd runner && npm install --ignore-scripts && ./node_modules/.bin/tsc --noEmit
 |---|---|
 | `sandbox` | Open the command-center dashboard (session list, attention routing, attach) |
 | `sandbox claude [prompt]` | Start a **new** Claude Agent SDK session for the current project and open the TUI (`--model <id\|alias>` sets the session model; switch in-session with `/model`; `--worktree auto\|on\|off` controls per-session git worktree isolation). To resume an existing one, use `sandbox attach` |
-| `sandbox opencode` | Start a **new** OpenCode-backend session (external `opencode serve` + attach) |
+| `sandbox opencode [prompt]` | Start a **new** OpenCode-backend session (external `opencode serve` + attach). `--model <provider/model>` sets the session default (e.g. `anthropic/claude-sonnet-4-5`); `--provider anthropic\|openai\|opencode-zen` picks which key the pod receives from the shared Secret |
 | `sandbox attach <id>` | Reconnect to a running/suspended session and replay history |
 | `sandbox trace <id>` | Replay a session's normalized event timeline (`--json`, `--since`, `--tool` filters) |
-| `sandbox status` | List sessions and their status |
-| `sandbox sync <id>` | Manage Mutagen file sync for a session |
+| `sandbox status` | List sessions and their status (`--all` also lists locally-known sessions gone from the cluster) |
+| `sandbox auth [status]` | Show configured auth per agent + cluster connectivity, and list stored Anthropic accounts (offline; no secrets printed) |
+| `sandbox auth login` | Add a stored Anthropic account (`--subscription` via `claude setup-token`, or `--console` for a pasted API key) |
+| `sandbox auth list` / `default <id>` / `logout <id>` | List stored Anthropic accounts, set the default, or remove one (local only) |
+| `sandbox sync <id>` | Manage Mutagen file sync for a session (`--pause`, `--resume`, `--terminate`) |
+| `sandbox sync gc` | Terminate orphaned file-sync sessions whose pod is gone (`--dry-run` to preview; needs cluster access to confirm live sessions) |
 | `sandbox suspend <id>` | Terminate the pod, keep the PVC |
 | `sandbox resume <id>` | Resume a suspended session |
 | `sandbox cancel <id>` | Interrupt the active turn |
