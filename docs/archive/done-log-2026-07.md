@@ -1375,3 +1375,47 @@ opencode prompt positional).
   Residuals documented: Connect happy path + reaperTick wrapper need a
   runner-factory seam; model_sse.go closures excluded (dashboard owned by
   the §2a refactor this batch).
+
+## 2026-07-12 — batch 3: row model, sync GC follow-ups, docs + e2e faithfulness (00f9b6e..709b463)
+
+/loop batch 3. `just check` green after one round-trip (MF3's 5-field list
+template broke the §1d collision test's producer-side fake — real daemon
+output renders an EMPTY context field for legacy syncs, so production was
+never wrong; malformed-row skip contract now pinned in sync + client).
+
+- **§2a — dashboard row model consolidated.** Typed `listRow`
+  (rowSession|rowHeader) slice from `visibleRows()`; `sessionAt(cursor)` /
+  `selectedSession()` the single accessor across render, nav, actions,
+  group toggle, zones overflow band, and attention routing.
+  `jumpToNextNeedingAttention` unified — flat path resolves by session
+  identity (was: raw cursor-as-session-index, safe only by 1:1
+  coincidence), fail-closed translate-back preserved. q/g overloads left
+  for the input-context binding tables (correct scoping — pure keybinding
+  disambiguation). Perf note filed: visibleSessions() recomputed
+  per-frame with no memoization (matches the existing §4 item).
+- **§5 — MF3 context-scoped GC.** `--label sandbox-context=<ctx>` stamped
+  at create; List/GC scoped; other-context syncs never reaped; label-less
+  legacy syncs keep exactly pre-MF3 reapability (never immortal; re-stamped
+  only on fresh recreate — mutagen create is a no-op on existing names).
+  Full selection matrix pinned.
+- **§5 — MF5 stalled-sync self-heal.** `syncProber` (the owning layer, not
+  the dashboard) fires a 30s-debounced background `Manager.Reconcile`
+  (ResumeAll+FlushAll, label-scoped, idempotent) on SyncStalled — heals
+  sync loss while SSE stays healthy. Create path deliberately does not
+  resume (could un-pause a deliberately suspended session).
+- **§5 — SF1 CLI half.** Bounded best-effort `startupSyncGC` on
+  bare-`sandbox` + `attach`; dev-reset/kind-down run `sandbox sync gc`
+  before deleting pods. Remaining: dashboard-Init half + create commands.
+- **§10 — runner-api.md/README/checklist docs.** healthz body (+ why it's
+  tokenless), all three 409 paths verbatim from turnRejectReason, interrupt
+  empty-segment fallback + opencode direct-abort-200; README auth/sync-gc/
+  opencode command rows; LAUNCH-CHECKLIST corrected; HARDENING-BACKLOG
+  given a provenance-not-backlog header (agent verified zero true overlaps
+  with TODO.md by topic grep).
+- **§10 — e2e fake-runner faithfulness ([F4] residual).** Fake now mirrors
+  server.ts: auth-before-route 401 shape, full 409 set, 400 invalid-JSON/
+  missing-prompt, 1 MiB → 413 body, after= validation + B5 clamp, JSON 404s,
+  loud `{"error":…,"fake":"e2e"}` 501s for unmodeled routes.
+  TestE2EFakeRunnerFaithfulness = 16-assertion route/status/body table.
+  Not modeled (documented): seq-0 persist-failure bypass, delta compaction,
+  heartbeats.

@@ -207,11 +207,10 @@ all landed (done log) — the items below are what remains.
   `previewLayout`; render, list sizing, and scrollbar hit-test all walk it.
   `App.modalRect` deliberately excluded (popup margin geometry, not a band).
   Goldens byte-identical; §2c layout changes are now one-line band edits.
-- [ ] **Consolidate the two dashboard row models (from §1b).**
-  `visibleSessions()` vs `visibleRows()` both interpret `m.cursor`; one row
-  abstraction with a `sessionAt(cursor)` accessor for render+nav+actions.
-  The S15 archived-section design pointer lives in the `groups.go` header
-  comment. `groups.go:57`.
+- [x] **Row models consolidated — done 2026-07-12** (done log): one typed
+  `[]listRow` from `visibleRows()`; cursor indexes it; `sessionAt(cursor)`
+  is the single accessor for render/nav/actions/attention routing.
+  `visibleSessions()` remains the flat data source only.
 - [ ] **App.Update flat dispatch + one detachTranscript() (MED).** 450-line
   screen-router; detach sequence duplicated 4×; recursive
   `a.Update(*msg.ready)` re-entry (`app.go:676,691`); B17 single-delegation
@@ -567,15 +566,16 @@ done log.)
   "claude-runner" name is a misnomer today (one shared image serves every
   backend; inbox 2026-07). Cross-ref the §7b ADR — its Flox layer is designed
   as the shared base of this split.
-- [ ] **Mutagen sync GC follow-ups** (core landed — see done log): **MF3**
-  cross-context over-reap (stamp `--label sandbox-context=<ctx>` in CreateAll,
-  scope List/gc to current context); **MF5** mid-session sync loss doesn't
-  self-heal while SSE is healthy (SyncProber stall → re-run CreateAll+Flush);
-  **SF1** auto-GC only runs T+30s into an open TUI (fire `reconcileListCmd` in
-  Init; run gc core best-effort at CLI startup after MF3); make `just
-  dev-reset`/`kind-down` run `sandbox sync gc` before deleting pods.
-  `internal/sync/sync.go`, `internal/tui/dashboard/model.go`,
-  `internal/cli/commands.go`.
+- [~] **Mutagen sync GC follow-ups — MF3/MF5 + SF1-CLI done 2026-07-12**
+  (done log): context labels + scoped GC (legacy label-less syncs keep
+  pre-MF3 reapability); prober-layer debounced Reconcile self-heal on
+  stall; startup GC on bare-`sandbox`/`attach`; dev-reset/kind-down gc
+  first. STILL OPEN (small): fire `reconcileListCmd` in dashboard `Init`
+  (SF1's TUI half, `internal/tui/dashboard/model.go`) and add
+  `startupSyncGC()` to the `claude`/`opencode` create commands
+  (`internal/cli/claude_remote.go`). Unverified live: real-daemon heal of a
+  genuinely wedged transport; `kind-down`-after-gc leaves orphans if
+  sessions were live at teardown (pre-existing, noted).
 
 ## 6) Codex backend + credential manager
 
@@ -895,11 +895,10 @@ naming-break, and Shell items each stand alone.
   boots the real router + real sqlite event log — bearer auth, 404s, every
   409 `turnRejectReason` path, SSE `after=` replay incl. the B5 clamp, B9
   typed 400s. Residual promoted below.
-- [ ] **`internal/e2e`'s fake runner faithfulness to `server.ts` unchecked
-  (MED, [F4] residual).** The real-server suite landed; what remains is
-  cross-checking that the Go e2e harness's fake runner matches the real
-  routes' shapes (status codes, error bodies, replay semantics) so the
-  build-tagged e2e can't drift green. `internal/e2e`, `runner/test/server-http.test.ts`.
+- [x] **e2e fake-runner faithfulness — done 2026-07-12** (done log): fake
+  mirrors server.ts auth ordering, 409 set, 400/413 bodies, after=
+  validation + B5 clamp; unmodeled routes 501 loudly;
+  TestE2EFakeRunnerFaithfulness pins 16 shapes.
 - [x] **Oversized-body 413 now reaches clients — done 2026-07-12** (done
   log): `readBody` stops destroying the socket; rejects once, drains,
   route's catch flushes the mapped 413. Pinning test flipped to assert the
@@ -918,14 +917,10 @@ naming-break, and Shell items each stand alone.
   dashboard `model_sse.go` command closures remain untested (excluded from
   the batch — dashboard was under the §2a refactor).
 
-- [ ] **`docs/runner-api.md` shape gaps** (2026-07-07 docs sweep): `/healthz`
-  body `{status,protocolVersion}` undocumented (consumed by `client.go:97`);
-  `POST /turns` 409s (concurrent-turn + supervise-only) undocumented; interrupt
-  empty-turn-segment (`/turns//interrupt` = active turn) undocumented. README
-  omits `sandbox auth logout`, `auth status`, `sync … gc`. `LAUNCH-CHECKLIST.md`
-  "whole tree is uncommitted WIP (no HEAD)" is false; `HARDENING-BACKLOG.md`
-  C*/M*/BR* items live outside the TODO single-backlog protocol (fold in or keep
-  as a referenced provenance backlog).
+- [x] **docs shape gaps — done 2026-07-12** (done log): runner-api.md
+  healthz body / 409 table / interrupt empty-segment; README auth+sync-gc+
+  opencode flags; LAUNCH-CHECKLIST HEAD claim fixed; HARDENING-BACKLOG
+  marked provenance-only (verified zero true TODO overlaps).
 - [ ] Ops: new CLI-created sessions use `:latest` and can hit the stale traefik
   manifest cache — bust the cache or pin digests CLI-side. (Resume path
   already fixed via digest pinning — see done log.)
