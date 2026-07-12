@@ -112,8 +112,8 @@ func (b *blockCard) renderStreamTail() string {
 	}
 	// A2: use persistent AssistantItem + StreamingMarkdown for incremental rendering
 	// of the live tail instead of creating a new item per delta. The live tail wears
-	// the same Charple role gutter as the finalized assistant block (renderBlock) so
-	// it doesn't shift left when the turn completes. It MUST wrap at the same width as
+	// the same ⏺ bullet + hanging indent as the finalized assistant block (renderBlock)
+	// so it doesn't shift left when the turn completes. It MUST wrap at the same width as
 	// the finalized block (assistantWrapWidth) — keyed off m.width, not the
 	// list-provided width — or the block reflows at message.completed and the view
 	// lurches (T1).
@@ -132,7 +132,7 @@ func (b *blockCard) renderStreamTail() string {
 	// Trim it here so the tail and the finalized block are the same height.
 	body = strings.TrimRight(body, "\n")
 	if body != "" {
-		body = gutterPrefix(body, theme.Charple)
+		body = bulletPrefix(body, theme.TextMuted)
 	}
 	if b.unread {
 		return m.renderUnreadDivider() + "\n" + body

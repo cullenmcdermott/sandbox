@@ -22,10 +22,10 @@ func TestAssistantBlockRoutesThroughChat(t *testing.T) {
 	const body = "Here is **bold** text and a list:\n\n- one\n- two\n"
 	got := m.renderBlock(m.newBlockCard(blockAssistant, body))
 
-	// Oracle: the same pool renderer chat.MarkdownRenderer at the gutter-reduced
-	// width, then wrapped in the A2.1 Charple role gutter — exactly what
+	// Oracle: the same pool renderer chat.MarkdownRenderer at the indent-reduced
+	// width, then headed with the §2c ⏺ bullet + hanging indent — exactly what
 	// renderBlock does for a finalized assistant block.
-	wrap := m.width - 2 - gutterInset
+	wrap := m.width - 2 - msgIndent
 	if wrap < 20 {
 		wrap = 20
 	}
@@ -37,7 +37,7 @@ func TestAssistantBlockRoutesThroughChat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pool render: %v", err)
 	}
-	want := gutterPrefix(strings.TrimRight(out, "\n"), theme.Charple)
+	want := bulletPrefix(strings.TrimRight(out, "\n"), theme.TextMuted)
 
 	if got != want {
 		t.Fatalf("blockAssistant does not route through chat pool.\n--- got ---\n%q\n--- want ---\n%q", got, want)

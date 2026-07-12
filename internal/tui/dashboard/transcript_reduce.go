@@ -314,6 +314,9 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		var p session.RateLimitPayload
 		_ = json.Unmarshal(ev.Payload, &p)
 		m.rlSeen = true
+		// §2c: the rate-limit row is transient — it surfaces for rlTransientWindow
+		// after each update, then fades, rather than owning a permanent second row.
+		m.rlUpdatedAt = nowFunc()
 		m.rlAvailable = p.Available
 		m.rlSubscription = p.SubscriptionType
 		m.rl5hUtil = p.FiveHourUtil

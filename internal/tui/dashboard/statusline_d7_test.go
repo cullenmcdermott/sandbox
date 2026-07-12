@@ -27,14 +27,34 @@ func TestStatusLineWarnsAtEightyPercent(t *testing.T) {
 	}
 }
 
-// Below 80% there is no warning marker.
+// Between the ≥60% gauge threshold and the 80% warning there is no warning
+// marker. (§2c: below 60% the gauge is hidden entirely, so this probes 65% —
+// visible, un-warned — rather than the old always-visible 10% case.)
 func TestStatusLineNoWarnBelowEighty(t *testing.T) {
-	out := stripANSI(newStatusModel(1000, 100).renderStatusLine())
-	if !strings.Contains(out, "10%") {
-		t.Fatalf("status line missing 10%% context: %q", out)
+	out := stripANSI(newStatusModel(1000, 650).renderStatusLine())
+	if !strings.Contains(out, "65%") {
+		t.Fatalf("status line missing 65%% context: %q", out)
 	}
 	if strings.Contains(out, "! ") {
-		t.Fatalf("status line should not warn at 10%%: %q", out)
+		t.Fatalf("status line should not warn at 65%%: %q", out)
+	}
+}
+
+// §2c: below the 60% gauge threshold the ctx gauge is hidden entirely so a roomy
+// context stays quiet — no percentage in the row at all.
+func TestStatusLineHidesCtxBelowThreshold(t *testing.T) {
+	out := stripANSI(newStatusModel(1000, 100).renderStatusLine())
+	if strings.Contains(out, "10%") || strings.Contains(out, "%") {
+		t.Fatalf("ctx gauge must be hidden below 60%%, got %q", out)
+	}
+}
+
+// §2c fix (c): when the model's context limit is unknown the chat status line
+// HIDES the gauge (matching the dashboard), rather than assuming a 200k window.
+func TestStatusLineHidesCtxWhenLimitUnknown(t *testing.T) {
+	m := newStatusModel(0, 180000) // limit unknown, lots of tokens
+	if out := stripANSI(m.renderStatusLine()); strings.Contains(out, "%") {
+		t.Fatalf("unknown ctx limit must hide the gauge (no %%), got %q", out)
 	}
 }
 

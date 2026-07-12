@@ -37,11 +37,10 @@ var (
 	styleTError     lipgloss.Style
 	styleTInfo      lipgloss.Style
 
-	// Status-line styles. renderStatusLine and workingStatus run on every
+	// Status-line styles. renderStatusLine and workingLine run on every
 	// keystroke plus each 150ms work-tick, so their fixed styles are memoized
 	// here rather than rebuilt per frame.
 	styleSLMuted  lipgloss.Style
-	styleSLLabel  lipgloss.Style
 	styleSLBody   lipgloss.Style
 	styleSLBright lipgloss.Style
 	styleSLBranch lipgloss.Style
@@ -73,14 +72,15 @@ func rebuildStyles() {
 		BorderForeground(theme.BorderMedium)
 	styleEmpty = lipgloss.NewStyle().Foreground(theme.TextDim)
 
-	styleTUser = lipgloss.NewStyle().Foreground(theme.Guac).Bold(true)
+	// §2c: the user's own words are the quietest element in the transcript, not
+	// the loudest — a muted foreground behind a dim "> " quote, no Bold/Guac.
+	styleTUser = lipgloss.NewStyle().Foreground(theme.TextMuted)
 	styleTAssistant = lipgloss.NewStyle().Foreground(theme.TextBody)
 	styleTTool = lipgloss.NewStyle().Foreground(theme.Malibu)
 	styleTError = lipgloss.NewStyle().Foreground(theme.Coral)
 	styleTInfo = lipgloss.NewStyle().Foreground(theme.TextMuted)
 
 	styleSLMuted = lipgloss.NewStyle().Foreground(theme.TextMuted)
-	styleSLLabel = lipgloss.NewStyle().Foreground(theme.TextSecondary)
 	styleSLBody = lipgloss.NewStyle().Foreground(theme.TextBody)
 	styleSLBright = lipgloss.NewStyle().Foreground(theme.TextBright).Bold(true)
 	styleSLBranch = lipgloss.NewStyle().Foreground(theme.Peach)

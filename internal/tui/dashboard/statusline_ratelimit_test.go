@@ -59,6 +59,7 @@ func TestStatusLineShowsRealRateLimits(t *testing.T) {
 	withFixedNow(t, base, func() {
 		m := &TranscriptModel{}
 		m.rlSeen, m.rlAvailable = true, true
+		m.rlUpdatedAt = base // §2c: within the transient window so the row shows
 		m.rl5hUtil, m.rl7dUtil = 42, 18
 		m.rl5hReset = base.Add(2*time.Hour + 13*time.Minute) // -> "2h13m"
 		m.rl7dReset = base.Add(3 * 24 * time.Hour)           // -> "3d0h"
@@ -87,6 +88,7 @@ func TestStatusLineShowsRealRateLimits(t *testing.T) {
 func TestStatusLineHidesUnavailableRateLimits(t *testing.T) {
 	m := &TranscriptModel{}
 	m.rlSeen, m.rlAvailable = true, false // headless: rlSubscription stays ""
+	m.rlUpdatedAt = nowFunc()             // §2c: within the transient window
 	out := stripANSI(m.renderStatusLine())
 	if strings.Contains(out, "5h:") || strings.Contains(out, "weekly:") {
 		t.Errorf("unavailable rate limits must not render a window row: %q", out)
@@ -177,6 +179,7 @@ func TestStatusLineShowsActiveModelWindow(t *testing.T) {
 		m := &TranscriptModel{}
 		m.Model = "claude-opus-4-8"
 		m.rlSeen, m.rlAvailable = true, true
+		m.rlUpdatedAt = base // §2c: within the transient window so the row shows
 		m.rl5hUtil, m.rl7dUtil = 42, 18
 		m.rlOpusSeen, m.rlOpusUtil = true, 62
 		m.rlOpusReset = base.Add(2 * 24 * time.Hour) // -> "2d0h"
@@ -213,6 +216,7 @@ func TestStatusLineShowsSonnetActiveWindow(t *testing.T) {
 		m := &TranscriptModel{}
 		m.Model = "claude-sonnet-4-6"
 		m.rlSeen, m.rlAvailable = true, true
+		m.rlUpdatedAt = base // §2c: within the transient window so the row shows
 		m.rl5hUtil, m.rl7dUtil = 42, 18
 		m.rlOpusSeen, m.rlOpusUtil = true, 62          // present but must NOT show for a Sonnet session
 		m.rlSonnetSeen, m.rlSonnetUtil = true, 0       // present at 0% — must still render

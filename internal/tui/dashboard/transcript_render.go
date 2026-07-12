@@ -87,6 +87,7 @@ const (
 	regionPalette    = "palette"
 	regionSearch     = "search"
 	regionGap        = "gap"
+	regionWorking    = "working"
 	regionComposer   = "composer"
 	regionStatusLine = "statusline"
 	regionBanner     = "banner"
@@ -226,13 +227,22 @@ func (m *TranscriptModel) liveLayout() vlayout {
 		below = append(below, region{regionSearch, 1, func() string { return m.renderSearchBar(m.width) }})
 	}
 
-	// A blank line sets the composer apart from the transcript (roominess), then
-	// the boxed composer (border 2 + rows + hint row 1 = inputRows()+3) and the
-	// fixed-height status line.
+	// A blank line sets the composer apart from the transcript (roominess). While a
+	// turn runs (or history replays) a single left-aligned working-indicator line
+	// sits directly above the composer — "✳ Thinking… (12s · ↓820 tokens · esc to
+	// interrupt)" — so the live state and the esc affordance are one glance above
+	// the input. It is absent when idle, so the idle layout is byte-identical.
+	below = append(below, region{regionGap, 1, func() string { return "" }})
+	if m.workingLine() != "" {
+		below = append(below, region{regionWorking, 1, func() string {
+			return truncate(m.workingLine(), max(1, m.width))
+		}})
+	}
+	// Then the boxed composer (border 2 + rows + hint row 1 = inputRows()+3) and
+	// the status line (1 quiet row, +1 while the transient rate-limit row shows).
 	below = append(below,
-		region{regionGap, 1, func() string { return "" }},
 		region{regionComposer, m.inputRows() + 3, m.renderInput},
-		region{regionStatusLine, statusLineRows, m.renderStatusLine},
+		region{regionStatusLine, m.statusLineHeight(), m.renderStatusLine},
 	)
 
 	return m.stack(m.headerBands(), below, m.liveBodyView)
@@ -339,29 +349,73 @@ func (m *TranscriptModel) renderUnreadDivider() string {
 	return lipgloss.NewStyle().Foreground(theme.TextMuted).Render(line)
 }
 
-// A2.1 (Calm) role gutter. gutterInset is the left inset a guttered message (or
-// a place-indented subordinate block) occupies: 1 pad column + the 2-cell role
-// bar "▌ ". Wrapping blocks render that much narrower so the bar + text still fit
-// the body width.
-const gutterInset = 3
+// §2c message grammar. msgIndent is the hanging-indent width a user or assistant
+// message occupies: the 2-cell head prefix ("⏺ " for the assistant bullet, "> "
+// for the quiet user prompt) on the first line, matched by a 2-space indent on
+// every wrapped/continuation line so the block reads as one column. Wrapping
+// blocks render that much narrower so the prefix + text still fit the body width.
+//
+// This replaced the full-height role gutter bars (a Charple/Guac "▌ " down every
+// line): those colored bars were the largest departure from Claude Code's look.
+// The ⏺ bullet is a neutral marker (theme.TextMuted) so the transcript's only
+// colored signals are the tool-card status hues (running/ok/err) — role hue no
+// longer competes with status.
+const msgIndent = 2
 
-// gutterPrefix puts a slim role-colored bar (Charple for the assistant, Guac for
-// the user) down the left of every line of a message block — replacing the old
-// "❯ " prefix. The bar is its own styled span so it never bleeds into the line.
-func gutterPrefix(s string, bar color.Color) string {
-	b := lipgloss.NewStyle().Foreground(bar).Render("▌ ")
+// hangingPrefix applies a 2-cell head prefix to the first line of a message
+// block and a 2-space indent to every continuation line, so a wrapped message
+// aligns under its bullet/quote rather than back at column 0. An empty input
+// stays empty (no stray prefix on a blank line — handled by renderBlock).
+func hangingPrefix(s, firstPrefix string) string {
 	lines := strings.Split(s, "\n")
-	for i, l := range lines {
-		lines[i] = " " + b + l
+	for i := range lines {
+		if i == 0 {
+			lines[i] = firstPrefix + lines[i]
+		} else {
+			lines[i] = "  " + lines[i]
+		}
 	}
 	return strings.Join(lines, "\n")
 }
 
-// placeIndent indents a subordinate block (tool card, footer, notice, reasoning)
-// by gutterInset spaces so it aligns under the message column rather than under
-// the role bar.
+// bulletPrefix heads an assistant message with a single "⏺ " bullet (CC's
+// per-turn action grammar), colored bar for status but neutral for plain text.
+// Leading blank lines are dropped first: glamour emits a blank document-margin
+// line before the first paragraph, which would otherwise orphan the ⏺ on its own
+// line above the text. finalizeStreaming and renderStreamTail both feed
+// trimLeadingBlankLines-cleaned bodies, so the tail and the finalized block stay
+// the same height (T1).
+func bulletPrefix(s string, bullet color.Color) string {
+	head := lipgloss.NewStyle().Foreground(bullet).Render(toolHeadBullet) + " "
+	return hangingPrefix(trimLeadingBlankLines(s), head)
+}
+
+// trimLeadingBlankLines drops leading whitespace-only lines from s.
+func trimLeadingBlankLines(s string) string {
+	for {
+		i := strings.IndexByte(s, '\n')
+		if i < 0 || strings.TrimSpace(s[:i]) != "" {
+			return s
+		}
+		s = s[i+1:]
+	}
+}
+
+// quotePrefix heads a user message with a dim "> " — the user's own words are the
+// quietest element in the transcript, not the loudest (they used to be Bold+Guac
+// behind a colored bar).
+func quotePrefix(s string) string {
+	head := lipgloss.NewStyle().Foreground(theme.TextDim).Render("> ")
+	return hangingPrefix(s, head)
+}
+
+// placeIndent indents a subordinate block (footer, notice, reasoning) by
+// msgIndent spaces so it aligns under the message content column rather than at
+// column 0. Tool/subagent cards are NOT place-indented: they carry their own ⏺
+// head at column 0 (aligned with the assistant bullets), so renderBlock passes
+// them through verbatim.
 func placeIndent(s string) string {
-	pad := strings.Repeat(" ", gutterInset)
+	pad := strings.Repeat(" ", msgIndent)
 	lines := strings.Split(s, "\n")
 	for i, l := range lines {
 		lines[i] = pad + l
@@ -369,10 +423,12 @@ func placeIndent(s string) string {
 	return strings.Join(lines, "\n")
 }
 
-// renderBlock renders a transcript block with its Calm chrome: user/assistant
-// blocks get the role gutter bar; every other (subordinate) kind is indented to
-// the message column. The bare content is produced by renderBlockBody; an empty
-// body stays empty (no stray bar/indent on a blank line).
+// renderBlock renders a transcript block with its §2c chrome: an assistant block
+// gets the neutral ⏺ bullet + hanging indent; a user block gets the dim "> "
+// quote; tool/subagent cards keep their own ⏺ head at column 0; every other
+// (subordinate) kind is indented to the message content column. The bare content
+// is produced by renderBlockBody; an empty body stays empty (no stray prefix on a
+// blank line).
 func (m *TranscriptModel) renderBlock(b *blockCard) string {
 	raw := m.renderBlockBody(b)
 	if raw == "" {
@@ -380,9 +436,12 @@ func (m *TranscriptModel) renderBlock(b *blockCard) string {
 	}
 	switch b.kind {
 	case blockUser:
-		return gutterPrefix(raw, theme.Guac)
+		return quotePrefix(raw)
 	case blockAssistant:
-		return gutterPrefix(raw, theme.Charple)
+		return bulletPrefix(raw, theme.TextMuted)
+	case blockToolCard, blockSubagent:
+		// The card owns its ⏺ head at column 0, aligned with assistant bullets.
+		return raw
 	default:
 		return placeIndent(raw)
 	}
@@ -393,17 +452,31 @@ func (m *TranscriptModel) renderBlock(b *blockCard) string {
 // (T1): the tail wraps at this width while streaming, and if the finalized block
 // wrapped even one column narrower, the extra wrapped lines would push the
 // content up and the view would lurch off the bottom at message.completed. It
-// reserves the gutter chrome (gutterInset) plus one column for the scrollbar.
+// reserves the ⏺ hanging indent (msgIndent) plus a scrollbar + margin column.
 func (m *TranscriptModel) assistantWrapWidth() int {
-	w := m.width - 2 - gutterInset
+	w := m.width - 2 - msgIndent
 	if w < 20 {
 		w = 20
 	}
 	return w
 }
 
-// renderBlockBody renders a block's bare content (no gutter/indent). Wrapping
-// kinds reserve gutterInset columns so the chrome added by renderBlock fits.
+// cardWidth is the render width for a tool or subagent card. The card owns its ⏺
+// head at column 0 (aligned with the assistant bullets), so — unlike a wrapped
+// message body — it reserves only the scrollbar column + one right margin, not a
+// hanging indent. renderBlockBody and toolCardExpandable share it so the elbow
+// hint, the toggle gate (H7), and the card's own render can never disagree.
+func (m *TranscriptModel) cardWidth() int {
+	w := m.width - 2
+	if w < 10 {
+		w = 10
+	}
+	return w
+}
+
+// renderBlockBody renders a block's bare content (no prefix/indent). Message
+// bodies reserve msgIndent columns (assistantWrapWidth); cards use cardWidth so
+// their ⏺ head sits at column 0 where renderBlock passes them through verbatim.
 // renderAssistantMD renders assistant markdown through the pooled glamour
 // renderer, falling back to a plainly-styled render when the renderer is
 // unavailable or errors. The finalized-block path (renderBlockBody) and the live
@@ -437,11 +510,7 @@ func (m *TranscriptModel) renderBlockBody(b *blockCard) string {
 		return ai.RawRender(wrap)
 	case blockToolCard:
 		if b.tool != nil {
-			w := m.width - 2 - gutterInset
-			if w < 10 {
-				w = 10
-			}
-			return m.renderToolCard(b.tool, w)
+			return m.renderToolCard(b.tool, m.cardWidth())
 		}
 		return b.text
 	case blockTool:
@@ -457,11 +526,7 @@ func (m *TranscriptModel) renderBlockBody(b *blockCard) string {
 		return b.text
 	case blockSubagent:
 		if b.sub != nil {
-			w := m.width - 2 - gutterInset
-			if w < 10 {
-				w = 10
-			}
-			return m.renderSubagentCard(b.sub, w)
+			return m.renderSubagentCard(b.sub, m.cardWidth())
 		}
 	case blockReasoning:
 		// Render reasoning/thinking text as a muted "Thought:" prefix box
@@ -718,10 +783,7 @@ func headArg(arg string, budget int) (shown string, truncated bool) {
 // call the renderer makes (renderItem's blockToolCard case), so a card whose
 // elbow shows no expand hint is also not toggleable (H7).
 func (m *TranscriptModel) toolCardExpandable(c *toolCard) bool {
-	w := m.width - 2 - gutterInset
-	if w < 10 {
-		w = 10
-	}
+	w := m.cardWidth()
 	nameStr := c.tool
 	if nameStr == "" {
 		nameStr = "tool"
@@ -1109,8 +1171,10 @@ func (m *TranscriptModel) renderInput() string {
 		Render(m.input.View())
 
 	// A thin row under the box: the vim-mode badge on the left (only when modal
-	// editing is on), and the live working/loading indicator (or key hints)
-	// right-aligned.
+	// editing is on), and the key hints right-aligned. The live working/loading
+	// indicator no longer lives here — it is a dedicated left-aligned line ABOVE
+	// the composer (workingLine / regionWorking), where it can spell out "esc to
+	// interrupt" instead of the box's static "esc detach".
 	var right string
 	switch {
 	case m.vimEnabled && m.imode == modeNormal:
@@ -1121,11 +1185,6 @@ func (m *TranscriptModel) renderInput() string {
 		// Vim off: the prompt is always focused, so surface how to leave (esc when
 		// idle, or ctrl+]) instead of the modal "i to type" hint.
 		right = kit.KbdRow([2]string{"↵", "send"}, [2]string{"esc", "detach"})
-	}
-	if m.replaying {
-		right = m.loadingStatus()
-	} else if m.turnActive {
-		right = m.workingStatus()
 	}
 	badge := ""
 	if m.vimEnabled {
@@ -1198,27 +1257,79 @@ func (m *TranscriptModel) loadingStatus() string {
 	return lipgloss.NewStyle().Foreground(theme.Malibu).Render("⟳ " + msg)
 }
 
-// workingStatus renders the live indicator shown on the prompt line during a
-// turn: spinner · elapsed · token counts · cost.
-func (m *TranscriptModel) workingStatus() string {
-	spin := theme.SpinnerFrame(m.workFrame)
-	// Animated "working" ellipsis at a slower sub-rate than the spinner (§C.3),
-	// collapsed to a static "…" under reduce-motion (§E).
+// workingLine renders the §2c live working indicator: a single left-aligned line
+// ABOVE the composer while a turn runs (or history replays), e.g.
+//
+//	✳ Thinking… (12s · ↓820 tokens · esc to interrupt)
+//
+// The verb is context-aware (reasoning→Thinking, a running tool→Running <Tool>,
+// streaming text→Writing, else Working). The trailing hint says "esc to steer"
+// when a prompt is queued (esc sends it now) and "esc to interrupt" otherwise —
+// esc genuinely does both, which the old right-aligned "working…" cell never
+// spelled out. Empty when idle and not replaying so the band is absent.
+func (m *TranscriptModel) workingLine() string {
+	if m.replaying {
+		return m.loadingStatus()
+	}
+	if !m.turnActive {
+		return ""
+	}
+	// Animated "…" at a slower sub-rate than a spinner (§C.3), static under
+	// reduce-motion (§E) so goldens are byte-stable.
 	ell := anim.Ellipsis(m.workFrame / spinnerSubRate)
 	if anim.ReduceMotion() {
 		ell = "…"
 	}
-	working := styleSLBusy.Render("working" + ell)
-	out := spin + " " + working + "  " +
-		styleSLLabel.Render(fmtElapsed(nowFunc().Sub(m.turnStart)))
-	if m.InputTokens > 0 || m.OutputTokens > 0 {
-		out += styleSLMuted.
-			Render(fmt.Sprintf("  ↑%s ↓%s", kit.FormatTokens(m.InputTokens), kit.FormatTokens(m.OutputTokens)))
+	glyph := lipgloss.NewStyle().Foreground(theme.Busy).Render(theme.MarkClaude)
+	verb := styleSLBusy.Render(m.workingVerb() + ell)
+
+	parts := []string{fmtElapsed(nowFunc().Sub(m.turnStart))}
+	if m.OutputTokens > 0 {
+		parts = append(parts, "↓"+kit.FormatTokens(m.OutputTokens)+" tokens")
 	}
-	if m.TotalCostUSD > 0 {
-		out += styleSLCost.Render("  " + kit.FormatCost(m.TotalCostUSD))
+	if m.queuedPrompt != "" {
+		parts = append(parts, "esc to steer")
+	} else {
+		parts = append(parts, "esc to interrupt")
 	}
-	return out
+	meta := styleSLMuted.Render(" (" + strings.Join(parts, " · ") + ")")
+	return glyph + " " + verb + meta
+}
+
+// workingVerb picks the present-tense verb for the working indicator from the
+// live turn phase: thinking (reasoning), running a specific tool, writing the
+// reply (streaming text), or a generic "Working" between phases.
+func (m *TranscriptModel) workingVerb() string {
+	switch {
+	case m.reasoning:
+		return "Thinking"
+	case m.runningToolName() != "":
+		return "Running " + m.runningToolName()
+	case m.streaming:
+		return "Writing"
+	default:
+		return "Working"
+	}
+}
+
+// runningToolName returns the display name of the most recently started tool
+// still awaiting its result, or "" when none is running. It reads the pendingTools
+// FIFO (block indices of unresolved tool cards) so it stays O(pending), not O(all
+// blocks).
+func (m *TranscriptModel) runningToolName() string {
+	for i := len(m.pendingTools) - 1; i >= 0; i-- {
+		idx := m.pendingTools[i]
+		if idx < 0 || idx >= len(m.blocks) {
+			continue
+		}
+		if b := m.blocks[idx]; b.tool != nil && b.tool.status == toolRunning {
+			if b.tool.tool != "" {
+				return b.tool.tool
+			}
+			return "tool"
+		}
+	}
+	return ""
 }
 
 // turnFooter renders the dim per-turn footer (§D): a diamond, the model, the

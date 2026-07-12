@@ -17,17 +17,31 @@ import (
 
 	"charm.land/lipgloss/v2"
 
+	"github.com/cullenmcdermott/sandbox/tui/anim"
 	"github.com/cullenmcdermott/sandbox/tui/terminal"
 	"github.com/cullenmcdermott/sandbox/tui/theme"
 )
 
-// statusLineRows is the fixed height of the status-line block. A2.5 (Calm)
-// collapsed the old 4-row CC-clone block to two: a single status row (model ·
-// cwd · branch · ctx · cost · mode) plus one conditional rate-limit row, shown
-// only when real claude.ai /usage data is present and otherwise blank. Kept
-// FIXED at 2 (not variable) so the body height never reflows when usage data
-// arrives mid-session. layout() reserves this many rows below the prompt.
-const statusLineRows = 2
+// Status-line collapse (§2c). The permanent two-row gauge block became ONE quiet
+// row by default: model · cwd · branch · (ctx only ≥ctxGaugeThreshold) · (cost
+// only ≥statusCostThreshold) · mode. The rate-limit window row is TRANSIENT — it
+// appears for rlTransientWindow after a rate_limit.updated event and fades back,
+// so the status line is a single line at rest. Height is therefore variable
+// (statusLineHeight): 1 at rest, 2 while the transient row shows. The layout is
+// declarative (liveLayout reserves statusLineHeight()), so the one-line grow/
+// shrink is a clean body reflow, not hand-counted stack arithmetic.
+const (
+	// ctxGaugeThreshold is the context-window fill fraction (as a percent) below
+	// which the ctx gauge is hidden entirely — a fresh, roomy context is quiet.
+	ctxGaugeThreshold = 60
+	// statusCostThreshold hides trivial spend: the $cost segment appears only once
+	// a turn has cost at least this much, so a cheap session stays uncluttered.
+	statusCostThreshold = 0.10
+	// rlTransientWindow is how long the rate-limit row stays up after an update
+	// before it has fully faded out. The last fadeTail of it is the fade.
+	rlTransientWindow = 8 * time.Second
+	rlTransientFade   = 3 * time.Second
+)
 
 // podWorkspacePrefix is the legacy pod path the project was mounted under. The
 // SDK cwd is now the real host project path (Option B, resumable transcripts),
@@ -332,18 +346,6 @@ func fmtReset(t time.Time) string {
 	}
 }
 
-// fmtTokenLimit formats a token count compactly: 1000000→"1.0m", 200000→"200k".
-func fmtTokenLimit(n int) string {
-	switch {
-	case n >= 1_000_000:
-		return fmt.Sprintf("%.1fm", float64(n)/1_000_000)
-	case n >= 1000:
-		return fmt.Sprintf("%dk", n/1000)
-	default:
-		return formatInt(n)
-	}
-}
-
 // statusCwd is the project path shown in the status line: the SDK cwd (now the
 // real host project path) with any legacy /session/workspace/ prefix stripped,
 // falling back to the project base name.
@@ -383,17 +385,168 @@ func (m *TranscriptModel) activeModelWindow() (util float64, reset time.Time, la
 	return 0, time.Time{}, "", false
 }
 
-// renderStatusLine renders the 4-row CC-clone status line, themed via the
-// Phase-0a tokens. Always visible (idle and during a turn).
-func (m *TranscriptModel) renderStatusLine() string {
-	muted := styleSLMuted // connective text
-	label := styleSLLabel
-	sep := muted.Render(" ─ ")
+// statusLineHeight is the current row count of the status line: one quiet row at
+// rest, plus the transient rate-limit row while it is up (§2c). liveLayout
+// reserves exactly this, so renderStatusLine must emit the same number of rows.
+func (m *TranscriptModel) statusLineHeight() int {
+	if m.rateRowVisible() {
+		return 2
+	}
+	return 1
+}
 
-	// Row 1: model ─ cwd ─ branch* ─ used/limit pct ●bar · $cost.
-	segs := []string{
-		styleSLBright.Render(shortModelName(m.Model)),
-		styleSLBody.Render(m.statusCwd()),
+// rateRowVisible reports whether the transient rate-limit row is up: within
+// rlTransientWindow of the last rate_limit.updated. A zero updatedAt (no event
+// yet) is never visible, so a fresh session shows a single-row status line.
+func (m *TranscriptModel) rateRowVisible() bool {
+	if !m.rlSeen || m.rlUpdatedAt.IsZero() {
+		return false
+	}
+	return nowFunc().Sub(m.rlUpdatedAt) < rlTransientWindow
+}
+
+// rateRowFade is the transient row's 0..1 fade fraction: 0 during the hold, then
+// ramping to 1 across the final rlTransientFade so the row blends toward the page
+// background before it is dropped. 0 outside the window (never called then).
+func (m *TranscriptModel) rateRowFade() float64 {
+	el := nowFunc().Sub(m.rlUpdatedAt)
+	start := rlTransientWindow - rlTransientFade
+	if el <= start {
+		return 0
+	}
+	f := float64(el-start) / float64(rlTransientFade)
+	if f < 0 {
+		f = 0
+	}
+	if f > 1 {
+		f = 1
+	}
+	return f
+}
+
+// slFade blends a status-line color toward the page background by frac (0=full,
+// 1=gone), used to fade the transient rate-limit row out over its window.
+func slFade(c color.Color, frac float64) color.Color {
+	if frac <= 0 {
+		return c
+	}
+	return anim.LerpColor(c, theme.Page, frac)
+}
+
+// slSeg is one budgeted status-row segment. Required segments (the model id and
+// the permission-mode chip — the ⚠ bypass warning must never be invisible, §2d)
+// are always kept; optional segments are dropped from the tail inward when the
+// row would otherwise overflow, so the row is width-safe by construction (§1c).
+// Each optional segment bakes in its own leading separator, so dropping a middle
+// one never leaves a dangling separator.
+type slSeg struct {
+	s        string
+	required bool
+}
+
+// budgetRow joins segments left-to-right, keeping every required segment and
+// including optional ones only while they (plus the still-unplaced required
+// segments) fit the budget. A final ANSI-aware truncate is the backstop when even
+// the required segments overflow a very narrow width.
+func budgetRow(budget int, segs []slSeg) string {
+	reqAfter := make([]int, len(segs)+1)
+	for i := len(segs) - 1; i >= 0; i-- {
+		reqAfter[i] = reqAfter[i+1]
+		if segs[i].required {
+			reqAfter[i] += lipgloss.Width(segs[i].s)
+		}
+	}
+	var b strings.Builder
+	cur := 0
+	for i, sg := range segs {
+		w := lipgloss.Width(sg.s)
+		if !sg.required && cur+w+reqAfter[i+1] > budget {
+			continue
+		}
+		b.WriteString(sg.s)
+		cur += w
+	}
+	out := b.String()
+	if lipgloss.Width(out) > budget {
+		out = truncate(out, budget)
+	}
+	return out
+}
+
+// ctxBar renders the 10-cell context gauge: the Ghostty raster gauge (Kitty
+// placeholders), the shimmer bar during a turn, or the static block bar — the
+// same degradation ladder as before, just gated behind the ≥60% threshold now.
+func (m *TranscriptModel) ctxBar(frac float64, pct int) string {
+	switch {
+	case m.caps.KittyGraphics && !m.caps.ReduceMotion:
+		return m.ctxGaugeKitty(frac)
+	case m.caps.TrueColor && !m.caps.ReduceMotion && m.DashStatus == StatusBusy:
+		return shimmerBlockBar(frac, 10, m.workFrame, pct >= 80)
+	default:
+		return blockBar(frac, 10, rampColor(frac))
+	}
+}
+
+// ctxSegment builds the row-1 context gauge, or "" to hide it. It is HIDDEN when
+// the model's context limit is unknown (m.CtxLimit ≤ 0) — matching the dashboard,
+// which hides the gauge then rather than assuming a 200k window (§2c fix c) — and
+// also below ctxGaugeThreshold, so a roomy context stays quiet. At/above the
+// threshold it shows "pct% <bar>", with a coral "! " warning past 80%.
+func (m *TranscriptModel) ctxSegment() string {
+	if m.CtxLimit <= 0 {
+		return ""
+	}
+	frac := float64(m.ctxTokens()) / float64(m.CtxLimit)
+	if frac < 0 {
+		frac = 0
+	}
+	if frac > 1 {
+		frac = 1
+	}
+	pct := int(frac*100 + 0.5)
+	if pct < ctxGaugeThreshold {
+		return ""
+	}
+	warn := ""
+	if pct >= 80 {
+		warn = styleSLWarn.Render("! ")
+	}
+	return warn +
+		lipgloss.NewStyle().Foreground(rampColor(frac)).Render(fmt.Sprintf("%d%% ", pct)) +
+		m.ctxBar(frac, pct)
+}
+
+// renderStatusLine renders the §2c collapsed status line: one quiet row (model ·
+// cwd · branch · ctx≥60% · cost≥threshold · mode · effort · sync), plus the
+// transient rate-limit row while it is up. Width-safe by construction.
+func (m *TranscriptModel) renderStatusLine() string {
+	// Budget the row to the frame width (leaving the leading space), so segments
+	// shed tail-first instead of overflowing (§1c). A model that hasn't been laid
+	// out yet (width 0 — background/warm builds, unit tests) has no meaningful
+	// budget, so nothing is shed: the row renders in full.
+	budget := 1 << 30
+	if m.width > 0 {
+		budget = max(10, m.width-1)
+	}
+	row1 := m.statusRow1(budget)
+	if !m.rateRowVisible() {
+		return " " + row1
+	}
+	return " " + row1 + "\n " + truncate(m.rateRow(), budget)
+}
+
+// statusRow1 assembles the always-present quiet row as budgeted segments. The
+// model id and the mode chip are required (the ⚠ bypass chip must stay visible);
+// cwd, branch, ctx, cost, effort, and sync are optional and shed tail-first at
+// narrow widths. Every optional segment bakes in its leading separator.
+func (m *TranscriptModel) statusRow1(budget int) string {
+	muted := styleSLMuted
+	sepDash := muted.Render(" ─ ")
+	sepDot := muted.Render(" · ")
+
+	segs := []slSeg{{s: styleSLBright.Render(shortModelName(m.Model)), required: true}}
+	if cwd := m.statusCwd(); cwd != "" {
+		segs = append(segs, slSeg{s: sepDash + styleSLBody.Render(cwd)})
 	}
 	if m.Branch != "" {
 		b := m.Branch
@@ -404,103 +557,65 @@ func (m *TranscriptModel) renderStatusLine() string {
 		if m.Ahead > 0 || m.Behind > 0 {
 			branch += muted.Render(fmt.Sprintf(" ↑%d↓%d", m.Ahead, m.Behind))
 		}
-		segs = append(segs, branch)
+		segs = append(segs, slSeg{s: sepDash + branch})
 	}
-
-	limit := m.CtxLimit
-	if limit <= 0 {
-		limit = 200000
+	if ctx := m.ctxSegment(); ctx != "" {
+		segs = append(segs, slSeg{s: sepDash + ctx})
 	}
-	used := m.ctxTokens()
-	frac := float64(used) / float64(limit)
-	if frac < 0 {
-		frac = 0
+	// Cost trails only once spend is material (§2c): a cheap session stays quiet.
+	if m.TotalCostUSD >= statusCostThreshold {
+		segs = append(segs, slSeg{s: sepDot + styleSLCost.Render(fmt.Sprintf("$%.2f", m.TotalCostUSD))})
 	}
-	if frac > 1 {
-		frac = 1
-	}
-	pct := int(frac*100 + 0.5)
-	warn := ""
-	if pct >= 80 {
-		warn = styleSLWarn.Render("! ")
-	}
-	// Stage 1: while a turn runs on a truecolor terminal (and motion is allowed),
-	// the gauge fill becomes a live gradient that shimmers per work-tick frame and
-	// pulses coral past 80%. Everywhere else (idle, NO_COLOR, non-truecolor, tests)
-	// it falls back to the static single-color bar — byte-identical to today.
-	bar := blockBar(frac, 10, rampColor(frac))
-	switch {
-	case m.caps.KittyGraphics && !m.caps.ReduceMotion:
-		// Stage 3: the showpiece — a rasterized 10×1-cell gauge via Kitty Unicode
-		// placeholders. Overrides the shimmer on Ghostty (the richer rendering).
-		// Suppressed under the global off switch (NO_COLOR / SANDBOX_REDUCE_MOTION)
-		// so output degrades to the block bar (D2/D4).
-		bar = m.ctxGaugeKitty(frac)
-	case m.caps.TrueColor && !m.caps.ReduceMotion && m.DashStatus == StatusBusy:
-		bar = shimmerBlockBar(frac, 10, m.workFrame, pct >= 80)
-	}
-	ctx := styleSLBody.Render(fmt.Sprintf("%s/%s ", fmtTokenLimit(used), fmtTokenLimit(limit))) +
-		warn +
-		lipgloss.NewStyle().Foreground(rampColor(frac)).Render(fmt.Sprintf("%d%% ", pct)) +
-		bar
-	segs = append(segs, ctx)
-
-	row1 := strings.Join(segs, sep)
-	if m.TotalCostUSD > 0 {
-		row1 += muted.Render(" · ") + styleSLCost.Render(fmt.Sprintf("$%.4f", m.TotalCostUSD))
-	}
-	// Mode moves onto row 1 as a compact trailing tag (was the separate row 4).
-	row1 += muted.Render(" · ") + m.mode.modeTag()
-	// Effort tag trails the mode, but ONLY when a /effort override is set — gated
-	// on non-empty so the default status line stays byte-identical (no golden
-	// churn). It reflects the request, not an SDK confirmation (no echo exists).
+	// The permission-mode chip is required so the ⚠ bypass warning is never shed.
+	segs = append(segs, slSeg{s: sepDot + m.mode.modeTag(), required: true})
 	if m.effortOverride != "" {
-		row1 += muted.Render(" · ") + effortTag(m.effortOverride)
+		segs = append(segs, slSeg{s: sepDot + effortTag(m.effortOverride)})
 	}
-	// File-sync health (warm-session poll, fed from the dashboard): a trailing
-	// glyph so a stalled mutagen sync is visible while attached. Gated on a
-	// non-empty status so the default (unprobed) status line stays byte-identical.
 	if seg := syncSegment(m.syncStatus); seg != "" {
-		row1 += muted.Render(" · ") + seg
+		segs = append(segs, slSeg{s: sepDot + seg})
 	}
+	return budgetRow(budget, segs)
+}
 
-	// Row 2: a single compact claude.ai plan-usage row (5-hour + weekly util bars,
-	// reset countdowns, and the attached model's weekly cap when present), from
-	// real SDK /usage data (rate_limit.updated). Shown ONLY when that data is
-	// available; otherwise BLANK — we never fabricate values and never show a
-	// placeholder (A2.5: rate-limit detail only-when-present). The block stays a
-	// fixed two rows regardless, so the body height never reflows.
-	body := styleSLBody
-	row2 := ""
-	switch {
-	case m.rlSeen && m.rlAvailable:
+// rateRow builds the transient claude.ai plan-usage row (5-hour + weekly util
+// bars, reset countdowns, and the attached model's weekly cap when present) from
+// real rate_limit.updated data. Every color is faded toward the page background
+// by rateRowFade so the row visibly dissolves before it is dropped. When plan
+// limits don't apply it names the reason (headless auth) instead of a bare blank.
+func (m *TranscriptModel) rateRow() string {
+	fade := m.rateRowFade()
+	lbl := func(s string) string {
+		return lipgloss.NewStyle().Foreground(slFade(theme.TextSecondary, fade)).Render(s)
+	}
+	body := func(s string) string {
+		return lipgloss.NewStyle().Foreground(slFade(theme.TextBody, fade)).Render(s)
+	}
+	mut := func(s string) string {
+		return lipgloss.NewStyle().Foreground(slFade(theme.TextMuted, fade)).Render(s)
+	}
+	if m.rlAvailable {
 		f5 := m.rl5hUtil / 100
 		f7 := m.rl7dUtil / 100
-		row2 = label.Render("5h: ") + blockBar(f5, 8, rampColor(f5)) +
-			body.Render(fmt.Sprintf(" %d%%", int(m.rl5hUtil+0.5))) +
-			muted.Render(" "+fmtReset(m.rl5hReset)) +
-			muted.Render(" · ") + label.Render("weekly: ") + blockBar(f7, 8, rampColor(f7)) +
-			body.Render(fmt.Sprintf(" %d%%", int(m.rl7dUtil+0.5))) +
-			muted.Render(" "+fmtReset(m.rl7dReset))
-		// Per-model weekly cap for the attached model (Max plans): percent + reset.
-		if mUtil, mReset, lbl, ok := m.activeModelWindow(); ok {
-			row2 += muted.Render(" · ") + label.Render(lbl+": ") +
-				lipgloss.NewStyle().Foreground(rampColor(mUtil/100)).Render(fmt.Sprintf("%d%%", int(mUtil+0.5))) +
-				muted.Render(" · "+lbl+" in "+fmtReset(mReset))
+		row := lbl("5h: ") + blockBar(f5, 8, slFade(rampColor(f5), fade)) +
+			body(fmt.Sprintf(" %d%%", int(m.rl5hUtil+0.5))) +
+			mut(" "+fmtReset(m.rl5hReset)) +
+			mut(" · ") + lbl("weekly: ") + blockBar(f7, 8, slFade(rampColor(f7), fade)) +
+			body(fmt.Sprintf(" %d%%", int(m.rl7dUtil+0.5))) +
+			mut(" "+fmtReset(m.rl7dReset))
+		if mUtil, mReset, lname, ok := m.activeModelWindow(); ok {
+			row += mut(" · ") + lbl(lname+": ") +
+				lipgloss.NewStyle().Foreground(slFade(rampColor(mUtil/100), fade)).Render(fmt.Sprintf("%d%%", int(mUtil+0.5))) +
+				mut(" · "+lname+" in "+fmtReset(mReset))
 		}
-	case m.rlSeen && !m.rlAvailable:
-		// Plan limits don't apply to this session. Rather than leave row 2 blank
-		// (reads as a glitch — the original "usage unavailable" complaint), name
-		// the reason. An empty subscription type means headless setup-token /
-		// API-key auth, where the experimental /usage API carries no plan limits.
-		reason := "n/a"
-		if m.rlSubscription == "" {
-			reason = "n/a (headless auth)"
-		}
-		row2 = label.Render("usage: ") + muted.Render(reason)
+		return row
 	}
-
-	return " " + row1 + "\n " + row2
+	// Plan limits don't apply. An empty subscription type means headless setup-
+	// token / API-key auth, where the experimental /usage API carries no limits.
+	reason := "n/a"
+	if m.rlSubscription == "" {
+		reason = "n/a (headless auth)"
+	}
+	return lbl("usage: ") + mut(reason)
 }
 
 // syncSegment renders the attached session's mutagen sync health as a compact

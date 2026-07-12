@@ -510,6 +510,11 @@ func (m *Model) Init() tea.Cmd {
 		cmds = append(cmds, m.seedCmd())
 		// Start the cluster watch.
 		cmds = append(cmds, m.startWatchCmd())
+		// Reconcile once at open (SF1) so the orphaned-sync auto-GC runs on the
+		// authoritative cluster snapshot immediately, not only after the first
+		// T+30s tick. Safe with no sessions yet: List returns an empty snapshot,
+		// reconcile prunes nothing, and gcListOrphansCmd is a no-op without a reaper.
+		cmds = append(cmds, m.reconcileListCmd())
 		// Periodically re-list the cluster to prune phantom sessions the watch
 		// informer missed (a delete that happened before its cache synced).
 		cmds = append(cmds, reconcileTickCmd())

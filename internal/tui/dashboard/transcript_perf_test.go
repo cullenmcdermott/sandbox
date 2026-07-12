@@ -19,7 +19,7 @@ import (
 func TestAssistantWrapWidthUnified(t *testing.T) {
 	m := NewTranscript(&fakeRunnerClient{}, transcriptSession(), nil)
 	m.width = 50
-	if got, want := m.assistantWrapWidth(), m.width-2-gutterInset; got != want {
+	if got, want := m.assistantWrapWidth(), m.width-2-msgIndent; got != want {
 		t.Fatalf("assistantWrapWidth = %d, want %d", got, want)
 	}
 	m.width = 10 // narrow: clamps to a floor

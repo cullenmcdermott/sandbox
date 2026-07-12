@@ -242,6 +242,11 @@ type TranscriptModel struct {
 	// event arrives. Reset times parse from RFC3339; zero => unknown.
 	rlSeen      bool
 	rlAvailable bool
+	// rlUpdatedAt is when the last rate_limit.updated arrived. The rate-limit row
+	// is TRANSIENT (§2c): the status line is one quiet row by default and only
+	// grows to two for rlTransientWindow after an update, then fades back — so the
+	// permanent two-row gauge block never sits under the composer.
+	rlUpdatedAt time.Time
 	// rlSubscription is the claude.ai plan ('pro'/'max'/…), empty for headless
 	// setup-token / API-key sessions. When rlAvailable is false and this is
 	// empty, the status line shows "usage n/a (headless auth)" so the missing
