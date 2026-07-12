@@ -1280,3 +1280,48 @@ sweep), 9943f59 (runner half), 21a709f (client/TUI half).
 Still open in §1: statusline row-1 overflow (folds into §2c), port-forward
 mid-stream death detection (optional), §1f A1 uid-separation (gated on §7b),
 hook-shape SDK-version-pin caveat.
+
+## 2026-07-12 — batch: yolo default, ownerRef GC, §8 tui surface (cd0e87c..3d37f0e + bookkeeping)
+
+/loop-driven batch (Opus implements, Fable reviews/gates/commits). Full
+`just check` green (one round-trip: anti-cheat required `// gate-ok:` on a
+color-based t.Skip).
+
+- **§2d — yolo default (DECIDED 2026-07-07).** Runner
+  `resolvePermissionMode` empty/unknown → `bypassPermissions` (was
+  acceptEdits); SDK gate (`allowDangerouslySkipPermissions` +
+  `IS_SANDBOX=1`) verified to cover the new default; `canUseTool` correctly
+  omitted for bypass. TUI needed no status plumbing — it already pins the
+  mode per turn (`transcript.go:499` defaults modeBypass,
+  `autopilot.go:431` sends it) — so the statusline work was making bypass
+  unmissable: inverted coral `⚠ bypass` chip (dark-on-Coral, bold) vs the
+  quiet foreground tags for ask/auto/plan. 3 new statusline tests.
+  `docs/runner-api.md` mode description updated.
+- **§10 — oversized body now yields the mapped 413.** `readBody` no longer
+  `req.destroy()`s synchronously on oversize (the route's catch mapped
+  BodyTooLargeError to 413 a microtask after the socket died →
+  ECONNRESET); it rejects once, discards further inbound bytes, lets the
+  socket drain. The pinning test now asserts the 413 body arrives.
+- **§6.3 — Secret GC for out-of-band deletion.** ownerReferences
+  (Secret+PVC → Sandbox) set after the Sandbox exists (UID from Create
+  return or the re-create Get), ONLY on resources this call created
+  (`secretPreexisted`/`pvcPreexisted` guards — a pre-existing PVC is never
+  adopted, C7), idempotent by UID, RetryOnConflict Get+Update, best-effort
+  (warn, never fail the create). Credential reconcile preserves the ref
+  (pinned). The C3 shape-check restructure (two Gets → one) is
+  behavior-equivalent. 3 new tests + a fake-clientset UID reactor.
+- **§7b — `go get .` activation hook removed** from
+  `.flox/env/manifest.toml` (mutated go.mod as a cd side effect; decided in
+  the accepted ADR). GOENV/KUBECONFIG lines kept.
+- **§8 — public tui/* batch.** `theme.Register(Theme)` (replace-by-name
+  case-insensitive, re-applies if the replaced theme is live, else append;
+  startup-only like the rest of the registry) + exported
+  `Denied`/`InfoSubtle`/`SuccessSubtle`/`WarningSubtle` active vars wired
+  through ApplyTheme. tui/kit: every mutable render color (ANSI-16 table,
+  component colors, rule/thumb, role accents) moved into one `palette`
+  struct behind `atomic.Pointer` with copy-modify-store setters + a -race
+  hammer test — two tea.Programs can no longer race a theme swap against a
+  render; role map → fixed array with bounds-checked fallback.
+  `FormatTokens` gains the B tier with boundary promotion (999,950,000 →
+  "1B"); boundary table tests. tui/list: dead `Item.Finished()` dropped;
+  sdktest pin updated in the same change.

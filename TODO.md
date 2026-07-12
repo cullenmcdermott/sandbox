@@ -412,16 +412,10 @@ there. HIGH items are the at-a-glance tells; most are renderer-local.
   entirely (`account_picker.go:123`); change it to always show the stage
   with "cluster default" + "＋ add account" rows. Also the natural home for
   the §6 launch-preflight reauth stage — build the stage machinery once.
-- [ ] **Yolo default — DECIDED 2026-07-07: yes, IMPLEMENT.** Flip the
-  runner's empty/unknown-mode default from `acceptEdits` to
-  `bypassPermissions` (`runner/src/claude.ts:70-81`) so every client
-  inherits it; the SDK safety gate is already wired (`IS_SANDBOX=1` +
-  `allowDangerouslySkipPermissions`, `claude.ts:216-229`). REQUIRED in the
-  same change: statusline surfaces the active mode so yolo is never
-  invisible (`statusline.go`). Cost brake for unattended runs = the §1e
-  autopilot guards (max_iterations 50 / token_budget), signed off same day.
-  Cross-ref §8's mode-enum abstraction (6.2) — flip the default now, don't
-  wait for the enum.
+- [x] **Yolo default — done 2026-07-12** (done log): runner default flipped
+  to `bypassPermissions` (SDK gate verified to cover it); statusline renders
+  bypass as an inverted coral `⚠ bypass` chip (never invisible); the TUI
+  already pinned the mode per turn, so no status plumbing was needed.
 
 ### 2e. Premium-feel program (2026-07-07 Crush/ecosystem research)
 
@@ -633,11 +627,10 @@ ChatGPT-plan OAuth owned by the credential manager.
      subscription tokens; if not, keep setup-token as the documented
      mechanism and have the reauth stage drive it (wrapped status quo).
      Console accounts stay paste-a-key.
-  3. **Secret GC for out-of-band deletion (SMALL).** CLI destroy cleans up,
-     but `kubectl delete sandbox` outside the CLI orphans the PVC + Secret.
-     Set ownerReferences (Secret+PVC → Sandbox) so cluster-side deletion
-     cascades. Cross-ref the §10 KRO ADR, which recommends exactly this over
-     adopting kro.
+  3. ~~Secret GC for out-of-band deletion~~ — **done 2026-07-12** (done
+     log): ownerReferences (Secret+PVC → Sandbox) set on create-owned
+     resources only, best-effort, reconcile-safe; `kubectl delete sandbox`
+     now cascades.
   4. **Isolation contract (DECIDED — implement via §7a items 1/3).** No
      shared cross-provider Secret: each backend's key lives in the
      per-session Secret, seeded from `client/cred` for the selected provider
@@ -738,7 +731,7 @@ side effect of `cd`.
   - Kubernetes Nix/Flox cache strategy: baked closures first; `NIX_CONFIG`
     substituters/trusted keys via the env seam; egress allowlist opening;
     anti-poisoning publish gate (follow-on design) + pruning story.
-  - Remove the `go get .` activation hook (can land first, independent).
+  - ~~Remove the `go get .` activation hook~~ — **done 2026-07-12** (done log).
 
 ### 7c. OpenCode operational items
 
@@ -848,18 +841,18 @@ naming-break, and Shell items each stand alone.
   (PTY handling included); `internal/cli/shell.go` becomes a thin wrapper.
   Build it atop an ssh-target seam so non-interactive consumers can still
   exec. Pin in sdktest.
-- [ ] tui/theme: add `Register(Theme)` (doc promise exists) + export the
-  missing `Denied/Info/Success/Warning` active tone vars.
-  `tui/theme/theme.go:63,107-144`.
-- [ ] tui/kit: palette race → `atomic.Pointer` swap (two tea.Programs must
-  not share a plain map). `tui/kit/style.go:21`, `tui/kit/components.go:32`.
-- [ ] tui/list: drop dead `Item.Finished()`. `tui/list/list.go:12`.
+- [x] tui/theme `Register(Theme)` + `Denied`/`*Subtle` tone vars — done
+  2026-07-12 (done log).
+- [x] tui/kit palette race → whole-palette `atomic.Pointer` snapshot — done
+  2026-07-12 (done log; -race hammer test).
+- [x] tui/list dead `Item.Finished()` dropped (+ sdktest pin) — done
+  2026-07-12 (done log).
 - [x] client: `Destroy` sync-before-destroy reorder — done 2026-07-11 (done
   log); pinned by the F3 call-order spy.
 - [x] client: `DialRunner` forwards the runner port only — done 2026-07-11
   (done log); pinned by TestDialRunner.
-- [ ] kit.FormatTokens gains the `B` tier (caps at "1000M" today).
-  `tui/kit/style.go`.
+- [x] kit.FormatTokens `B` tier with boundary promotion — done 2026-07-12
+  (done log).
 - [x] WithStateDir ssh-dir layout — DECIDED via the §9 worktree sign-off
   (4.10): move `ssh/` INSIDE the state root in the same pre-OSS break that
   adds the worktree root; implement with the worktree Spec-split change.
@@ -914,14 +907,10 @@ naming-break, and Shell items each stand alone.
   cross-checking that the Go e2e harness's fake runner matches the real
   routes' shapes (status codes, error bodies, replay semantics) so the
   build-tagged e2e can't drift green. `internal/e2e`, `runner/test/server-http.test.ts`.
-- [ ] **Oversized request body surfaces as ECONNRESET, not the mapped 413
-  (LOW, found by the F4 suite).** `httputil.ts` `readBody` calls
-  `req.destroy()` synchronously right after rejecting with
-  `BodyTooLargeError`; the B9 catch in `createRunnerServer` runs a microtask
-  later, after the socket is gone — the reject is safe (turn never reaches the
-  agent) but clients see a reset instead of `413 {error:"request body too
-  large"}`. Fix: respond (or drain) before destroying. Pinned as-is by the
-  suite's oversized-body test — update that test with the fix.
+- [x] **Oversized-body 413 now reaches clients — done 2026-07-12** (done
+  log): `readBody` stops destroying the socket; rejects once, drains,
+  route's catch flushes the mapped 413. Pinning test flipped to assert the
+  413 body.
 - [x] **[F5] port-forward lifecycle covered — done 2026-07-11** (done log):
   retry decision extracted pure (`classifyForwardReconnect` +
   `nextForwardBackoff`) + table tests over every branch and the full backoff
