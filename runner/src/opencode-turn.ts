@@ -219,6 +219,14 @@ export function createOpencodeTurnMapper(ocSession: string, emit: Emit, audit?: 
   const streamedText = new Map<string, string>();
   const reasoningStarted = new Set<string>();
   const reasoningCompleted = new Set<string>();
+  // Part ids known (from a message.part.updated(type:reasoning)) to be reasoning
+  // parts. opencode streams a ReasoningPart's content in the SAME `.text` field a
+  // TextPart uses, so its incremental message.part.delta events also carry
+  // field:'text' — indistinguishable from an assistant text delta by field alone.
+  // Tracking the ids lets handleTextDelta route them to reasoning.* and keeps the
+  // session.idle text-flush from re-emitting the reasoning as a second
+  // message.completed (the double-render bug).
+  const reasoningParts = new Set<string>();
   const toolStarted = new Set<string>();
   const toolSettled = new Set<string>();
   // messageID → role. opencode streams the user prompt itself as a text part on
@@ -242,6 +250,10 @@ export function createOpencodeTurnMapper(ocSession: string, emit: Emit, audit?: 
   };
 
   const completeTextPart = (partId: string) => {
+    // Never complete a reasoning part as an assistant message: its content belongs
+    // to reasoning.* only. Guards the session.idle flush loop against a reasoning
+    // part that a field:'text' delta mis-registered before its type was known.
+    if (reasoningParts.has(partId)) return;
     if (textStarted.has(partId) && !textCompleted.has(partId)) {
       textCompleted.add(partId);
       // textOf is the authoritative cumulative full text from message.part.updated;
@@ -284,6 +296,15 @@ export function createOpencodeTurnMapper(ocSession: string, emit: Emit, audit?: 
         break;
       }
       case 'reasoning': {
+        reasoningParts.add(part.id);
+        // If a field:'text' delta for this part arrived before we learned it was a
+        // reasoning part, it was mis-registered as an assistant text part. Undo that
+        // so the session.idle flush cannot re-emit the reasoning as a trailing
+        // message.completed. (In opencode's normal ordering the part is announced via
+        // this message.part.updated before any delta, so this is defensive.)
+        textStarted.delete(part.id);
+        streamedText.delete(part.id);
+        textOf.delete(part.id);
         if (!reasoningStarted.has(part.id)) {
           reasoningStarted.add(part.id);
           emit('reasoning.started', {});
@@ -336,6 +357,14 @@ export function createOpencodeTurnMapper(ocSession: string, emit: Emit, audit?: 
     const delta = p.delta;
     if (typeof delta !== 'string' || delta.length === 0) return;
     const partId = p.partID ?? messageID;
+    // A ReasoningPart streams its content in `.text` too, so its deltas also carry
+    // field:'text'. Once the part is known to be reasoning, route its deltas to
+    // reasoning.* — never the assistant text channel — so it is emitted once as
+    // reasoning.* only and does not double-render (§2b owns how reasoning is shown).
+    if (reasoningParts.has(partId)) {
+      emit('reasoning.delta', { content: delta, delta: true });
+      return;
+    }
     ensureTextStarted(partId);
     streamedText.set(partId, (streamedText.get(partId) ?? '') + delta);
     emit('message.delta', { role: 'assistant', content: delta, delta: true });

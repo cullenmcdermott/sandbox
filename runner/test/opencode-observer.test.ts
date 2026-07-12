@@ -10,7 +10,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Event } from '@opencode-ai/sdk';
 
-import { createObserverHandler, markObservedTurnInterrupted, type ObserverDeps } from '../src/opencode-observer.js';
+import {
+  createObserverHandler,
+  markObservedTurnInterrupted,
+  hasInterruptedTurn,
+  type ObserverDeps,
+} from '../src/opencode-observer.js';
 
 const OC = 'ses_oc';
 
@@ -287,6 +292,20 @@ test('observer reset() abandons an in-flight cycle back to idle (stream dropped)
   const before = calls.statuses.length;
   h.reset();
   assert.equal(calls.statuses.length, before);
+});
+
+test('markObservedTurnInterrupted bounds the interrupt set for ids that never become an active cycle', () => {
+  // An interrupt marked for a turn id that never becomes the active observer cycle
+  // (a stale/phantom id from POST /interrupt) is never consumed by a session.idle
+  // and never shed by endCycle — without a bound it leaks forever. Mark far more
+  // than the cap and assert the set stays bounded, evicting oldest-first.
+  const ids = Array.from({ length: 40 }, (_, i) => `leak-${i}`);
+  for (const id of ids) markObservedTurnInterrupted(id);
+
+  const stillTracked = ids.filter((id) => hasInterruptedTurn(id));
+  assert.ok(stillTracked.length <= 8, `interrupt set must stay bounded, got ${stillTracked.length} tracked`);
+  assert.equal(hasInterruptedTurn('leak-0'), false, 'oldest interrupt evicted');
+  assert.equal(hasInterruptedTurn('leak-39'), true, 'most-recent interrupt retained');
 });
 
 test('observer suppresses turn.completed after an explicit interrupt terminal event', () => {

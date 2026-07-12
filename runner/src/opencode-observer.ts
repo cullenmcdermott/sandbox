@@ -48,8 +48,23 @@ const PLACEHOLDER_TITLE = 'sandbox runner session';
 
 const interruptedTurns = new Set<string>();
 
+// Upper bound on interruptedTurns. An entry is normally consumed by its own
+// turn's session.idle (createObserverHandler) or shed by endCycle; but an
+// interrupt marked for an id that NEVER becomes the active cycle (a stale or
+// phantom turn id from POST /interrupt) is never consumed and would leak forever.
+// The set only ever meaningfully holds the current synthetic turn's id, so a
+// small cap is safe: on overflow we evict oldest-first (Set preserves insertion
+// order), keeping the most recent — and thus the live cycle's — marker.
+const MAX_INTERRUPTED_TURNS = 8;
+
 export function markObservedTurnInterrupted(turnId: string): void {
-  if (turnId) interruptedTurns.add(turnId);
+  if (!turnId) return;
+  interruptedTurns.add(turnId);
+  while (interruptedTurns.size > MAX_INTERRUPTED_TURNS) {
+    const oldest = interruptedTurns.values().next().value as string | undefined;
+    if (oldest === undefined) break;
+    interruptedTurns.delete(oldest);
+  }
 }
 
 /** Test-only: whether a turn id is still tracked as interrupted. Lets the GC

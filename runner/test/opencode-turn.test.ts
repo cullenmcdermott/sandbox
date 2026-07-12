@@ -68,6 +68,30 @@ function textPart(
   } as unknown as Event;
 }
 
+// A reasoning part (opencode's ReasoningPart). Its content lives in `.text`, the
+// SAME field a TextPart uses — which is why its message.part.delta stream also
+// carries field:'text'.
+function reasoningPart(
+  partId: string,
+  text: string,
+  opts: { end?: boolean; delta?: string; messageID?: string } = {},
+): Event {
+  return {
+    type: 'message.part.updated',
+    properties: {
+      part: {
+        id: partId,
+        sessionID: SID,
+        messageID: opts.messageID ?? ASSISTANT,
+        type: 'reasoning',
+        text,
+        time: opts.end ? { start: 1, end: 2 } : { start: 1 },
+      },
+      delta: opts.delta,
+    },
+  } as unknown as Event;
+}
+
 function toolPart(partId: string, status: 'running' | 'completed' | 'error', extra: Record<string, unknown>): Event {
   return {
     type: 'message.part.updated',
@@ -430,6 +454,70 @@ test('a delta for a foreign session or non-text field is ignored', () => {
   m.handle(partDelta('y', { field: 'reasoning' }));
   m.handle(partDelta('', {})); // empty delta
   assert.equal(events.length, 0);
+});
+
+// --- Reasoning: emitted once as reasoning.* only (no trailing message.completed) -
+
+test('reasoning + text in one assistant message: reasoning is not re-emitted as a trailing message.completed', () => {
+  // Reproduces the live capture (omni-prod, big-pickle reasoning model, seq 41 vs
+  // 38): opencode streams a ReasoningPart's content via message.part.delta with
+  // field:'text' (a ReasoningPart stores its content in `.text`, exactly like a
+  // TextPart), then the real answer streams, then session.idle. The mapper must NOT
+  // flush the reasoning part as a second message.completed at idle.
+  const { emit, events } = capture();
+  const m = createOpencodeTurnMapper(SID, emit);
+  m.handle(messageUpdated('assistant', ASSISTANT));
+  events.length = 0;
+
+  // Reasoning part: announced, streamed via field:'text' deltas, then completed.
+  m.handle(reasoningPart('pr', '', {})); // announces the part as type:reasoning
+  m.handle(partDelta('Let me ', { field: 'text', partID: 'pr' }));
+  m.handle(partDelta('think', { field: 'text', partID: 'pr' }));
+  m.handle(reasoningPart('pr', 'Let me think', { end: true }));
+
+  // Real answer: streams on its own part, then completes.
+  m.handle(partDelta('The answer', { field: 'text', partID: 'pt' }));
+  m.handle(textPart('pt', 'The answer', { end: true }));
+
+  m.handle(sessionIdle());
+
+  const completed = events.filter((e) => e.type === 'message.completed');
+  assert.equal(completed.length, 1, 'exactly one message.completed (the answer, not the reasoning)');
+  assert.equal(completed[0].payload.content, 'The answer');
+  // The reasoning surfaces through reasoning.* only, never message.completed.
+  assert.equal(
+    events.some((e) => e.type === 'message.completed' && e.payload.content === 'Let me think'),
+    false,
+    'reasoning text must never appear as a message.completed',
+  );
+  const reasoningCompleted = events.filter((e) => e.type === 'reasoning.completed');
+  assert.equal(reasoningCompleted.length, 1);
+  assert.equal(reasoningCompleted[0].payload.content, 'Let me think');
+  // Reasoning deltas route to reasoning.delta, not message.delta.
+  assert.deepEqual(
+    events.filter((e) => e.type === 'reasoning.delta').map((e) => e.payload.content),
+    ['Let me ', 'think'],
+  );
+  assertMapperInvariants(events);
+});
+
+test('reasoning delta arriving before the part is typed still does not double-render at idle', () => {
+  // Defensive ordering: if a field:'text' delta for the reasoning part reaches the
+  // mapper before the message.part.updated(type:reasoning) that types it, the delta
+  // is briefly mis-mapped as assistant text — but once the part is typed the mapper
+  // undoes that registration so the session.idle flush cannot re-emit it.
+  const { emit, events } = capture();
+  const m = createOpencodeTurnMapper(SID, emit);
+  m.handle(messageUpdated('assistant', ASSISTANT));
+  events.length = 0;
+
+  m.handle(partDelta('secret reasoning', { field: 'text', partID: 'pr' })); // delta first
+  m.handle(reasoningPart('pr', 'secret reasoning', { end: true })); // now typed as reasoning
+  m.handle(textPart('pt', 'Final answer', { delta: 'Final answer', end: true }));
+  m.handle(sessionIdle());
+
+  const completedContents = events.filter((e) => e.type === 'message.completed').map((e) => e.payload.content);
+  assert.deepEqual(completedContents, ['Final answer'], 'the reasoning text is never emitted as message.completed');
 });
 
 // --- G2: permission flow --------------------------------------------------

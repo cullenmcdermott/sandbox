@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -30,7 +32,8 @@ func newClaudeRemoteCmd() *cobra.Command {
 			if len(args) > 0 {
 				prompt = args[0]
 			}
-			return runStartSession(cmd, session.BackendClaudeSDK, prompt, runnerImage, reaperImage, nameFlag, modelFlag, accountFlag, worktreeFlag)
+			// claude has no opencode provider step, so the provider selector is empty.
+			return runStartSession(cmd, session.BackendClaudeSDK, prompt, runnerImage, reaperImage, nameFlag, modelFlag, accountFlag, worktreeFlag, "")
 		},
 	}
 	cmd.Flags().StringVar(&runnerImage, "runner-image", client.DefaultRunnerImage, "runner container image")
@@ -44,29 +47,39 @@ func newClaudeRemoteCmd() *cobra.Command {
 
 // newOpencodeCmd starts a new remote opencode-server session and hands the
 // terminal to the local `opencode attach` TUI. (Resuming an existing session is
-// `sandbox attach`, or picking it from the dashboard.) Unlike `claude`, opencode
-// owns its own input loop, so there is no initial-prompt argument: the prompt is
-// typed into the opencode TUI itself.
+// `sandbox attach`, or picking it from the dashboard.)
+//
+// Flags mirror `claude` where they map cleanly: --model sets the session default
+// (opencode ids are "provider/model", e.g. anthropic/claude-sonnet-4-5) and an
+// optional [prompt] positional seeds the first turn. --provider is opencode-only:
+// it selects which provider API key the pod receives from the shared
+// opencode-credentials Secret (validated fail-closed by client.Create). opencode
+// has no Anthropic account step, so the account selector is always empty.
 func newOpencodeCmd() *cobra.Command {
 	var (
 		runnerImage  string
 		reaperImage  string
 		nameFlag     string
+		modelFlag    string
+		providerFlag string
 		worktreeFlag string
 	)
 	cmd := &cobra.Command{
-		Use:   "opencode",
+		Use:   "opencode [prompt]",
 		Short: "Start a remote opencode-server session and open the local opencode TUI",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// opencode manages its own model selection, so there is no --model
-			// flag here (TODO.md): pass an empty model. opencode has no Anthropic
-			// account step either, so the account selector is always empty.
-			return runStartSession(cmd, session.BackendOpenCode, "", runnerImage, reaperImage, nameFlag, "", "", worktreeFlag)
+			prompt := ""
+			if len(args) > 0 {
+				prompt = args[0]
+			}
+			return runStartSession(cmd, session.BackendOpenCode, prompt, runnerImage, reaperImage, nameFlag, modelFlag, "", worktreeFlag, providerFlag)
 		},
 	}
 	cmd.Flags().StringVar(&runnerImage, "runner-image", client.DefaultRunnerImage, "runner container image")
 	cmd.Flags().StringVar(&reaperImage, "reaper-image", k8s.DefaultReaperImage, "idle-reaper container image")
 	cmd.Flags().StringVar(&nameFlag, "name", "", "custom display name for the session (overrides the auto title)")
+	cmd.Flags().StringVar(&modelFlag, "model", "", "model id for the session default as provider/model (e.g. anthropic/claude-sonnet-4-5); empty uses the opencode server default")
+	cmd.Flags().StringVar(&providerFlag, "provider", "", "opencode model provider whose API key the pod receives from the shared Secret: anthropic (default), openai, or opencode-zen")
 	cmd.Flags().StringVar(&worktreeFlag, "worktree", "auto", "per-session git worktree isolation: auto (worktree iff the project is a git repo), on (require a git repo), off (never)")
 	return cmd
 }
@@ -115,8 +128,10 @@ func resolveProjectPath() (string, error) {
 //
 // account is the raw `--account` selector (id|label, may be ""); it is honored
 // only for the claude backend (opencode has no Anthropic account step). worktree
-// is the raw `--worktree` selector (auto|on|off), validated here.
-func runStartSession(cmd *cobra.Command, backendName, prompt, runnerImage, reaperImage, name, model, account, worktree string) error {
+// is the raw `--worktree` selector (auto|on|off), validated here. opencodeProvider
+// is the raw `--provider` selector (may be ""); honored only for opencode and
+// validated fail-closed inside client.Create (ErrInvalidOpencodeProvider).
+func runStartSession(cmd *cobra.Command, backendName, prompt, runnerImage, reaperImage, name, model, account, worktree, opencodeProvider string) error {
 	worktreeMode, err := parseWorktreeMode(worktree)
 	if err != nil {
 		return err
@@ -134,11 +149,12 @@ func runStartSession(cmd *cobra.Command, backendName, prompt, runnerImage, reape
 	}
 
 	opts := client.CreateOptions{
-		Backend:     backendName,
-		ProjectPath: projectPath,
-		RunnerImage: runnerImage,
-		Model:       model,
-		Worktree:    worktreeMode,
+		Backend:          backendName,
+		ProjectPath:      projectPath,
+		RunnerImage:      runnerImage,
+		Model:            model,
+		Worktree:         worktreeMode,
+		OpencodeProvider: opencodeProvider,
 	}
 	// Resolve the Anthropic account → per-session credential (fail closed): a
 	// requested account that can't be resolved/read is a hard error, never a
@@ -167,6 +183,22 @@ func runStartSession(cmd *cobra.Command, backendName, prompt, runnerImage, reape
 	// the `rename` command, so a custom name wins over the runner auto title.
 	applyCreateName(indexTitleStore{}, sid, name)
 
+	// opencode: deliver a positional prompt as a headless first turn through the
+	// runner's turn adapter BEFORE the TUI launches. The claude path hands its
+	// prompt to the dashboard transcript (initialPrompt, submitted once the stream
+	// is live), but opencode sessions render through the external `opencode attach`
+	// pane, which has no such hook — passing the prompt through RunAttached would
+	// silently drop it. This trades the animated connect splash for plain stderr
+	// progress (pod phase lines) on the prompt-seeded path only; `opencode attach
+	// --continue` then attaches to the in-flight turn. A failure is a hard error,
+	// never a silent drop; the session stays up for a manual `sandbox attach`.
+	if backendName == session.BackendOpenCode && prompt != "" {
+		if err := submitInitialOpencodeTurn(ctx, c, backend, sid, prompt, cmd.ErrOrStderr()); err != nil {
+			return fmt.Errorf("submit initial prompt: %w\nsession %s is still running — `sandbox attach %s` and type the prompt there", err, sid, sid)
+		}
+		prompt = "" // delivered; RunAttached must not carry it too
+	}
+
 	dashSess := dashboard.SessionFromState(session.State{
 		ID:          sid,
 		Backend:     backendName,
@@ -183,4 +215,57 @@ func runStartSession(cmd *cobra.Command, backendName, prompt, runnerImage, reape
 			dashboard.RunOptions{DestroyHook: newLocalDestroyHook(c), PreDestroyHook: newPreDestroySyncStop(c), TitleStore: indexTitleStore{}, SnapshotStore: indexSnapshotStore{}, EventCache: newIndexEventCache(), DriverStore: indexDriverStore{}, ObserverConnector: newDashboardObserverConnector(c, reaperImage), SyncProber: dashboardSyncProber(), SyncReaper: dashboardSyncReaper(), IdleTimeout: defaultReaperIdleTimeout, AccountStore: newDashboardAccountStore(), WorktreeOps: newWorktreeOps(c)},
 		)
 	})
+}
+
+// submitInitialOpencodeTurn posts `sandbox opencode "prompt"`'s positional prompt
+// as a headless first turn against a freshly created session, mirroring the
+// hidden `sandbox turn` command's flow (turn.go): pod-ready wait → dial → health
+// → StartTurn. Fire-and-return — POST /turns registers the turn and the runner
+// drives it server-side, so the dial is torn down immediately and the TUI attach
+// that follows finds the turn already streaming. Progress goes to errOut (the
+// alt-screen TUI is not up yet, so plain lines are the honest substitute for the
+// connect splash).
+func submitInitialOpencodeTurn(ctx context.Context, c *client.Client, backend *k8s.Backend, sid session.ID, prompt string, errOut io.Writer) error {
+	ref := session.Ref{ID: sid}
+	// Block until the pod is running (schedule + image pull) — DialRunner's
+	// port-forward needs a live pod, and waitHealthy's budget is far shorter than
+	// a cold image pull. Same wait the dashboard connect path performs, minus the
+	// animation.
+	lastPhase := ""
+	if err := backend.StartWithProgress(ctx, ref, func(detail string) {
+		if detail != lastPhase {
+			lastPhase = detail
+			fmt.Fprintf(errOut, "pod: %s\n", detail)
+		}
+	}); err != nil {
+		return fmt.Errorf("wait for pod: %w", err)
+	}
+	rc, cleanup, err := c.DialRunner(ctx, ref)
+	if err != nil {
+		return fmt.Errorf("dial runner: %w", err)
+	}
+	defer cleanup()
+	turn, err := startPromptTurn(ctx, rc, ref, prompt)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(errOut, "initial prompt submitted (turn %s)\n", turn.Turn)
+	return nil
+}
+
+// startPromptTurn health-waits the runner then posts the prompt as a turn. Split
+// from submitInitialOpencodeTurn on the client.RunnerClient interface seam so it
+// is unit-testable with a fake runner (the pod wait + dial above need a cluster).
+// No mode/model overrides: the opencode turn adapter ignores mode (permissions
+// are OPENCODE_AUTO_PERMISSION-governed) and the session's default model was
+// already provisioned via CreateOptions.Model.
+func startPromptTurn(ctx context.Context, rc client.RunnerClient, ref session.Ref, prompt string) (client.TurnRef, error) {
+	if err := waitHealthy(ctx, rc); err != nil {
+		return client.TurnRef{}, fmt.Errorf("runner health: %w", err)
+	}
+	turn, err := rc.StartTurn(ctx, ref, client.TurnInput{Prompt: prompt})
+	if err != nil {
+		return client.TurnRef{}, fmt.Errorf("start turn: %w", err)
+	}
+	return turn, nil
 }
