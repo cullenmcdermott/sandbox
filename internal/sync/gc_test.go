@@ -26,10 +26,11 @@ func (s *stubRunner) Output(_ context.Context, _ io.Reader, args ...string) ([]b
 // rows.
 func TestList_FiltersToSandboxSessionLabel(t *testing.T) {
 	out := strings.Join([]string{
-		"claude-sdk-abc|sync_111|sandbox-claude-sdk-abc-project|Watching",
-		"claude-sdk-abc|sync_222|sandbox-claude-sdk-abc-config-skills|ConnectingBeta",
-		"|sync_lima|sandbox-vm-orch-project|Watching", // lima sync: no sandbox-session label → drop
-		"opencode-server-xyz|sync_333|sandbox-opencode-server-xyz-project|Paused",
+		"claude-sdk-abc|omni-prod|sync_111|sandbox-claude-sdk-abc-project|Watching",
+		"claude-sdk-abc|omni-prod|sync_222|sandbox-claude-sdk-abc-config-skills|ConnectingBeta",
+		"|omni-prod|sync_lima|sandbox-vm-orch-project|Watching",                    // lima sync: no sandbox-session label → drop
+		"opencode-server-xyz||sync_333|sandbox-opencode-server-xyz-project|Paused", // legacy: no sandbox-context label
+		"short|sync_999|sandbox-short-project|Watching",                            // wrong field count (stale 4-field shape) → skip, no crash
 		"", // trailing blank
 	}, "\n")
 	r := &stubRunner{out: []byte(out)}
@@ -40,7 +41,7 @@ func TestList_FiltersToSandboxSessionLabel(t *testing.T) {
 		t.Fatalf("List: %v", err)
 	}
 	if len(sessions) != 3 {
-		t.Fatalf("expected 3 sandbox-session syncs (lima + blank dropped), got %d: %+v", len(sessions), sessions)
+		t.Fatalf("expected 3 sandbox-session syncs (lima + blank + short row dropped), got %d: %+v", len(sessions), sessions)
 	}
 	// It must NOT shell out with a label selector — a key-only selector returns
 	// nothing on this mutagen; we list all + filter in Go.
@@ -51,14 +52,21 @@ func TestList_FiltersToSandboxSessionLabel(t *testing.T) {
 	if strings.Contains(got, "label-selector") {
 		t.Errorf("List must not use a label selector (key-only returns nothing): %q", got)
 	}
-	// Fields parsed in order sessionID|identifier|name|status.
-	if sessions[0] != (SyncSession{SessionID: "claude-sdk-abc", Identifier: "sync_111", Name: "sandbox-claude-sdk-abc-project", Status: "Watching"}) {
+	// Fields parsed in order sessionID|context|identifier|name|status.
+	if sessions[0] != (SyncSession{SessionID: "claude-sdk-abc", Context: "omni-prod", Identifier: "sync_111", Name: "sandbox-claude-sdk-abc-project", Status: "Watching"}) {
 		t.Errorf("row 0 mis-parsed: %+v", sessions[0])
 	}
-	// The lima sync_lima must be absent.
+	// A legacy sync (no sandbox-context label) parses with an empty Context.
+	if sessions[2].Context != "" {
+		t.Errorf("legacy sync should have empty Context, got %q", sessions[2].Context)
+	}
+	// The lima sync_lima and the short (stale-shape) row must be absent.
 	for _, s := range sessions {
 		if s.Identifier == "sync_lima" {
 			t.Fatal("lima sync (sandbox-vm-id) leaked into our List — would risk terminating a real session's sync")
+		}
+		if s.SessionID == "short" || s.Identifier == "sync_999" {
+			t.Fatalf("stale 4-field row must be skipped, not mis-parsed: %+v", s)
 		}
 	}
 }

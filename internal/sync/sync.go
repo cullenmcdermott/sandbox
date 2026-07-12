@@ -17,6 +17,9 @@ import (
 	"io"
 	"path"
 	"strings"
+	stdsync "sync"
+
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 // Runner is the interface for Mutagen CLI invocations. It matches the
@@ -29,11 +32,68 @@ type Runner interface {
 // Manager manages Mutagen sync sessions for a remote session.
 type Manager struct {
 	r Runner
+
+	// kubeContext resolves the current kube context name for the sandbox-context
+	// label (MF3). nil (production) uses the process-cached ambient kubeconfig
+	// resolver; tests inject a stub to make the label deterministic.
+	kubeContext func() string
 }
 
 // New creates a sync Manager.
 func New(r Runner) *Manager {
 	return &Manager{r: r}
+}
+
+// kubeContextCache resolves the ambient kubeconfig current-context ONCE per
+// process: the value can't change within a run, and CreateAll issues up to 8
+// creates that would otherwise each re-read ~/.kube/config. A Manager with an
+// injected kubeContext (tests) bypasses this cache entirely.
+var (
+	kubeCtxOnce stdsync.Once
+	kubeCtxName string
+)
+
+// currentKubeContext returns the ambient kubeconfig current-context, "" when it
+// can't be resolved (in-cluster, no kubeconfig, or a load error). Cached.
+func currentKubeContext() string {
+	kubeCtxOnce.Do(func() { kubeCtxName = loadKubeContext() })
+	return kubeCtxName
+}
+
+// loadKubeContext reads the current-context from the ambient kubeconfig
+// (KUBECONFIG / ~/.kube/config). "" on any failure — the CLI runs against the
+// same ambient kubeconfig the client uses, so this matches the cluster the
+// session was created against.
+func loadKubeContext() string {
+	cfg, err := clientcmd.NewDefaultClientConfigLoadingRules().Load()
+	if err != nil {
+		return ""
+	}
+	return cfg.CurrentContext
+}
+
+// CurrentContext returns the kube context this Manager stamps onto new syncs and
+// scopes GC to (MF3). "" when it can't be resolved (in-cluster / no kubeconfig),
+// in which case no sandbox-context label is stamped and GC falls back to the
+// legacy live-set check.
+func (m *Manager) CurrentContext() string {
+	if m.kubeContext != nil {
+		return m.kubeContext()
+	}
+	return currentKubeContext()
+}
+
+// contextLabelArgs returns the `--label sandbox-context=<ctx>` create flag when
+// a context is resolvable, or nil. A nil (empty-context) result deliberately
+// leaves the sync unlabeled — matching pre-MF3 sessions — so an in-cluster or
+// kubeconfig-less caller still creates working syncs (they're then GC-scoped by
+// the legacy live-set path, not the context label).
+func (m *Manager) contextLabelArgs() []string {
+	ctx := m.CurrentContext()
+	if ctx == "" {
+		return nil
+	}
+	return []string{"--label", "sandbox-context=" + ctx}
 }
 
 // Spec describes the sync sessions to create for a remote session.
@@ -121,9 +181,12 @@ func (m *Manager) CreateInputs(ctx context.Context, spec Spec) error {
 			"sync", "create",
 			"--name=" + name,
 			"--label", label,
-			"--mode=one-way-safe",
-			localPath, spec.SSHHost + ":" + remotePath,
 		}
+		args = append(args, m.contextLabelArgs()...)
+		args = append(args,
+			"--mode=one-way-safe",
+			localPath, spec.SSHHost+":"+remotePath,
+		)
 		if _, err := m.r.Output(ctx, nil, args...); err != nil {
 			if !isMutagenAlreadyExists(err) {
 				return fmt.Errorf("sync: create config-%s session: %w", sub.Local, err)
@@ -140,9 +203,12 @@ func (m *Manager) CreateInputs(ctx context.Context, spec Spec) error {
 			"sync", "create",
 			"--name=" + name,
 			"--label", label,
-			"--mode=one-way-safe",
-			spec.SSHHost + ":" + remotePath, localPath,
 		}
+		args = append(args, m.contextLabelArgs()...)
+		args = append(args,
+			"--mode=one-way-safe",
+			spec.SSHHost+":"+remotePath, localPath,
+		)
 		if _, err := m.r.Output(ctx, nil, args...); err != nil {
 			if !isMutagenAlreadyExists(err) {
 				return fmt.Errorf("sync: create transcripts-%s session: %w", sub, err)
@@ -209,6 +275,9 @@ func (m *Manager) createProjectSync(ctx context.Context, spec Spec, label string
 		"sync", "create",
 		"--name=" + projectName,
 		"--label", label,
+	}
+	args = append(args, m.contextLabelArgs()...)
+	args = append(args,
 		// two-way-safe is data-preserving (M27): when only one side changed a
 		// path, the change propagates; when BOTH sides changed the same path
 		// (a conflict — e.g. the operator and the agent edit one file at once),
@@ -220,7 +289,7 @@ func (m *Manager) createProjectSync(ctx context.Context, spec Spec, label string
 		// side and silently overwrite the pod's edit.)
 		"--mode=two-way-safe",
 		"--ignore-vcs",
-	}
+	)
 	args = append(args, buildTreeIgnores...)
 	args = append(args, gitignoreFlags...)
 	args = append(args, securityIgnores...)
@@ -283,6 +352,27 @@ func (m *Manager) ResumeAll(ctx context.Context, sessionID string) error {
 	return err
 }
 
+// Reconcile self-heals a session's sync sessions after a mid-session stall
+// (MF5): it resumes any that a transient fault left paused, then forces a flush
+// cycle to re-establish a wedged transport and surface real errors. Both steps
+// are label-scoped and idempotent, so no Spec is needed and it is safe to call
+// repeatedly — the prober-owning layer fires it (debounced) when it observes a
+// SyncStalled reading while the SSE stream is still healthy, the case where
+// nothing else re-runs sync setup.
+//
+// It heals a sync that still EXISTS but wedged; it does not recreate a fully
+// terminated sync (that needs the connect path's Spec and happens on reconnect).
+// A create re-run is a separate, already-idempotent path: `mutagen sync create`
+// with an existing name reports "session already exists", which CreateAll/
+// CreateProject/CreateInputs swallow as a no-op — so re-running create never
+// errors, and Reconcile adds the resume+flush that actually un-sticks it.
+func (m *Manager) Reconcile(ctx context.Context, sessionID string) error {
+	if err := m.ResumeAll(ctx, sessionID); err != nil {
+		return err
+	}
+	return m.FlushAll(ctx, sessionID)
+}
+
 // TerminateAll terminates all sync sessions for a session.
 func (m *Manager) TerminateAll(ctx context.Context, sessionID string) error {
 	label := sessionLabel(sessionID)
@@ -300,16 +390,19 @@ func (m *Manager) TerminateAll(ctx context.Context, sessionID string) error {
 // orphans whose pod endpoint is gone.
 type SyncSession struct {
 	SessionID  string // sandbox session id (from the sandbox-session label)
+	Context    string // kube context that created it (sandbox-context label; "" for pre-MF3 syncs)
 	Identifier string // mutagen session identifier (sync_...)
 	Name       string // mutagen session name (sandbox-<id>-<kind>)
 	Status     string // mutagen status enum string (Watching, ConnectingBeta, Paused, …)
 }
 
-// syncListTemplate emits one line per session: sessionID|identifier|name|status.
-// It reads the sandbox-session label so List can scope to THIS tool's k8s syncs:
-// the lima-based system-config manager shares the same host mutagen daemon but
-// labels its syncs sandbox-vm-id, which we must never touch.
-const syncListTemplate = `{{range .}}{{index .Labels "sandbox-session"}}|{{.Identifier}}|{{.Name}}|{{.Status}}{{"\n"}}{{end}}`
+// syncListTemplate emits one line per session:
+// sessionID|context|identifier|name|status. It reads the sandbox-session label so
+// List can scope to THIS tool's k8s syncs (the lima-based system-config manager
+// shares the same host mutagen daemon but labels its syncs sandbox-vm-id, which
+// we must never touch), and the sandbox-context label so GC can scope to the
+// current cluster's syncs (MF3 — never reap a sync a different context created).
+const syncListTemplate = `{{range .}}{{index .Labels "sandbox-session"}}|{{index .Labels "sandbox-context"}}|{{.Identifier}}|{{.Name}}|{{.Status}}{{"\n"}}{{end}}`
 
 // List returns every mutagen sync session owned by THIS tool — those carrying a
 // non-empty sandbox-session label. Sessions from other users of the same host
@@ -328,7 +421,14 @@ func (m *Manager) List(ctx context.Context) ([]SyncSession, error) {
 
 // parseSyncList parses syncListTemplate output, keeping only rows that carry a
 // sandbox-session label (ours). Lima syncs (empty first field) and blank lines
-// are dropped.
+// are dropped. A row with the wrong field count (output from a stale/other
+// template shape) is skipped, never a crash — every consumer degrades safely on
+// a skipped row: the GC selectors simply don't see it (conservative — an unseen
+// sync is never reaped) and the client's same-dir collision scan omits its
+// warning (its documented degrade-to-silence). A REAL daemon driven by
+// syncListTemplate always emits exactly 5 fields: a label-less pre-MF3 sync
+// renders `{{index .Labels "sandbox-context"}}` as an EMPTY second field, not a
+// missing one.
 func parseSyncList(out []byte) []SyncSession {
 	var sessions []SyncSession
 	for _, line := range strings.Split(string(out), "\n") {
@@ -336,15 +436,16 @@ func parseSyncList(out []byte) []SyncSession {
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "|", 4)
-		if len(parts) != 4 || parts[0] == "" {
+		parts := strings.SplitN(line, "|", 5)
+		if len(parts) != 5 || parts[0] == "" {
 			continue // not ours (no sandbox-session label) or malformed
 		}
 		sessions = append(sessions, SyncSession{
 			SessionID:  parts[0],
-			Identifier: parts[1],
-			Name:       parts[2],
-			Status:     parts[3],
+			Context:    parts[1],
+			Identifier: parts[2],
+			Name:       parts[3],
+			Status:     parts[4],
 		})
 	}
 	return sessions

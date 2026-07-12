@@ -59,6 +59,11 @@ func newAttachCmd() *cobra.Command {
 				return fmt.Errorf("session %s does not exist", id)
 			}
 
+			// Best-effort orphan-sync GC at startup (SF1): clean up syncs left by
+			// destroyed/reaped pods now rather than waiting for the first in-TUI
+			// reconcile. Backgrounded so it never delays the attach.
+			startupSyncGC()
+
 			// Launch the command center attached to this session. The dashboard
 			// Connector (driven by the client package) handles resume-if-suspended,
 			// port-forward, health, sync, and reaper, and doubles as the
@@ -349,12 +354,116 @@ func newSyncCmd() *cobra.Command {
 	return cmd
 }
 
+// clusterLister is the subset of *client.Client the GC needs: the authoritative
+// live-session set for the current context. Kept as an interface so the orphan
+// selection is unit-testable without a cluster.
+type clusterLister interface {
+	List(ctx context.Context) ([]session.State, error)
+}
+
+// selectOrphanSyncs picks the orphaned syncs to terminate. It is conservative:
+//   - skips actively-syncing syncs (only IsOrphanStatus transport-down ones);
+//   - skips a sync whose session is still live in THIS context's cluster
+//     (running or suspended — it reconnects/resumes);
+//   - skips a sync a DIFFERENT kube context created (its sandbox-context label
+//     is set and != currentCtx) — the MF3 cross-context over-reap fix: the live
+//     set only covers the current context, so another context's session would
+//     otherwise look "gone" and be wrongly reaped.
+//
+// A legacy sync with no sandbox-context label ("" — created before MF3) falls
+// through to the live-set check: it is GC-able by whichever context is running
+// (so it never becomes immortal), reproducing the pre-MF3 behavior. It is
+// re-stamped with the context label the next time the connect path (re)creates
+// it, closing the migration window. Returns the mutagen identifiers to terminate
+// and a per-session orphan count for reporting.
+func selectOrphanSyncs(syncs []syncpkg.SyncSession, live map[string]bool, currentCtx string) (orphanIDs []string, bySession map[string]int) {
+	bySession = map[string]int{}
+	for _, s := range syncs {
+		if !syncpkg.IsOrphanStatus(s.Status) {
+			continue // actively syncing → keep
+		}
+		if s.Context != "" && s.Context != currentCtx {
+			continue // another kube context owns it — not ours to judge (MF3)
+		}
+		if live[s.SessionID] {
+			continue // session still exists (running/suspended) → keep
+		}
+		orphanIDs = append(orphanIDs, s.Identifier)
+		bySession[s.SessionID]++
+	}
+	return orphanIDs, bySession
+}
+
+// gcResult is the outcome of one orphan-selection pass.
+type gcResult struct {
+	orphanIDs []string
+	bySession map[string]int
+}
+
+// syncGCCore runs one GC selection pass against the current context: list this
+// tool's syncs, confirm the live set from the cluster, and select orphans via
+// selectOrphanSyncs. It does NOT terminate — the caller decides (the command
+// prints/terminates; the best-effort startup sweep terminates silently). It
+// refuses to proceed if the cluster can't be listed: during an outage every pod
+// is unreachable, so every sync would look orphaned and an empty live set would
+// nuke them all.
+func syncGCCore(ctx context.Context, mgr *syncpkg.Manager, c clusterLister) (gcResult, error) {
+	syncs, err := mgr.List(ctx)
+	if err != nil {
+		return gcResult{}, fmt.Errorf("list syncs: %w", err)
+	}
+	states, err := c.List(ctx)
+	if err != nil {
+		return gcResult{}, fmt.Errorf("cannot list cluster sessions; refusing to run (an outage makes every sync look gone): %w", err)
+	}
+	live := make(map[string]bool, len(states))
+	for _, st := range states {
+		live[string(st.ID)] = true
+	}
+	orphanIDs, bySession := selectOrphanSyncs(syncs, live, mgr.CurrentContext())
+	return gcResult{orphanIDs: orphanIDs, bySession: bySession}, nil
+}
+
+// startupSyncGC fires the best-effort orphan-sync sweep (SF1) in the background
+// so it never delays the TUI opening, cleaning up syncs left by destroyed/
+// idle-reaped/dev-reset pods at launch instead of waiting for the first in-TUI
+// reconcile (~T+30s). Bounded so a slow or offline cluster can't leak a goroutine
+// for the process lifetime.
+func startupSyncGC() {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		runBestEffortSyncGC(ctx)
+	}()
+}
+
+// runBestEffortSyncGC runs a full GC pass (select + terminate) silently and
+// swallows every error (SF1). It is fired at the start of the TUI-launching
+// commands so orphaned syncs from destroyed/reaped/dev-reset pods are cleaned up
+// without waiting T+30s for the first in-TUI reconcile. Best-effort by design:
+// no cluster (offline), no mutagen, or a list failure just skips this pass — the
+// in-TUI GC still runs later, and `sandbox sync gc` remains the explicit path.
+func runBestEffortSyncGC(ctx context.Context) {
+	c, err := newClient()
+	if err != nil {
+		return
+	}
+	mgr := syncManager()
+	res, err := syncGCCore(ctx, mgr, c)
+	if err != nil || len(res.orphanIDs) == 0 {
+		return
+	}
+	_ = mgr.TerminateByIdentifier(ctx, res.orphanIDs...)
+}
+
 // newSyncGCCmd terminates orphaned Mutagen sync sessions: this tool's syncs whose
 // pod endpoint is gone (the session was destroyed, idle-reaped, dev-reset, or
 // kubectl-deleted) and that would otherwise retry the dead pod forever and pile
 // up in the host Mutagen daemon. It is conservative by construction:
 //   - scoped to this tool's syncs (the sandbox-session label) — never the lima
 //     sandbox-vm-id syncs that share the host daemon;
+//   - scoped to the CURRENT kube context (the sandbox-context label) — never a
+//     sync a different context created (MF3);
 //   - only syncs whose transport is down (IsOrphanStatus), so an actively-syncing
 //     session is never touched;
 //   - cross-referenced against the live cluster, so a running OR suspended
@@ -372,10 +481,6 @@ func newSyncGCCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			mgr := syncManager()
-			syncs, err := mgr.List(ctx)
-			if err != nil {
-				return fmt.Errorf("sync gc: list syncs: %w", err)
-			}
 			// Authoritative live set. Refuse to proceed without it: during a cluster
 			// outage every pod is unreachable, so every sync would look orphaned and
 			// an empty live set would nuke them all.
@@ -383,43 +488,26 @@ func newSyncGCCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("sync gc needs cluster access to confirm live sessions: %w", err)
 			}
-			states, err := c.List(ctx)
+			res, err := syncGCCore(ctx, mgr, c)
 			if err != nil {
-				return fmt.Errorf("sync gc: cannot list cluster sessions; refusing to run (an outage makes every sync look gone): %w", err)
-			}
-			live := make(map[string]bool, len(states))
-			for _, st := range states {
-				live[string(st.ID)] = true
-			}
-
-			var orphanIDs []string
-			bySession := map[string]int{}
-			for _, s := range syncs {
-				if !syncpkg.IsOrphanStatus(s.Status) {
-					continue // actively syncing → keep
-				}
-				if live[s.SessionID] {
-					continue // session still exists (running/suspended) → keep
-				}
-				orphanIDs = append(orphanIDs, s.Identifier)
-				bySession[s.SessionID]++
+				return fmt.Errorf("sync gc: %w", err)
 			}
 			out := cmd.OutOrStdout()
-			if len(orphanIDs) == 0 {
+			if len(res.orphanIDs) == 0 {
 				fmt.Fprintln(out, "sync gc: no orphaned sync sessions.")
 				return nil
 			}
-			for sid, n := range bySession {
+			for sid, n := range res.bySession {
 				fmt.Fprintf(out, "  %s — %d orphaned sync session(s)\n", sid, n)
 			}
 			if dryRun {
-				fmt.Fprintf(out, "sync gc: %d orphaned sync session(s) across %d gone session(s) (dry-run — re-run without --dry-run to terminate).\n", len(orphanIDs), len(bySession))
+				fmt.Fprintf(out, "sync gc: %d orphaned sync session(s) across %d gone session(s) (dry-run — re-run without --dry-run to terminate).\n", len(res.orphanIDs), len(res.bySession))
 				return nil
 			}
-			if err := mgr.TerminateByIdentifier(ctx, orphanIDs...); err != nil {
+			if err := mgr.TerminateByIdentifier(ctx, res.orphanIDs...); err != nil {
 				return fmt.Errorf("sync gc: terminate orphans: %w", err)
 			}
-			fmt.Fprintf(out, "sync gc: terminated %d orphaned sync session(s) across %d gone session(s).\n", len(orphanIDs), len(bySession))
+			fmt.Fprintf(out, "sync gc: terminated %d orphaned sync session(s) across %d gone session(s).\n", len(res.orphanIDs), len(res.bySession))
 			return nil
 		},
 	}

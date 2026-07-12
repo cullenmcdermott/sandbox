@@ -12,7 +12,9 @@ import (
 // listStubRunner is a syncpkg.Runner that returns a canned `mutagen sync list`
 // output (or an error) for the same-path collision scan. The scan only issues
 // `sync list --template <pipe-template>`, whose output is one
-// "sessionID|identifier|name|status" line per session.
+// "sessionID|context|identifier|name|status" line per session (the context field
+// is the MF3 sandbox-context label; a real daemon renders it as an EMPTY field —
+// not a missing one — for a pre-MF3 label-less sync).
 type listStubRunner struct {
 	out string
 	err error
@@ -29,9 +31,15 @@ func TestSameDirSyncWarning(t *testing.T) {
 	const ours = "claude-sdk-ours"
 	const dir = "/work/repo"
 
-	// listLine formats one `mutagen sync list` template row.
+	// listLine formats one `mutagen sync list` template row (current 5-field
+	// shape, sandbox-context label populated).
 	listLine := func(id, name, status string) string {
-		return id + "|sync_" + id + "|" + name + "|" + status
+		return id + "|some-ctx|sync_" + id + "|" + name + "|" + status
+	}
+	// legacyListLine formats a row for a pre-MF3 sync: the sandbox-context label
+	// is absent, so the template renders an empty second field.
+	legacyListLine := func(id, name, status string) string {
+		return id + "||sync_" + id + "|" + name + "|" + status
 	}
 
 	cases := []struct {
@@ -87,6 +95,26 @@ func TestSameDirSyncWarning(t *testing.T) {
 			name:          "mutagen absent (list errors) degrades silently",
 			workspacePath: dir,
 			listErr:       io.ErrUnexpectedEOF,
+			otherEntries:  map[string]index.Entry{"claude-sdk-other": {ProjectPath: dir}},
+			wantWarn:      false,
+		},
+		{
+			// A pre-MF3 sync has no sandbox-context label (empty second field) but
+			// must still be seen by the collision scan — the label is a GC scoping
+			// concern, not a collision one.
+			name:          "collision with a legacy (context-less) sync still warns",
+			workspacePath: dir,
+			list:          legacyListLine("claude-sdk-other", "sandbox-claude-sdk-other-project", "Watching for changes"),
+			otherEntries:  map[string]index.Entry{"claude-sdk-other": {ProjectPath: dir}},
+			wantWarn:      true,
+		},
+		{
+			// A row in an unexpected shape (wrong field count — e.g. output from a
+			// stale template) is skipped by the parser: no crash, and the scan
+			// degrades to silence exactly like a list error.
+			name:          "malformed (old 4-field shape) row degrades silently",
+			workspacePath: dir,
+			list:          "claude-sdk-other|sync_claude-sdk-other|sandbox-claude-sdk-other-project|Watching for changes",
 			otherEntries:  map[string]index.Entry{"claude-sdk-other": {ProjectPath: dir}},
 			wantWarn:      false,
 		},

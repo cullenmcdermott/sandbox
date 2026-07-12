@@ -64,6 +64,10 @@ func NewRoot() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// Best-effort orphan-sync GC at startup (SF1): clean up syncs left by
+			// destroyed/reaped/dev-reset pods now rather than waiting for the first
+			// in-TUI reconcile. Backgrounded so it never delays the dashboard.
+			startupSyncGC()
 			// The connectors/creator/hooks bridge the public client package into
 			// the dashboard.Connector/Creator types, so the dashboard imports
 			// neither cli nor client.

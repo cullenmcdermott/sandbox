@@ -52,35 +52,84 @@ func localSSHConfig() (*syncpkg.SSHConfig, error) {
 	return syncpkg.NewSSHConfig(include, filepath.Join(home, ".ssh", "config")), nil
 }
 
-// dashboardSyncProber builds the dashboard's per-session sync-health probe,
-// backed by the Mutagen sync manager. It maps a SyncState to its short token and
-// degrades to "unknown" on any error so the indicator never blocks the UI. For a
-// conflicted sync it also formats a capped per-file detail list + a resolution
-// hint (§1d) — the internal/sync parsing lives in the sync package; this adapter
-// only shapes the typed summary into the dashboard's decoupled SyncHealth.
-func dashboardSyncProber() dashboard.SyncProber {
+// syncHealMinInterval bounds how often a single session's stalled sync is
+// self-healed (MF5). The dashboard probes each warm session's health on a timer,
+// so without a debounce a persistent stall would fire ResumeAll+FlushAll on every
+// probe. One heal attempt per interval is enough to un-stick a transient stall
+// while the SSE stream stays healthy.
+const syncHealMinInterval = 30 * time.Second
+
+// syncProber is the stateful backing for the dashboard's sync-health probe. It
+// maps a SyncState to the dashboard's decoupled SyncHealth and, on a SyncStalled
+// reading, fires a debounced background self-heal (MF5) — the layer that owns the
+// prober, not the dashboard, drives the recovery.
+type syncProber struct {
+	mu         sync.Mutex
+	lastHealAt map[session.ID]time.Time
+}
+
+// probe reads a session's sync health, shapes the conflict detail, and triggers
+// the self-heal when the sync has stalled. It degrades to "unknown" on any error
+// so the indicator never blocks the UI.
+func (p *syncProber) probe(ctx context.Context, id session.ID) dashboard.SyncHealth {
 	// conflictFileCap bounds how many conflicting files the detail pane lists
 	// before collapsing the rest into a "+N more" line, so a mass conflict can't
 	// flood the pane.
 	const conflictFileCap = 5
-	return func(ctx context.Context, id session.ID) dashboard.SyncHealth {
-		st, summary, err := syncManager().StatusDetail(ctx, string(id))
-		if err != nil {
-			return dashboard.SyncHealth{Status: "unknown"}
-		}
-		h := dashboard.SyncHealth{Status: st.String()}
-		if st == syncpkg.SyncConflicted && summary.Total > 0 {
-			for i, cf := range summary.Files {
-				if i >= conflictFileCap {
-					h.Conflicts = append(h.Conflicts, fmt.Sprintf("+%d more", summary.Total-conflictFileCap))
-					break
-				}
-				h.Conflicts = append(h.Conflicts, cf.Describe())
-			}
-			h.Hint = syncpkg.ConflictResolutionHint
-		}
-		return h
+	st, summary, err := syncManager().StatusDetail(ctx, string(id))
+	if err != nil {
+		return dashboard.SyncHealth{Status: "unknown"}
 	}
+	if st == syncpkg.SyncStalled {
+		p.maybeHeal(id)
+	}
+	h := dashboard.SyncHealth{Status: st.String()}
+	if st == syncpkg.SyncConflicted && summary.Total > 0 {
+		for i, cf := range summary.Files {
+			if i >= conflictFileCap {
+				h.Conflicts = append(h.Conflicts, fmt.Sprintf("+%d more", summary.Total-conflictFileCap))
+				break
+			}
+			h.Conflicts = append(h.Conflicts, cf.Describe())
+		}
+		h.Hint = syncpkg.ConflictResolutionHint
+	}
+	return h
+}
+
+// maybeHeal fires a background Reconcile (ResumeAll+FlushAll) for a stalled
+// session, at most once per syncHealMinInterval (MF5). It runs off the probe
+// goroutine on its own bounded context so a slow flush never blocks the health
+// read, and swallows errors — a failed heal just leaves the stall visible for the
+// next probe to retry. It heals a stalled-but-existing sync while SSE is healthy,
+// the gap where nothing else re-runs sync setup; a genuinely terminated sync is
+// still recreated by the connect path on the next reconnect.
+func (p *syncProber) maybeHeal(id session.ID) {
+	p.mu.Lock()
+	now := time.Now()
+	if last, ok := p.lastHealAt[id]; ok && now.Sub(last) < syncHealMinInterval {
+		p.mu.Unlock()
+		return
+	}
+	p.lastHealAt[id] = now
+	p.mu.Unlock()
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		_ = syncManager().Reconcile(ctx, string(id))
+	}()
+}
+
+// dashboardSyncProber builds the dashboard's per-session sync-health probe,
+// backed by the Mutagen sync manager. It maps a SyncState to its short token and
+// degrades to "unknown" on any error so the indicator never blocks the UI. For a
+// conflicted sync it also formats a capped per-file detail list + a resolution
+// hint (§1d), and for a stalled sync it fires a debounced self-heal (MF5) — the
+// internal/sync parsing/reconcile lives in the sync package; this adapter only
+// shapes the typed summary into the dashboard's decoupled SyncHealth.
+func dashboardSyncProber() dashboard.SyncProber {
+	p := &syncProber{lastHealAt: make(map[session.ID]time.Time)}
+	return p.probe
 }
 
 // dashboardSyncReaper builds the dashboard's orphaned-sync GC, backed by the
@@ -92,18 +141,30 @@ func dashboardSyncReaper() dashboard.SyncReaper {
 type reaperAdapter struct{}
 
 func (reaperAdapter) ListOrphans(ctx context.Context) ([]dashboard.OrphanSync, error) {
-	sessions, err := syncManager().List(ctx)
+	mgr := syncManager()
+	sessions, err := mgr.List(ctx)
 	if err != nil {
 		return nil, err
 	}
+	// Scope to the current kube context (MF3): a sync a DIFFERENT context created
+	// carries that context's sandbox-context label. The dashboard's GC confirms a
+	// candidate against the current cluster's live set before terminating, but that
+	// live set can't see another context's sessions — so an out-of-context sync
+	// would look orphaned and be wrongly reaped. Legacy syncs (no label, "") fall
+	// through as before so they never become immortal.
+	currentCtx := mgr.CurrentContext()
 	var orphans []dashboard.OrphanSync
 	for _, s := range sessions {
-		if syncpkg.IsOrphanStatus(s.Status) {
-			orphans = append(orphans, dashboard.OrphanSync{
-				Identifier: s.Identifier,
-				SessionID:  session.ID(s.SessionID),
-			})
+		if !syncpkg.IsOrphanStatus(s.Status) {
+			continue
 		}
+		if s.Context != "" && s.Context != currentCtx {
+			continue // another kube context owns it — not ours to reap
+		}
+		orphans = append(orphans, dashboard.OrphanSync{
+			Identifier: s.Identifier,
+			SessionID:  session.ID(s.SessionID),
+		})
 	}
 	return orphans, nil
 }

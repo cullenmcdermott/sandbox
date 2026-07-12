@@ -169,6 +169,10 @@ kind-down:
     #!/usr/bin/env bash
     [ -n "${FLOX_ENV:-}" ] || exec flox activate -- just kind-down
     set -euo pipefail
+    # Reap orphaned mutagen syncs BEFORE tearing the cluster down, while it can
+    # still be listed — `sync gc` refuses to run once the cluster is gone. Scoped
+    # to the current kube context (MF3). Best-effort (no cluster ⇒ nothing to do).
+    KUBECONFIG="$PWD/dev/local/.kubeconfig" go run ./cmd/sandbox sync gc 2>/dev/null || true
     ctlptl delete -f dev/local/ctlptl.yaml || kind delete cluster --name sandbox-local
     rm -f dev/local/.kubeconfig
     printf '\033[32m%s\033[0m\n' "kind down: cluster 'sandbox-local' deleted"
@@ -289,6 +293,11 @@ dev-reset:
     if ! kind get clusters 2>/dev/null | grep -qx sandbox-local; then
         echo "no 'sandbox-local' cluster — nothing to reset (run 'just dev-up')" >&2; exit 0
     fi
+    # Reap orphaned mutagen syncs BEFORE deleting the pods, while the cluster can
+    # still be listed — `sync gc` refuses to run once it can't confirm the live set
+    # (an outage would make every sync look gone). Scoped to the current kube
+    # context (MF3) so it never touches another cluster's syncs. Best-effort.
+    go run ./cmd/sandbox sync gc || true
     # Sandboxes own their pods; delete them, then the PVCs and any reaper Jobs that
     # the controller/reaper left behind in agent-sessions.
     kubectl delete sandboxes.agents.x-k8s.io --all -n agent-sessions --ignore-not-found --wait=false || true

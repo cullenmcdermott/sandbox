@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/cullenmcdermott/sandbox/internal/session"
+	syncpkg "github.com/cullenmcdermott/sandbox/internal/sync"
 )
 
 // TestConfirmDestroyGate exercises the destroy command's interactive
@@ -114,5 +115,50 @@ func TestCancelActiveTurnPropagatesStateError(t *testing.T) {
 	}
 	if client.interruptedWith != nil {
 		t.Error("InterruptTurn must not be called when SessionState failed")
+	}
+}
+
+// TestSelectOrphanSyncs covers the MF3 context-scoped orphan selection: only
+// transport-down syncs, only sessions absent from the current context's live
+// set, and — the fix — never a sync a DIFFERENT context created.
+func TestSelectOrphanSyncs(t *testing.T) {
+	const currentCtx = "omni-prod"
+	syncs := []syncpkg.SyncSession{
+		// current ctx, gone session, orphaned → reap
+		{SessionID: "gone", Context: currentCtx, Identifier: "sync_gone", Status: "ConnectingBeta"},
+		// current ctx, live session, orphaned → keep (reconnecting)
+		{SessionID: "live", Context: currentCtx, Identifier: "sync_live", Status: "ConnectingBeta"},
+		// current ctx, gone session, actively watching → keep (not orphaned)
+		{SessionID: "busy", Context: currentCtx, Identifier: "sync_busy", Status: "Watching"},
+		// DIFFERENT ctx, not in this cluster's live set, orphaned → keep (MF3)
+		{SessionID: "other", Context: "staging", Identifier: "sync_other", Status: "Disconnected"},
+		// legacy (no ctx label), gone session, orphaned → reap (migration fallback)
+		{SessionID: "legacy", Context: "", Identifier: "sync_legacy", Status: "Disconnected"},
+	}
+	live := map[string]bool{"live": true}
+
+	orphanIDs, bySession := selectOrphanSyncs(syncs, live, currentCtx)
+
+	got := map[string]bool{}
+	for _, id := range orphanIDs {
+		got[id] = true
+	}
+	want := map[string]bool{"sync_gone": true, "sync_legacy": true}
+	if len(got) != len(want) {
+		t.Fatalf("selected %v, want %v", orphanIDs, []string{"sync_gone", "sync_legacy"})
+	}
+	for id := range want {
+		if !got[id] {
+			t.Errorf("expected %s to be selected for reap", id)
+		}
+	}
+	if got["sync_other"] {
+		t.Error("MF3 violation: a different context's sync was selected for reap")
+	}
+	if got["sync_live"] || got["sync_busy"] {
+		t.Error("a live or actively-syncing sync was wrongly selected")
+	}
+	if bySession["gone"] != 1 || bySession["legacy"] != 1 {
+		t.Errorf("per-session counts wrong: %v", bySession)
 	}
 }
