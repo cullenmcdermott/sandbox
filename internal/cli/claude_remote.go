@@ -142,6 +142,12 @@ func runStartSession(cmd *cobra.Command, backendName, prompt, runnerImage, reape
 		return err
 	}
 
+	// Best-effort orphan-sync GC at startup (SF1), matching bare-`sandbox` and
+	// `attach`: clean up syncs left by destroyed/reaped/dev-reset pods now rather
+	// than waiting for the first in-TUI reconcile. Backgrounded + bounded so it
+	// never delays session creation.
+	startupSyncGC()
+
 	ctx := cmd.Context()
 	projectPath, err := resolveProjectPath()
 	if err != nil {
