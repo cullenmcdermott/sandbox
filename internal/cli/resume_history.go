@@ -142,13 +142,13 @@ func syncResumeHistory() error {
 	historyPath := filepath.Join(cfgDir, "history.jsonl")
 	var firstErr error
 	for _, e := range entries {
-		if e.ClaudeSessionID == "" || e.ProjectPath == "" {
+		if e.AgentSessionID == "" || e.ProjectPath == "" {
 			continue
 		}
-		if !transcriptExistsFor(cfgDir, e.ClaudeSessionID) {
+		if !transcriptExistsFor(cfgDir, e.AgentSessionID) {
 			continue // not synced yet — a later shutdown will pick it up
 		}
-		has, herr := historyHasSession(historyPath, e.ClaudeSessionID)
+		has, herr := historyHasSession(historyPath, e.AgentSessionID)
 		if herr != nil {
 			if firstErr == nil {
 				firstErr = herr
@@ -162,7 +162,7 @@ func syncResumeHistory() error {
 			Display:        resumeDisplay(e),
 			PastedContents: map[string]any{},
 			Project:        e.ProjectPath,
-			SessionID:      e.ClaudeSessionID,
+			SessionID:      e.AgentSessionID,
 			Timestamp:      time.Now().UnixMilli(),
 		}); werr != nil && firstErr == nil {
 			firstErr = werr

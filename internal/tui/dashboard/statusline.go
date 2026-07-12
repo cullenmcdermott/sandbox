@@ -17,6 +17,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 
+	"github.com/cullenmcdermott/sandbox/internal/session"
 	"github.com/cullenmcdermott/sandbox/tui/anim"
 	"github.com/cullenmcdermott/sandbox/tui/terminal"
 	"github.com/cullenmcdermott/sandbox/tui/theme"
@@ -59,17 +60,17 @@ const (
 	modeBypass                      // SDK "bypassPermissions": yolo (session default)
 )
 
-// apiValue is the TurnInput.Mode string sent to the runner for this mode.
-func (p permMode) apiValue() string {
+// apiValue is the TurnInput.ApprovalPolicy sent to the runner for this mode.
+func (p permMode) apiValue() session.ApprovalPolicy {
 	switch p {
 	case modeDefault:
-		return "default"
+		return session.ApprovalDefault
 	case modePlan:
-		return "plan"
+		return session.ApprovalPlan
 	case modeBypass:
-		return "bypassPermissions"
+		return session.ApprovalBypass
 	default:
-		return "acceptEdits"
+		return session.ApprovalAcceptEdits
 	}
 }
 

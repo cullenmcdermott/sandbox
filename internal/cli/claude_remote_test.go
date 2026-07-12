@@ -53,7 +53,7 @@ func TestStartPromptTurnPostsThePrompt(t *testing.T) {
 	if f.started[0].Prompt != "fix the build" {
 		t.Fatalf("prompt = %q, want the positional arg", f.started[0].Prompt)
 	}
-	if f.started[0].Mode != "" || f.started[0].Model != "" {
+	if f.started[0].ApprovalPolicy != "" || f.started[0].Model != "" {
 		t.Fatalf("unexpected mode/model overrides: %+v", f.started[0])
 	}
 	if f.startedAt[0] != ref {

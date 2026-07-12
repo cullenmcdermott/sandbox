@@ -46,8 +46,11 @@ func mapStage(st client.Stage) dashboard.ConnectStage {
 	}
 }
 
-// mapOpencode adapts client opencode creds to the dashboard's type.
-func mapOpencode(oc *client.OpencodeCreds) *dashboard.OpencodeCreds {
+// mapOpencode adapts the client's generic external-service creds
+// (Connection.External) to the dashboard's opencode pane type. Today the only
+// backend with an external service is opencode-server; codex will reuse the
+// client.ExternalCreds shape with its own dashboard pane.
+func mapOpencode(oc *client.ExternalCreds) *dashboard.OpencodeCreds {
 	if oc == nil {
 		return nil
 	}
@@ -84,7 +87,7 @@ func newDashboardConnector(c *client.Client, reaperImage string) dashboard.Conne
 			Client:        conn.Runner,
 			Reconnect:     reconnect,
 			Endpoint:      conn.Endpoint,
-			OpencodeCreds: mapOpencode(conn.Opencode),
+			OpencodeCreds: mapOpencode(conn.External),
 			Warning:       conn.Warning,
 			// §5: sync/reaper advisories settle in the background now; the
 			// dashboard polls this seam so they surface instead of vanishing.
@@ -196,7 +199,7 @@ func newDashboardCreator(c *client.Client, runnerImage, reaperImage string) dash
 			Client:        conn.Runner,
 			Reconnect:     reconnect,
 			Endpoint:      conn.Endpoint,
-			OpencodeCreds: mapOpencode(conn.Opencode),
+			OpencodeCreds: mapOpencode(conn.External),
 			Warning:       conn.Warning,
 			AwaitWarning:  sess.AwaitSync,
 			Close:         func() { _ = sess.Close() },

@@ -63,9 +63,9 @@ func newTurnCmd() *cobra.Command {
 			}
 
 			turn, err := rc.StartTurn(ctx, ref, session.TurnInput{
-				Prompt: prompt,
-				Mode:   mode,
-				Model:  model,
+				Prompt:         prompt,
+				ApprovalPolicy: session.ApprovalPolicy(mode),
+				Model:          model,
 			})
 			if err != nil {
 				return fmt.Errorf("start turn: %w", err)

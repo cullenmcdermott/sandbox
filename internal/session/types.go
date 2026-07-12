@@ -173,6 +173,44 @@ const (
 	StatusGone      Status = "GONE"
 )
 
+// Activity is the runner-reported turn activity of a session — whether a turn is
+// currently running. It is a DISTINCT vocabulary from the lifecycle Status (D9):
+// Status (CREATING/RUNNING/SUSPENDED/…) is owned by the k8s backend and describes
+// the pod/Sandbox, while Activity (idle/busy/error) is owned by the runner and
+// describes the agent turn loop. Keeping them on separate fields is the "one
+// vocabulary per field" resolution — a runner-sourced State never overwrites the
+// lifecycle Status with an "idle"/"busy" value.
+type Activity string
+
+const (
+	ActivityIdle  Activity = "idle"
+	ActivityBusy  Activity = "busy"
+	ActivityError Activity = "error"
+)
+
+// ApprovalPolicy is the tool-approval policy a turn runs under — an owned enum so
+// callers pick a named policy instead of a raw SDK string. The wire values are
+// the Claude SDK permission-mode strings, kept for wire compatibility (both the
+// runner's turn body and the persisted autopilot-spec overrides key off "mode").
+// The runner maps the policy per-backend; a backend that cannot honor it (e.g.
+// opencode-server, whose interactive client owns its own permission modal)
+// ignores it rather than failing — documented at the runner's Agent seam, not
+// silent.
+type ApprovalPolicy string
+
+const (
+	// ApprovalDefault asks before each tool use (SDK "default").
+	ApprovalDefault ApprovalPolicy = "default"
+	// ApprovalAcceptEdits auto-accepts file edits (SDK "acceptEdits").
+	ApprovalAcceptEdits ApprovalPolicy = "acceptEdits"
+	// ApprovalPlan is read-only planning (SDK "plan").
+	ApprovalPlan ApprovalPolicy = "plan"
+	// ApprovalBypass skips per-tool permission prompts (SDK "bypassPermissions",
+	// "yolo"). It is the runner default (since 2026-07-12); still hard-gated by
+	// the SDK's allowDangerouslySkipPermissions + IS_SANDBOX check.
+	ApprovalBypass ApprovalPolicy = "bypassPermissions"
+)
+
 // State is the observed state of a remote session, mirroring the runner's
 // session.json plus Kubernetes pod/Sandbox state.
 type State struct {
@@ -184,11 +222,22 @@ type State struct {
 	// Spec.WorkspacePath. Attach resolves the local Mutagen endpoint from this.
 	WorkspacePath string `json:"workspacePath,omitempty"`
 	Model         string `json:"model,omitempty"`
-	Status        Status `json:"status"`
-	// ClaudeSession is populated from the runner's session.json (the upstream
-	// Claude SDK session id) but is not yet read anywhere in the Go CLI; it is
-	// carried for future resume/inspection features.
-	ClaudeSession string `json:"claudeSession,omitempty"`
+	// Status is the session's lifecycle state (CREATING/RUNNING/SUSPENDED/FAILED/
+	// GONE/UNKNOWN). It is owned by the k8s backend (pod/Sandbox state); the runner
+	// does NOT report it, so a runner-sourced State leaves it empty. This is the
+	// single vocabulary for this field (D9) — the runner's turn-activity signal is
+	// carried separately on Activity.
+	Status Status `json:"status,omitempty"`
+	// Activity is the runner-reported turn activity (idle/busy/error), populated
+	// only by the runner client's SessionState from GET /status (the k8s backend
+	// cannot know it and leaves it empty). Distinct from Status (D9).
+	Activity Activity `json:"activity,omitempty"`
+	// AgentSessionID is the backend's own resume id — the Claude SDK session UUID
+	// for a claude-sdk session, or the opencode session id — reported by the
+	// runner's session.json. One backend per session ⇒ one resume id. It is
+	// carried for resume/inspection; the local index/history path persists it
+	// separately (see internal/index.Entry.AgentSessionID).
+	AgentSessionID string `json:"agentSession,omitempty"`
 	// LastTurnID is the most recently started turn, which persists after the
 	// turn finishes (the runner uses it to seed the next turn id). It does NOT
 	// mean a turn is running — that is ActiveTurnID.
@@ -224,10 +273,15 @@ type TurnInput struct {
 	Prompt       string   `json:"prompt"`
 	Resume       TurnID   `json:"resume,omitempty"`
 	AllowedTools []string `json:"allowedTools,omitempty"`
-	// Mode is the SDK permission mode the turn runs in: one of
-	// "default", "acceptEdits", "plan", "bypassPermissions". Empty means the
-	// runner uses "acceptEdits" (preserves the pre-mode-switching behavior).
-	Mode string `json:"mode,omitempty"`
+	// ApprovalPolicy is the tool-approval policy the turn runs under, an owned
+	// enum (ApprovalDefault/ApprovalAcceptEdits/ApprovalPlan/ApprovalBypass) rather
+	// than a raw SDK string. Empty means the runner applies its default
+	// (ApprovalBypass since 2026-07-12 — the sandbox pod is the isolation
+	// boundary; see docs/runner-api.md). The wire key stays "mode" and the wire
+	// values are the SDK permission-mode strings, so this maps 1:1 for the
+	// claude-sdk backend; the runner maps it per-backend and a backend that does
+	// not honor it (opencode owns its own permission modal) ignores it.
+	ApprovalPolicy ApprovalPolicy `json:"mode,omitempty"`
 	// Model overrides the model for this turn (the in-session /model switch):
 	// an id/alias like "opus", "sonnet", "haiku", or a full id. Empty means the
 	// runner falls back to its session default (Spec.Model / SANDBOX_MODEL) and

@@ -105,14 +105,19 @@ func (c *Client) ProtocolVersion() int {
 // internal/cli commands (turn, trace — via waitHealthy) report identical
 // wording. Deliberately advisory, not fatal: OSS users build and push their
 // own runner images, so a skewed pair is the steady state, not an edge case.
+// The wording must stay ACTIONABLE — it names both versions, the concrete
+// failure mode (a renamed wire field decodes as empty against the wrong
+// counterpart, e.g. the §8 v1→v2 status/claudeSession renames), and the fix
+// (update the image + restart the pod, or re-create the session); pinned by
+// client/session_protocol_version_test.go.
 func ProtocolMismatchWarning(remoteVersion int) string {
 	if remoteVersion == session.ProtocolVersion {
 		return ""
 	}
 	if remoteVersion == 0 {
-		return fmt.Sprintf("runner did not report a protocol version (old runner image, pre-dates the handshake); this CLI speaks protocol v%d — behavior may be subtly wrong if the wire contract has since changed", session.ProtocolVersion)
+		return fmt.Sprintf("runner did not report a protocol version (old runner image, pre-dates the handshake); this CLI expects protocol v%d and renamed wire fields may silently decode as empty — update the runner image, then suspend/resume the session to restart its pod, or destroy and re-create the session", session.ProtocolVersion)
 	}
-	return fmt.Sprintf("CLI/runner protocol version mismatch: runner reports v%d, this CLI speaks v%d — behavior may be subtly wrong (rebuild/pull a matching runner image)", remoteVersion, session.ProtocolVersion)
+	return fmt.Sprintf("CLI/runner protocol version mismatch: runner speaks v%d, this CLI expects v%d — renamed wire fields may silently decode as empty; update the runner image, then suspend/resume the session to restart its pod, or destroy and re-create the session", remoteVersion, session.ProtocolVersion)
 }
 
 // StartTurn POSTs a new turn to the runner.

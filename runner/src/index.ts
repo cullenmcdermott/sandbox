@@ -111,7 +111,7 @@ function main(): void {
   appendEvent(reg.state.sandbox_session_id, undefined, 'session.started', {
     model: reg.state.model ?? '',
     cwd: bootCwd,
-    ...(reg.state.claude_session_id ? { claudeSessionId: reg.state.claude_session_id } : {}),
+    ...(reg.state.claude_session_id ? { agentSessionId: reg.state.claude_session_id } : {}),
   });
 
   // Resolve the agent backend up front so an unknown SANDBOX_BACKEND fails at

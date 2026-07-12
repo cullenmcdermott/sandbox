@@ -22,6 +22,13 @@ export interface Agent {
   // done. It must honor `abort` (client interrupt) and never throw for an
   // aborted turn — emit `turn.interrupted` instead. Resolves when the turn
   // fully settles; the caller has already registered the turn.
+  //
+  // `mode` is the tool-approval policy (Go: TurnInput.ApprovalPolicy — 'default'
+  // | 'acceptEdits' | 'plan' | 'bypassPermissions'). It is mapped PER-BACKEND: the
+  // claude-sdk backend applies it as the SDK permissionMode; a backend that owns
+  // its own permission surface (opencode-server, whose interactive client drives
+  // the modal) does not honor it and MAY ignore it — documented here so a
+  // non-honoring backend is an explicit contract, not a silent drop.
   runTurn(
     cfg: RunnerConfig,
     turnId: string,

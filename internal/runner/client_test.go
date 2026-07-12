@@ -195,7 +195,9 @@ func TestSessionState(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"id":"test","backend":"claude-sdk","projectPath":"/tmp","status":"idle"}`)
+		// §8 wire contract: the runner reports turn activity on "activity" (NOT the
+		// lifecycle "status") and the backend resume id on "agentSession".
+		fmt.Fprintf(w, `{"id":"test","backend":"claude-sdk","projectPath":"/tmp","activity":"idle","agentSession":"sdk-uuid"}`)
 	}))
 	defer srv.Close()
 
@@ -207,6 +209,16 @@ func TestSessionState(t *testing.T) {
 	}
 	if st.ID != "test" || st.Backend != "claude-sdk" {
 		t.Errorf("got id=%q backend=%q", st.ID, st.Backend)
+	}
+	if st.Activity != session.ActivityIdle {
+		t.Errorf("activity: got %q, want idle", st.Activity)
+	}
+	if st.AgentSessionID != "sdk-uuid" {
+		t.Errorf("agentSession: got %q, want sdk-uuid", st.AgentSessionID)
+	}
+	// The runner does not report the lifecycle Status; it must stay empty.
+	if st.Status != "" {
+		t.Errorf("status: got %q, want empty (runner does not report lifecycle status)", st.Status)
 	}
 }
 

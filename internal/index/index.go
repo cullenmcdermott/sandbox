@@ -71,14 +71,17 @@ type Entry struct {
 	// display title when RenamedTitle is empty; the derived basename is the
 	// final fallback.
 	AutoTitle string `json:"autoTitle,omitempty"`
-	// ClaudeSessionID is the Claude Agent SDK session UUID reported by the runner
-	// (session.started event). It is the id `claude --resume <id>` expects, and
-	// the key used to write a local ~/.claude/history.jsonl entry so a k8s session
-	// shows up in the interactive resume picker on the laptop.
-	ClaudeSessionID string `json:"claudeSessionId,omitempty"`
-	Namespace       string `json:"namespace"`
-	SandboxName     string `json:"sandboxName"`
-	RunnerToken     string `json:"-"` // stored separately, not in JSON
+	// AgentSessionID is the backend's own resume id reported by the runner
+	// (session.started event) — the Claude Agent SDK session UUID for a claude-sdk
+	// session (one backend per session ⇒ one resume id, §8 De-Claude rename). It is
+	// the id `claude --resume <id>` expects, and the key used to write a local
+	// ~/.claude/history.jsonl entry so a k8s session shows up in the interactive
+	// resume picker on the laptop. Load migrates the pre-§8 on-disk key
+	// "claudeSessionId" into this field; Save then rewrites it as "agentSessionId".
+	AgentSessionID string `json:"agentSessionId,omitempty"`
+	Namespace      string `json:"namespace"`
+	SandboxName    string `json:"sandboxName"`
+	RunnerToken    string `json:"-"` // stored separately, not in JSON
 	// WorktreePath, WorktreeBranch, and RepoRoot record the session's per-session
 	// git worktree (empty for a non-git / WorktreeOff session). They let teardown
 	// and reaping reason about the worktree without re-running git discovery:
@@ -246,6 +249,9 @@ func mergeEntry(prev, next Entry) Entry {
 	if next.SandboxName == "" {
 		next.SandboxName = prev.SandboxName
 	}
+	if next.AgentSessionID == "" {
+		next.AgentSessionID = prev.AgentSessionID
+	}
 	if next.WorktreePath == "" {
 		next.WorktreePath = prev.WorktreePath
 	}
@@ -292,6 +298,18 @@ func (i *Index) Load(id string) (Entry, error) {
 	var entry Entry
 	if err := json.Unmarshal(data, &entry); err != nil {
 		return Entry{}, fmt.Errorf("index: decode %s: %w", id, err)
+	}
+	// Backward-compat migration (§8 De-Claude): entries written before the
+	// AgentSessionID rename persisted the resume id under "claudeSessionId". Accept
+	// the old key when the new one is absent so existing sessions stay resumable;
+	// the next Save rewrites it as "agentSessionId".
+	if entry.AgentSessionID == "" {
+		var legacy struct {
+			ClaudeSessionID string `json:"claudeSessionId"`
+		}
+		if json.Unmarshal(data, &legacy) == nil && legacy.ClaudeSessionID != "" {
+			entry.AgentSessionID = legacy.ClaudeSessionID
+		}
 	}
 	return entry, nil
 }

@@ -3,6 +3,7 @@ package index
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -26,6 +27,49 @@ func TestLoadCorruptReturnsDecodeError(t *testing.T) {
 
 	if _, err := idx.Load("broken"); err == nil {
 		t.Fatal("Load of corrupt entry: expected a decode error, got nil")
+	}
+}
+
+// §8 De-Claude migration: an entry written before the AgentSessionID rename
+// persisted the resume id under "claudeSessionId". Load must migrate the old key
+// into AgentSessionID (so existing sessions stay resumable), and the next Save
+// must rewrite it under the new "agentSessionId" key while dropping the old one.
+func TestLoadMigratesLegacyClaudeSessionID(t *testing.T) {
+	dir := t.TempDir()
+	idx := New(dir)
+
+	entryDir := filepath.Join(dir, "claude-sdk-legacy")
+	if err := os.MkdirAll(entryDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// A pre-rename entry: only the old key is present.
+	legacy := `{"sandboxSessionId":"claude-sdk-legacy","backend":"claude-sdk","projectPath":"/tmp","claudeSessionId":"sdk-uuid-1"}`
+	if err := os.WriteFile(filepath.Join(entryDir, "session.json"), []byte(legacy), 0o600); err != nil {
+		t.Fatalf("write legacy: %v", err)
+	}
+
+	got, err := idx.Load("claude-sdk-legacy")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got.AgentSessionID != "sdk-uuid-1" {
+		t.Fatalf("AgentSessionID: got %q, want migrated sdk-uuid-1", got.AgentSessionID)
+	}
+
+	// Re-Save (a no-op title merge) must persist the new key and drop the old one.
+	if err := idx.Save("claude-sdk-legacy", got); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(entryDir, "session.json"))
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	s := string(raw)
+	if !strings.Contains(s, `"agentSessionId": "sdk-uuid-1"`) {
+		t.Errorf("rewritten entry missing new agentSessionId key: %s", s)
+	}
+	if strings.Contains(s, "claudeSessionId") {
+		t.Errorf("rewritten entry still carries the legacy claudeSessionId key: %s", s)
 	}
 }
 

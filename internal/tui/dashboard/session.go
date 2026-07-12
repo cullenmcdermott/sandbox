@@ -92,7 +92,7 @@ func (s SessionStatus) Glyph() string {
 type Session struct {
 	// sessionReadModel holds the shared SSE-derived read-model state
 	// (DashStatus, Model/CtxLimit, usage tokens/cost, git Branch/Dirty, the
-	// pending-permission descriptor, ClaudeSessionID) reduced by ApplyEvent. It is
+	// pending-permission descriptor, AgentSessionID) reduced by ApplyEvent. It is
 	// embedded so the existing s.DashStatus / s.InputTokens / … field accesses and
 	// the SessionSnapshot serialization stay unchanged. The same struct is embedded
 	// in TranscriptModel, so both surfaces reduce one identical read-model.

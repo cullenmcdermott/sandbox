@@ -20,7 +20,7 @@ unexpected failures return 500.
 ### `GET /healthz`
 Returns 200 if the runner process is alive. No auth required. Body:
 ```json
-{ "status": "ok", "protocolVersion": 1 }
+{ "status": "ok", "protocolVersion": 2 }
 ```
 `protocolVersion` is the runner's `PROTOCOL_VERSION`. Because this route needs no
 bearer token, a client can hit it before it has one to distinguish "no runner
@@ -43,16 +43,26 @@ Returns the runner's `session.json` state:
   "id": "claude-sdk-7f3a",
   "backend": "claude-sdk",
   "projectPath": "/Users/you/git/my-project",
-  "status": "idle",
-  "claudeSession": "sdk-session-id",
+  "activity": "idle",
+  "agentSession": "sdk-session-id",
   "lastTurnId": "turn-12",
   "activeTurnId": "",
   "lastActivity": "2026-06-18T22:30:00Z",
   "model": "claude-sonnet-4-5-20250929",
-  "protocolVersion": 1,
+  "protocolVersion": 2,
   "capabilities": { "autopilot": true }
 }
 ```
+`activity` is the runner's turn-activity signal — `idle` | `busy` | `error`. It
+is **distinct** from the k8s lifecycle status (`CREATING`/`RUNNING`/`SUSPENDED`/…),
+which the runner does not report; the Go side keeps the two on separate fields
+(`State.Activity` vs `State.Status`, the D9 one-vocabulary-per-field split).
+`agentSession` is the backend's own resume id — the Claude SDK session UUID for a
+`claude-sdk` session, or the opencode session id — one backend per session ⇒ one
+resume id. (Both fields were renamed from `status`/`claudeSession` in the §8
+De-Claude break; the CLI and runner ship together, so the wire rename lands on
+both sides at once.)
+
 `model` is **optional**: it is omitted until the runner has seen the model id in
 the SDK's init message (i.e. before the first turn it is absent).
 
@@ -96,12 +106,16 @@ Starts a new turn. Request body:
 }
 ```
 `prompt` (non-empty string) is required; the rest are optional. `mode` is the
-SDK permission mode — one of `default`, `acceptEdits`, `plan`, or
-`bypassPermissions`; an empty or unrecognized value defaults to
-`bypassPermissions` (§2d yolo default — the sandbox pod is the isolation
-boundary, so an unpinned turn runs without per-tool permission prompts). The TUI
-pins the mode explicitly and surfaces `bypassPermissions` as a distinct warning
-chip in its status line. (`bypassPermissions` additionally requires the SDK's
+turn's tool-approval policy (Go: the owned `TurnInput.ApprovalPolicy` enum) — one
+of `default`, `acceptEdits`, `plan`, or `bypassPermissions`; an empty or
+unrecognized value defaults to `bypassPermissions` (§2d yolo default — the
+sandbox pod is the isolation boundary, so an unpinned turn runs without per-tool
+permission prompts). The runner maps this **per-backend**: the `claude-sdk`
+backend applies it 1:1 as the SDK `permissionMode`; the `opencode-server` backend
+does **not** honor it (its interactive client owns its own permission modal) and
+ignores the field — a documented no-op, not a silent drop. The TUI pins the mode
+explicitly and surfaces `bypassPermissions` as a distinct warning chip in its
+status line. (`bypassPermissions` additionally requires the SDK's
 `allowDangerouslySkipPermissions` gate, which the runner sets only for that
 mode.) `model` is the per-turn model override (the in-session `/model` switch) —
 an id or alias like `opus`, `sonnet`, `haiku`, or a full id; it wins over the
@@ -128,7 +142,7 @@ new one:
 | Condition | 409 `error` body |
 |---|---|
 | A registered runner turn is already active (any backend) | `a turn is already active; interrupt it before starting a new one` |
-| An interactive `opencode-server` turn is in flight (surfaces only as `status: busy` via the observer, no registered turn) | `the opencode session is busy; interrupt the active turn before starting a new one` |
+| An interactive `opencode-server` turn is in flight (surfaces only as `activity: busy` via the observer, no registered turn) | `the opencode session is busy; interrupt the active turn before starting a new one` |
 | A supervise-only backend that has no `Agent` (accepts no runner turns) | `backend <name> does not accept runner turns` |
 
 The first two are the authoritative `turnRejectReason` set (`runner/src/turns.ts`),

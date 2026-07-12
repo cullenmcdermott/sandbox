@@ -52,21 +52,25 @@ func (s Stage) String() string {
 	}
 }
 
-// OpencodeCreds holds the local endpoint and HTTP basic-auth credentials for an
-// opencode-server session (nil for claude-sdk sessions).
-type OpencodeCreds struct {
+// ExternalCreds holds the local endpoint and HTTP basic-auth credentials for a
+// backend that exposes a secondary local service the caller drives directly (an
+// external UI/API pane): today an opencode-server session's `opencode serve`,
+// and the shape codex will reuse for its remote TUI. Nil for a claude-sdk
+// session, which has no such external service.
+type ExternalCreds struct {
 	Username string
 	Password string
 	URL      string // e.g. http://127.0.0.1:4096
 }
 
 // Connection is the successful outcome of Session.Connect: a live runner client,
-// the local runner endpoint, the resolved backend, and any opencode credentials.
+// the local runner endpoint, the resolved backend, and any external-service
+// credentials.
 type Connection struct {
 	Runner   RunnerClient
 	Endpoint string         // runner HTTP base URL
 	Backend  string         // resolved backend id
-	Opencode *OpencodeCreds // nil for claude-sdk
+	External *ExternalCreds // nil for a backend with no external service (claude-sdk)
 	// Warning is a non-fatal advisory (e.g. file sync failed) the caller should
 	// surface rather than discard.
 	Warning string
@@ -478,7 +482,7 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 			s.closeHandles()
 			return nil, fmt.Errorf("opencode serve not ready: %w", werr)
 		}
-		conn.Opencode = &OpencodeCreds{
+		conn.External = &ExternalCreds{
 			Username: k8s.OpencodeUsername(),
 			Password: pass,
 			URL:      "http://" + addr,

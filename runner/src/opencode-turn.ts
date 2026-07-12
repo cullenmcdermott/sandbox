@@ -557,6 +557,10 @@ async function runTurn(
   prompt: string,
   resume: string | undefined,
   _allowedTools: string[] | undefined,
+  // The tool-approval policy (Go: TurnInput.ApprovalPolicy) is NOT honored by the
+  // opencode backend: the interactive `opencode` client owns its own permission
+  // modal, so the runner has no mode to apply. Ignored by contract (see agent.ts),
+  // not silently dropped; the param exists only to satisfy the Agent.runTurn seam.
   _mode: string | undefined,
   model: string | undefined,
   // opencode exposes no reasoning-effort knob, so the per-turn /effort override

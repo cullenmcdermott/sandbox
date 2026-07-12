@@ -254,7 +254,7 @@ test('the right bearer token authorizes a GET (200 + protocol version)', { skip 
     assert.equal(r.status, 200);
     const body = r.json as Record<string, unknown>;
     assert.equal(body.id, b.sid);
-    assert.equal(body.status, 'idle');
+    assert.equal(body.activity, 'idle');
     assert.equal(body.protocolVersion, PROTOCOL_VERSION);
   } finally {
     b.cleanup();

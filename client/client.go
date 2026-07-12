@@ -28,6 +28,8 @@ type (
 	Spec               = session.Spec
 	State              = session.State
 	Status             = session.Status
+	Activity           = session.Activity
+	ApprovalPolicy     = session.ApprovalPolicy
 	Event              = session.Event
 	TurnInput          = session.TurnInput
 	TurnRef            = session.TurnRef
@@ -133,6 +135,17 @@ const (
 	StatusSuspended = session.StatusSuspended
 	StatusFailed    = session.StatusFailed
 	StatusGone      = session.StatusGone
+
+	// Activity vocabulary (runner-reported turn activity; distinct from Status).
+	ActivityIdle  = session.ActivityIdle
+	ActivityBusy  = session.ActivityBusy
+	ActivityError = session.ActivityError
+
+	// ApprovalPolicy vocabulary (tool-approval policy for a turn, TurnInput.ApprovalPolicy).
+	ApprovalDefault     = session.ApprovalDefault
+	ApprovalAcceptEdits = session.ApprovalAcceptEdits
+	ApprovalPlan        = session.ApprovalPlan
+	ApprovalBypass      = session.ApprovalBypass
 )
 
 // WorktreeMode selects per-session git worktree behavior at Create (design

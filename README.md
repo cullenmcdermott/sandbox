@@ -72,11 +72,11 @@ once a session has synced you can:
 ```bash
 cd <project>            # the same directory you launched the session from
 claude --resume         # pick the session from claude's list, or:
-claude --resume <claudeSession>
+claude --resume <agentSession>
 ```
 
-`<claudeSession>` is the Claude SDK session UUID, surfaced by the runner status
-API (`GET /sessions/:id/status`, field `claudeSession`) and recorded in the local
+`<agentSession>` is the Claude SDK session UUID, surfaced by the runner status
+API (`GET /sessions/:id/status`, field `agentSession`) and recorded in the local
 session index; `claude --resume` with no id also lists it for that project.
 
 This is a **one-way fork**: local turns run entirely on your laptop and never flow

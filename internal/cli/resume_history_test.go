@@ -27,7 +27,7 @@ func TestSyncResumeHistory(t *testing.T) {
 	if err := idx.Save("sess-synced", index.Entry{
 		SandboxSessionID: "sess-synced",
 		ProjectPath:      "/Users/cullen/git/sandbox",
-		ClaudeSessionID:  synced,
+		AgentSessionID:   synced,
 		AutoTitle:        "add resume support",
 	}); err != nil {
 		t.Fatal(err)
@@ -35,7 +35,7 @@ func TestSyncResumeHistory(t *testing.T) {
 	if err := idx.Save("sess-unsynced", index.Entry{
 		SandboxSessionID: "sess-unsynced",
 		ProjectPath:      "/Users/cullen/git/other",
-		ClaudeSessionID:  unsynced,
+		AgentSessionID:   unsynced,
 	}); err != nil {
 		t.Fatal(err)
 	}

@@ -35,10 +35,10 @@ type sessionReadModel struct {
 	cwd          string
 	defaultModel string
 
-	// ClaudeSessionID is the Claude Agent SDK session UUID from session.started,
+	// AgentSessionID is the Claude Agent SDK session UUID from session.started,
 	// persisted to the index so the session is resumable from the laptop. Read
 	// only by the dashboard, derived here to keep session.started single-unmarshal.
-	ClaudeSessionID string
+	AgentSessionID string
 
 	// Live token/cost accounting from usage.updated (and the context.compacted
 	// baseline reset). The >0 guards mirror the runner: a partial usage event must
@@ -123,8 +123,8 @@ func (rm *sessionReadModel) ApplyEvent(ev session.Event) readModelResult {
 		if p.Cwd != "" {
 			rm.cwd = p.Cwd
 		}
-		if p.ClaudeSessionID != "" {
-			rm.ClaudeSessionID = p.ClaudeSessionID
+		if p.AgentSessionID != "" {
+			rm.AgentSessionID = p.AgentSessionID
 		}
 
 	case session.EventWorkspaceStatus:

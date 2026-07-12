@@ -18,10 +18,10 @@ func TestTranscriptAuditLog(t *testing.T) {
 	t.Setenv("HOME", home)
 
 	store := indexTitleStore{}
-	store.SaveClaudeSessionID("claude-sdk-a", "uuid-1")
-	store.SaveClaudeSessionID("claude-sdk-a", "uuid-1") // dedupe: already recorded
-	store.SaveClaudeSessionID("claude-sdk-b", "uuid-2")
-	store.SaveClaudeSessionID("claude-sdk-c", "") // empty id: no-op
+	store.SaveAgentSessionID("claude-sdk-a", "uuid-1")
+	store.SaveAgentSessionID("claude-sdk-a", "uuid-1") // dedupe: already recorded
+	store.SaveAgentSessionID("claude-sdk-b", "uuid-2")
+	store.SaveAgentSessionID("claude-sdk-c", "") // empty id: no-op
 
 	root, err := index.DefaultRoot()
 	if err != nil {

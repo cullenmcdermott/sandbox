@@ -290,11 +290,11 @@ func (m *TranscriptModel) doReconnect() tea.Cmd {
 
 // startTurnCmd posts a new turn and surfaces a synchronous start failure; the
 // turn itself streams back over SSE.
-func startTurnCmd(client RunnerClient, ref session.Ref, prompt, mode, model, effort string, advisor bool) tea.Cmd {
+func startTurnCmd(client RunnerClient, ref session.Ref, prompt string, approval session.ApprovalPolicy, model, effort string, advisor bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if _, err := client.StartTurn(ctx, ref, session.TurnInput{Prompt: prompt, Mode: mode, Model: model, Effort: effort, Advisor: advisor}); err != nil {
+		if _, err := client.StartTurn(ctx, ref, session.TurnInput{Prompt: prompt, ApprovalPolicy: approval, Model: model, Effort: effort, Advisor: advisor}); err != nil {
 			return turnErrMsg{err: err}
 		}
 		return nil

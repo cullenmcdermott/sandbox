@@ -10,7 +10,7 @@
  * refuse, since OSS users routinely pair a self-built runner against a
  * different CLI version).
  */
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 /** Canonical event type enum. */
 export type EventType =
@@ -101,7 +101,7 @@ export interface SessionStartedPayload {
   cwd: string;
   tools?: string[];
   permissionMode?: string;
-  claudeSessionId?: string;
+  agentSessionId?: string;
 }
 
 /** payload for session.status_changed events. */

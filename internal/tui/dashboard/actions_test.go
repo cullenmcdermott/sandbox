@@ -77,7 +77,7 @@ type fakeRunnerClient struct {
 func (f *fakeRunnerClient) Health(context.Context) error { return nil }
 func (f *fakeRunnerClient) StartTurn(_ context.Context, ref session.Ref, in session.TurnInput) (session.TurnRef, error) {
 	f.startedPrompts = append(f.startedPrompts, in.Prompt)
-	f.startedModes = append(f.startedModes, in.Mode)
+	f.startedModes = append(f.startedModes, string(in.ApprovalPolicy))
 	f.startedModels = append(f.startedModels, in.Model)
 	f.startedEfforts = append(f.startedEfforts, in.Effort)
 	f.startedAdvisor = append(f.startedAdvisor, in.Advisor)

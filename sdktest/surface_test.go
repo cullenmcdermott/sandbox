@@ -210,16 +210,38 @@ var _ = client.Connection{
 	Runner:   nil,
 	Endpoint: "http://127.0.0.1:8787",
 	Backend:  client.BackendClaudeSDK,
-	Opencode: (*client.OpencodeCreds)(nil),
+	External: (*client.ExternalCreds)(nil),
 	Warning:  "",
 }
 
+var _ = client.ExternalCreds{Username: "opencode", Password: "", URL: "http://127.0.0.1:4096"}
+
 var _ = client.TurnInput{
-	Prompt:       "fix the build",
-	Resume:       client.TurnID("t1"),
-	AllowedTools: []string{"Bash"},
-	Mode:         "acceptEdits",
-	Model:        "opus",
+	Prompt:         "fix the build",
+	Resume:         client.TurnID("t1"),
+	AllowedTools:   []string{"Bash"},
+	ApprovalPolicy: client.ApprovalAcceptEdits,
+	Model:          "opus",
+}
+
+// ApprovalPolicy enum + Activity enum are part of the owned public vocabulary
+// (§8 De-Claude): retyping a constant or dropping one fails the build here.
+var (
+	_ client.ApprovalPolicy = client.ApprovalDefault
+	_ client.ApprovalPolicy = client.ApprovalAcceptEdits
+	_ client.ApprovalPolicy = client.ApprovalPlan
+	_ client.ApprovalPolicy = client.ApprovalBypass
+
+	_ client.Activity = client.ActivityIdle
+	_ client.Activity = client.ActivityBusy
+	_ client.Activity = client.ActivityError
+)
+
+// State carries the renamed AgentSessionID + the distinct Activity field (D9).
+var _ = client.State{
+	Status:         client.StatusRunning,
+	Activity:       client.ActivityIdle,
+	AgentSessionID: "sdk-session-uuid",
 }
 
 // --- client: Anthropic account selection --------------------------------------

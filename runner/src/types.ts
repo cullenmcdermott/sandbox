@@ -155,14 +155,22 @@ export interface TurnRequestBody {
    * being `session.TurnID`, the runner treats this as the backend's own session
    * identifier — the Claude SDK session UUID (claude.ts effectiveResume) or the
    * opencode session id — NOT a turn id. An SDK consumer must pass the agent
-   * session id here, not a TurnID. (D10; the Go-side type is corrected under §8's
-   * AgentSessionID rename.)
+   * session id here, not a TurnID. (D10: the Go-side field is still typed
+   * session.TurnID; retyping it to a plain agent-session-id string is deferred —
+   * the §8 De-Claude break renamed State.ClaudeSession → State.AgentSessionID but
+   * left TurnInput.Resume's type unchanged.)
    */
   resume?: string;
   allowedTools?: string[];
   /**
-   * SDK permission mode for this turn: 'default' | 'acceptEdits' | 'plan' |
-   * 'bypassPermissions'. Omitted/empty => the runner uses 'acceptEdits'.
+   * Tool-approval policy for this turn (Go: TurnInput.ApprovalPolicy, an owned
+   * enum): 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions'. Omitted,
+   * empty, or unrecognized => the runner defaults to 'bypassPermissions' (§2d
+   * yolo default — the sandbox pod is the isolation boundary). The runner maps
+   * this per-backend: the claude-sdk backend applies it 1:1 as the SDK
+   * permissionMode (claude.ts resolvePermissionMode); the opencode-server backend
+   * does NOT honor it — its interactive client owns its own permission modal — so
+   * the field is ignored there rather than silently dropped (see agent.ts).
    */
   mode?: string;
   /**
@@ -222,8 +230,15 @@ export interface StatusResponse {
   id: string;
   backend: string;
   projectPath: string;
-  status: string;
-  claudeSession: string;
+  /** Runner-reported turn activity: 'idle' | 'busy' | 'error'. Distinct from the
+   * k8s lifecycle status (CREATING/RUNNING/…), which the runner does not report —
+   * the Go side keeps them on separate fields (State.Activity vs State.Status, D9).
+   * Renamed from `status` in the §8 De-Claude break. */
+  activity: string;
+  /** The backend's own resume id — the Claude SDK session UUID (claude-sdk) or the
+   * opencode session id. One backend per session ⇒ one resume id. Renamed from
+   * `claudeSession` in the §8 De-Claude break (Go: State.AgentSessionID). */
+  agentSession: string;
   lastTurnId: string;
   /** The currently running turn id, or '' when idle. Unlike lastTurnId (which
    * persists after a turn finishes to seed nextTurnId), this is live registry

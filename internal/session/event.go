@@ -161,15 +161,17 @@ type ContextCompactedPayload struct {
 // CLI uses model+cwd for the status line and the model id to look up the
 // context-window limit (ctx%).
 //
-// Tools, PermissionMode, and ClaudeSessionID are emitted by the runner but not
+// Tools, PermissionMode, and AgentSessionID are emitted by the runner but not
 // yet consumed by the Go CLI; they are kept on the wire for forward-compat
 // (future status-line / resume features) and validated by schema_test.go.
+// AgentSessionID is the backend's resume id (the Claude SDK session UUID today);
+// it is the SSE-payload analogue of State.AgentSessionID (§8 De-Claude rename).
 type SessionStartedPayload struct {
-	Model           string   `json:"model"`
-	Cwd             string   `json:"cwd"`
-	Tools           []string `json:"tools,omitempty"`
-	PermissionMode  string   `json:"permissionMode,omitempty"`
-	ClaudeSessionID string   `json:"claudeSessionId,omitempty"`
+	Model          string   `json:"model"`
+	Cwd            string   `json:"cwd"`
+	Tools          []string `json:"tools,omitempty"`
+	PermissionMode string   `json:"permissionMode,omitempty"`
+	AgentSessionID string   `json:"agentSessionId,omitempty"`
 }
 
 // SessionStatusPayload is the payload for session.status_changed events.

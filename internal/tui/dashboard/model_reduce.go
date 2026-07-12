@@ -279,8 +279,8 @@ func (m *Model) applyRunnerEvent(id session.ID, event session.Event) tea.Cmd {
 				// Persist the Claude SDK session id (session.started) so the CLI
 				// can make the session resumable from the laptop on shutdown.
 				if event.Type == session.EventSessionStarted &&
-					m.titleStore != nil && m.sessions[i].ClaudeSessionID != "" {
-					m.titleStore.SaveClaudeSessionID(id, m.sessions[i].ClaudeSessionID)
+					m.titleStore != nil && m.sessions[i].AgentSessionID != "" {
+					m.titleStore.SaveAgentSessionID(id, m.sessions[i].AgentSessionID)
 				}
 				if changed {
 					m.sortSessions()

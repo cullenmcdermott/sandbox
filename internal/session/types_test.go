@@ -218,8 +218,9 @@ func TestStatusString(t *testing.T) {
 }
 
 func TestTurnInputModeJSON(t *testing.T) {
-	// Mode marshals to the "mode" key and round-trips.
-	in := TurnInput{Prompt: "hi", Mode: "plan"}
+	// ApprovalPolicy marshals to the wire "mode" key (kept for wire compat) and
+	// round-trips.
+	in := TurnInput{Prompt: "hi", ApprovalPolicy: ApprovalPlan}
 	data, err := json.Marshal(in)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -231,11 +232,11 @@ func TestTurnInputModeJSON(t *testing.T) {
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if decoded.Mode != "plan" {
-		t.Errorf("mode: got %q, want plan", decoded.Mode)
+	if decoded.ApprovalPolicy != ApprovalPlan {
+		t.Errorf("approval policy: got %q, want plan", decoded.ApprovalPolicy)
 	}
 
-	// Empty mode is omitted (default path => runner uses acceptEdits).
+	// Empty policy is omitted (default path => runner uses bypassPermissions).
 	data, err = json.Marshal(TurnInput{Prompt: "hi"})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)

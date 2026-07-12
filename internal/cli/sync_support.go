@@ -206,11 +206,12 @@ func (indexTitleStore) SaveTitle(id session.ID, title string) {
 	_ = idx.Save(string(id), entry)
 }
 
-// SaveClaudeSessionID persists the Claude SDK session UUID for a session,
-// preserving the rest of the entry. This is what later lets the CLI write a local
-// ~/.claude/history.jsonl entry so the session resumes from the laptop.
-func (indexTitleStore) SaveClaudeSessionID(id session.ID, claudeID string) {
-	if claudeID == "" {
+// SaveAgentSessionID persists the backend's resume id (the Claude SDK session
+// UUID today) for a session, preserving the rest of the entry. This is what later
+// lets the CLI write a local ~/.claude/history.jsonl entry so the session resumes
+// from the laptop.
+func (indexTitleStore) SaveAgentSessionID(id session.ID, agentID string) {
+	if agentID == "" {
 		return
 	}
 	idx, err := newIndex()
@@ -221,15 +222,15 @@ func (indexTitleStore) SaveClaudeSessionID(id session.ID, claudeID string) {
 	if err != nil {
 		entry = index.Entry{SandboxSessionID: string(id), SandboxName: string(id)}
 	}
-	if entry.ClaudeSessionID == claudeID {
+	if entry.AgentSessionID == agentID {
 		return // already recorded; avoid a redundant write
 	}
-	entry.ClaudeSessionID = claudeID
+	entry.AgentSessionID = agentID
 	_ = idx.Save(string(id), entry)
 	// Record the provenance to the append-only audit log (§1d). Done here, at the
 	// single point a new mapping is learned, so the log grows once per session —
 	// not on every event — and outlives the index entry a later destroy removes.
-	appendTranscriptAudit(string(id), claudeID, entry.ProjectPath)
+	appendTranscriptAudit(string(id), agentID, entry.ProjectPath)
 }
 
 // transcriptAuditRecord is one line of the append-only transcript audit log

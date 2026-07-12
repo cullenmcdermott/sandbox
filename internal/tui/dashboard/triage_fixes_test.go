@@ -25,7 +25,7 @@ func (f *fakeTitleStore) LoadTitle(id session.ID) string        { return f.m[id]
 func (f *fakeTitleStore) SaveTitle(id session.ID, t string)     { f.m[id] = t }
 func (f *fakeTitleStore) LoadAutoTitle(id session.ID) string    { return f.auto[id] }
 func (f *fakeTitleStore) SaveAutoTitle(id session.ID, t string) { f.auto[id] = t }
-func (f *fakeTitleStore) SaveClaudeSessionID(id session.ID, c string) {
+func (f *fakeTitleStore) SaveAgentSessionID(id session.ID, c string) {
 	if f.claude == nil {
 		f.claude = map[session.ID]string{}
 	}

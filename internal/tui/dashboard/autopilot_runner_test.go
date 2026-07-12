@@ -62,7 +62,7 @@ func TestCapabilityArmsRunnerDriver(t *testing.T) {
 	if req.MaxIterations != autopilotMaxIterations {
 		t.Errorf("arm req maxIterations = %d, want %d", req.MaxIterations, autopilotMaxIterations)
 	}
-	if req.Overrides.Model != "opus" || req.Overrides.Mode != modeAcceptEdits.apiValue() {
+	if req.Overrides.Model != "opus" || req.Overrides.Mode != string(modeAcceptEdits.apiValue()) {
 		t.Errorf("arm req overrides did not carry the current model/mode: %+v", req.Overrides)
 	}
 

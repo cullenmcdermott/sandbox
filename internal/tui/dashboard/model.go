@@ -409,9 +409,10 @@ type TitleStore interface {
 	SaveTitle(id session.ID, title string)
 	LoadAutoTitle(id session.ID) string
 	SaveAutoTitle(id session.ID, title string)
-	// SaveClaudeSessionID persists the Claude SDK session UUID for a session so
-	// the CLI can later make it resumable from the laptop (history.jsonl entry).
-	SaveClaudeSessionID(id session.ID, claudeID string)
+	// SaveAgentSessionID persists the backend's resume id (the Claude SDK session
+	// UUID today) for a session so the CLI can later make it resumable from the
+	// laptop (history.jsonl entry).
+	SaveAgentSessionID(id session.ID, agentSessionID string)
 }
 
 // WithTitleStore registers the persistent store for renamed session titles.

@@ -428,7 +428,7 @@ func (m *TranscriptModel) armRunnerAutopilot(req session.AutopilotRequest) tea.C
 	req.Overrides = session.AutopilotOverrides{
 		Model:  m.modelOverride,
 		Effort: m.effortOverride,
-		Mode:   m.mode.apiValue(),
+		Mode:   string(m.mode.apiValue()),
 	}
 	req.MaxIterations = autopilotMaxIterations
 	// Record locally + persist for re-arm-on-re-attach (§1e). Saved before the

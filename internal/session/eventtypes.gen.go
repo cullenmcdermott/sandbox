@@ -10,7 +10,7 @@ package session
 // /sessions/:id/status); internal/runner.Client.Health records it, and
 // callers compare it against this const to warn (not refuse) on skew — see
 // client/session.go Connect and internal/cli/connect.go waitHealthy.
-const ProtocolVersion = 1
+const ProtocolVersion = 2
 
 // EventType consts. EventType itself is declared in event.go.
 const (
