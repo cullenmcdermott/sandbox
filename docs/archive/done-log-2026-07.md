@@ -1466,3 +1466,38 @@ fmtTokenLimit + styleSLLabel orphaned by the statusline collapse).
   config — wrong for a host tool; documented).
 - **§5 residual** — startupSyncGC wired into runStartSession (claude +
   opencode create paths).
+
+## 2026-07-12 — batch 5: the §8 De-Claude coordinated break (5a2ee59, solo whole-tree agent)
+
+One review round-trip: the conscious wire break shipped with PROTOCOL_VERSION
+still 1 — bumped to 2 at the schema source of truth + the mismatch advisory
+made concretely actionable (both versions named, update-image + suspend/
+resume or destroy/re-create remedy; kept advisory-not-fatal BY DESIGN for
+self-built runner-image pairs — documented in schema + both function docs;
+actionable wording pinned by test). Post-commit `just check` fully green
+(the gen-drift gate requires the schema commit in HEAD first — known gotcha).
+
+- **ApprovalPolicy**: `TurnInput.Mode string` → `TurnInput.ApprovalPolicy
+  session.ApprovalPolicy` (Default/AcceptEdits/Plan/Bypass); wire key stays
+  `mode` with the SDK strings, so the persisted autopilot spec and
+  resolvePermissionMode need no migration.
+- **Connection.External** (`ExternalCreds`) replaces Connection.Opencode;
+  dashboard-internal OpencodeCreds deliberately kept (it IS the opencode
+  attach pane; codex adds its own pane over the generic SDK shape).
+- **AgentSessionID**: State json `agentSession`; SSE SessionStartedPayload
+  `agentSessionId` (schema + just gen); index Entry migrates the legacy
+  `claudeSessionId` key on Load and rewrites new on Save. Byproduct fix:
+  `mergeEntry` had omitted the resume-id field — a partial re-seed could
+  clobber a learned session id to "" (latent, now pinned).
+- **[D9]**: one vocabulary — `State.Status` is k8s-owned lifecycle
+  (`status,omitempty`; runner no longer reports it), new `State.Activity`
+  (idle/busy/error) carries runner turn-activity. Status body:
+  `status`→`activity`, `claudeSession`→`agentSession` (conscious break,
+  protocol v2). Runner PVC session.json format untouched (no pod-side
+  migration).
+- 36+ files across internal/session, index, runner(Go+TS), cli, dashboard,
+  client, sdktest (pins updated same change), schema, docs. Flagged for a
+  future narrow change: D10 — `TurnInput.Resume` is typed TurnID but
+  carries the backend agent-session-id (comment corrected, type left).
+- Unverified: live pod round-trip of the renamed wire fields (needs a
+  cluster); CI-only linters.

@@ -319,10 +319,9 @@ changes go through `schema/events.json` + `just gen` (never hand-edit `*.gen.*`)
   exactly one `usage.updated` per result with real cost, cache-only turns
   move ctx%. Deliberately NOT done here: `exitCode` (§2c plumbing, the
   hook/mapping seam correlation is nontrivial).
-- [ ] **[D9] `session.State.Status` dual vocabulary in the public SDK** —
-  `client.go:174-188` vs `types.go:156-163`; deferred INTO §8's De-Claude
-  coordinated break (one vocabulary lands with the `ApprovalPolicy`/
-  `AgentSessionID` renames, not piecemeal).
+- [x] **[D9] Status dual vocabulary — done 2026-07-12** with the §8
+  De-Claude break (done log): `State.Status` = k8s lifecycle only;
+  new `State.Activity` (idle/busy/error) carries runner turn-activity.
 
 ### 2c. Design/layout changes (renderer)
 
@@ -810,14 +809,12 @@ naming-break, and Shell items each stand alone.
   NOT yet externally implementable — `EnsureReaper` names
   `internal/k8s.ReaperOptions`; export/replace that type when a third-party
   backend is real (documented in the interface comment).
-- [ ] **De-Claude the turn/state model in ONE coordinated break:**
-  `TurnInput.Mode` → owned `ApprovalPolicy` enum (mapped per-backend in the
-  runner; non-honoring backends documented, not silent);
-  `Connection.Opencode` → generic `Connection.External` (codex reuses the
-  shape); `State.ClaudeSession` → `State.AgentSessionID` (one backend per
-  session ⇒ one resume id). `internal/session/types.go:175-178`, `:144-153`,
-  `client/session.go:62`. Cross-ref the §2d yolo flip (mode default changes
-  runner-side independently).
+- [x] **De-Claude coordinated break — done 2026-07-12** (done log):
+  `ApprovalPolicy` enum (wire strings unchanged), `Connection.External`/
+  `ExternalCreds`, `State.AgentSessionID` (+ index Load migration),
+  D9 folded in (`State.Activity` for runner turn-activity; `Status` is
+  k8s-only). Wire break ⇒ protocol v2 + actionable mismatch advisory
+  (pinned). Live pod round-trip unverified.
 - [x] **`Session.Shell` + `SSHTarget` seam — done 2026-07-12** (done log):
   SSH-only forward + per-session key as the reusable primitive; one-call
   PTY shell atop it (raw mode, SIGWINCH, remote exit code); CLI shell is a
