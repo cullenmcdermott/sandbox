@@ -12,7 +12,6 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/cullenmcdermott/sandbox/internal/k8s"
-	"github.com/cullenmcdermott/sandbox/internal/runner"
 	syncpkg "github.com/cullenmcdermott/sandbox/internal/sync"
 )
 
@@ -315,10 +314,25 @@ func (c *Client) ensureReaperWithRetry(ctx context.Context, ref Ref, image, pull
 	return warn
 }
 
+// healthChecker is the runner health seam waitHealthy depends on. *runner.Client
+// satisfies it; tests use a fake (mirrors reap.go's idleChecker split).
+type healthChecker interface {
+	Health(ctx context.Context) error
+}
+
 // waitHealthy polls the runner /healthz until it responds OK or ctx is done. A
 // freshly resumed pod (or new port-forward) may need a moment.
-func waitHealthy(ctx context.Context, client *runner.Client) error {
-	deadline := time.Now().Add(30 * time.Second)
+func waitHealthy(ctx context.Context, client healthChecker) error {
+	return waitHealthyWithin(ctx, client, 30*time.Second, time.Second)
+}
+
+// waitHealthyWithin is the testable core of waitHealthy: it polls client.Health
+// every interval until it returns nil, the budget elapses (returning the last
+// error), or ctx is cancelled. budget/interval are injected so the
+// deadline-exhaustion branch is exercisable without a real 30s wait. Each poll
+// caps at a 3s per-attempt timeout, matching production.
+func waitHealthyWithin(ctx context.Context, client healthChecker, budget, interval time.Duration) error {
+	deadline := time.Now().Add(budget)
 	var lastErr error
 	for {
 		hctx, cancel := context.WithTimeout(ctx, 3*time.Second)
@@ -334,7 +348,7 @@ func waitHealthy(ctx context.Context, client *runner.Client) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(time.Second):
+		case <-time.After(interval):
 		}
 	}
 }

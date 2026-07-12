@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -168,4 +169,73 @@ func TestEvaluateIdlePropagatesError(t *testing.T) {
 	if sus.called {
 		t.Error("Suspend must not be called when the idle poll failed")
 	}
+}
+
+// TestEvaluateIdleMalformedIdleSince: a runner that reports an unparseable
+// IdleSince surfaces a parse error (not a silent skip or a spurious suspend), so
+// a runner bug can't quietly disable the reaper.
+func TestEvaluateIdleMalformedIdleSince(t *testing.T) {
+	idle := &fakeIdleChecker{results: []session.IdleStatus{{IdleSince: "not-a-timestamp"}}}
+	sus := &fakeSuspender{}
+
+	err := evaluateIdle(context.Background(), idle, sus, session.Ref{ID: "s1"}, 15*time.Minute, time.Now(), discardLog)
+	if err == nil || !strings.Contains(err.Error(), "parse idleSince") {
+		t.Fatalf("evaluateIdle returned %v, want a parse idleSince error", err)
+	}
+	if sus.called {
+		t.Error("Suspend must not be called when IdleSince is unparseable")
+	}
+}
+
+// TestEvaluateIdleRecheckError: an error on the M19 re-check (after the first
+// poll already showed idle-past-timeout) propagates and blocks the suspend,
+// rather than suspending on a stale first reading.
+func TestEvaluateIdleRecheckError(t *testing.T) {
+	now := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+	stale := now.Add(-30 * time.Minute).Format(time.RFC3339)
+	sentinel := errors.New("runner blipped on recheck")
+	idle := &recheckErrIdleChecker{first: session.IdleStatus{IdleSince: stale}, recheckErr: sentinel}
+	sus := &fakeSuspender{}
+
+	err := evaluateIdle(context.Background(), idle, sus, session.Ref{ID: "s1"}, 15*time.Minute, now, discardLog)
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("evaluateIdle returned %v, want the re-check error to propagate", err)
+	}
+	if sus.called {
+		t.Error("Suspend must not be called when the M19 re-check failed")
+	}
+}
+
+// TestEvaluateIdleSuspendError: a Suspend failure (after confirmed idle) is
+// surfaced so the reaper loop logs+retries rather than reporting a clean reap.
+func TestEvaluateIdleSuspendError(t *testing.T) {
+	now := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+	stale := now.Add(-30 * time.Minute).Format(time.RFC3339)
+	idle := &fakeIdleChecker{results: []session.IdleStatus{{IdleSince: stale}, {IdleSince: stale}}}
+	sus := &fakeSuspender{err: errors.New("suspend boom")}
+
+	err := evaluateIdle(context.Background(), idle, sus, session.Ref{ID: "s1"}, 15*time.Minute, now, discardLog)
+	if err == nil || errors.Is(err, errReaped) {
+		t.Fatalf("evaluateIdle returned %v, want the Suspend error (not errReaped)", err)
+	}
+	if !sus.called {
+		t.Error("Suspend should have been attempted")
+	}
+}
+
+// recheckErrIdleChecker returns a scripted first result, then an error on the
+// M19 re-check (the second Idle call) — a state fakeIdleChecker can't express,
+// since its err applies to every call.
+type recheckErrIdleChecker struct {
+	first      session.IdleStatus
+	recheckErr error
+	calls      int
+}
+
+func (f *recheckErrIdleChecker) Idle(_ context.Context, _ session.Ref) (session.IdleStatus, error) {
+	f.calls++
+	if f.calls == 1 {
+		return f.first, nil
+	}
+	return session.IdleStatus{}, f.recheckErr
 }
