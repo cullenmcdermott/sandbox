@@ -233,6 +233,72 @@ func (c *Client) Idle(ctx context.Context, ref session.Ref) (session.IdleStatus,
 	return st, nil
 }
 
+// ErrAutopilotUnsupported is returned by ArmAutopilot/DisarmAutopilot when the
+// backend has no runner-side autopilot driver (the runner answers 409). The TUI
+// treats it as the signal to fall back to its local tea.Tick driver.
+var ErrAutopilotUnsupported = errors.New("runner: backend has no autopilot driver")
+
+// ErrAutopilotNotArmed is returned by DisarmAutopilot when there is no spec to
+// disarm (the runner answers 404). Idempotent callers can treat it as success.
+var ErrAutopilotNotArmed = errors.New("runner: no autopilot spec to disarm")
+
+// ArmAutopilot arms (or replaces) the runner-owned autopilot driver via
+// PUT /sessions/:id/autopilot (the server-side /loop-/goal loop; see
+// docs/server-side-loop-adr.md). It returns the runner's /status body reflecting
+// the now-armed driver. A backend without a runner driver answers 409, mapped to
+// ErrAutopilotUnsupported so the caller can fall back to its local driver; a
+// malformed request answers 400, folded into the returned error by statusError.
+func (c *Client) ArmAutopilot(ctx context.Context, ref session.Ref, req session.AutopilotRequest) (session.State, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return session.State{}, err
+	}
+	resp, err := c.do(ctx, http.MethodPut, fmt.Sprintf("/sessions/%s/autopilot", ref.ID), body)
+	if err != nil {
+		return session.State{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusConflict {
+			return session.State{}, fmt.Errorf("%w (%v)", ErrAutopilotUnsupported, statusError(resp, "runner arm autopilot"))
+		}
+		return session.State{}, statusError(resp, "runner arm autopilot")
+	}
+	var st session.State
+	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
+		return session.State{}, fmt.Errorf("runner arm autopilot: decode: %w", err)
+	}
+	return st, nil
+}
+
+// DisarmAutopilot disarms the runner-owned driver via
+// DELETE /sessions/:id/autopilot: the runner sets the persisted spec to
+// state:"stopped" (reason "user") and bumps gen. It returns the runner's /status
+// body. A never-armed driver answers 404, mapped to ErrAutopilotNotArmed so an
+// idempotent caller can treat it as already-disarmed; a backend without a runner
+// driver answers 409, mapped to ErrAutopilotUnsupported.
+func (c *Client) DisarmAutopilot(ctx context.Context, ref session.Ref) (session.State, error) {
+	resp, err := c.do(ctx, http.MethodDelete, fmt.Sprintf("/sessions/%s/autopilot", ref.ID), nil)
+	if err != nil {
+		return session.State{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		switch resp.StatusCode {
+		case http.StatusNotFound:
+			return session.State{}, fmt.Errorf("%w (%v)", ErrAutopilotNotArmed, statusError(resp, "runner disarm autopilot"))
+		case http.StatusConflict:
+			return session.State{}, fmt.Errorf("%w (%v)", ErrAutopilotUnsupported, statusError(resp, "runner disarm autopilot"))
+		}
+		return session.State{}, statusError(resp, "runner disarm autopilot")
+	}
+	var st session.State
+	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
+		return session.State{}, fmt.Errorf("runner disarm autopilot: decode: %w", err)
+	}
+	return st, nil
+}
+
 // Events opens an SSE stream of events after the given sequence number for a
 // real (active) client — one that keeps the session "attached" for idle
 // detection. The channel closes when the stream ends or ctx is cancelled.

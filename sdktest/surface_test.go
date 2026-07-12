@@ -84,6 +84,8 @@ var (
 	_ func(*client.Session, context.Context) (client.State, error)                               = (*client.Session).SessionState
 	_ func(*client.Session, context.Context) (client.IdleStatus, error)                          = (*client.Session).Idle
 	_ func(*client.Session, context.Context, string) (client.ExecResult, error)                  = (*client.Session).Exec
+	_ func(*client.Session, context.Context, client.AutopilotRequest) (client.State, error)      = (*client.Session).ArmAutopilot
+	_ func(*client.Session, context.Context) (client.State, error)                               = (*client.Session).DisarmAutopilot
 	_ func(*client.Session) string                                                               = (*client.Session).WorktreePath
 	_ func(*client.Session, context.Context) (client.WorktreeStatus, error)                      = (*client.Session).WorktreeStatus
 	_ func(*client.Session, context.Context, client.ConvertOptions) (client.BranchResult, error) = (*client.Session).ConvertToBranch
@@ -282,5 +284,38 @@ func (consumerRunnerClient) Exec(context.Context, client.Ref, string) (client.Ex
 func (consumerRunnerClient) Idle(context.Context, client.Ref) (client.IdleStatus, error) {
 	return client.IdleStatus{}, nil
 }
+func (consumerRunnerClient) ArmAutopilot(context.Context, client.Ref, client.AutopilotRequest) (client.State, error) {
+	return client.State{}, nil
+}
+func (consumerRunnerClient) DisarmAutopilot(context.Context, client.Ref) (client.State, error) {
+	return client.State{}, nil
+}
 
 var _ client.RunnerClient = consumerRunnerClient{}
+
+// --- client: autopilot arm/disarm surface (server-side loop ADR) -------------
+
+var (
+	// Kind constants + the arm/disarm sentinel errors a consumer branches on.
+	_       = client.AutopilotKindLoop
+	_       = client.AutopilotKindGoal
+	_ error = client.ErrAutopilotUnsupported
+	_ error = client.ErrAutopilotNotArmed
+
+	// Struct-literal pins: removing or retyping a field breaks a consumer here.
+	_ = client.AutopilotRequest{
+		Kind:          client.AutopilotKindLoop,
+		Prompt:        "keep working through TODO.md",
+		Sentinel:      "ALL_DONE",
+		IntervalMs:    0,
+		Overrides:     client.AutopilotOverrides{Model: "opus", Effort: "high", Mode: "acceptEdits"},
+		MaxIterations: 50,
+		TokenBudget:   nil,
+	}
+	_ = client.Capabilities{Autopilot: true}
+	// State carries the backend capability map the TUI reads to pick a code path.
+	_ = client.State{Capabilities: client.Capabilities{Autopilot: true}}
+	// The autopilot.state event + its payload, for a consumer rendering driver state.
+	_ client.EventType = client.EventAutopilotState
+	_                  = client.AutopilotStatePayload{State: "armed", Kind: "loop", Reason: "", Iteration: 0, Gen: 1}
+)

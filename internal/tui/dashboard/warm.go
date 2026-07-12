@@ -50,7 +50,7 @@ func (m *Model) observerProtected(id session.ID) bool {
 	if id != "" && id == m.attachedID {
 		return true
 	}
-	if t, ok := m.retained[id]; ok && (t.autopilot.active() || t.queuedPrompt != "") {
+	if t, ok := m.retained[id]; ok && (t.driverActive() || t.queuedPrompt != "") {
 		return true
 	}
 	s := m.sessionByID(id)

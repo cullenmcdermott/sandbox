@@ -306,6 +306,58 @@ func (indexSnapshotStore) SaveSnapshot(id session.ID, snap dashboard.SessionSnap
 	_ = idx.Save(string(id), entry)
 }
 
+// indexDriverStore implements dashboard.DriverStore on top of the local session
+// index (§1e), so the last-armed autopilot driver spec survives a detach/re-attach
+// and a bare /loop or /goal can re-arm it without retyping the prompt.
+type indexDriverStore struct{}
+
+// LoadDriver returns the last-armed driver spec for a session, or ok=false when
+// none was recorded (or the entry can't be read).
+func (indexDriverStore) LoadDriver(id session.ID) (session.AutopilotRequest, bool) {
+	idx, err := newIndex()
+	if err != nil {
+		return session.AutopilotRequest{}, false
+	}
+	entry, err := idx.Load(string(id))
+	if err != nil || entry.Driver == nil {
+		return session.AutopilotRequest{}, false
+	}
+	d := entry.Driver
+	return session.AutopilotRequest{
+		Kind:          d.Kind,
+		Prompt:        d.Prompt,
+		Sentinel:      d.Sentinel,
+		IntervalMs:    d.IntervalMs,
+		Overrides:     session.AutopilotOverrides{Model: d.Model, Effort: d.Effort, Mode: d.Mode},
+		MaxIterations: d.MaxIterations,
+		TokenBudget:   d.TokenBudget,
+	}, true
+}
+
+// SaveDriver records the last-armed driver spec, preserving the rest of the entry.
+func (indexDriverStore) SaveDriver(id session.ID, spec session.AutopilotRequest) {
+	idx, err := newIndex()
+	if err != nil {
+		return
+	}
+	entry, err := idx.Load(string(id))
+	if err != nil {
+		entry = index.Entry{SandboxSessionID: string(id), SandboxName: string(id)}
+	}
+	entry.Driver = &index.DriverSpec{
+		Kind:          spec.Kind,
+		Prompt:        spec.Prompt,
+		Sentinel:      spec.Sentinel,
+		IntervalMs:    spec.IntervalMs,
+		Model:         spec.Overrides.Model,
+		Effort:        spec.Overrides.Effort,
+		Mode:          spec.Overrides.Mode,
+		MaxIterations: spec.MaxIterations,
+		TokenBudget:   spec.TokenBudget,
+	}
+	_ = idx.Save(string(id), entry)
+}
+
 // indexEventCache implements dashboard.EventCache on top of the local index's
 // per-session events.ndjson: the foreground transcript loads it on a cold open to
 // rebuild history instantly and appends each non-delta event it streams. Best

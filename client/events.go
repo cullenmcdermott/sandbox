@@ -35,6 +35,7 @@ const (
 	EventWorkspaceStatus      = session.EventWorkspaceStatus
 	EventSessionTitle         = session.EventSessionTitle
 	EventModelsAvailable      = session.EventModelsAvailable
+	EventAutopilotState       = session.EventAutopilotState
 	EventError                = session.EventError
 
 	// EventStreamLive is a client-internal marker (no seq, not persisted) emitted
@@ -65,4 +66,5 @@ type (
 	TodoItem               = session.TodoItem
 	TodoUpdatedPayload     = session.TodoUpdatedPayload
 	TerminatingPayload     = session.TerminatingPayload
+	AutopilotStatePayload  = session.AutopilotStatePayload
 )

@@ -118,10 +118,10 @@ func (m *TranscriptModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		// A /loop or /goal idle between ticks/turns: esc reclaims control and stops
 		// the driver, honoring the chip's "esc to stop" contract even when there's
-		// no live turn to interrupt (§1e item 5). Detach stays on ctrl+].
-		if m.autopilot.active() {
-			m.stopAutopilot("autopilot stopped")
-			return m, nil
+		// no live turn to interrupt (§1e item 5). For the runner-owned driver this
+		// issues the DELETE. Detach stays on ctrl+].
+		if m.driverActive() {
+			return m, m.stopDriver("autopilot stopped")
 		}
 		if m.vimEnabled && m.imode == modeInsert {
 			m.enterNormal()
@@ -313,15 +313,16 @@ func (m *TranscriptModel) submit() tea.Cmd {
 	// A manually typed prompt means the user is taking over from a running
 	// /loop or /goal; stop the driver so it doesn't keep firing turns underneath
 	// them. (Loop ticks and goal continuations submit via submitText, not here,
-	// so they don't self-cancel.)
-	m.stopAutopilot("autopilot stopped — you took over")
+	// so they don't self-cancel.) For the runner-owned driver this returns the
+	// DELETE Cmd, batched with the manual turn.
+	dis := m.stopDriver("autopilot stopped — you took over")
 	if m.turnActive {
 		m.queuedPrompt = text
 		m.input.Reset()
-		return nil
+		return dis
 	}
 	m.input.Reset()
-	return m.submitText(text)
+	return tea.Batch(dis, m.submitText(text))
 }
 
 // queueSteer steers the active turn with the queued prompt: interrupt now, and
@@ -351,22 +352,23 @@ func (m *TranscriptModel) queueSteer() tea.Cmd {
 // turn.started landed) the runner falls back to its sole active turn.
 func (m *TranscriptModel) interruptTurn() tea.Cmd {
 	// An esc interrupt is the user reclaiming control: stop any /loop or /goal
-	// driver so it doesn't relaunch a turn after this one is torn down.
-	m.stopAutopilot("autopilot stopped")
+	// driver so it doesn't relaunch a turn after this one is torn down. For the
+	// runner-owned driver this issues the DELETE (batched with the interrupt).
+	dis := m.stopDriver("autopilot stopped")
 	if !m.turnActive {
-		return nil
+		return dis
 	}
 	// Capture into locals: the closure runs off the Update goroutine, and
 	// m.client is swapped by tReconnectedMsg (same pattern as resolvePermission).
 	client := m.client
 	sref := m.ref
 	ref := session.TurnRef{Session: m.ref.ID, Turn: m.activeTurnID}
-	return func() tea.Msg {
+	return tea.Batch(dis, func() tea.Msg {
 		if err := client.InterruptTurn(context.Background(), sref, ref); err != nil {
 			return interruptFailedMsg{err: err}
 		}
 		return nil
-	}
+	})
 }
 
 // interruptFailedMsg surfaces an interrupt request failure so a future

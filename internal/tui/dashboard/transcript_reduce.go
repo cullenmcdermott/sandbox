@@ -337,6 +337,15 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 			m.availableModels = p.Models
 		}
 
+	case session.EventAutopilotState:
+		// ADR §3 render-from-events: the runner-owned driver's armed chip,
+		// iteration counter, and terminal scrollback line all derive from this
+		// event. The background toast + OS notification for a stopped driver is
+		// raised in the dashboard reducer (applyRunnerEvent) so it can respect the
+		// replay/live boundary and target background sessions; here we only touch
+		// this model's presentation (safe to re-apply on replay).
+		m.applyAutopilotState(ev)
+
 	case session.EventTurnCompleted:
 		// Status → needs-input is set by the shared reducer.
 		m.finalizeStreaming()

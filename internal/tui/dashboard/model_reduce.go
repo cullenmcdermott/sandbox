@@ -255,6 +255,20 @@ func (m *Model) applyRunnerEvent(id session.ID, event session.Event) tea.Cmd {
 			}
 			if !dup {
 				m.saveSnapshot(&m.sessions[i], changed)
+				// Runner-owned autopilot driver (ADR §3, render-from-events): a
+				// terminal `stopped` for a BACKGROUND session raises a toast + OS
+				// notification here, reusing the §1e autopilotToast plumbing (the
+				// foreground session shows its own scrollback line via the transcript,
+				// so it's excluded). Gated on the replay/live boundary — !dup (seq
+				// dedup) AND !catchingUp (a fresh attach's replay burst) — so a
+				// REPLAYED stopped never re-fires the OS notification; only a
+				// flip-to-live one does (the §1a suppression pattern).
+				if event.Type == session.EventAutopilotState &&
+					!m.sessions[i].catchingUp && id != m.attachedID {
+					if note := autopilotStoppedNoteFromEvent(event); note != "" {
+						autopilotCmd = m.autopilotToast(id, note)
+					}
+				}
 				// Persist a runner-generated auto title so it survives a re-seed
 				// (the cluster state carries no local label). RenamedTitle still
 				// wins at display time, so this is safe even for a renamed session.

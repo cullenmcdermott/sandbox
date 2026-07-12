@@ -318,11 +318,28 @@ type TranscriptModel struct {
 	// on for the NORMAL/INSERT chords and the mode badge.
 	vimEnabled bool
 
-	// autopilot is the running /loop or /goal driver, if any (autopilot.go).
+	// autopilot is the running LOCAL /loop or /goal driver, if any (autopilot.go).
+	// Used only for backends without a runner-side driver (capabilities.autopilot
+	// false); the runner-driven path uses runnerDriver instead.
 	autopilot autopilotState
 	// autopilotGenSeq is a monotonic counter snapshotted into autopilot.gen so a
 	// loop tick left over from a stopped/restarted run is recognized as stale.
 	autopilotGenSeq int
+	// autopilotCapable is true when this session's runner backend has a server-side
+	// autopilot driver (capabilities.autopilot). Fetched once at attach; drives the
+	// ADR §Q3 precedence: /loop-/goal arm the runner driver instead of the local
+	// tea.Tick loop. Defaults false (safe local fallback) until the fetch lands.
+	autopilotCapable bool
+	// runnerDriver is the runner-owned driver's state, rendered PURELY from
+	// autopilot.state events (ADR §3). Mutually exclusive with `autopilot`.
+	runnerDriver runnerDriverState
+	// lastDriverSpec is the most recently armed runner-driver spec, kept for a
+	// one-key re-arm (§1e). Restored from the index on re-attach (driverStore) so a
+	// bare /loop or /goal re-arms without retyping.
+	lastDriverSpec *session.AutopilotRequest
+	// driverStore persists lastDriverSpec across a detach/re-attach (§1e). Copied
+	// from the dashboard on attach; nil in tests / when no store is wired.
+	driverStore DriverStore
 	// lastAssistantText is the most recent non-empty assistant message text,
 	// captured on message.completed and reset at turn start. /goal reads it to
 	// detect the completion sentinel once a turn ends.
@@ -549,6 +566,10 @@ func (m *TranscriptModel) Init() tea.Cmd {
 		// cached head (after=lastSeq) rather than replaying from seq 0.
 		m.loadCachedTranscript()
 		cmds = append(cmds, m.startEventStream())
+		// ADR §Q3: learn whether this backend has a runner-side autopilot driver so
+		// /loop-/goal pick the runner vs local path. One /status round-trip over the
+		// already-open forward; lands well before a human can type a command.
+		cmds = append(cmds, fetchAutopilotCapabilityCmd(m.client, m.ref))
 	}
 	if m.initialPrompt != "" {
 		cmds = append(cmds, func() tea.Msg {
@@ -573,6 +594,24 @@ func (m *TranscriptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case submitTextMsg:
 		return m, m.submitText(msg.text)
+
+	case autopilotCapabilityMsg:
+		if msg.id == m.ref.ID {
+			m.autopilotCapable = msg.capable
+		}
+		return m, nil
+
+	case autopilotArmResultMsg:
+		if msg.id != m.ref.ID {
+			return m, nil
+		}
+		return m, m.handleAutopilotArmResult(msg)
+
+	case autopilotDisarmResultMsg:
+		if msg.id != m.ref.ID {
+			return m, nil
+		}
+		return m, m.handleAutopilotDisarmResult(msg)
 
 	case tEventMsg:
 		ev := session.Event(msg)

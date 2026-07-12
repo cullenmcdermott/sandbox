@@ -35,6 +35,24 @@ type (
 	PermissionDecision = session.PermissionDecision
 	ExecResult         = session.ExecResult
 	IdleStatus         = session.IdleStatus
+	Capabilities       = session.Capabilities
+	AutopilotRequest   = session.AutopilotRequest
+	AutopilotOverrides = session.AutopilotOverrides
+)
+
+// Autopilot driver kinds, re-exported for consumers building an AutopilotRequest.
+const (
+	AutopilotKindLoop = session.AutopilotKindLoop
+	AutopilotKindGoal = session.AutopilotKindGoal
+)
+
+// Autopilot arm/disarm sentinel errors a consumer branches on with errors.Is:
+// ErrAutopilotUnsupported when the backend has no runner-side driver (409 —
+// fall back to a local driver), ErrAutopilotNotArmed when a disarm targets a
+// never-armed session (404 — already disarmed).
+var (
+	ErrAutopilotUnsupported = runner.ErrAutopilotUnsupported
+	ErrAutopilotNotArmed    = runner.ErrAutopilotNotArmed
 )
 
 // RunnerClient is the live connection to a session's in-pod runner: start and
@@ -53,6 +71,14 @@ type RunnerClient interface {
 	SessionState(ctx context.Context, ref Ref) (State, error)
 	Exec(ctx context.Context, ref Ref, command string) (ExecResult, error)
 	Idle(ctx context.Context, ref Ref) (IdleStatus, error)
+	// ArmAutopilot arms (or replaces) the runner-owned autopilot driver — the
+	// server-side /loop-/goal loop that self-submits turns so a loop survives a
+	// closed laptop (docs/server-side-loop-adr.md). Returns the runner's /status
+	// body; a backend without a driver returns ErrAutopilotUnsupported.
+	ArmAutopilot(ctx context.Context, ref Ref, req AutopilotRequest) (State, error)
+	// DisarmAutopilot disarms the runner-owned driver. Returns the /status body;
+	// a never-armed session returns ErrAutopilotNotArmed.
+	DisarmAutopilot(ctx context.Context, ref Ref) (State, error)
 }
 
 // The concrete runner client satisfies the public interface.

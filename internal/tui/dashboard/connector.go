@@ -26,6 +26,11 @@ type RunnerClient interface {
 	// Idle reports whether the session is idle (and since when), used to render
 	// the warm-session "suspends in ~X" hint.
 	Idle(ctx context.Context, ref session.Ref) (session.IdleStatus, error)
+	// ArmAutopilot / DisarmAutopilot drive the runner-owned autopilot driver (the
+	// server-side /loop-/goal loop) when the backend reports capabilities.autopilot
+	// (ADR §Q3). Both return the runner's /status body.
+	ArmAutopilot(ctx context.Context, ref session.Ref, req session.AutopilotRequest) (session.State, error)
+	DisarmAutopilot(ctx context.Context, ref session.Ref) (session.State, error)
 }
 
 // OpencodeCreds holds the local endpoint and HTTP basic-auth credentials for

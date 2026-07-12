@@ -76,6 +76,7 @@ func NewRoot() *cobra.Command {
 					TitleStore:        indexTitleStore{},
 					SnapshotStore:     indexSnapshotStore{},
 					EventCache:        newIndexEventCache(),
+					DriverStore:       indexDriverStore{},
 					ObserverConnector: newDashboardObserverConnector(c, ""),
 					SyncProber:        dashboardSyncProber(),
 					SyncReaper:        dashboardSyncReaper(),

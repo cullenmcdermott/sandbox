@@ -48,10 +48,11 @@ func (m *TranscriptModel) escapeConsumes() bool {
 	if m.showHelp || m.search.open || m.paletteOpen() || m.turnActive {
 		return true
 	}
-	// A running /loop or /goal gives a bare esc a local meaning even when idle
-	// between ticks: it stops the driver (the chip promises "esc to stop") rather
-	// than detaching with the driver still armed (§1e item 5). Detach is ctrl+].
-	if m.autopilot.active() {
+	// A running /loop or /goal (local OR runner-owned) gives a bare esc a local
+	// meaning even when idle between ticks: it stops the driver (the chip promises
+	// "esc to stop") rather than detaching with the driver still armed (§1e item
+	// 5). Detach is ctrl+].
+	if m.driverActive() {
 		return true
 	}
 	return m.vimEnabled && m.imode == modeInsert

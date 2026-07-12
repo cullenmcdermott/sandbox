@@ -821,3 +821,25 @@ func (s *Session) Idle(ctx context.Context) (IdleStatus, error) {
 	}
 	return rc.Idle(ctx, s.ref)
 }
+
+// ArmAutopilot arms (or replaces) the runner-owned autopilot driver for this
+// session (the server-side /loop-/goal loop). Requires a prior successful
+// Connect. Returns ErrAutopilotUnsupported for a backend without a runner driver.
+func (s *Session) ArmAutopilot(ctx context.Context, req AutopilotRequest) (State, error) {
+	rc := s.Runner()
+	if rc == nil {
+		return State{}, ErrNotConnected
+	}
+	return rc.ArmAutopilot(ctx, s.ref, req)
+}
+
+// DisarmAutopilot disarms the runner-owned autopilot driver for this session.
+// Requires a prior successful Connect. Returns ErrAutopilotNotArmed when no
+// driver was ever armed.
+func (s *Session) DisarmAutopilot(ctx context.Context) (State, error) {
+	rc := s.Runner()
+	if rc == nil {
+		return State{}, ErrNotConnected
+	}
+	return rc.DisarmAutopilot(ctx, s.ref)
+}

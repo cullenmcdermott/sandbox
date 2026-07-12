@@ -63,6 +63,15 @@ type fakeRunnerClient struct {
 	eventsErr      error // if set, Events fails to open the stream
 	resolveErr     error // if set, ResolvePermission fails with it (still records the decision)
 	passiveStreams int   // count of EventsPassive calls (RV6 background-stream path)
+
+	// Autopilot (server-side loop ADR): SessionState reports autopilotCap in the
+	// capability bit; ArmAutopilot/DisarmAutopilot record their calls and fail with
+	// the *Err when set.
+	autopilotCap bool
+	armReqs      []session.AutopilotRequest
+	disarms      int
+	armErr       error
+	disarmErr    error
 }
 
 func (f *fakeRunnerClient) Health(context.Context) error { return nil }
@@ -100,7 +109,21 @@ func (f *fakeRunnerClient) EventsPassive(ctx context.Context, ref session.Ref, a
 	return f.Events(ctx, ref, after)
 }
 func (f *fakeRunnerClient) SessionState(context.Context, session.Ref) (session.State, error) {
-	return session.State{}, nil
+	return session.State{Capabilities: session.Capabilities{Autopilot: f.autopilotCap}}, nil
+}
+func (f *fakeRunnerClient) ArmAutopilot(_ context.Context, ref session.Ref, req session.AutopilotRequest) (session.State, error) {
+	f.armReqs = append(f.armReqs, req)
+	if f.armErr != nil {
+		return session.State{}, f.armErr
+	}
+	return session.State{Capabilities: session.Capabilities{Autopilot: f.autopilotCap}}, nil
+}
+func (f *fakeRunnerClient) DisarmAutopilot(_ context.Context, ref session.Ref) (session.State, error) {
+	f.disarms++
+	if f.disarmErr != nil {
+		return session.State{}, f.disarmErr
+	}
+	return session.State{Capabilities: session.Capabilities{Autopilot: f.autopilotCap}}, nil
 }
 func (f *fakeRunnerClient) Exec(_ context.Context, _ session.Ref, command string) (session.ExecResult, error) {
 	f.execCommands = append(f.execCommands, command)

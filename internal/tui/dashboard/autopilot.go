@@ -21,6 +21,9 @@ package dashboard
 // esc interrupt hands control back to the user and stops the driver.
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -28,6 +31,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/cullenmcdermott/sandbox/internal/runner"
 	"github.com/cullenmcdermott/sandbox/internal/session"
 	"github.com/cullenmcdermott/sandbox/tui/theme"
 )
@@ -53,7 +57,48 @@ const (
 	// goalSentinel is the token the agent is told to emit, on its own line, once
 	// the goal is fully met. Detection normalizes surrounding punctuation/emoji.
 	goalSentinel = "GOAL_MET"
+	// autopilotMaxIterations is the hard iteration ceiling armed on the
+	// runner-owned driver (ADR Q2 default 50, always enforced server-side). The
+	// armed chip surfaces it so the budget is visible while the loop runs.
+	autopilotMaxIterations = 50
 )
+
+// runnerDriverState mirrors the runner-owned autopilot driver's last-known state,
+// derived PURELY from autopilot.state events (ADR §3 render-from-events). It is
+// distinct from the local tea.Tick `autopilot` driver: exactly one path is active
+// per session (chosen by the capabilities.autopilot bit), never both. active is
+// true between an `armed` and its terminal `stopped` event.
+type runnerDriverState struct {
+	active    bool
+	kind      string // session.AutopilotKind* ("loop" | "goal")
+	iteration int
+	gen       int
+}
+
+// autopilotCapabilityMsg reports whether the attached session's runner backend
+// has a server-side autopilot driver (capabilities.autopilot), fetched once when
+// the transcript goes live. id scopes it to the owning session so a stale result
+// after a fast detach/reattach is ignored.
+type autopilotCapabilityMsg struct {
+	id      session.ID
+	capable bool
+}
+
+// autopilotArmResultMsg carries the outcome of a PUT /autopilot arm. On success
+// the armed chip renders from the incoming autopilot.state event; this only
+// surfaces a confirmation line and (on an unexpected unsupported error) the local
+// fallback.
+type autopilotArmResultMsg struct {
+	id  session.ID
+	req session.AutopilotRequest
+	err error
+}
+
+// autopilotDisarmResultMsg carries the outcome of a DELETE /autopilot disarm.
+type autopilotDisarmResultMsg struct {
+	id  session.ID
+	err error
+}
 
 // autopilotState is the live driver. The zero value means "off"; gen is a
 // snapshot of the model's monotonic counter so a queued loop tick scheduled by
@@ -122,14 +167,13 @@ func (m *TranscriptModel) dispatchAutopilot(raw string) (tea.Cmd, bool) {
 }
 
 // cmdLoop starts (or stops) a `/loop`. Grammar: `/loop [interval] <prompt>` |
-// `/loop stop`.
+// `/loop stop` | `/loop` (bare = re-arm the last loop spec, §1e).
 func (m *TranscriptModel) cmdLoop(args []string) tea.Cmd {
 	if len(args) == 1 && (args[0] == "stop" || args[0] == "off") {
-		if m.autopilot.kind == autopilotLoop {
-			m.stopAutopilot("⟳ loop stopped")
-		} else {
-			m.appendBlock(blockInfo, "no loop is running")
+		if m.driverActive() {
+			return m.stopDriver("⟳ loop stopped")
 		}
+		m.appendBlock(blockInfo, "no loop is running")
 		return nil
 	}
 	// An optional leading token is the interval when it parses as a duration
@@ -142,6 +186,11 @@ func (m *TranscriptModel) cmdLoop(args []string) tea.Cmd {
 	}
 	prompt := strings.TrimSpace(strings.Join(rest, " "))
 	if prompt == "" {
+		// §1e re-arm: a bare `/loop` re-arms the last recorded loop spec without
+		// retyping (works across a re-attach — the spec is restored from the index).
+		if cmd, ok := m.rearmDriver(session.AutopilotKindLoop); ok {
+			return cmd
+		}
 		m.appendBlock(blockInfo, "usage: /loop [interval] <prompt>   e.g. /loop 5m run the tests and summarize any failures")
 		m.appendBlock(blockInfo, "tip: have the prompt emit "+goalSentinel+" on its own line when the backlog is empty and the loop stops itself")
 		return nil
@@ -153,8 +202,22 @@ func (m *TranscriptModel) cmdLoop(args []string) tea.Cmd {
 	// suspends while the loop waits between ticks; the warm model is then dropped
 	// and the loop silently lapses (item 3). Warn rather than clamp — the user may
 	// keep the session busy another way — so the failure mode is at least visible.
+	// (The runner-owned driver keeps the pod non-idle while armed, so this only
+	// bites the local fallback — but the interval is a per-loop choice, so warn
+	// regardless.)
 	if m.idleTimeout > 0 && interval >= m.idleTimeout {
 		m.appendBlock(blockInfo, fmt.Sprintf("⚠ interval %s ≥ idle timeout %s — the pod may suspend between iterations and end the loop; use a shorter interval or keep this session active", humanInterval(interval), humanInterval(m.idleTimeout)))
+	}
+	// ADR §Q3 precedence: a backend with a runner-side driver arms THAT (survives
+	// a closed laptop) and renders from autopilot.state events; a backend without
+	// one keeps exactly today's local tea.Tick driver.
+	if m.autopilotCapable {
+		return m.armRunnerAutopilot(session.AutopilotRequest{
+			Kind:       session.AutopilotKindLoop,
+			Prompt:     prompt,
+			Sentinel:   goalSentinel,
+			IntervalMs: interval.Milliseconds(),
+		})
 	}
 	m.startAutopilot(autopilotState{kind: autopilotLoop, prompt: prompt, interval: interval})
 	m.appendBlock(blockInfo, fmt.Sprintf("⟳ loop started — every %s · esc to stop", humanInterval(interval)))
@@ -163,23 +226,34 @@ func (m *TranscriptModel) cmdLoop(args []string) tea.Cmd {
 }
 
 // cmdGoal starts (or stops) a `/goal`. Grammar: `/goal <condition>` |
-// `/goal stop`.
+// `/goal stop` | `/goal` (bare = re-arm the last goal spec, §1e).
 func (m *TranscriptModel) cmdGoal(condition string) tea.Cmd {
 	if condition == "stop" || condition == "off" {
-		if m.autopilot.kind == autopilotGoal {
-			m.stopAutopilot("◎ goal stopped")
-		} else {
-			m.appendBlock(blockInfo, "no goal is running")
+		if m.driverActive() {
+			return m.stopDriver("◎ goal stopped")
 		}
+		m.appendBlock(blockInfo, "no goal is running")
 		return nil
 	}
 	if condition == "" {
+		// §1e re-arm: a bare `/goal` re-arms the last recorded goal spec.
+		if cmd, ok := m.rearmDriver(session.AutopilotKindGoal); ok {
+			return cmd
+		}
 		m.appendBlock(blockInfo, "usage: /goal <condition>   e.g. /goal all tests pass and the linter is clean")
 		return nil
 	}
 	if m.turnActive {
 		m.appendBlock(blockInfo, "finish or interrupt the current turn before starting a goal")
 		return nil
+	}
+	// ADR §Q3 precedence: arm the runner-owned driver when the backend has one.
+	if m.autopilotCapable {
+		return m.armRunnerAutopilot(session.AutopilotRequest{
+			Kind:     session.AutopilotKindGoal,
+			Prompt:   goalPrompt(condition),
+			Sentinel: goalSentinel,
+		})
 	}
 	m.startAutopilot(autopilotState{kind: autopilotGoal, prompt: condition})
 	m.appendBlock(blockInfo, "◎ goal set — working until met · esc to stop")
@@ -334,20 +408,230 @@ func humanInterval(d time.Duration) string {
 	return b.String()
 }
 
+// driverActive reports whether ANY autopilot driver is running for this session —
+// the local tea.Tick driver OR the runner-owned one. The two are mutually
+// exclusive (chosen by the capability bit); this is the single predicate every
+// gate (esc-stop, warm retention, chip) uses so neither path is treated as
+// second-class.
+func (m *TranscriptModel) driverActive() bool {
+	return m.autopilot.active() || m.runnerDriver.active
+}
+
+// armRunnerAutopilot arms (or replaces) the runner-owned driver via the client's
+// PUT /autopilot, records the spec for a one-key re-arm (§1e), and returns the
+// arm Cmd. It deliberately does NOT start a local tea.Tick loop or set
+// m.autopilot — the armed chip, iteration counter, and terminal toast all render
+// from the resulting autopilot.state events (ADR §3), so there is a single
+// read-model and no double-submit. Overrides carry the user's current
+// model/effort/mode so self-submitted turns match a manual turn.
+func (m *TranscriptModel) armRunnerAutopilot(req session.AutopilotRequest) tea.Cmd {
+	req.Overrides = session.AutopilotOverrides{
+		Model:  m.modelOverride,
+		Effort: m.effortOverride,
+		Mode:   m.mode.apiValue(),
+	}
+	req.MaxIterations = autopilotMaxIterations
+	// Record locally + persist for re-arm-on-re-attach (§1e). Saved before the
+	// POST so a detach mid-arm can't lose it.
+	spec := req
+	m.lastDriverSpec = &spec
+	if m.driverStore != nil {
+		m.driverStore.SaveDriver(m.ref.ID, spec)
+	}
+	client, ref := m.client, m.ref
+	return func() tea.Msg {
+		_, err := client.ArmAutopilot(context.Background(), ref, req)
+		return autopilotArmResultMsg{id: ref.ID, req: req, err: err}
+	}
+}
+
+// rearmDriver re-arms the last recorded driver spec of the given kind (§1e). It
+// returns (cmd, true) when a re-arm was issued, or (_, false) when there is no
+// stored spec of that kind or the backend has no runner driver — the caller then
+// falls back to its usage message. The spec is taken from the in-memory record
+// (restored from the index on re-attach).
+func (m *TranscriptModel) rearmDriver(kind string) (tea.Cmd, bool) {
+	if !m.autopilotCapable || m.lastDriverSpec == nil || m.lastDriverSpec.Kind != kind {
+		return nil, false
+	}
+	if m.turnActive {
+		m.appendBlock(blockInfo, "finish or interrupt the current turn before re-arming")
+		return nil, true
+	}
+	req := *m.lastDriverSpec
+	m.appendBlock(blockInfo, "↻ re-arming the last "+kind+" — "+truncatePrompt(req.Prompt))
+	return m.armRunnerAutopilot(req), true
+}
+
+// stopDriver stops whichever autopilot driver is running: it disarms the
+// runner-owned driver (DELETE /autopilot) when one is armed, else stops the local
+// tea.Tick driver. `reason`, when non-empty, is written to the transcript for
+// scrollback. Returns the disarm Cmd for the runner path (nil for the local one).
+func (m *TranscriptModel) stopDriver(reason string) tea.Cmd {
+	if m.runnerDriver.active {
+		m.runnerDriver = runnerDriverState{}
+		if reason != "" {
+			m.appendBlock(blockInfo, reason)
+		}
+		client, ref := m.client, m.ref
+		return func() tea.Msg {
+			_, err := client.DisarmAutopilot(context.Background(), ref)
+			return autopilotDisarmResultMsg{id: ref.ID, err: err}
+		}
+	}
+	m.stopAutopilot(reason)
+	return nil
+}
+
+// applyAutopilotState reduces one autopilot.state event into the render-model
+// (ADR §3): it updates the runner-driver chip/iteration state and, on a terminal
+// stop, clears the chip and drops a scrollback line. It fires NO toast / OS
+// notification — that lives in the dashboard reducer (applyRunnerEvent) so it can
+// respect the replay/live boundary and target background sessions.
+func (m *TranscriptModel) applyAutopilotState(ev session.Event) {
+	var p session.AutopilotStatePayload
+	if json.Unmarshal(ev.Payload, &p) != nil {
+		return
+	}
+	switch p.State {
+	case "armed", "ticked":
+		m.runnerDriver = runnerDriverState{active: true, kind: p.Kind, iteration: p.Iteration, gen: p.Gen}
+	case "stopped":
+		m.runnerDriver = runnerDriverState{}
+		if note := autopilotStoppedNote(p.Kind, p.Reason); note != "" {
+			m.appendBlock(blockInfo, note)
+		}
+	}
+}
+
+// autopilotStoppedNote is the human-readable scrollback/toast line for a
+// terminated runner driver, keyed on kind + stop reason. A `user` disarm returns
+// "" — stopDriver already noted it locally and a toast would be redundant noise.
+func autopilotStoppedNote(kind, reason string) string {
+	glyph := "⟳ loop"
+	if kind == session.AutopilotKindGoal {
+		glyph = "◎ goal"
+	}
+	switch reason {
+	case "sentinel":
+		if kind == session.AutopilotKindGoal {
+			return "✅ goal reached"
+		}
+		return "⟳ loop finished — nothing left to do"
+	case "budget":
+		return glyph + fmt.Sprintf(" stopped — reached the %d-iteration/token budget", autopilotMaxIterations)
+	case "lapsed":
+		return glyph + " ended — no turn completed for a while (the session may have suspended)"
+	case "error":
+		return glyph + " stopped — repeated turn failures (see the audit log)"
+	case "user":
+		return ""
+	}
+	return glyph + " stopped"
+}
+
+// autopilotStoppedNoteFromEvent decodes an autopilot.state event and returns the
+// stopped note for a BACKGROUND toast, or "" when the event is not a terminal
+// stop (or is a `user` disarm). Used by the dashboard reducer.
+func autopilotStoppedNoteFromEvent(ev session.Event) string {
+	var p session.AutopilotStatePayload
+	if json.Unmarshal(ev.Payload, &p) != nil || p.State != "stopped" {
+		return ""
+	}
+	return autopilotStoppedNote(p.Kind, p.Reason)
+}
+
+// truncatePrompt shortens a stored prompt for a one-line re-arm confirmation.
+func truncatePrompt(s string) string {
+	s = strings.TrimSpace(strings.ReplaceAll(s, "\n", " "))
+	const max = 60
+	if len(s) > max {
+		return s[:max-1] + "…"
+	}
+	return s
+}
+
 // autopilotChip is the hint-row indicator shown while a driver runs (empty when
-// off, so the idle hint row is byte-identical to before).
+// off, so the idle hint row is byte-identical to before). The runner-owned driver
+// (rendered from autopilot.state events) surfaces its iteration/budget ceiling
+// (ADR Q2); the local driver keeps its interval/turn readout.
 func (m *TranscriptModel) autopilotChip() string {
 	var label string
-	switch m.autopilot.kind {
-	case autopilotLoop:
+	switch {
+	case m.runnerDriver.active:
+		switch m.runnerDriver.kind {
+		case session.AutopilotKindGoal:
+			label = fmt.Sprintf("◎ goal · turn %d/%d", m.runnerDriver.iteration, autopilotMaxIterations)
+		default:
+			label = fmt.Sprintf("⟳ loop · turn %d/%d", m.runnerDriver.iteration, autopilotMaxIterations)
+		}
+	case m.autopilot.kind == autopilotLoop:
 		label = "⟳ loop " + humanInterval(m.autopilot.interval)
-	case autopilotGoal:
+	case m.autopilot.kind == autopilotGoal:
 		label = fmt.Sprintf("◎ goal · turn %d", m.autopilot.iter)
 	default:
 		return ""
 	}
 	return lipgloss.NewStyle().Foreground(theme.Malibu).Render(label) +
 		styleSLMuted.Render(" · esc to stop")
+}
+
+// handleAutopilotArmResult surfaces the outcome of an arm POST. Success renders
+// from the incoming autopilot.state event, so this only prints a confirmation;
+// an unexpected `unsupported` (capability/version skew) falls back to the local
+// driver so the command still does something.
+func (m *TranscriptModel) handleAutopilotArmResult(msg autopilotArmResultMsg) tea.Cmd {
+	if msg.err == nil {
+		if msg.req.Kind == session.AutopilotKindGoal {
+			m.appendBlock(blockInfo, "◎ goal set — working until met · esc to stop")
+		} else {
+			m.appendBlock(blockInfo, "⟳ loop started · esc to stop")
+		}
+		return nil
+	}
+	if errors.Is(msg.err, runner.ErrAutopilotUnsupported) {
+		// The backend turned out to have no runner driver: drop the capability bit
+		// and fall back to the local tea.Tick driver from the recorded spec.
+		m.autopilotCapable = false
+		m.appendBlock(blockInfo, "autopilot: runner driver unavailable — using the local loop instead")
+		if msg.req.Kind == session.AutopilotKindGoal {
+			return m.cmdGoal(msg.req.Prompt)
+		}
+		interval := time.Duration(msg.req.IntervalMs) * time.Millisecond
+		return m.cmdLoop([]string{interval.String(), msg.req.Prompt})
+	}
+	m.appendBlock(blockInfo, "autopilot: could not arm the driver — "+msg.err.Error())
+	return nil
+}
+
+// handleAutopilotDisarmResult surfaces a disarm POST failure. A never-armed spec
+// (ErrAutopilotNotArmed — e.g. the driver already sentinel-stopped) is benign and
+// swallowed; other errors are surfaced so a stuck driver isn't hidden.
+func (m *TranscriptModel) handleAutopilotDisarmResult(msg autopilotDisarmResultMsg) tea.Cmd {
+	if msg.err == nil || errors.Is(msg.err, runner.ErrAutopilotNotArmed) {
+		return nil
+	}
+	m.appendBlock(blockInfo, "autopilot: could not disarm the driver — "+msg.err.Error())
+	return nil
+}
+
+// fetchAutopilotCapabilityCmd reads capabilities.autopilot from the runner's
+// /status once at attach, so /loop-/goal can pick the runner vs local path (ADR
+// §Q3). A failed fetch reports not-capable, which is the safe fallback (local
+// driver). Runs off the Update goroutine, so it captures its client/ref locally.
+func fetchAutopilotCapabilityCmd(client RunnerClient, ref session.Ref) tea.Cmd {
+	return func() tea.Msg {
+		// Bounded like the other one-shot dashboard probes (C9): an unresponsive
+		// runner costs at most a few seconds of missing capability bit (the local
+		// driver stays the fallback), never a stranded goroutine.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		st, err := client.SessionState(ctx, ref)
+		if err != nil {
+			return autopilotCapabilityMsg{id: ref.ID, capable: false}
+		}
+		return autopilotCapabilityMsg{id: ref.ID, capable: st.Capabilities.Autopilot}
+	}
 }
 
 // autopilotUsageHint returns a one-line usage cue for the palette when the query

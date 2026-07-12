@@ -273,6 +273,10 @@ type RunOptions struct {
 	// delta (Workstream C).
 	EventCache EventCache
 
+	// DriverStore persists the last-armed autopilot driver spec per session so a
+	// bare /loop or /goal re-arms it after a re-attach without retyping (§1e).
+	DriverStore DriverStore
+
 	// ObserverConnector is the lightweight connect path for background passive
 	// status streams (port-forward + runner health, no file-sync setup). When
 	// nil, background streams use Connector.
@@ -330,6 +334,9 @@ func (a *App) applyOpts(opts []RunOptions) {
 	}
 	if opts[0].EventCache != nil {
 		a.dashboard = a.dashboard.WithEventCache(opts[0].EventCache)
+	}
+	if opts[0].DriverStore != nil {
+		a.dashboard = a.dashboard.WithDriverStore(opts[0].DriverStore)
 	}
 	if opts[0].ObserverConnector != nil {
 		a.dashboard = a.dashboard.WithObserverConnector(opts[0].ObserverConnector)
@@ -576,6 +583,16 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Reaper idle timeout so a /loop can warn when its interval risks a
 		// mid-loop suspend (§1e item 4).
 		m.idleTimeout = a.dashboard.idleTimeout
+		// §1e re-arm: give the transcript the driver-spec store and restore the last
+		// recorded spec so a bare /loop or /goal re-arms it after a re-attach (unless
+		// a warm model already carries a live in-memory one).
+		m.driverStore = a.dashboard.driverStore
+		if m.driverStore != nil && m.lastDriverSpec == nil {
+			if spec, ok := m.driverStore.LoadDriver(msg.sess.ID()); ok {
+				s := spec
+				m.lastDriverSpec = &s
+			}
+		}
 		// Hand off a one-shot initial prompt (from `sandbox claude "…"`) so the
 		// transcript submits it as the first turn once its stream is live.
 		m.initialPrompt = a.initialPrompt

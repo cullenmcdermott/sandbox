@@ -203,6 +203,20 @@ type State struct {
 	PodReady     bool      `json:"podReady,omitempty"`
 	SandboxName  string    `json:"sandboxName,omitempty"`
 	RunnerToken  string    `json:"-"`
+	// Capabilities is the backend capability map reported by the runner on
+	// GET /sessions/:id/status. It is populated only by the runner client's
+	// SessionState (the k8s backend cannot know it and leaves it zero). The TUI
+	// reads Capabilities.Autopilot to pick the autopilot code path (runner-owned
+	// driver vs the local tea.Tick fallback — ADR §Q3 precedence).
+	Capabilities Capabilities `json:"capabilities,omitempty"`
+}
+
+// Capabilities is the backend capability map from GET /status (mirrors the
+// StatusResponse.capabilities object in runner/src/types.ts). Autopilot is true
+// when this backend has a runner-side autopilot driver (the server-side
+// /loop-/goal loop); today only claude-sdk reports true.
+type Capabilities struct {
+	Autopilot bool `json:"autopilot"`
 }
 
 // TurnInput is the user input that starts a turn.
