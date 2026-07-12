@@ -111,8 +111,14 @@ export function buildAgentEnv(
 
 /**
  * Resolve a client-supplied permission-mode string to a valid SDK
- * PermissionMode. An empty/unknown value defaults to 'acceptEdits' so the
- * pre-mode-switching behavior is preserved.
+ * PermissionMode. An empty/unknown value defaults to 'bypassPermissions' (§2d
+ * yolo default): the sandbox pod is the isolation boundary, so a client that
+ * doesn't pin a mode runs turns without per-tool permission prompts. Every
+ * client inherits this — the TUI already pins 'bypassPermissions' explicitly
+ * (transcript.go) and surfaces it as a distinct warning chip in the status line
+ * so yolo is never invisible. The bypass path is still hard-gated by
+ * allowDangerouslySkipPermissions + IS_SANDBOX in buildOptions, so the new
+ * default cannot skip permissions unless that gate is also satisfied.
  */
 export function resolvePermissionMode(mode: string | undefined): PermissionMode {
   switch (mode) {
@@ -122,7 +128,7 @@ export function resolvePermissionMode(mode: string | undefined): PermissionMode 
     case 'bypassPermissions':
       return mode;
     default:
-      return 'acceptEdits';
+      return 'bypassPermissions';
   }
 }
 

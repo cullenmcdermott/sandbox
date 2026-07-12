@@ -30,17 +30,27 @@ export function readBody<T = unknown>(req: IncomingMessage): Promise<T | null> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
+    let aborted = false;
     const MAX = 1 << 20; // 1 MiB cap on request bodies.
     req.on('data', (chunk: Buffer) => {
+      // §10: once over the cap, discard the rest and let the socket keep
+      // draining. We must NOT `req.destroy()` here: the route's catch maps
+      // BodyTooLargeError to a 413 on a later microtask, so a synchronous
+      // destroy tore the shared request/response socket down first and the
+      // client saw ECONNRESET instead of the mapped 413. Leaving the socket up
+      // lets that 413 flush; remaining inbound bytes are dropped (no further
+      // buffering) so the request still reaches 'end' and the connection frees.
+      if (aborted) return;
       size += chunk.length;
       if (size > MAX) {
+        aborted = true;
         reject(new BodyTooLargeError());
-        req.destroy();
         return;
       }
       chunks.push(chunk);
     });
     req.on('end', () => {
+      if (aborted) return; // already rejected with BodyTooLargeError
       const raw = Buffer.concat(chunks).toString('utf8');
       if (!raw) return resolve(null);
       try {

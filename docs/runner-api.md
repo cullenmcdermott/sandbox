@@ -90,8 +90,11 @@ Starts a new turn. Request body:
 ```
 `prompt` (non-empty string) is required; the rest are optional. `mode` is the
 SDK permission mode — one of `default`, `acceptEdits`, `plan`, or
-`bypassPermissions`; an empty or unrecognized value defaults to `acceptEdits`.
-(`bypassPermissions` additionally requires the SDK's
+`bypassPermissions`; an empty or unrecognized value defaults to
+`bypassPermissions` (§2d yolo default — the sandbox pod is the isolation
+boundary, so an unpinned turn runs without per-tool permission prompts). The TUI
+pins the mode explicitly and surfaces `bypassPermissions` as a distinct warning
+chip in its status line. (`bypassPermissions` additionally requires the SDK's
 `allowDangerouslySkipPermissions` gate, which the runner sets only for that
 mode.) `model` is the per-turn model override (the in-session `/model` switch) —
 an id or alias like `opus`, `sonnet`, `haiku`, or a full id; it wins over the

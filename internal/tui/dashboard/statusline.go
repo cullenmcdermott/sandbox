@@ -64,9 +64,19 @@ func (p permMode) apiValue() string {
 func (p permMode) next() permMode { return permMode((int(p) + 1) % 4) }
 
 // modeTag is the compact permission-mode tag for the collapsed status row (A2.5):
-// a glyph + short label in the mode's hue. Not bold — it sits as a quiet trailing
-// tag on row 1.
+// a glyph + short label in the mode's hue. The safer modes sit as a quiet
+// foreground-only trailing tag on row 1. bypassPermissions (yolo) is the §2d
+// default, so it must never be invisible: it renders as a filled coral warning
+// CHIP (inverted — dark text on a coral band, bold) that stands out from the
+// quiet tags, making an active yolo session unmistakable at a glance.
 func (p permMode) modeTag() string {
+	if p == modeBypass {
+		return lipgloss.NewStyle().
+			Foreground(theme.Page).
+			Background(theme.Coral).
+			Bold(true).
+			Render(" ⚠ bypass ")
+	}
 	var glyph, label string
 	var col color.Color
 	switch p {
@@ -76,8 +86,6 @@ func (p permMode) modeTag() string {
 		glyph, label, col = "⏵", "ask", theme.Malibu
 	case modePlan:
 		glyph, label, col = "⏸", "plan", theme.Gold
-	case modeBypass:
-		glyph, label, col = "⏵⏵", "bypass", theme.Coral
 	}
 	return lipgloss.NewStyle().Foreground(col).Render(glyph + " " + label)
 }

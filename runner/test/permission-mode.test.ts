@@ -14,9 +14,12 @@ test('valid SDK modes pass through unchanged', () => {
   assert.equal(resolvePermissionMode('bypassPermissions'), 'bypassPermissions');
 });
 
-test('empty/undefined/unknown defaults to acceptEdits (preserves prior behavior)', () => {
-  assert.equal(resolvePermissionMode(undefined), 'acceptEdits');
-  assert.equal(resolvePermissionMode(''), 'acceptEdits');
-  assert.equal(resolvePermissionMode('yolo'), 'acceptEdits');
-  assert.equal(resolvePermissionMode('Plan'), 'acceptEdits'); // case-sensitive enum
+test('empty/undefined/unknown defaults to bypassPermissions (§2d yolo default)', () => {
+  // §2d: an unpinned mode now inherits yolo (bypassPermissions). The sandbox pod
+  // is the isolation boundary; the bypass path stays hard-gated by
+  // allowDangerouslySkipPermissions + IS_SANDBOX in buildOptions.
+  assert.equal(resolvePermissionMode(undefined), 'bypassPermissions');
+  assert.equal(resolvePermissionMode(''), 'bypassPermissions');
+  assert.equal(resolvePermissionMode('yolo'), 'bypassPermissions');
+  assert.equal(resolvePermissionMode('Plan'), 'bypassPermissions'); // case-sensitive enum
 });

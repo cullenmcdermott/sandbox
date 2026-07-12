@@ -387,28 +387,25 @@ test('B9: malformed JSON body maps to 400 (InvalidJsonError), not 500', { skip }
   }
 });
 
-// B9 FINDING: the 413 mapping in server.ts's createRunnerServer catch is
-// effectively unreachable by a real client. readBody's oversize branch
-// (httputil.ts) calls `req.destroy()` SYNCHRONOUSLY right after `reject(...)`;
-// the catch that would write the 413 runs as a microtask AFTER that sync frame,
-// by which point the shared request/response socket is already torn down. So the
-// client observes a connection reset (ECONNRESET), NOT the 413 JSON. This test
-// pins that observed behavior (an oversized upload IS rejected — it never reaches
-// the agent — but as a socket reset, not a clean 413). See the returned report:
-// the wire-level 413 status is currently dead code. The typed BodyTooLargeError
-// itself is unit-covered in robustness-b5-b9.test.ts.
-test('B9: an oversized body is rejected — currently as a socket reset, not the mapped 413 (finding)', { skip }, async () => {
+// §10 (was B9 finding): the 413 mapping in server.ts's createRunnerServer catch
+// now actually reaches the client. readBody previously called `req.destroy()`
+// SYNCHRONOUSLY right after `reject(...)`; the catch that writes the 413 runs as
+// a microtask AFTER that sync frame, so the shared request/response socket was
+// already torn down and the client saw ECONNRESET, not the JSON. The fix stops
+// destroying in readBody (httputil.ts) and lets the route's error mapping respond
+// while remaining inbound bytes drain — so the mapped 413 flushes. This test now
+// asserts the clean 413 body arrives (the typed BodyTooLargeError itself is also
+// unit-covered in robustness-b5-b9.test.ts).
+test('§10: an oversized body is rejected with the mapped 413 body, which reaches the client', { skip }, async () => {
   const b = await boot();
   try {
     const big = 'x'.repeat((1 << 20) + 1024); // just over the 1 MiB cap
-    await assert.rejects(
-      req(b.port, 'POST', `/sessions/${b.sid}/turns`, {
-        token: b.token,
-        body: JSON.stringify({ prompt: big }),
-      }),
-      (e: NodeJS.ErrnoException) => e.code === 'ECONNRESET',
-      'oversized body tears down the socket before the 413 can be written',
-    );
+    const resp = await req(b.port, 'POST', `/sessions/${b.sid}/turns`, {
+      token: b.token,
+      body: JSON.stringify({ prompt: big }),
+    });
+    assert.equal(resp.status, 413);
+    assert.deepEqual(resp.json, { error: 'request body too large' });
     // The upload never reached the agent — the point of the size cap holds.
     assert.equal(b.runTurnCalls.length, 0);
   } finally {
