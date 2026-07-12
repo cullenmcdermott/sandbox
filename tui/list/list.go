@@ -9,7 +9,6 @@ import "strings"
 type Item interface {
 	Render(width int) string // full styled block; may be multi-line
 	Version() uint64         // monotonic; changes when output would change
-	Finished() bool          // advisory: true once output is terminal (reserved for future freezing)
 }
 
 // Versioned is an embeddable counter satisfying Item.Version().

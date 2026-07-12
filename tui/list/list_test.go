@@ -18,7 +18,6 @@ func newCountingItem(body string) *countingItem {
 	return &countingItem{Versioned: NewVersioned(), body: body}
 }
 func (c *countingItem) Render(width int) string { c.renders++; return c.body }
-func (c *countingItem) Finished() bool          { return true }
 
 func build(n int) ([]Item, []*countingItem) {
 	items := make([]Item, n)

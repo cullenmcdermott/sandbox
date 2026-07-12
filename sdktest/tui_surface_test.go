@@ -71,14 +71,13 @@ var (
 )
 
 // consumerListItem proves list.Item stays implementable by outside consumers:
-// WIDENING it (adding a method) is a breaking change and must fail here. NOTE:
-// Item.Finished() is flagged for removal in TODO.md §8 — if it is dropped, this
-// stub AND the interface change together, which is exactly the signal this pin
-// exists to force.
+// WIDENING it (adding a method) is a breaking change and must fail here. The
+// contract is Render(width) + Version() only — the advisory Finished() method
+// was removed in §8 (never called by the list), so a consumer implements just
+// these two.
 type consumerListItem struct{ list.Versioned }
 
 func (consumerListItem) Render(width int) string { return "" }
-func (consumerListItem) Finished() bool          { return true }
 
 // Pointer receiver: Version() is promoted from *list.Versioned, so the pin uses
 // a pointer (the natural way a consumer embeds the counter).

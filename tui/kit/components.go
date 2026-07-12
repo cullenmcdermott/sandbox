@@ -28,17 +28,8 @@ const (
 	RoleMuted
 )
 
-// Component palette. Defaults are on-brand; the dashboard theme can swap them
-// via SetComponentColors so the kit reskins with the active theme.
-var (
-	kbdKeyColor    color.Color = color.RGBA{R: 0x7b, G: 0xb6, B: 0xff, A: 0xff}
-	kbdLabelColor  color.Color = color.RGBA{R: 0xb6, G: 0xaf, B: 0xd2, A: 0xff}
-	kbdSepColor    color.Color = color.RGBA{R: 0x6b, G: 0x6b, B: 0x6b, A: 0xff}
-	kvKeyColor     color.Color = color.RGBA{R: 0x92, G: 0x8a, B: 0xae, A: 0xff}
-	kvValColor     color.Color = color.RGBA{R: 0xb6, G: 0xaf, B: 0xd2, A: 0xff}
-	errDetailColor color.Color = color.RGBA{R: 0xb6, G: 0xaf, B: 0xd2, A: 0xff}
-	btnBlurColor   color.Color = color.RGBA{R: 0xb6, G: 0xaf, B: 0xd2, A: 0xff}
-)
+// numRoles is the count of defined Roles — the size of the palette's role table.
+const numRoles = int(RoleMuted) + 1
 
 // ComponentColors carries the theme-driven component palette. A zero field keeps
 // the current value, so callers set only what they have.
@@ -50,66 +41,62 @@ type ComponentColors struct {
 	Roles             map[Role]color.Color
 }
 
-// SetComponentColors swaps the component palette to follow the active theme.
+// SetComponentColors swaps the component palette to follow the active theme. It
+// copy-modify-stores the shared palette atomically, so it is safe to call while
+// another goroutine renders (two tea.Programs never race on the palette). A zero
+// field keeps the current value.
 func SetComponentColors(c ComponentColors) {
+	cur := *pal()
 	if c.KbdKey != nil {
-		kbdKeyColor = c.KbdKey
+		cur.kbdKey = c.KbdKey
 	}
 	if c.KbdLabel != nil {
-		kbdLabelColor = c.KbdLabel
+		cur.kbdLabel = c.KbdLabel
 	}
 	if c.KbdSep != nil {
-		kbdSepColor = c.KbdSep
+		cur.kbdSep = c.KbdSep
 	}
 	if c.KVKey != nil {
-		kvKeyColor = c.KVKey
+		cur.kvKey = c.KVKey
 	}
 	if c.KVVal != nil {
-		kvValColor = c.KVVal
+		cur.kvVal = c.KVVal
 	}
 	if c.ErrDetail != nil {
-		errDetailColor = c.ErrDetail
+		cur.errDetail = c.ErrDetail
 	}
 	if c.ButtonBlur != nil {
-		btnBlurColor = c.ButtonBlur
+		cur.btnBlur = c.ButtonBlur
 	}
 	if c.Rule != nil {
-		ruleColor = c.Rule
+		cur.rule = c.Rule
 	}
 	if c.ScrollThumb != nil {
-		thumbColor = c.ScrollThumb
+		cur.thumb = c.ScrollThumb
 	}
 	for r, col := range c.Roles {
-		if col != nil {
-			roleColorTable[r] = col
+		if col != nil && int(r) >= 0 && int(r) < len(cur.roles) {
+			cur.roles[r] = col
 		}
 	}
+	activePalette.Store(&cur)
 }
 
-// roleColorTable maps a Role to its accent color (overridable per theme).
-var roleColorTable = map[Role]color.Color{
-	RoleBrand:   color.RGBA{R: 0x6b, G: 0x50, B: 0xff, A: 0xff},
-	RoleBusy:    color.RGBA{R: 0xd9, G: 0xe6, B: 0x4e, A: 0xff},
-	RoleWaiting: color.RGBA{R: 0xff, G: 0xc2, B: 0x47, A: 0xff},
-	RoleSuccess: color.RGBA{R: 0x2f, G: 0xd9, B: 0x8b, A: 0xff},
-	RoleDenied:  color.RGBA{R: 0xe0, G: 0x8a, B: 0x4a, A: 0xff},
-	RoleError:   color.RGBA{R: 0xff, G: 0x52, B: 0x77, A: 0xff},
-	RoleInfo:    color.RGBA{R: 0x54, G: 0xcb, B: 0xe0, A: 0xff},
-	RoleMuted:   color.RGBA{R: 0x80, G: 0x79, B: 0xa0, A: 0xff},
-}
-
-// roleAccent returns the accent color for a Role.
+// roleAccent returns the accent color for a Role, falling back to the muted
+// accent for an out-of-range or unset role.
 func roleAccent(r Role) color.Color {
-	if c, ok := roleColorTable[r]; ok {
-		return c
+	p := pal()
+	if int(r) >= 0 && int(r) < len(p.roles) && p.roles[r] != nil {
+		return p.roles[r]
 	}
-	return roleColorTable[RoleMuted]
+	return p.roles[RoleMuted]
 }
 
 // Kbd renders a single key hint, e.g. Kbd("a","approve") → "[a] approve".
 func Kbd(key, label string) string {
-	k := lipgloss.NewStyle().Foreground(kbdKeyColor).Render("[" + key + "]")
-	return k + " " + lipgloss.NewStyle().Foreground(kbdLabelColor).Render(label)
+	p := pal()
+	k := lipgloss.NewStyle().Foreground(p.kbdKey).Render("[" + key + "]")
+	return k + " " + lipgloss.NewStyle().Foreground(p.kbdLabel).Render(label)
 }
 
 // kbdSeparator joins key hints; one shared separator so every footer/box agrees.
@@ -121,7 +108,7 @@ func KbdRow(pairs ...[2]string) string {
 	for i, p := range pairs {
 		hints[i] = Kbd(p[0], p[1])
 	}
-	sep := lipgloss.NewStyle().Foreground(kbdSepColor).Render(kbdSeparatorText)
+	sep := lipgloss.NewStyle().Foreground(pal().kbdSep).Render(kbdSeparatorText)
 	return strings.Join(hints, sep)
 }
 
@@ -138,7 +125,7 @@ func Button(label string, focused bool) string {
 		bg := roleAccent(RoleBrand)
 		return lipgloss.NewStyle().Foreground(OnColor(bg)).Background(bg).Bold(true).Padding(0, 1).Render(label)
 	}
-	return lipgloss.NewStyle().Foreground(btnBlurColor).Padding(0, 1).Render(label)
+	return lipgloss.NewStyle().Foreground(pal().btnBlur).Padding(0, 1).Render(label)
 }
 
 // CardOpts configures a Card.
@@ -227,8 +214,9 @@ func KV(key, val string, keyWidth int) string {
 	if pad := keyWidth - lipgloss.Width(k); pad > 0 {
 		k += strings.Repeat(" ", pad)
 	}
-	return lipgloss.NewStyle().Foreground(kvKeyColor).Render(k) + " " +
-		lipgloss.NewStyle().Foreground(kvValColor).Render(val)
+	p := pal()
+	return lipgloss.NewStyle().Foreground(p.kvKey).Render(k) + " " +
+		lipgloss.NewStyle().Foreground(p.kvVal).Render(val)
 }
 
 // ErrorBlock renders a structured, actionable error: title, optional detail, and
@@ -237,7 +225,7 @@ func KV(key, val string, keyWidth int) string {
 func ErrorBlock(title, detail, action string) string {
 	lines := []string{lipgloss.NewStyle().Foreground(roleAccent(RoleError)).Bold(true).Render("✗ " + title)}
 	if detail != "" {
-		lines = append(lines, lipgloss.NewStyle().Foreground(errDetailColor).Render("  "+detail))
+		lines = append(lines, lipgloss.NewStyle().Foreground(pal().errDetail).Render("  "+detail))
 	}
 	if action != "" {
 		lines = append(lines, lipgloss.NewStyle().Foreground(roleAccent(RoleInfo)).Render("  "+action))

@@ -14,18 +14,16 @@ import (
 	"github.com/rivo/uniseg"
 )
 
-// ansiTable is the default ANSI-16 → RGB palette used by RemapANSI (normal 0–7
-// then bright 8–15). The dashboard theme can swap it via SetANSITable so raw
-// output adopts the active theme; these defaults are on-brand xterm-ish values.
-var ansiTable = [16]color.RGBA{
-	{0x1e, 0x1e, 0x1e, 0xff}, {0xd7, 0x4e, 0x4e, 0xff}, {0x4e, 0xd7, 0x6b, 0xff}, {0xd7, 0xc6, 0x4e, 0xff},
-	{0x4e, 0x8c, 0xd7, 0xff}, {0xb0, 0x6e, 0xd7, 0xff}, {0x4e, 0xc9, 0xd7, 0xff}, {0xd0, 0xd0, 0xd0, 0xff},
-	{0x6b, 0x6b, 0x6b, 0xff}, {0xff, 0x7b, 0x7b, 0xff}, {0x7b, 0xff, 0x9a, 0xff}, {0xff, 0xf0, 0x7b, 0xff},
-	{0x7b, 0xb6, 0xff, 0xff}, {0xd9, 0x9c, 0xff, 0xff}, {0x7b, 0xf2, 0xff, 0xff}, {0xff, 0xff, 0xff, 0xff},
+// SetANSITable overrides the palette RemapANSI maps basic SGR colors onto. It
+// swaps the shared palette atomically (copy-modify-store), so it is safe to call
+// while another goroutine is rendering. Defaults live in defaultPalette (the
+// on-brand xterm-ish values); the dashboard theme swaps them so raw output
+// adopts the active theme.
+func SetANSITable(t [16]color.RGBA) {
+	cur := *pal()
+	cur.ansi = t
+	activePalette.Store(&cur)
 }
-
-// SetANSITable overrides the palette RemapANSI maps basic SGR colors onto.
-func SetANSITable(t [16]color.RGBA) { ansiTable = t }
 
 // OnColor returns a legible foreground to place on background bg — a near-white
 // for dark backgrounds, a near-black for light ones, chosen by relative
@@ -73,9 +71,10 @@ func RemapANSI(s string) string {
 func isCSIFinal(c byte) bool { return c >= 0x40 && c <= 0x7e }
 
 // remapSGR rewrites the parameter list of one SGR sequence, replacing basic
-// color params with truecolor from ansiTable and copying everything else —
-// including 38/48 extended runs — verbatim.
+// color params with truecolor from the active ANSI table and copying everything
+// else — including 38/48 extended runs — verbatim.
 func remapSGR(params string) string {
+	ansi := pal().ansi
 	toks := strings.Split(params, ";")
 	out := make([]string, 0, len(toks))
 	for i := 0; i < len(toks); i++ {
@@ -98,7 +97,7 @@ func remapSGR(params string) string {
 			continue
 		}
 		if idx, isBg, ok := basicColorIndex(t); ok {
-			out = append(out, trueColorParams(ansiTable[idx], isBg))
+			out = append(out, trueColorParams(ansi[idx], isBg))
 			continue
 		}
 		out = append(out, t)
@@ -214,9 +213,6 @@ func TitledRule(title string, w int, from, to color.Color) string {
 	return title + " " + rule
 }
 
-// ruleColor is the muted foreground for flat section rules — chrome, not signal.
-var ruleColor color.Color = color.RGBA{R: 0x6b, G: 0x6b, B: 0x6b, A: 0xff}
-
 // SectionHeader renders title, a flat `─` rule, and optional right-aligned info,
 // occupying exactly width w. The info ends flush against the right edge;
 // the rule expands to absorb the slack between title and info. When w cannot fit
@@ -227,6 +223,7 @@ func SectionHeader(title string, w int, info ...string) string {
 		inf = info[0]
 	}
 	tw := lipgloss.Width(title)
+	ruleColor := pal().rule
 	rule := func(n int) string {
 		return lipgloss.NewStyle().Foreground(ruleColor).Render(strings.Repeat("─", n))
 	}
@@ -249,9 +246,6 @@ func SectionHeader(title string, w int, info ...string) string {
 	}
 	return title + " " + rule(fill) + " " + inf
 }
-
-// thumbColor is the foreground for the scrollbar thumb.
-var thumbColor color.Color = color.RGBA{R: 0xb0, G: 0x6e, B: 0xd7, A: 0xff}
 
 // Scrollbar renders a stateless vertical scrollbar of the given height for a
 // content of contentSize lines shown in a viewport of viewportSize lines at the
@@ -284,7 +278,7 @@ func Scrollbar(height, contentSize, viewportSize, offset int) string {
 	if pos > travel {
 		pos = travel
 	}
-	thumbGlyph := lipgloss.NewStyle().Foreground(thumbColor).Render("▐")
+	thumbGlyph := lipgloss.NewStyle().Foreground(pal().thumb).Render("▐")
 	rows := make([]string, height)
 	for i := range rows {
 		if i >= pos && i < pos+thumb {
@@ -296,10 +290,11 @@ func Scrollbar(height, contentSize, viewportSize, offset int) string {
 	return strings.Join(rows, "\n")
 }
 
-// FormatTokens renders a token count with k/M units, trimming a trailing ".0":
-// counts under 1000 are plain, thousands use "k", millions use "M". Values whose
-// one-decimal k rendering would round up to 1000 (n >= 999,950) promote to "M"
-// instead of showing "1000k".
+// FormatTokens renders a token count with k/M/B units, trimming a trailing
+// ".0": counts under 1000 are plain, thousands use "k", millions use "M", and
+// billions use "B". At each boundary a value whose one-decimal rendering would
+// round up to 1000 promotes to the next unit instead of showing "1000k" /
+// "1000M" (e.g. n >= 999,950 → "M", n >= 999,950,000 → "B").
 func FormatTokens(n int) string {
 	if n < 1000 {
 		return strconv.Itoa(n)
@@ -307,7 +302,10 @@ func FormatTokens(n int) string {
 	if k := roundTenth(float64(n) / 1000); k < 1000 {
 		return trimDotZero(k) + "k"
 	}
-	return trimDotZero(roundTenth(float64(n)/1_000_000)) + "M"
+	if m := roundTenth(float64(n) / 1_000_000); m < 1000 {
+		return trimDotZero(m) + "M"
+	}
+	return trimDotZero(roundTenth(float64(n)/1_000_000_000)) + "B"
 }
 
 // roundTenth rounds v to one decimal place — the precision trimDotZero prints —

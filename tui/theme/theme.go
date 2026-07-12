@@ -141,10 +141,18 @@ var (
 	OnGold  color.Color
 
 	// Semantic tones: Warning sits between the muted info notices and the
-	// error Coral (pod reschedules, degradations).
+	// error Coral (pod reschedules, degradations). Denied is the refusal/blocked
+	// tone (distinct from the error Coral). Info/Success/Warning each pair with a
+	// near-background *Subtle fill used behind them (a notice/toast = accent text
+	// on its Subtle background).
+	Denied  color.Color
 	Info    color.Color
 	Success color.Color
 	Warning color.Color
+
+	InfoSubtle    color.Color
+	SuccessSubtle color.Color
+	WarningSubtle color.Color
 
 	Busy color.Color
 )
@@ -199,7 +207,9 @@ func ApplyTheme(t Theme) {
 	TextBright, TextBody, TextSecondary, TextMuted, TextDim = t.TextBright, t.TextBody, t.TextSecondary, t.TextMuted, t.TextDim
 	Shadow = t.Shadow
 	Busy = t.Busy
+	Denied = t.Denied
 	Info, Success, Warning = t.Info, t.Success, t.Warning
+	InfoSubtle, SuccessSubtle, WarningSubtle = t.InfoSubtle, t.SuccessSubtle, t.WarningSubtle
 
 	StatusMuted = TextMuted
 	StatusDim = TextDim
@@ -272,6 +282,29 @@ func ansiTableFor(t Theme) [16]color.RGBA {
 		toRGBA(t.Malibu),     // 14 bright cyan
 		toRGBA(t.TextBright), // 15 bright white
 	}
+}
+
+// Register adds t to the theme registry so it participates fully — discoverable
+// by ByName, reachable by Cycle, and selectable via DefaultForBackground's
+// SANDBOX_THEME override. Registration by a name that already exists (case-
+// insensitive) replaces the existing entry in place, so re-registering is
+// idempotent; a new name is appended. Register does not apply t — call
+// ApplyTheme (or Cycle to it) to make it active, at which point every OnChange
+// hook re-skins from its palette like any built-in theme.
+//
+// Not safe for concurrent use with ApplyTheme or the other registry readers;
+// register themes during startup, before the render loop begins.
+func Register(t Theme) {
+	for i := range themes {
+		if strings.EqualFold(themes[i].Name, t.Name) {
+			themes[i] = t
+			if strings.EqualFold(activeTheme, t.Name) {
+				ApplyTheme(t) // keep the live palette in sync with a replaced active theme
+			}
+			return
+		}
+	}
+	themes = append(themes, t)
 }
 
 // ByName returns the registered theme with the given name (case-insensitive)

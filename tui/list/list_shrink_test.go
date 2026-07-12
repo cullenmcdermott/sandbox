@@ -13,7 +13,6 @@ type mutableItem struct {
 }
 
 func (m *mutableItem) Render(width int) string { return strings.Join(m.lines, "\n") }
-func (m *mutableItem) Finished() bool          { return false }
 
 // REGRESSION: an anchor item that re-renders shorter than the recorded
 // offsetLine must not be skipped. Before normalize(), a 10-line item scrolled

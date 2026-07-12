@@ -139,9 +139,18 @@ func TestScrollbarThumb(t *testing.T) {
 	}
 }
 
-// ORACLE: number formatting matches known outputs (K/M trimming, comma cost). [S4]
+// ORACLE: number formatting matches known outputs (k/M/B trimming, unit
+// promotion at each boundary, comma cost). [S4]
 func TestFormatTokensAndCost(t *testing.T) {
-	tok := map[int]string{0: "0", 999: "999", 1000: "1k", 1200: "1.2k", 1_000_000: "1M"}
+	tok := map[int]string{
+		0: "0", 999: "999", 1000: "1k", 1200: "1.2k",
+		999_949:   "999.9k", // just below the k→M promotion
+		999_950:   "1M",     // one-decimal k rounds to 1000 → promotes to M
+		1_000_000: "1M", 1_500_000: "1.5M", 12_300_000: "12.3M",
+		999_949_999:   "999.9M", // just below the M→B promotion
+		999_950_000:   "1B",     // one-decimal M rounds to 1000 → promotes to B
+		1_000_000_000: "1B", 2_500_000_000: "2.5B", 15_000_000_000: "15B",
+	}
 	for in, want := range tok {
 		if got := FormatTokens(in); got != want {
 			t.Fatalf("FormatTokens(%d) = %q, want %q", in, got, want)
