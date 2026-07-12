@@ -198,7 +198,7 @@ func (m *Model) seedErrorLines(width int) []string {
 	return lines
 }
 
-func (m *Model) renderRowLines(rows []groupedSession, width, height int) ([]string, int) {
+func (m *Model) renderRowLines(rows []listRow, width, height int) ([]string, int) {
 	if len(rows) == 0 {
 		// U2: three-way state branch so "loading", "empty cluster", and
 		// "filter matched nothing" are visually distinct (spec 04-ux-responsiveness §U2).
@@ -238,7 +238,7 @@ func (m *Model) renderRowLines(rows []groupedSession, width, height int) ([]stri
 	shown := 0
 	for i := top; i < len(rows) && len(lines) < height; i++ {
 		var rl []string
-		if rows[i].session != nil {
+		if rows[i].kind == rowSession {
 			rl = strings.Split(m.renderSessionRow(*rows[i].session, i == m.cursor, width), "\n")
 		} else {
 			rl = []string{m.renderGroupHeader(rows[i].repo, width)}
@@ -254,8 +254,8 @@ func (m *Model) renderRowLines(rows []groupedSession, width, height int) ([]stri
 
 // rowHeight is the physical line count for a display row: two lines per session
 // (primary + dim sub-line), one for a group header.
-func rowHeight(r groupedSession) int {
-	if r.session != nil {
+func rowHeight(r listRow) int {
+	if r.kind == rowSession {
 		return 2
 	}
 	return 1
@@ -264,7 +264,7 @@ func rowHeight(r groupedSession) int {
 // rowScrollTop returns the first visible display-row index so the cursor row is
 // fully visible within `height` physical lines, anchoring the cursor toward the
 // bottom when scrolling down (matching the old single-line viewport behavior).
-func (m *Model) rowScrollTop(rows []groupedSession, height int) int {
+func (m *Model) rowScrollTop(rows []listRow, height int) int {
 	cur := m.cursor
 	if cur < 0 {
 		cur = 0

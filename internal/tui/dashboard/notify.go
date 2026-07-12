@@ -226,64 +226,47 @@ func firstLineOf(s string) string {
 // attention, wrapping around the list. Returns the
 // selected session or nil if none need attention.
 func (m *Model) jumpToNextNeedingAttention() *Session {
-	if m.groupView.open {
-		visible := m.visibleSessions()
-		if len(visible) == 0 {
-			return nil
-		}
-		start := 0
-		if sel := m.selectedRowSession(); sel != nil {
-			for i, s := range visible {
-				if s.ID() == sel.ID() {
-					start = i
-					break
-				}
-			}
-		}
-		for offset := 1; offset <= len(visible); offset++ {
-			idx := (start + offset) % len(visible)
-			s := visible[idx]
-			if s.ID() == m.attachedID || !needsAttention(s) {
-				continue
-			}
-			if m.groupView.repos != nil {
-				m.groupView.repos[repoKey(s)] = true
-			}
-			rows := m.visibleRows()
-			for rowIdx, row := range rows {
-				if row.session != nil && row.session.ID() == s.ID() {
-					m.cursor = rowIdx
-					return row.session
-				}
-			}
-			// Unreachable today: after expanding s's group, groupedSessions()
-			// always emits its row. But fail closed rather than return a session
-			// without having moved the row cursor — a future hidden/archived row
-			// class (TODO §2a row-model consolidation) could make visibleRows()
-			// diverge from visibleSessions() and silently reintroduce the exact
-			// stale-row-cursor bug §1b fixed.
-			return nil
-		}
-		return nil
-	}
+	// Scan the flat, filtered+sorted session list (visibleSessions) forward from
+	// the current selection — resolved by session *identity*, never by treating the
+	// row cursor as a session index — for the next session that needs attention and
+	// isn't already attached. Then translate the target back into the ONE row model
+	// (visibleRows): expand its group first in group view so its row exists, and
+	// move the row cursor onto that row (§1b — a raw session index must never be
+	// stuffed into a display-row cursor).
 	visible := m.visibleSessions()
 	if len(visible) == 0 {
 		return nil
 	}
-	start := m.cursor
-	if start < 0 || start >= len(visible) {
-		start = 0
+	start := 0
+	if sel := m.selectedSession(); sel != nil {
+		for i, s := range visible {
+			if s.ID() == sel.ID() {
+				start = i
+				break
+			}
+		}
 	}
 	for offset := 1; offset <= len(visible); offset++ {
 		idx := (start + offset) % len(visible)
 		s := visible[idx]
-		if s.ID() == m.attachedID {
-			continue // already viewing it — jumping here would be a no-op detach/attach
+		if s.ID() == m.attachedID || !needsAttention(s) {
+			continue
 		}
-		if needsAttention(s) {
-			m.cursor = idx
-			return &s
+		if m.groupView.open && m.groupView.repos != nil {
+			m.groupView.repos[repoKey(s)] = true
 		}
+		rows := m.visibleRows()
+		for rowIdx, row := range rows {
+			if row.kind == rowSession && row.session.ID() == s.ID() {
+				m.cursor = rowIdx
+				return row.session
+			}
+		}
+		// Fail closed rather than return a session without having moved the row
+		// cursor: a future hidden/archived rowKind could make visibleRows() drop a
+		// session visibleSessions() still lists, and silently returning it here would
+		// reintroduce the exact stale-row-cursor bug §1b fixed.
+		return nil
 	}
 	return nil
 }

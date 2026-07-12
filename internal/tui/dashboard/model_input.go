@@ -116,7 +116,7 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// open the modal (or toast when it has no worktree). Gated on the injected
 	// WorktreeOps so it is a no-op in the library/unit-test default.
 	if m.worktreeOps != nil && key.Matches(msg, m.keys.Branch) {
-		sel := m.selectedRowSession()
+		sel := m.selectedSession()
 		if sel != nil {
 			return m, m.worktreeStatusCmd(sel.ID())
 		}
@@ -227,7 +227,7 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	// Attach — flip to transcript screen via the App.
 	if key.Matches(msg, m.keys.Attach) {
-		sel := m.selectedRowSession()
+		sel := m.selectedSession()
 		if sel != nil {
 			return m, func() tea.Msg { return attachMsg{sess: *sel} }
 		}
@@ -236,14 +236,14 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	// Approve / Deny — inline permission from the detail pane.
 	if key.Matches(msg, m.keys.Approve) {
-		sel := m.selectedRowSession()
+		sel := m.selectedSession()
 		if sel != nil && sel.DashStatus == StatusWaiting {
 			return m, m.approveCmd(*sel, true)
 		}
 		return m, nil
 	}
 	if key.Matches(msg, m.keys.Deny) {
-		sel := m.selectedRowSession()
+		sel := m.selectedSession()
 		if sel != nil && sel.DashStatus == StatusWaiting {
 			return m, m.approveCmd(*sel, false)
 		}
@@ -262,7 +262,7 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// branch cancels the stream (and the pod closing the connection ends it
 	// anyway via handleRunnerEvent's StreamEnded path).
 	if key.Matches(msg, m.keys.Suspend) {
-		sel := m.selectedRowSession()
+		sel := m.selectedSession()
 		if sel != nil && sel.DashStatus != StatusSuspended {
 			for i := range m.sessions {
 				if m.sessions[i].ID() == sel.ID() {
@@ -277,7 +277,7 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	// Resume — scale a suspended session's pod back up.
 	if key.Matches(msg, m.keys.Resume) {
-		sel := m.selectedRowSession()
+		sel := m.selectedSession()
 		if sel != nil && sel.DashStatus == StatusSuspended {
 			for i := range m.sessions {
 				if m.sessions[i].ID() == sel.ID() {
@@ -292,7 +292,7 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	// Destroy — irreversible; gate behind a confirm dialog.
 	if key.Matches(msg, m.keys.Destroy) {
-		sel := m.selectedRowSession()
+		sel := m.selectedSession()
 		if sel != nil {
 			m.confirm = &confirmPrompt{
 				message: "Destroy " + sel.DisplayTitle() + "?  This deletes the pod and PVC and cannot be undone.",

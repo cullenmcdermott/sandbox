@@ -402,7 +402,7 @@ func (m *Model) sessionListBody(boxW, boxH int) []string {
 	if shown < len(allRows) {
 		hidden := make([]Session, 0)
 		for _, r := range allRows[shown:] {
-			if r.session != nil {
+			if r.kind == rowSession {
 				hidden = append(hidden, *r.session)
 			}
 		}

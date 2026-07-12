@@ -4,12 +4,19 @@ package dashboard
 // 5f / Mockup C, design S15). Sessions can be grouped by project repo
 // (collapsible) and renamed to human labels.
 //
+// Row model (§2a): the session list is ONE ordered slice of listRow values —
+// visibleRows(). Each row is a typed variant (rowKind): a session row or a
+// group header. The cursor indexes THAT slice, and sessionAt(cursor) is the
+// single accessor render, navigation, and actions share. Group view on/off only
+// changes how visibleRows() is built, never how consumers walk it. visibleSessions()
+// is the flat, filtered+sorted session *data* the builder draws from — it is never
+// indexed by the cursor.
+//
 // Archive (a separate "finished" section, design S15) is intentionally NOT
 // implemented here: the earlier `A`/archiveSelected/Session.Archived scaffold
-// was a no-op (nothing read the flag) and misled users, so it was removed. The
-// designed archived section belongs with the §2a row-model consolidation
-// (visibleSessions vs visibleRows), which is the right home for a new row
-// class — see TODO.md §1b.
+// was a no-op (nothing read the flag) and misled users, so it was removed. When
+// it lands it becomes a new rowKind (e.g. a section header + archived rows) added
+// to visibleRows() — the row model is now the right home for it. See TODO.md §1b.
 
 import (
 	"fmt"
@@ -54,7 +61,7 @@ func (m *Model) toggleRepoGroup() {
 	}
 	row := rows[m.cursor]
 	repo := row.repo
-	if row.session != nil {
+	if row.kind == rowSession {
 		repo = repoKey(*row.session)
 	}
 	m.groupView.repos[repo] = !m.groupView.repos[repo]
@@ -66,13 +73,13 @@ func repoKey(s Session) string {
 }
 
 // groupedSessions returns sessions partitioned by repo when group view is on.
-// Each group header is represented by a groupedSession with a non-empty repo.
+// Each group header is represented by a headerRow (rowHeader) with its repo label.
 //
 // Groups are built from visibleSessions() — NOT the raw m.sessions — so the `/`
 // filter narrows group contents (and drops now-empty groups) and the
 // attention-first float carries into group ordering. Repo order follows first
 // appearance in the already-filtered/sorted visibleSessions list.
-func (m *Model) groupedSessions() []groupedSession {
+func (m *Model) groupedSessions() []listRow {
 	visible := m.visibleSessions()
 	type key struct {
 		repo     string
@@ -91,27 +98,47 @@ func (m *Model) groupedSessions() []groupedSession {
 			groups = append(groups, key{repo: r, expanded: expanded})
 		}
 	}
-	var out []groupedSession
+	var out []listRow
 	for _, g := range groups {
-		out = append(out, groupedSession{repo: g.repo})
+		out = append(out, headerRow(g.repo))
 		if !g.expanded {
 			continue
 		}
 		for i := range visible {
 			if repoKey(visible[i]) == g.repo {
 				s := visible[i]
-				out = append(out, groupedSession{session: &s})
+				out = append(out, sessionRow(&s))
 			}
 		}
 	}
 	return out
 }
 
-// groupedSession is either a repo header or a real session.
-type groupedSession struct {
-	repo    string   // non-empty for header rows
-	session *Session // non-nil for data rows
+// rowKind is the closed set of session-list row variants. It is the discriminator
+// for the typed row model: a new row class (e.g. the S15 archived section) is a new
+// rowKind added here and emitted by visibleRows() — the one place the list's row
+// vocabulary is defined.
+type rowKind int
+
+const (
+	rowSession rowKind = iota // a real session; session != nil
+	rowHeader                 // a repo group header; repo carries the label
+)
+
+// listRow is one display row of the session list: either a repo header or a real
+// session, tagged by kind. The cursor indexes the []listRow that visibleRows()
+// returns; sessionAt() resolves a row index to its session.
+type listRow struct {
+	kind    rowKind
+	repo    string   // header label (rowHeader)
+	session *Session // payload (rowSession)
 }
+
+// sessionRow builds a session data row.
+func sessionRow(s *Session) listRow { return listRow{kind: rowSession, session: s} }
+
+// headerRow builds a repo group header row.
+func headerRow(repo string) listRow { return listRow{kind: rowHeader, repo: repo} }
 
 // openRename starts renaming the selected session.
 func (m *Model) openRename() {
@@ -130,7 +157,7 @@ func (m *Model) commitRename() {
 	if !m.renaming {
 		return
 	}
-	sel := m.selectedRowSession()
+	sel := m.selectedSession()
 	if sel == nil {
 		m.renaming = false
 		m.renameBuf = ""
@@ -161,38 +188,44 @@ func (m *Model) commitRename() {
 	m.renameBuf = ""
 }
 
-// visibleRows returns the display rows for the session list. In group view
-// this includes repo headers; otherwise it is the same as visibleSessions.
-func (m *Model) visibleRows() []groupedSession {
+// visibleRows returns the display rows for the session list — the ONE ordered row
+// slice the cursor indexes (§2a). In group view it includes repo headers; in flat
+// view it is one session row per visibleSessions() entry. Group view on/off changes
+// only this builder, never how consumers walk the result.
+func (m *Model) visibleRows() []listRow {
 	if !m.groupView.open {
-		rows := make([]groupedSession, len(m.visibleSessions()))
-		for i, s := range m.visibleSessions() {
-			rows[i] = groupedSession{session: &s}
+		visible := m.visibleSessions()
+		rows := make([]listRow, len(visible))
+		for i := range visible {
+			s := visible[i]
+			rows[i] = sessionRow(&s)
 		}
 		return rows
 	}
 	return m.groupedSessions()
 }
 
-// selectedRowSession returns the session at the cursor, skipping group headers.
-func (m *Model) selectedRowSession() *Session {
+// sessionAt returns the session that the row at index i selects, skipping group
+// headers: a header row resolves to the nearest session below it, then above. It
+// is the single accessor render, navigation, and actions share (§2a); out-of-range
+// indices (and a list of only headers) yield nil.
+func (m *Model) sessionAt(i int) *Session {
 	rows := m.visibleRows()
-	if m.cursor < 0 || m.cursor >= len(rows) {
+	if i < 0 || i >= len(rows) {
 		return nil
 	}
-	row := rows[m.cursor]
-	if row.session != nil {
-		return row.session
+	if rows[i].kind == rowSession {
+		return rows[i].session
 	}
-	// If the cursor is on a header, look down for the next session row.
-	for i := m.cursor + 1; i < len(rows); i++ {
-		if rows[i].session != nil {
-			return rows[i].session
+	// The cursor is on a header: look down for the next session row, then up.
+	for j := i + 1; j < len(rows); j++ {
+		if rows[j].kind == rowSession {
+			return rows[j].session
 		}
 	}
-	for i := m.cursor - 1; i >= 0; i-- {
-		if rows[i].session != nil {
-			return rows[i].session
+	for j := i - 1; j >= 0; j-- {
+		if rows[j].kind == rowSession {
+			return rows[j].session
 		}
 	}
 	return nil

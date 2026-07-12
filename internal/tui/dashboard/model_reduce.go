@@ -673,13 +673,13 @@ func (m *Model) visibleSessions() []Session {
 	return sortByAttention(FilterSessions(m.sessions, q), m.attentionFirst)
 }
 
-// selectedSession returns the currently highlighted session, or nil. It
-// delegates to the header-aware row accessor: the cursor indexes display rows
-// (which include repo headers in group view), so indexing visibleSessions
-// directly would describe/act on the wrong session whenever a header sits
-// above the cursor.
+// selectedSession returns the currently highlighted session, or nil. It is the
+// single accessor for "the session under the cursor" — sessionAt(m.cursor). The
+// cursor indexes display rows (which include repo headers in group view), so
+// indexing visibleSessions directly would describe/act on the wrong session
+// whenever a header sits above the cursor.
 func (m *Model) selectedSession() *Session {
-	return m.selectedRowSession()
+	return m.sessionAt(m.cursor)
 }
 
 // sessionByID returns the Session with the given ID from the dashboard's session

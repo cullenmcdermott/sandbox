@@ -70,7 +70,7 @@ func TestCtrlGGroupViewLandsOnRowAndExpands(t *testing.T) {
 	if row.session == nil || row.session.ID() != "b2" {
 		t.Fatalf("ctrl+g landed the row cursor on %+v, want the b2 session row", row)
 	}
-	if sel := m.selectedRowSession(); sel == nil || sel.ID() != "b2" {
-		t.Fatalf("selectedRowSession after ctrl+g = %v, want b2", sel)
+	if sel := m.selectedSession(); sel == nil || sel.ID() != "b2" {
+		t.Fatalf("selectedSession after ctrl+g = %v, want b2", sel)
 	}
 }
