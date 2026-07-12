@@ -52,77 +52,148 @@ func fitModal(s string, w, h int) string {
 	return strings.Join(lines, "\n")
 }
 
-// previewView renders the transcript's history (header + divider + scrollable
-// body) with a connect banner where the composer would normally sit. It is used
-// during ScreenConnecting (Fix A) so a session's conversation is visible while
-// its pod resumes, instead of a blank splash. Read-only: no input box.
-func (m *TranscriptModel) previewView(w, h int, banner string) string {
-	m.width, m.height = w, h
-	bannerH := lipgloss.Height(banner)
-	// header(1) + divider(1) + body + blank(1) + banner.
-	bodyH := h - 3 - bannerH
+// --------------------------------------------------------------------------
+// Vertical layout regions
+// --------------------------------------------------------------------------
+//
+// The transcript is a vertical stack of bands (header, divider, body, optional
+// permission/palette/search, composer, status line — or, in the connect
+// preview, a banner). Historically each consumer hand-counted the stack:
+// layout() reserved the body height with a bare `-3`, renderTranscript()
+// re-assembled the same bands into a parts slice, previewView() used its own
+// `h-3-bannerH`, and the scrollbar hit-test hard-coded `bodyTop=2`. Any layout
+// change had to be mirrored in every copy, and a missed copy silently broke
+// mouse mapping. These types make the stack declarative: one builder produces an
+// ordered []region with the body as the flex band, and ALL consumers walk it —
+// rendering, body sizing, and hit-testing read the same numbers. Adding,
+// removing, or resizing a band is a one-line change to the builder.
+
+// region is one horizontal band in the transcript's vertical stack: a name, its
+// height in rows for the current frame, and a renderer that produces exactly
+// that many rows.
+type region struct {
+	name   string
+	height int
+	render func() string
+}
+
+// Region names. The body is the single flex band (its height absorbs whatever
+// the fixed bands leave); every other band has a fixed, self-measured height.
+const (
+	regionHeader     = "header"
+	regionDivider    = "divider"
+	regionBody       = "body"
+	regionPerm       = "perm"
+	regionPalette    = "palette"
+	regionSearch     = "search"
+	regionGap        = "gap"
+	regionComposer   = "composer"
+	regionStatusLine = "statusline"
+	regionBanner     = "banner"
+)
+
+// vlayout is the transcript's per-frame vertical layout: the ordered region
+// stack and the frame's total height. It is the single source of the stack
+// arithmetic, so render and hit-test can never drift.
+type vlayout struct {
+	regions []region
+	total   int
+}
+
+// top returns the 0-based row of the named band's first line within the frame
+// (the summed height of every band above it), or -1 if the band is absent.
+func (v vlayout) top(name string) int {
+	y := 0
+	for _, r := range v.regions {
+		if r.name == name {
+			return y
+		}
+		y += r.height
+	}
+	return -1
+}
+
+// heightOf returns the named band's row height, or 0 if it is absent this frame.
+func (v vlayout) heightOf(name string) int {
+	for _, r := range v.regions {
+		if r.name == name {
+			return r.height
+		}
+	}
+	return 0
+}
+
+// view composites the stack top-to-bottom. Bands are joined with newlines
+// exactly as the former hand-assembled parts slice was; each band's render must
+// emit its declared height so the frame sums to total.
+func (v vlayout) view() string {
+	parts := make([]string, len(v.regions))
+	for i, r := range v.regions {
+		parts[i] = r.render()
+	}
+	return strings.Join(parts, "\n")
+}
+
+// headerBands are the fixed bands stacked above the body — the title header and
+// the divider rule. Shared by the live and preview layouts (and, via bodyTop, by
+// the scrollbar hit-test) so a band added above the body updates every consumer.
+func (m *TranscriptModel) headerBands() []region {
+	return []region{
+		{regionHeader, 1, m.renderHeader},
+		{regionDivider, 1, func() string { return styleDivider.Render(strings.Repeat("─", m.width)) }},
+	}
+}
+
+// bodyTop is the 0-based row of the transcript body's first line — the combined
+// height of the bands above it. The scrollbar hit-test uses it so mouse mapping
+// follows the same band definitions the renderer stacks.
+func (m *TranscriptModel) bodyTop() int {
+	y := 0
+	for _, r := range m.headerBands() {
+		y += r.height
+	}
+	return y
+}
+
+// stack assembles a vlayout from the fixed bands above and below a single flex
+// body band. The body height is the frame total minus every fixed band (floored
+// at 1); its renderer is supplied by the caller (the live view shows the
+// empty-session welcome when there is nothing yet; the preview shows the plain
+// body under its banner). Sizing the list widget to heightOf(regionBody) stays
+// the caller's job — this only computes the geometry.
+func (m *TranscriptModel) stack(above, below []region, bodyView func() string) vlayout {
+	fixed := 0
+	for _, r := range above {
+		fixed += r.height
+	}
+	for _, r := range below {
+		fixed += r.height
+	}
+	bodyH := m.height - fixed
 	if bodyH < 1 {
 		bodyH = 1
 	}
-	m.body.SetSize(max(1, w-1), bodyH)
-	m.syncItems()
-	m.body.GotoBottom()
-	parts := []string{
-		m.renderHeader(),
-		styleDivider.Render(strings.Repeat("─", w)),
-		m.bodyView(),
-		"",
-		banner,
-	}
-	return strings.Join(parts, "\n")
+	regions := make([]region, 0, len(above)+1+len(below))
+	regions = append(regions, above...)
+	regions = append(regions, region{regionBody, bodyH, bodyView})
+	regions = append(regions, below...)
+	return vlayout{regions: regions, total: m.height}
 }
 
-// renderTranscript builds the actual transcript string for the current size.
-func (m *TranscriptModel) renderTranscript(w, h int) string {
-	body := m.bodyView()
-	// A fresh session has no history yet; show a brief welcome instead of a blank
-	// void (parity with the dashboard's firstRunView). Live attached view only —
-	// previewView keeps its plain body under the connect banner.
-	if m.transcriptEmpty() {
-		body = m.emptyTranscriptView(max(1, m.width-1), m.body.Height())
-	}
-	parts := []string{m.renderHeader(), styleDivider.Render(strings.Repeat("─", w)), body}
-	if m.pending != nil {
-		// Rebuild the box at render time so the permission-appear border fade
-		// (§C.3) reads the live elapsed time rather than the cached layout build.
-		if m.pending.isPlan {
-			parts = append(parts, m.permBox)
-		} else {
-			parts = append(parts, m.buildPermissionBox(m.width))
-		}
-	}
-	if m.palette != "" {
-		parts = append(parts, m.palette)
-	}
-	// The search bar (T3) sits just above the input when open; without this it
-	// was dead code and `/`-search opened with no visible affordance.
-	if m.search.open {
-		parts = append(parts, m.renderSearchBar(w))
-	}
-	// A blank line sets the input apart from the transcript so the composer has
-	// room to breathe instead of butting against the last message (roominess).
-	parts = append(parts, "", m.renderInput(), m.renderStatusLine())
-	return strings.Join(parts, "\n")
-}
+// liveLayout builds the attached (composer) transcript's region stack at the
+// current size. Fixed bands measure themselves exactly as the former
+// layout()/renderTranscript() pair did; the body flexes to fill the rest. It
+// builds m.permBox / m.palette as a side effect so the render closures reuse the
+// same strings the heights were measured from.
+func (m *TranscriptModel) liveLayout() vlayout {
+	// Size the composer's textarea first so inputRows() (which wraps on this
+	// width) is accurate before its height is reserved. Must match renderInput()
+	// exactly, or the reserved height drifts from what renders.
+	m.input.SetWidth(m.composerInnerWidth())
 
-// --------------------------------------------------------------------------
-// Layout
-// --------------------------------------------------------------------------
+	var below []region
 
-// layout (re)sizes the list body and input and reconciles items. It is called
-// on resize and whenever the permission box appears/disappears or the diff view
-// toggles, since those change the available body height.
-func (m *TranscriptModel) layout() {
-	if m.width <= 0 || m.height <= 0 {
-		return
-	}
-
-	permH := 0
+	// Inline permission / plan-approval box, when one is pending.
 	m.permBox = ""
 	if m.pending != nil {
 		if m.pending.isPlan {
@@ -130,34 +201,98 @@ func (m *TranscriptModel) layout() {
 		} else {
 			m.permBox = m.buildPermissionBox(m.width)
 		}
-		permH = strings.Count(m.permBox, "\n") + 1
+		permH := strings.Count(m.permBox, "\n") + 1
+		below = append(below, region{regionPerm, permH, func() string {
+			// Rebuild the non-plan box at render time so the permission-appear
+			// border fade (§C.3) reads the live elapsed time rather than the
+			// cached build; the plan card is static, so reuse it.
+			if m.pending.isPlan {
+				return m.permBox
+			}
+			return m.buildPermissionBox(m.width)
+		}})
 	}
 
-	palH := 0
+	// Slash-command palette, when the composer starts with '/'.
 	m.palette = ""
 	if m.paletteOpen() {
 		m.palette = m.renderPalette(m.width)
-		palH = strings.Count(m.palette, "\n") + 1
+		palH := strings.Count(m.palette, "\n") + 1
+		below = append(below, region{regionPalette, palH, func() string { return m.palette }})
 	}
 
-	// The search bar consumes one row above the input when open (T3).
-	searchH := 0
+	// The search bar (T3) consumes one row just above the composer when open.
 	if m.search.open {
-		searchH = 1
+		below = append(below, region{regionSearch, 1, func() string { return m.renderSearchBar(m.width) }})
 	}
 
-	// Size the composer first so inputRows() (which wraps on this width) is
-	// accurate, then reserve the body height around the boxed input. Must match
-	// renderInput() exactly, or the reserved height drifts from what renders.
-	m.input.SetWidth(m.composerInnerWidth())
-	// header(1) + divider(1) + input gap(1) + box(border 2 + rows) + hint row(1).
-	inputH := m.inputRows() + 3
-	vpH := m.height - 3 - inputH - statusLineRows - permH - palH - searchH
-	if vpH < 1 {
-		vpH = 1
+	// A blank line sets the composer apart from the transcript (roominess), then
+	// the boxed composer (border 2 + rows + hint row 1 = inputRows()+3) and the
+	// fixed-height status line.
+	below = append(below,
+		region{regionGap, 1, func() string { return "" }},
+		region{regionComposer, m.inputRows() + 3, m.renderInput},
+		region{regionStatusLine, statusLineRows, m.renderStatusLine},
+	)
+
+	return m.stack(m.headerBands(), below, m.liveBodyView)
+}
+
+// liveBodyView renders the body band for the attached view: the scrollable list,
+// or a brief welcome for a fresh session so it isn't a blank void (parity with
+// the dashboard's firstRunView). It sizes to the list's current height, which
+// layout() set from heightOf(regionBody).
+func (m *TranscriptModel) liveBodyView() string {
+	if m.transcriptEmpty() {
+		return m.emptyTranscriptView(max(1, m.width-1), m.body.Height())
 	}
+	return m.bodyView()
+}
+
+// previewLayout builds the connect-preview region stack: the same header/divider
+// and body, but a connect banner where the composer would be (read-only, no
+// input). The body stays plain — no empty-session welcome under the banner.
+func (m *TranscriptModel) previewLayout(banner string) vlayout {
+	below := []region{
+		{regionGap, 1, func() string { return "" }},
+		{regionBanner, lipgloss.Height(banner), func() string { return banner }},
+	}
+	return m.stack(m.headerBands(), below, m.bodyView)
+}
+
+// renderTranscript builds the attached transcript string for the current size.
+func (m *TranscriptModel) renderTranscript(w, h int) string {
+	return m.liveLayout().view()
+}
+
+// previewView renders the transcript's history (header + divider + scrollable
+// body) with a connect banner where the composer would normally sit. It is used
+// during ScreenConnecting (Fix A) so a session's conversation is visible while
+// its pod resumes, instead of a blank splash. Read-only: no input box.
+func (m *TranscriptModel) previewView(w, h int, banner string) string {
+	m.width, m.height = w, h
+	v := m.previewLayout(banner)
+	m.body.SetSize(max(1, w-1), v.heightOf(regionBody))
+	m.syncItems()
+	m.body.GotoBottom()
+	return v.view()
+}
+
+// --------------------------------------------------------------------------
+// Layout
+// --------------------------------------------------------------------------
+
+// layout (re)sizes the list body and reconciles items. It is called on resize
+// and whenever a band appears/disappears (permission box, palette, search) or
+// the composer grows, since those change the flex body height. The band
+// geometry lives in liveLayout; layout only applies the body height it computes.
+func (m *TranscriptModel) layout() {
+	if m.width <= 0 || m.height <= 0 {
+		return
+	}
+	v := m.liveLayout()
 	// Reserve one column on the right for the transcript scrollbar (§D).
-	m.body.SetSize(max(1, m.width-1), vpH)
+	m.body.SetSize(max(1, m.width-1), v.heightOf(regionBody))
 	m.syncItems()
 }
 

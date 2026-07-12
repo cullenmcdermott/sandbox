@@ -21,9 +21,11 @@ type submitTextMsg struct{ text string }
 // of kit.Scrollbar's pos math: a row near the top maps to offset 0, near the
 // bottom to the max offset.
 func (m *TranscriptModel) scrollbarDragTo(relX, relY int) bool {
-	// bodyTop = header(1) + divider(1); the scrollbar sits in the rightmost body
-	// column (bodyView reserves m.width-1 for content, +1 for the bar).
-	const bodyTop = 2
+	// bodyTop comes from the region stack (header + divider above the body), so
+	// this hit-test follows the same band geometry the renderer uses; the
+	// scrollbar sits in the rightmost body column (bodyView reserves m.width-1 for
+	// content, +1 for the bar).
+	bodyTop := m.bodyTop()
 	bodyH := m.body.Height()
 	if relX != m.width-1 || relY < bodyTop || relY >= bodyTop+bodyH {
 		return false
