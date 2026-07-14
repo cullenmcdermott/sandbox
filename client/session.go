@@ -368,6 +368,10 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 		return nil, err
 	}
 	rc := runner.New(endpoint, token)
+	// §10 observability: carry this connect flow's correlation id on runner
+	// requests (X-Sandbox-Trace-Id) so the pod bridges it to each turn id
+	// (trace: <id> turn.link turn=…). No-op ("" → no header) when tracing is off.
+	rc.SetTraceID(tr.traceID())
 	s.setRunner(rc)
 	stage(StageRunner)
 	healthSpan := tr.start("connect.runner_health")

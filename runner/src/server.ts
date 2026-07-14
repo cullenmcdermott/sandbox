@@ -13,6 +13,7 @@ import { getRegistry, loadConfig, toStatusResponse } from './session.js';
 import { PORT, PROTOCOL_VERSION, type PermissionRequestBody, type TurnRequestBody, type TurnResponse, type ExecRequestBody, type AutopilotRequestBody } from './types.js';
 import { type Agent } from './agent.js';
 import { startTurn, turnRejectReason } from './turns.js';
+import { traceTurnLink, traceIDFromHeader } from './trace.js';
 import { type Autopilot, type AutopilotArmInput } from './autopilot.js';
 import { opencodeTurnClient } from './opencode-turn.js';
 import { markObservedTurnInterrupted } from './opencode-observer.js';
@@ -206,11 +207,18 @@ export function createRunnerServer(
   });
 }
 
-export function startServer(agent: Agent | null, autopilot: Autopilot | null = null): void {
+export function startServer(
+  agent: Agent | null,
+  autopilot: Autopilot | null = null,
+  onListening?: () => void,
+): void {
   const cfg = loadConfig();
   const server = createRunnerServer(cfg, agent, autopilot);
   server.listen(PORT, () => {
     console.log(`runner listening on :${PORT} (session=${cfg.sessionId})`);
+    // Fires once the socket is actually accepting, not when listen() was
+    // initiated — index.ts closes its boot.listen trace phase here.
+    onListening?.();
   });
 }
 
@@ -320,6 +328,11 @@ async function handle(req: IncomingMessage, res: ServerResponse, cfg: ReturnType
       return;
     }
     const turnResp: TurnResponse = { turnId: started.turnId };
+    // §10 observability: bridge the CLI's connect correlation id (the optional
+    // X-Sandbox-Trace-Id header) to the assigned turn id in the pod log, so one
+    // grep pivots between the CLI's connect spans and this turn's turn.* spans.
+    // No-op unless SANDBOX_TRACE is set AND the client sent a well-formed id.
+    traceTurnLink(traceIDFromHeader(req.headers['x-sandbox-trace-id']), started.turnId);
     return ok(res, turnResp);
   }
 

@@ -127,6 +127,14 @@ empty or unrecognized value leaves effort unset (SDK adaptive-thinking default).
 Effort is supported only on Fable 5 / Opus 4.6+ / Sonnet 4.6 and is silently
 ignored (or downgraded) on other models. The TUI displays the `max` tier under
 the label "ultracode", but the wire value sent here is always the real SDK enum.
+
+Optional request header: `X-Sandbox-Trace-Id: <id>` — a client-side trace
+correlation id (the Go client stamps its connect-flow tracer id on requests
+when CLI-side tracing is on; see `client/trace.go`). If the runner itself has
+`SANDBOX_TRACE` set and the id is well-formed (`[\w.-]{1,64}`), it logs
+`trace: <id> turn.link turn=<turnId>` to the pod log, bridging the CLI's
+connect spans and the runner's per-turn spans (`runner/src/trace.ts`).
+Otherwise the header is ignored. It never affects the response.
 Returns 200 with:
 ```json
 {

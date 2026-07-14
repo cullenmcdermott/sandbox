@@ -39,6 +39,24 @@ func TestTracerSilentWhenDisabled(t *testing.T) {
 	}
 }
 
+// traceID is what Connect propagates to the runner as X-Sandbox-Trace-Id: it
+// must be nil-safe ("" when tracing is off, so no header is sent) and must be
+// the same correlation id the flow's span lines carry when on.
+func TestTracerTraceID(t *testing.T) {
+	withTraceSink(t, false)
+	if got := newTracer().traceID(); got != "" {
+		t.Errorf(`disabled (nil) tracer traceID: got %q, want ""`, got)
+	}
+
+	buf := withTraceSink(t, true)
+	tr := newTracer()
+	tr.start("connect.total").end()
+	line := strings.TrimSpace(buf.String())
+	if id := tr.traceID(); id == "" || !strings.HasPrefix(line, "trace: "+id+" ") {
+		t.Errorf("traceID %q is not the correlation id of span line %q", tr.traceID(), line)
+	}
+}
+
 func TestTracerEmitsWhenEnabled(t *testing.T) {
 	buf := withTraceSink(t, true)
 

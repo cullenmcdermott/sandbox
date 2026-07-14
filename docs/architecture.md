@@ -248,6 +248,28 @@ The arm/disarm surface is `PUT/DELETE /sessions/:id/autopilot` (a lifecycle
 action distinct from submitting a turn), gated by the `capabilities.autopilot`
 bit in `GET /status`; both are HTTP bodies, hand-written outside the schema.
 
+## Observability (`SANDBOX_TRACE`)
+
+Dependency-free timing spans, off by default, enabled by setting
+`SANDBOX_TRACE` (the CLI's `--trace` flag sets it host-side; the pod env must
+set it runner-side). Each side emits one greppable line per span:
+
+- **CLI connect/create phases** (`client/trace.go`): every phase of
+  Connect/Create — status probe, pod-ready wait, port-forward, runner health,
+  project sync, plus the backgrounded flush/inputs/reaper — under one short
+  flow id (`trace: 3f9a1c2b connect.port_forward 412ms`), written to stderr.
+- **Runner turn lifecycle** (`runner/src/trace.ts`): first message, first
+  delta, settled + message count, keyed by turn id, written to the pod log.
+- **Runner boot phases** (`runner/src/index.ts`): event-log open, session-state
+  load, registry init, boot prep, socket listen, plus a total, keyed `boot`.
+- **The bridge:** the Go runner client stamps the connect flow id on requests
+  as `X-Sandbox-Trace-Id`; on `POST /turns` the runner logs
+  `trace: <flowId> turn.link turn=<turnId>` — so in merged CLI+pod logs one
+  grep for either id pivots to the other. See `docs/runner-api.md`.
+
+Not yet traced: pod-ready sub-phases (schedule vs image-pull vs ready — the
+big §5 unknown) and SSE first-event latency (TODO §10).
+
 ## Security model
 
 - **No cluster credentials in the pod:** `automountServiceAccountToken: false`.

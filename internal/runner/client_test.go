@@ -119,6 +119,41 @@ func TestStartTurn(t *testing.T) {
 	}
 }
 
+// StartTurn must carry the connect-flow correlation id as X-Sandbox-Trace-Id
+// when SetTraceID was called, and send no header at all by default — the
+// runner-side traceTurnLink treats an absent id as "old CLI / tracing off".
+func TestStartTurnTraceIDHeader(t *testing.T) {
+	var headers []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		v, present := r.Header["X-Sandbox-Trace-Id"]
+		if !present {
+			headers = append(headers, "<absent>")
+		} else {
+			headers = append(headers, v[0])
+		}
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"turnId":"turn-1"}`)
+	}))
+	defer srv.Close()
+
+	ref := session.Ref{ID: "test"}
+	in := session.TurnInput{Prompt: "hi"}
+
+	plain := New(srv.URL, "token")
+	if _, err := plain.StartTurn(context.Background(), ref, in); err != nil {
+		t.Fatalf("start turn (no trace id): %v", err)
+	}
+	traced := New(srv.URL, "token")
+	traced.SetTraceID("3f9a1c2b")
+	if _, err := traced.StartTurn(context.Background(), ref, in); err != nil {
+		t.Fatalf("start turn (trace id): %v", err)
+	}
+
+	if len(headers) != 2 || headers[0] != "<absent>" || headers[1] != "3f9a1c2b" {
+		t.Errorf("X-Sandbox-Trace-Id per request: got %v, want [<absent> 3f9a1c2b]", headers)
+	}
+}
+
 func TestExec(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/sessions/test/exec" || r.Method != "POST" {

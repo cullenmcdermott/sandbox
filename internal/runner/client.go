@@ -36,6 +36,7 @@ var sseMaxLineBytes = 16 * 1024 * 1024
 type Client struct {
 	baseURL string // e.g. "http://127.0.0.1:8787"
 	token   string // bearer token
+	traceID string // optional connect-flow correlation id (see SetTraceID)
 	http    *http.Client
 
 	// remoteProtocolVersion caches the last protocolVersion Health() observed
@@ -57,6 +58,16 @@ func New(baseURL, token string) *Client {
 		},
 	}
 }
+
+// SetTraceID attaches a connect-flow correlation id (client/trace.go tracer) to
+// every subsequent request as the X-Sandbox-Trace-Id header. The runner bridges
+// it to the assigned turn id on POST /turns (runner/src/trace.ts traceTurnLink)
+// so merged CLI+pod logs pivot between the CLI's connect spans and the runner's
+// turn spans by either id; other routes currently ignore it. Empty (the
+// default, and what a disabled tracer yields) sends no header. Set once right
+// after New, before the client is shared across goroutines — it is not
+// synchronized for later mutation.
+func (c *Client) SetTraceID(id string) { c.traceID = id }
 
 // healthResponse mirrors the runner's GET /healthz body (runner/src/server.ts
 // healthzBody). protocolVersion is absent on a pre-handshake runner image, in
@@ -573,6 +584,9 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte) (*htt
 	}
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	if c.traceID != "" {
+		req.Header.Set("X-Sandbox-Trace-Id", c.traceID)
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")

@@ -14,6 +14,7 @@ import { resolveWorkspaceDir } from './exec.js';
 import { startOpencodeSupervisor, type OpencodeSupervisor } from './opencode.js';
 import { warmupOpencodeSession } from './opencode-turn.js';
 import { startOpencodeObserver, type OpencodeObserver } from './opencode-observer.js';
+import { startBootTrace } from './trace.js';
 
 // Seconds before SIGKILL, reported in session.terminating so the TUI can show
 // an accurate countdown. Mirrors the pod's terminationGracePeriodSeconds.
@@ -73,11 +74,17 @@ function shutdown(signal: string): void {
 }
 
 function main(): void {
+  // §10 observability: per-phase boot timings (trace: boot boot.<phase> …) so a
+  // slow pod start is attributable. No-op unless SANDBOX_TRACE is set.
+  const boot = startBootTrace();
   const cfg = loadConfig();
   openEventLog();
+  boot.phase('event_log');
 
   const { state, bootEvents } = loadSessionState(cfg);
+  boot.phase('session_state');
   const reg = initRegistry(state);
+  boot.phase('registry');
 
   // Emit session.started on (re)boot so live SSE clients see the session come
   // up. On resume this is a fresh event after the persisted history; replay via
@@ -148,8 +155,17 @@ function main(): void {
     // its own reconnect loop, so it must not block boot on serve readiness.
     observer = startOpencodeObserver();
   }
+  // boot_prep covers everything between registry init and the listen call:
+  // orphaned-turn terminals, the session.started emit, agent/autopilot setup,
+  // and (opencode) supervisor/observer spawn initiation.
+  boot.phase('boot_prep');
 
-  startServer(agent, autopilot);
+  startServer(agent, autopilot, () => {
+    // Closes when the socket is accepting (the listen callback), so boot.listen
+    // covers the real bind, and boot.total is boot-start → ready-to-serve.
+    boot.phase('listen');
+    boot.done();
+  });
 }
 
 main();

@@ -79,6 +79,16 @@ func (s *span) end() {
 	fmt.Fprintf(s.tr.w, "trace: %s %s %s\n", s.tr.id, s.name, dur)
 }
 
+// traceID returns the flow's correlation id, or "" for a nil (disabled)
+// tracer, so callers can propagate it unconditionally — e.g. into
+// runner.Client.SetTraceID, which turns "" into "send no header".
+func (t *tracer) traceID() string {
+	if t == nil {
+		return ""
+	}
+	return t.id
+}
+
 // newTraceID mints a short correlation id for one connect/create flow.
 func newTraceID() string {
 	b := make([]byte, 4)
