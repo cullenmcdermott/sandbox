@@ -221,12 +221,13 @@ all landed (done log) — the items below are what remains.
   the truth and rebinding is impossible. Fix: context enum + per-context
   binding table; esc cascade = ordered action list, unit-testable.
   `transcript.go:1602`, `model.go:1745`.
-- [ ] **permissionPrompt component (MED).** Permission feature smeared across 4
-  places incl. pre-rendered strings held as model state with asymmetric
-  refresh (plan cards read stale cache, perm boxes re-render live) + a second
-  independent surface in permqueue.go. Component owns grace-gate/diff/plan
-  variant + Height()/Render(w)/HandleKey; perm queue reuses it. Natural vehicle
-  for the §2c numbered-options redesign. `transcript.go:135,1433,2817`.
+- [ ] **permissionPrompt component (MED) — base landed 2026-07-13.** The
+  numbered-options panel is now a component (`permprompt.go`: options,
+  question, pure key grammar, options render) and the §2c redesign shipped on
+  it. REMAINING: consolidate the smear — pre-rendered strings held as model
+  state with asymmetric refresh (plan cards read stale cache, perm boxes
+  re-render live), the plan-card variant, and permqueue.go's independent
+  surface reusing one component with Height()/Render(w)/HandleKey.
 - [~] **Clock injection sweep** — dashboard-package clocks all on `nowFunc`
   (grace gate, turn elapsed, toast lifecycle, motion loop, transitions), with
   clock-swap tests; Fable-approved 2026-07-06. DEFERRED: (a) `statusChangedAt`
@@ -250,14 +251,13 @@ changes go through `schema/events.json` + `just gen` (never hand-edit `*.gen.*`)
   Follow-up still open: per-agent full transcripts (narration renders as one
   live line; subagent thinking deliberately dropped — the event log retains
   everything). Live pod verify wanted at next natural Task fan-out.
-- [ ] **2. "Always allow" built but unreachable.** Runner fully implements
-  `scope:'session'` grants + edited input (`claude.ts:38,374-381,401-408`,
-  `grants.ts`, `server.ts:247`); TUI hardcodes `Scope:"once"`
-  (`transcript.go:2044`, `model.go:1414`) and offers only a/d. SDK `canUseTool`
-  suggestions (3rd arg) also dropped (`claude.ts:387` two-arg callback; no
-  PermissionPayload field). Mostly renderer work + one schema field. (Folds in
-  the earlier "Permission scope is always once" item; lands cleanly inside the
-  §2c numbered-options panel.)
+- [x] **2. "Always allow" reachable — done 2026-07-13** (done log): the §2c
+  numbered panel's option 2 sends `Scope:"session"` (tool-name grant,
+  `grants.ts`); scrollback names the grant's tool-level breadth; the perm
+  queue and plan card stay allow-once by design. STILL OPEN residuals (small):
+  `editedInput` (runner validates it; TUI never sends an edited input) and
+  SDK `canUseTool` suggestions (3rd arg still dropped — `claude.ts` two-arg
+  callback; no PermissionPayload field; would inform richer option rows).
 - [ ] **3. Thinking invisible until complete.** `reasoning.delta` streams fine;
   TUI buffers silently, flushes only on completed (`transcript.go:2445-2468`)
   — long thinks show a bare spinner where Claude Code streams live.
@@ -349,11 +349,11 @@ there. HIGH items are the at-a-glance tells; most are renderer-local.
   row-1 overflow residual); ctx gauge only ≥60% AND known limit (200k
   fallback removed both places); cost ≥$0.10; rate-limit row transient 8s
   after `rate_limit.updated` with fade.
-- [ ] **Permission prompt: numbered-option question panel (MED).** `[a]/[d]`
-  hotkey hints → CC's signature `Do you want to run this command?` + numbered
-  arrow-navigable options with ❯ selection (keep a/d as hidden accelerators).
-  Designed so "2. Yes, don't ask again" slots in when §2b gap 2 lands.
-  `transcript.go:1433`. Build on the §2a permissionPrompt component.
+- [x] **Permission prompt: numbered-option question panel — done 2026-07-13**
+  (done log): per-tool question + ❯-selected numbered options
+  (`permprompt.go`); a/d hidden accelerators; ↵ confirms, diff reveal moved
+  to ctrl+o; grace gate covers all resolving keys; goldens regenerated.
+  "2. Yes, allow <tool> this session" landed WITH §2b gap 2.
 - [ ] **De-bracket system notices (MED).** `[interrupted]`/`[reconnected]`/
   `[permission approved]` read as debug logs. → `⎿  Interrupted by user`
   (Coral, attached under the cut block), `⎿  Permission approved` under the

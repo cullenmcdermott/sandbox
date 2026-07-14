@@ -1573,3 +1573,31 @@ actionable wording pinned by test). Post-commit `just check` fully green
   transcripts — narration is one live line by design; subagent thinking is
   dropped presentation-side but retained in the event log. Live pod verify
   wanted at next natural Task fan-out.
+
+## 2026-07-13 — §2c numbered permission panel + §2b gap 2 session grants (3687bd3)
+
+- **The gap:** the runner has implemented `scope:'session'` tool-name grants
+  (grants.ts) + editedInput since they landed, but the TUI hardcoded
+  `Scope:"once"` and offered only [a]/[d] — "always allow" was built and
+  unreachable.
+- **permprompt.go** (the §2a component's base): per-tool CC-signature
+  question ("Do you want to run this command?" / "…make this edit?" /
+  fallback) + ❯-selected numbered options — 1. Yes / 2. Yes, allow <tool>
+  for the rest of this session / 3. No. `permPromptKey` = pure key grammar
+  (↑/↓ clamped nav ungated; digits direct-select+resolve; ↵ confirms; a/d
+  hidden accelerators = allow-once/deny; j/k left to transcript scroll),
+  table-tested.
+- **Session scope wired:** option 2 → `Scope:"session"`; the scrollback
+  line names the grant's REAL breadth ("approved · Bash allowed for this
+  session" — tool-level, never the exact argument, matching grants.ts
+  semantics). `resolvePermission(allow, scope)`; plan card + perm queue stay
+  allow-once by design.
+- **Key grammar change:** ↵ confirms the selection now, so the diff reveal
+  moved to ctrl+o (the tool-card expansion idiom), advertised only when
+  diffLines exist. Grace gate (quiet-window + cap) covers every resolving
+  key; pinned under a frozen clock.
+- Goldens: the two permission-box goldens regenerated deliberately; no other
+  golden moved. Height math safe (liveLayout measures the built box).
+- Residuals kept open in §2b item 2: editedInput still never sent; SDK
+  canUseTool suggestions (3rd arg) still dropped. §2a component item stays
+  open for the full 4-place consolidation (plan variant + permqueue reuse).
