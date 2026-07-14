@@ -242,15 +242,14 @@ doesn't render. These cap how Claude-Code-like ANY client can feel. Schema
 changes go through `schema/events.json` + `just gen` (never hand-edit `*.gen.*`).
 (Numbering preserved from the audit; gap 4 — compaction — landed, done log.)
 
-- [ ] **1. Subagent output flattens into the main transcript (correctness
-  bug).** `MessagePayload` has no `parentToolUseId`
-  (`schema/events.json:88-95`); `handleStreamEvent` receives it but only
-  attaches it to `tool_use`, never text/thinking deltas
-  (`runner/src/mapping.ts:110-114,249-253`) — a running Task's narration
-  interleaves into the single `assistantBuf` (`transcript.go:2301-2306`),
-  corrupting the main streaming reply. Fix: schema field + `just gen`; thread
-  in handleAssistantMessage/handleStreamEvent; route parented events into the
-  subagentCard (`subagent.go`) → also unlocks per-agent transcripts.
+- [x] **1. Subagent output flattening FIXED — done 2026-07-13** (done log):
+  `MessagePayload.parentToolUseId` (schema + gen, additive — no protocol
+  bump); the mapper stamps it on every message.*/reasoning.* emit; the
+  reducer routes parented events to the Task card (live bounded narration
+  line) and never the main buffers; `sandbox turn` stdout guarded too.
+  Follow-up still open: per-agent full transcripts (narration renders as one
+  live line; subagent thinking deliberately dropped — the event log retains
+  everything). Live pod verify wanted at next natural Task fan-out.
 - [ ] **2. "Always allow" built but unreachable.** Runner fully implements
   `scope:'session'` grants + edited input (`claude.ts:38,374-381,401-408`,
   `grants.ts`, `server.ts:247`); TUI hardcodes `Scope:"once"`
@@ -945,6 +944,40 @@ naming-break, and Shell items each stand alone.
   pull vs ready — the big §5 unknown); SSE first-event latency; the §1d
   observer-cap model remains absent from `docs/architecture.md` (doc drift,
   2026-07-06 harness audit).
+
+- [ ] **Visual-testing gaps (2026-07-13 review) — static goldens are strong,
+  motion/theme/size axes are not.** The golden harness
+  (`internal/tui/dashboard/golden_test.go:30`) deliberately pins
+  `SANDBOX_REDUCE_MOTION=1`, so every committed frame is the settled
+  end-state; the transition catalog (`internal/tui/dashboard/transitions.go:16`)
+  is only value-tested (`tui/anim/transition_test.go`,
+  `internal/tui/dashboard/permission_clock_test.go:119` — and the latter only
+  at past-window end states). Sub-items:
+  - [ ] *Mid-motion golden frames:* with motion forced ON and the injected
+    `nowFunc` stepped through fixed offsets (0, ½-window, past-end of
+    `rowEnterDur`/`statusFlashDur`/`permissionAppearDur`), golden the rendered
+    frame at each step — pins the row fade (`model_render.go:347`), status
+    flash (`model_render.go:342`), and permission-box appear
+    (`permission_diff.go:64`) as reviewable frame sequences. All inputs are
+    already injectable, so this is byte-deterministic; it also gives agents a
+    static way to "see" the animation (the golden files ARE the frames).
+  - [ ] *Theme axis:* goldens render only the default theme
+    (`tui/theme/theme.go:161` — themes[0] Midnight); Daylight is never
+    snapshotted anywhere. Parameterize at least one dashboard + one transcript
+    golden per registered theme.
+  - [ ] *Size axis:* every golden is 100×30 (`golden_test.go:53`,
+    `golden_multiturn_test.go:37`). `tui/kit` covers narrow degradation
+    per-component (`components_test.go` TestCardDegradesNarrow) but no
+    narrow-terminal golden exists for the composed dashboard/transcript frame.
+  - [ ] *Animation eyeball harness:* no repeatable way to watch dashboard
+    motion without a live cluster — `cmd/tuikit-demo` exercises only the
+    public `tui/` packages, and `just dev-tui` (justfile:363) needs the kind
+    cluster. Options: a fixture-replay dev mode for the dashboard (the
+    `testdata/transcript-multiturn.jsonl` stream already drives the real
+    handleEvent→render path in tests), and/or a VHS tape
+    (`nix run nixpkgs#vhs`) recording tuikit-demo → gif as a non-gating CI
+    artifact (vhs already noted as a nice-to-have in
+    `docs/archive/local-dev-turn-parity-plan.md:159`).
 
 ## Open caveats (carry-forward)
 

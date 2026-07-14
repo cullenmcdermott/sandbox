@@ -1538,3 +1538,38 @@ actionable wording pinned by test). Post-commit `just check` fully green
   manifest.lock regenerated post-`go get .`-hook removal (af2cd2e); TODO §3
   parenthetical updated (SDK turns now read settings; programmatic
   guard/audit hooks remain SDK-turn-only).
+
+## 2026-07-13 — §2b gap 1: subagent output flattening (131738c)
+
+- **The bug (the parity program's one labeled correctness bug):** the SDK's
+  `parent_tool_use_id` reached the mapper but was stamped only on `tool.*`
+  events — a running Task's message.started RESET the main `assistantBuf`
+  mid-reply and its text deltas interleaved into the main streaming reply;
+  parented reasoning.completed could flush/commit the main think block.
+- **Schema:** `MessagePayload.parentToolUseId` (optional) + `just gen`; the
+  doc now also records that reasoning.* reuses MessagePayload. Additive
+  optional field ⇒ wire-compatible both directions, protocol stays v2 (an
+  old counterpart keeps today's flattening, no NEW misbehavior).
+- **Mapper (`mapping.ts`):** the id rides every message.*/reasoning.* emit —
+  full-message text/thinking blocks, stream content_block_start,
+  text/thinking deltas, and the parented user string path (Task prompt
+  injection). Bare-key style (JSON.stringify drops undefined) matching the
+  existing tool.* emits.
+- **Reducer:** parented message.* → `applySubagentMessage` (subagent.go):
+  started resets the card's narration buffer, deltas accumulate (8KB cap,
+  mid-rune-safe tail trim, Bump-only per delta mirroring the E1 tool.delta
+  path), completed pins the final text; user-role echoes + unknown parent
+  ids dropped. Parented reasoning.* dropped outright (never touches the
+  main tail). Card renders one live italic narration line under the child
+  tree, width-budgeted with backstop truncate; collapsed cards unchanged.
+- **Headless:** `sandbox turn` no longer prints a parented
+  message.completed into stdout as the main reply (`internal/cli/turn.go`).
+- **Docs:** runner-api.md Event Types gains the subagent-attribution
+  contract paragraph.
+- Pins: 3 mapper tests (parented full message / stream deltas / user echo;
+  main-thread stays bare), 5 reducer tests (corruption oracle,
+  reasoning-tail isolation, live narration render + width, user-echo drop,
+  unknown-parent drop). Follow-up (still open under §2b): per-agent FULL
+  transcripts — narration is one live line by design; subagent thinking is
+  dropped presentation-side but retained in the event log. Live pod verify
+  wanted at next natural Task fan-out.
