@@ -277,9 +277,13 @@ changes go through `schema/events.json` + `just gen` (never hand-edit `*.gen.*`)
   image blocks dropped (`mapping.ts:153-156,183-188`). Kitty plumbing exists
   TUI-side (gauge). Gap starts at schema (attachment payload or fetch-by-ref
   given the SQLite log).
-- [ ] **8. Project slash commands / skills / CLAUDE.md absent in-pod.**
-  `settingSources: []` (`claude.ts:231`) — user-defined commands don't exist
-  for SDK turns. Config-level fix; interacts with config-input sync.
+- [x] **8. Project slash commands / skills / CLAUDE.md in-pod — done
+  2026-07-13** (done log): SDK turns load the user/project/local settings
+  tiers by default (was pinned `[]`); `SANDBOX_SETTING_SOURCES` overrides
+  (`none` = old isolation); title summarizer stays isolated; A1 not
+  reopened (settings-defined hooks inherit the stripped agent env —
+  SECURITY.md updated). Live in-pod verify (a synced `.claude/` command
+  actually firing) still wanted.
 - [ ] **9. Single-slot client-local prompt queue.** `queuedPrompt` is one
   string (`transcript.go:332-334`) — second message overwrites; invisible
   cross-client. Claude Code has a multi-message editable queue.
@@ -482,8 +486,9 @@ done log.)
   external-pane precedent in `external_pane.go`. Known costs: keystroke RTT,
   CC renderer misbehaves in tmux (claude-code#9935/#4851), permission modal
   replaced by claude's own, guards/audit only via pod-side settings hooks
-  (interactive claude reads settings, unlike `settingSources: []` SDK turns —
-  `claude.ts:231`), no metrics-observer API, resume forks the session id,
+  (the SDK's programmatic guard/audit hooks attach only to SDK turns —
+  `claude.ts:429`; since the §2b gap-8 fix both paths load on-disk settings),
+  no metrics-observer API, resume forks the session id,
   needs pod tmux for TTY-death survival.
 - [ ] **Watch upstream for a real remote transport** (#10042, #72448, #24594).
   If one ships, it slots into the codex Option-B pattern
@@ -932,12 +937,14 @@ naming-break, and Shell items each stand alone.
   `SANDBOX_TRACE=1` / `sandbox --trace`: connect/create phases incl. the
   backgrounded flush/inputs/reaper under one correlation id (`client/trace.go`);
   runner turn lifecycle (first message / first delta / settled + msg count,
-  `runner/src/trace.ts`). Fable-verified 2026-07-06. NEXT (not done):
-  correlate CLI connect id ↔ runner turn id across the HTTP seam; runner
-  startup spans (index.ts); pod-ready sub-phases (schedule vs pull vs ready
-  — the big §5 unknown); SSE first-event latency. Also: `SANDBOX_TRACE` and
-  the §1d observer-cap model are absent from `docs/architecture.md` — update
-  the durable ref (doc drift, found in the 2026-07-06 harness audit).
+  `runner/src/trace.ts`). Fable-verified 2026-07-06. 2026-07-13 (done log):
+  connect id ↔ turn id bridged across the HTTP seam (`X-Sandbox-Trace-Id` →
+  `turn.link` in the pod log); runner boot spans (`index.ts`, socket-accept
+  anchored); `SANDBOX_TRACE` now documented in `docs/architecture.md`
+  (Observability section). STILL OPEN: pod-ready sub-phases (schedule vs
+  pull vs ready — the big §5 unknown); SSE first-event latency; the §1d
+  observer-cap model remains absent from `docs/architecture.md` (doc drift,
+  2026-07-06 harness audit).
 
 ## Open caveats (carry-forward)
 

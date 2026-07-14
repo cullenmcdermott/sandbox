@@ -1501,3 +1501,40 @@ actionable wording pinned by test). Post-commit `just check` fully green
   carries the backend agent-session-id (comment corrected, type left).
 - Unverified: live pod round-trip of the renamed wire fields (needs a
   cluster); CI-only linters.
+
+## 2026-07-13 — settingSources (§2b gap 8) + trace-seam wiring (§10) (627f1ee, 7efeeac)
+
+- **§2b gap 8 — on-disk settings tiers load for SDK turns.** `buildOptions`
+  was pinned to `settingSources: []` (SDK isolation mode), hiding the synced
+  project's `.claude/` (slash commands, skills, subagents) + CLAUDE.md and
+  the PVC-staged user config (CLAUDE_CONFIG_DIR) from every turn. Default
+  now `['user','project','local']` (the SDK/CLI default);
+  `SANDBOX_SETTING_SOURCES` overrides (comma list; `''`/`none` = isolation).
+  `resolveSettingSources` pure + exported — narrows against the
+  SettingSource union (unknown tokens dropped, canonical order, deduped) —
+  pinned by `runner/test/setting-sources.test.ts` incl. buildOptions
+  pass-through. Title summarizer keeps `[]` deliberately (one-shot no-tools
+  fork). A1 NOT reopened: settings-defined hooks run as children of the
+  spawned claude binary and inherit the buildAgentEnv strip — no capability
+  beyond bypass-mode Bash; SECURITY.md gained the posture note (+
+  makePreToolUseBashHook pointer re-anchored). Live in-pod verify (a synced
+  command actually firing in a turn) still wanted.
+- **§10 — connect↔turn id bridge.** `runner.Client.SetTraceID` (set from
+  `Session.Connect`'s tracer, `""` → no header) stamps `X-Sandbox-Trace-Id`
+  on runner requests; POST /turns logs `trace: <flowId> turn.link
+  turn=<turnId>` so one grep in merged CLI+pod logs pivots between connect
+  spans and turn spans. Header treated as untrusted log input:
+  `traceIDFromHeader` accepts only `[\w.-]{1,64}`, else the link no-ops.
+  Pins: StartTurn header presence/absence, link/validator envelopes,
+  tracer.traceID nil-safety. runner-api.md documents the header.
+- **§10 — runner boot spans.** `startBootTrace` through `index.ts` main():
+  event_log / session_state / registry / boot_prep / listen + total, keyed
+  `boot`; `startServer` gained an optional `onListening` callback so the
+  listen phase closes at socket-accept (boot.total = start → ready-to-serve).
+  Fake-clock envelope tests.
+- **Durable-doc catch-up:** `docs/architecture.md` gained the Observability
+  section (SANDBOX_TRACE spans + the bridge — closes that half of the §10
+  doc-drift note; §1d observer-cap half still open). Also: flox
+  manifest.lock regenerated post-`go get .`-hook removal (af2cd2e); TODO §3
+  parenthetical updated (SDK turns now read settings; programmatic
+  guard/audit hooks remain SDK-turn-only).
