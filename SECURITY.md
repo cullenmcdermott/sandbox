@@ -102,10 +102,21 @@ Each verified against code at the cited location:
   replay to `attach` clients. The same `redactSecrets` gates `audit.jsonl`
   (`runner/src/audit.ts:34`).
 - **PreToolUse Bash blocking.** A runner `PreToolUse` hook
-  (`runner/src/claude.ts:282`, `makePreToolUseBashHook`) runs a shared blocklist
+  (`runner/src/claude.ts:429`, `makePreToolUseBashHook`) runs a shared blocklist
   (`runner/src/guards.ts` `bashCommandBlocked`) that denies Bash commands
   reaching for host/cluster/credential surfaces. **Defense-in-depth, not a
   boundary** — a regex blocklist is bypassable; treat it as noise reduction.
+- **On-disk settings tiers load for SDK turns** (§2b gap 8, 2026-07-13).
+  `settingSources` defaults to `user,project,local`
+  (`runner/src/claude.ts:349`, `resolveSettingSources`), so the synced
+  project's `.claude/` (commands, skills, hooks, CLAUDE.md) and the PVC-staged
+  user config participate in turns. A hook or command a settings file defines
+  runs as a child of the spawned `claude` binary and inherits the stripped
+  agent env (`buildAgentEnv`) — it can no more read `RUNNER_TOKEN` than the
+  Bash tool can, and adds no capability beyond the arbitrary Bash the default
+  bypassPermissions mode already allows. The programmatic guard/audit hooks
+  above apply regardless of settings files. `SANDBOX_SETTING_SOURCES=none`
+  restores full isolation.
 - **Append-only audit log.** A `PostToolUse` hook writes `audit.jsonl`
   (`runner/src/audit.ts`), redacted.
 - **Runner-infra env strip for spawned children.** `sanitizedExecEnv`

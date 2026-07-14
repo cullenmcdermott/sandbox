@@ -15,7 +15,7 @@
 // Events are persisted (appendEvent) BEFORE being streamed, so SSE replay is
 // consistent with the live tail.
 
-import { query, type EffortLevel, type Options, type PermissionMode, type Query, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import { query, type EffortLevel, type Options, type PermissionMode, type Query, type SDKMessage, type SettingSource } from '@anthropic-ai/claude-agent-sdk';
 import type { BetaContentBlock, BetaTextBlock } from '@anthropic-ai/sdk/resources/beta/messages/messages';
 import type { PermissionResult, HookCallback, HookInput, SyncHookJSONOutput } from '@anthropic-ai/claude-agent-sdk';
 import { mkdirSync } from 'node:fs';
@@ -166,6 +166,58 @@ export function resolveEffort(
   return v && VALID_EFFORTS.has(v) ? (v as EffortLevel) : undefined;
 }
 
+// The SDK SettingSource union (sdk.d.ts `SettingSource = 'user'|'project'|'local'`)
+// selects which on-disk settings *tiers* the spawned `claude` binary loads. Each
+// tier gates the discovery of that scope's settings.json AND its filesystem
+// extras — slash commands, skills, subagents, hooks — plus (for 'project')
+// CLAUDE.md. What each reads, given this pod's layout:
+//   'project' — <cwd>/.claude/{settings.json,commands,skills,agents} + CLAUDE.md,
+//               where cwd is the Mutagen-synced project workspace (§2b: the repo,
+//               incl. its committed .claude/, is two-way-synced into the pod).
+//   'local'   — <cwd>/.claude/settings.local.json (personal per-project overrides;
+//               usually .gitignored so absent in-pod, but honored if present).
+//   'user'    — $CLAUDE_CONFIG_DIR/{settings.json,commands,skills,agents,hooks}.
+//               CLAUDE_CONFIG_DIR is /session/state/claude (the PVC-backed config
+//               dir the SDK treats as ~/.claude); the config-input sync stages the
+//               host's ~/.claude/{skills,agents,commands,hooks} there one-way, so
+//               'user' is what actually surfaces those already-synced inputs to a
+//               turn. (settings.json itself is NOT synced, so 'user' only layers a
+//               settings file if one already exists on the PVC.)
+const VALID_SETTING_SOURCES: ReadonlySet<string> = new Set(['user', 'project', 'local']);
+
+// Default: load all three tiers (this is the SDK/CLI default when settingSources
+// is omitted). §2b gap 8: the runner previously pinned `[]` (SDK isolation mode),
+// which made project slash commands, skills, subagents and CLAUDE.md — and the
+// user-level config inputs the config-input sync stages under CLAUDE_CONFIG_DIR —
+// invisible to every SDK turn even though the files were on disk in the pod.
+const DEFAULT_SETTING_SOURCES: readonly SettingSource[] = ['user', 'project', 'local'];
+
+/**
+ * Resolve which on-disk settings tiers the SDK loads for a turn, from the
+ * SANDBOX_SETTING_SOURCES env knob (comma-separated: `user,project,local`):
+ *   - unset             → DEFAULT_SETTING_SOURCES (all three; SDK/CLI default).
+ *   - '' or 'none'      → [] (SDK isolation mode: no filesystem settings at all).
+ *   - an explicit list  → the listed VALID sources, emitted in canonical
+ *                         user→project→local order and de-duplicated; unknown
+ *                         tokens are dropped (a garbage value degrades to the
+ *                         valid subset rather than reaching the typed Options).
+ * Narrowing here — filtering against the known union rather than a raw cast —
+ * is what keeps an invalid token out of Options.settingSources (mirrors
+ * resolveEffort) and lets `tsc --noEmit` accept the assignment. Pure + exported
+ * so the choice is unit-testable without invoking the SDK.
+ */
+export function resolveSettingSources(raw: string | undefined): SettingSource[] {
+  if (raw === undefined) return [...DEFAULT_SETTING_SOURCES];
+  const tokens = raw
+    .split(',')
+    .map((t) => t.trim().toLowerCase())
+    .filter((t) => t.length > 0);
+  // Explicit isolation: an empty value, or the sentinel 'none'.
+  if (tokens.length === 0 || (tokens.length === 1 && tokens[0] === 'none')) return [];
+  // Canonical order + dedup: filter the known union by membership in the request.
+  return [...DEFAULT_SETTING_SOURCES].filter((s) => tokens.includes(s) && VALID_SETTING_SOURCES.has(s));
+}
+
 /**
  * Resolve the Claude SDK session id to resume for a turn (Workstream B). A
  * client-supplied resume id wins; otherwise default to the persisted session
@@ -281,7 +333,20 @@ export function buildOptions(
       // bypass also works for local/non-k8s dev where the pod env is absent.
       IS_SANDBOX: process.env.IS_SANDBOX ?? '1',
     }),
-    settingSources: [],
+    // §2b gap 8: load on-disk settings tiers (project/user/local) so the synced
+    // project's slash commands, skills, subagents and CLAUDE.md — plus the
+    // user-level config inputs staged under CLAUDE_CONFIG_DIR — are visible to the
+    // turn (was pinned `[]`, SDK isolation mode, which hid all of them). A1 is not
+    // reopened: any hook/command a settings file defines runs as a child of the
+    // spawned `claude` binary and therefore inherits options.env below, which
+    // buildAgentEnv already stripped of RUNNER_TOKEN and the other runner-infra
+    // secrets — the strip is upstream of every child, not per-call — so a
+    // settings-defined hook can no more read the bearer token than the Bash tool
+    // can, and grants no capability beyond the arbitrary Bash the yolo default
+    // already allows. The programmatic PreToolUse(Bash) guard + disallowedTools
+    // below still apply regardless of any settings file. Configurable via
+    // SANDBOX_SETTING_SOURCES (see resolveSettingSources).
+    settingSources: resolveSettingSources(process.env.SANDBOX_SETTING_SOURCES),
     abortController: abort,
     includePartialMessages: true,
     hooks: {
@@ -901,6 +966,11 @@ function liveTitleDeps(cfg: RunnerConfig, sessionId: string, turnId: string): Ti
           CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
           IS_SANDBOX: process.env.IS_SANDBOX ?? '1',
         }),
+        // Deliberately isolation mode (unlike buildOptions): the title summarizer
+        // is a throwaway forked query over a fixed TITLE_PROMPT with allowedTools:
+        // []. Loading a project's CLAUDE.md / skills / commands here would only add
+        // token cost and noise to a one-shot summary that neither reads them nor
+        // runs tools, so keep the settings tiers off for this internal call.
         settingSources: [],
         // Resume the just-completed conversation for context, but FORK it: the
         // TITLE_PROMPT Q&A is written to a throwaway forked session, never to the
