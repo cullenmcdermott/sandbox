@@ -56,7 +56,7 @@ func permQuestion(tool string) string {
 // accelerators (allow-once / deny). Navigation: ↑/↓. The caller applies the
 // grace gate to resolutions and owns the diff toggle (needs model state).
 func permPromptKey(key string, sel, n int) (newSel, resolve int, handled bool) {
-	newSel, resolve = sel, -1
+	newSel = sel
 	switch key {
 	case "up":
 		if newSel > 0 {
