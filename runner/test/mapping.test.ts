@@ -100,7 +100,11 @@ test('assistant text block → message.started + message.completed', () => {
     events.map((e) => e.type),
     ['message.started', 'message.completed', 'usage.updated'],
   );
-  assert.deepEqual(events[1].payload, { role: 'assistant', content: 'hello world' });
+  assert.deepEqual(events[1].payload, {
+    role: 'assistant',
+    content: 'hello world',
+    parentToolUseId: undefined, // main thread: the key is present but undefined (dropped by JSON.stringify)
+  });
 });
 
 // ORACLE: a Task tool_use carries subagent_type → agentName on tool.started.
@@ -433,7 +437,77 @@ test('stream_event content_block_delta(text) → message.delta', () => {
   );
   assert.equal(events.length, 1);
   assert.equal(events[0].type, 'message.delta');
-  assert.deepEqual(events[0].payload, { role: 'assistant', content: 'partial', delta: true });
+  assert.deepEqual(events[0].payload, {
+    role: 'assistant',
+    content: 'partial',
+    delta: true,
+    parentToolUseId: undefined, // main thread: undefined key, dropped on the wire
+  });
+});
+
+// ORACLE (§2b gap 1): a subagent's stream carries its Task's parent_tool_use_id
+// on EVERY message.* / reasoning.* emit — not just tool.* — so clients can route
+// the narration to the Task card instead of interleaving it into (and
+// corrupting) the main streaming reply.
+test('parented assistant message → message.* / reasoning.* carry parentToolUseId', () => {
+  const { events, emit } = collector();
+  mapMessage(
+    asMsg({
+      type: 'assistant',
+      parent_tool_use_id: 'task_9',
+      message: {
+        content: [
+          { type: 'thinking', thinking: 'sub thinking' },
+          { type: 'text', text: 'sub reply' },
+        ],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    }),
+    emit,
+  );
+  const payload = (t: string) => events.find((e) => e.type === t)!.payload;
+  for (const t of ['reasoning.started', 'reasoning.completed', 'message.started', 'message.completed']) {
+    assert.equal(payload(t).parentToolUseId, 'task_9', `${t} must carry the Task id`);
+  }
+  assert.equal(payload('message.completed').content, 'sub reply');
+});
+
+test('parented stream text/thinking deltas carry parentToolUseId; main-thread ones do not', () => {
+  const { events, emit } = collector();
+  const delta = (parent: string | undefined, d: Record<string, unknown>) =>
+    mapMessage(
+      asMsg({
+        type: 'stream_event',
+        parent_tool_use_id: parent,
+        event: { type: 'content_block_delta', index: 0, delta: d },
+      }),
+      emit,
+    );
+  delta('task_9', { type: 'text_delta', text: 'sub' });
+  delta('task_9', { type: 'thinking_delta', thinking: 'hmm' });
+  delta(undefined, { type: 'text_delta', text: 'main' });
+  assert.deepEqual(
+    events.map((e) => [e.type, e.payload.parentToolUseId]),
+    [
+      ['message.delta', 'task_9'],
+      ['reasoning.delta', 'task_9'],
+      ['message.delta', undefined],
+    ],
+  );
+});
+
+test('parented user string message → role:user message.* carry parentToolUseId', () => {
+  const { events, emit } = collector();
+  mapMessage(
+    asMsg({ type: 'user', parent_tool_use_id: 'task_9', message: { content: 'do the subtask' } }),
+    emit,
+  );
+  assert.deepEqual(
+    events.map((e) => e.type),
+    ['message.started', 'message.completed'],
+  );
+  assert.equal(events[1].payload.role, 'user');
+  assert.equal(events[1].payload.parentToolUseId, 'task_9');
 });
 
 // ORACLE (D6): input_json_delta events are attributed to the tool_use block

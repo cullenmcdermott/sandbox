@@ -200,14 +200,22 @@ function handleAssistantMessage(
   for (const block of msg.message.content as BetaContentBlock[]) {
     switch (block.type) {
       case 'text': {
-        emit('message.started', { role: 'assistant', content: '' });
-        emit('message.completed', { role: 'assistant', content: (block as BetaTextBlock).text });
+        // §2b gap 1: parentToolUseId rides every message.* / reasoning.* emit
+        // (not just tool.*) so a subagent's narration is routable to its Task
+        // card instead of interleaving into the main streaming reply.
+        // JSON.stringify drops the key when undefined (main thread).
+        emit('message.started', { role: 'assistant', content: '', parentToolUseId });
+        emit('message.completed', {
+          role: 'assistant',
+          content: (block as BetaTextBlock).text,
+          parentToolUseId,
+        });
         break;
       }
       case 'thinking': {
         const tb = block as BetaThinkingBlock;
-        emit('reasoning.started', {});
-        emit('reasoning.completed', { content: tb.thinking });
+        emit('reasoning.started', { parentToolUseId });
+        emit('reasoning.completed', { content: tb.thinking, parentToolUseId });
         break;
       }
       case 'tool_use': {
@@ -253,8 +261,11 @@ function handleUserMessage(
   // { type: 'tool_result', tool_use_id, content, is_error } blocks.
   if (!Array.isArray(content)) {
     const text = typeof content === 'string' ? content : '';
-    emit('message.started', { role: 'user', content: text });
-    emit('message.completed', { role: 'user', content: text });
+    // §2b gap 1: a parented user message is subagent-internal (e.g. the Task
+    // prompt injection) — stamp the parent id so clients keep it off the main
+    // transcript's user blocks.
+    emit('message.started', { role: 'user', content: text, parentToolUseId });
+    emit('message.completed', { role: 'user', content: text, parentToolUseId });
     return;
   }
   for (const block of content as Array<{
@@ -322,10 +333,11 @@ function handleStreamEvent(
       }
       switch (block.type) {
         case 'text':
-          emit('message.started', { role: 'assistant', content: '' });
+          // §2b gap 1: parented starts/deltas are routable to the Task card.
+          emit('message.started', { role: 'assistant', content: '', parentToolUseId });
           break;
         case 'thinking':
-          emit('reasoning.started', {});
+          emit('reasoning.started', { parentToolUseId });
           break;
         case 'tool_use':
           // NOTE: this streaming tool.started is intentionally lighter than the
@@ -350,10 +362,12 @@ function handleStreamEvent(
       const delta = e.delta;
       switch (delta.type) {
         case 'text_delta':
-          emit('message.delta', { role: 'assistant', content: delta.text, delta: true });
+          // §2b gap 1: a subagent's narration deltas carry their Task id so
+          // the client never streams them into the main reply buffer.
+          emit('message.delta', { role: 'assistant', content: delta.text, delta: true, parentToolUseId });
           break;
         case 'thinking_delta':
-          emit('reasoning.delta', { content: delta.thinking, delta: true });
+          emit('reasoning.delta', { content: delta.thinking, delta: true, parentToolUseId });
           break;
         case 'input_json_delta': {
           // D6: attribute the streamed input to its tool_use block so the TUI

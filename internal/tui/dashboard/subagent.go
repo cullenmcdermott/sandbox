@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"charm.land/lipgloss/v2"
 
@@ -28,6 +29,12 @@ type subagentCard struct {
 	children  []*toolCard
 	collapsed bool
 	status    toolStatus
+	// narrationBuf accumulates the subagent's own streamed assistant text
+	// (parented message.delta, §2b gap 1); narration pins the last completed
+	// message. Rendered as one live line under the child tree — never in the
+	// main transcript.
+	narrationBuf strings.Builder
+	narration    string
 	// card is the list card that renders this subagent (the Task header + its child
 	// tree). Mutating the subagent (a new child, a status change, collapse) bumps
 	// card's version so the list re-renders.
@@ -76,6 +83,84 @@ func (m *TranscriptModel) startSubagentChild(p session.ToolPayload) {
 	}
 	sub.card.Bump()
 	m.syncItems()
+}
+
+// narrationCap bounds the live narration buffer accumulated from a subagent's
+// message.delta stream. Only the tail is ever rendered (one line), so past the
+// cap the buffer is trimmed to its second half — amortized O(1) per delta with
+// the 2× hysteresis.
+const narrationCap = 8 * 1024
+
+// applySubagentMessage routes a parented message.* event onto its Task card's
+// narration instead of the main streaming transcript (§2b gap 1): started
+// resets the live buffer, delta appends (bounded by narrationCap), completed
+// pins the authoritative full text. User-role echoes (the Task prompt
+// injection) and unknown parent ids are dropped — dropped is still correct,
+// because the caller has already kept the event away from the main buffers.
+func (m *TranscriptModel) applySubagentMessage(t session.EventType, p session.MessagePayload) {
+	sub := m.subagents[p.ParentToolUseID]
+	if sub == nil || p.Role == "user" {
+		return
+	}
+	switch t {
+	case session.EventMessageStarted:
+		sub.narrationBuf.Reset()
+		sub.card.Bump()
+		m.syncItems()
+	case session.EventMessageDelta:
+		sub.narrationBuf.WriteString(p.Content)
+		if sub.narrationBuf.Len() > narrationCap {
+			tail := sub.narrationBuf.String()
+			cut := len(tail) - narrationCap/2
+			// Never start the kept tail mid-rune: a UTF-8 continuation byte at the
+			// cut would render as garbage if the trimmed region reaches the line
+			// that narrationLine displays.
+			for cut < len(tail) && !utf8.RuneStart(tail[cut]) {
+				cut++
+			}
+			sub.narrationBuf.Reset()
+			sub.narrationBuf.WriteString(tail[cut:])
+		}
+		// Mirror tool.delta (E1): bump just this card — the list cache is keyed
+		// on (item, version) — rather than rebuilding the item set per delta.
+		sub.card.Bump()
+	case session.EventMessageCompleted:
+		text := strings.TrimSpace(p.Content)
+		if text == "" {
+			text = strings.TrimSpace(sub.narrationBuf.String())
+		}
+		if text != "" {
+			sub.narration = text
+		}
+		sub.narrationBuf.Reset()
+		sub.card.Bump()
+		m.syncItems()
+	}
+}
+
+// narrationLine returns the subagent's current one-line narration: the last
+// non-empty line of the in-flight delta buffer while streaming, else the last
+// completed message. Empty when the agent has produced no text yet.
+func (sub *subagentCard) narrationLine() string {
+	if s := lastNonEmptyLine(sub.narrationBuf.String()); s != "" {
+		return s
+	}
+	return lastNonEmptyLine(sub.narration)
+}
+
+// lastNonEmptyLine returns the trailing non-blank line of s, trimmed.
+func lastNonEmptyLine(s string) string {
+	for len(s) > 0 {
+		i := strings.LastIndexByte(s, '\n')
+		if line := strings.TrimSpace(s[i+1:]); line != "" {
+			return line
+		}
+		if i < 0 {
+			return ""
+		}
+		s = s[:i]
+	}
+	return ""
 }
 
 // finishNested resolves a Task completion or a subagent child completion. It
@@ -186,12 +271,23 @@ func (m *TranscriptModel) renderSubagentCard(sub *subagentCard, width int) strin
 		return header
 	}
 	lines := []string{header}
+	narr := sub.narrationLine()
 	for i, c := range sub.children {
 		branch := "├"
-		if i == len(sub.children)-1 {
+		if i == len(sub.children)-1 && narr == "" {
 			branch = "└"
 		}
 		lines = append(lines, m.renderChildTool(branch, c, width))
+	}
+	if narr != "" {
+		// The subagent's latest utterance (§2b gap 1 routing): live while its
+		// message.delta stream runs, the final reply line once completed.
+		line := lipgloss.NewStyle().Foreground(theme.TextDim).Render("   └ ") +
+			lipgloss.NewStyle().Foreground(theme.TextMuted).Italic(true).Render(truncate(narr, max(1, width-6)))
+		if lipgloss.Width(line) > width {
+			line = truncate(line, width)
+		}
+		lines = append(lines, line)
 	}
 	return strings.Join(lines, "\n")
 }

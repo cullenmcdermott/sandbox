@@ -73,11 +73,17 @@ type TurnInterruptedPayload struct {
 	Reason string `json:"reason"`
 }
 
-// MessagePayload is the payload for message.* events.
+// MessagePayload is the payload for message.* events (reasoning.* events reuse
+// this shape, carrying Content only). ParentToolUseID marks a subagent's
+// stream: when set, the chunk belongs to the Task tool_use id named there, and
+// consumers must route it to that subagent's presentation — never into the
+// main streaming transcript, where it would interleave with (and corrupt) the
+// main reply (§2b gap 1).
 type MessagePayload struct {
-	Role    string `json:"role"`            // "user" | "assistant"
-	Content string `json:"content"`         // text content or delta
-	Delta   bool   `json:"delta,omitempty"` // true for message.delta
+	Role            string `json:"role"`                      // "user" | "assistant"
+	Content         string `json:"content"`                   // text content or delta
+	Delta           bool   `json:"delta,omitempty"`           // true for message.delta
+	ParentToolUseID string `json:"parentToolUseId,omitempty"` // Task tool_use id that spawned the emitting subagent (empty on the main thread)
 }
 
 // ToolPayload is the payload for tool.* events.

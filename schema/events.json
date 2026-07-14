@@ -117,11 +117,12 @@
       ]
     },
     "MessagePayload": {
-      "doc": "payload for message.* events.",
+      "doc": "payload for message.* events (reasoning.* events reuse this shape, carrying content only). parentToolUseId marks a subagent's stream: when set, the chunk belongs to the Task tool_use id named there, and clients must route it to that subagent's presentation — never into the main streaming transcript, where it would interleave with (and corrupt) the main reply (§2b gap 1).",
       "fields": [
         {"json": "role", "type": "string", "optional": false, "doc": "user | assistant"},
         {"json": "content", "type": "string", "optional": false, "doc": "text content or delta"},
-        {"json": "delta", "type": "bool", "optional": true, "doc": "true for message.delta events"}
+        {"json": "delta", "type": "bool", "optional": true, "doc": "true for message.delta events"},
+        {"json": "parentToolUseId", "type": "string", "optional": true, "doc": "Task tool_use id that spawned the emitting subagent (empty on the main thread)"}
       ]
     },
     "ToolPayload": {

@@ -156,7 +156,7 @@ export interface TurnInterruptedPayload {
   reason: string;
 }
 
-/** payload for message.* events. */
+/** payload for message.* events (reasoning.* events reuse this shape, carrying content only). parentToolUseId marks a subagent's stream: when set, the chunk belongs to the Task tool_use id named there, and clients must route it to that subagent's presentation — never into the main streaming transcript, where it would interleave with (and corrupt) the main reply (§2b gap 1). */
 export interface MessagePayload {
   /** user | assistant */
   role: string;
@@ -164,6 +164,8 @@ export interface MessagePayload {
   content: string;
   /** true for message.delta events */
   delta?: boolean;
+  /** Task tool_use id that spawned the emitting subagent (empty on the main thread) */
+  parentToolUseId?: string;
 }
 
 /** payload for tool.* events. */

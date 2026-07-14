@@ -98,7 +98,9 @@ func newTurnCmd() *cobra.Command {
 						if err := json.Unmarshal(ev.Payload, &msg); err != nil {
 							return fmt.Errorf("decode message.completed: %w", err)
 						}
-						if msg.Role == "assistant" {
+						// A parented message is a subagent's own stream (§2b gap 1) —
+						// printing it would interleave Task narration into the reply.
+						if msg.Role == "assistant" && msg.ParentToolUseID == "" {
 							fmt.Fprintln(out, msg.Content)
 						}
 					case session.EventTurnCompleted:

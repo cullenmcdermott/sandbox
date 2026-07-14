@@ -422,6 +422,18 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		m.appendBlock(blockError, "✗ "+msg)
 
 	case session.EventMessageStarted:
+		// §2b gap 1: a parented message belongs to a running Task's own stream.
+		// Route it to that subagent's card and NEVER touch the main streaming
+		// state — before this guard, a subagent's narration interleaved into
+		// assistantBuf and corrupted the main reply.
+		{
+			var p session.MessagePayload
+			_ = json.Unmarshal(ev.Payload, &p)
+			if p.ParentToolUseID != "" {
+				m.applySubagentMessage(ev.Type, p)
+				break
+			}
+		}
 		// A new message means any partial we committed on an earlier drop now
 		// stands on its own — it won't be replaced by this message's completed
 		// (RV9), so stop tracking it.
@@ -436,6 +448,10 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 	case session.EventMessageDelta:
 		var p session.MessagePayload
 		_ = json.Unmarshal(ev.Payload, &p)
+		if p.ParentToolUseID != "" { // §2b gap 1: subagent narration, not the main reply
+			m.applySubagentMessage(ev.Type, p)
+			break
+		}
 		m.streaming = true
 		m.assistantBuf.WriteString(p.Content)
 		m.streamDelta()
@@ -443,6 +459,10 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 	case session.EventMessageCompleted:
 		var p session.MessagePayload
 		_ = json.Unmarshal(ev.Payload, &p)
+		if p.ParentToolUseID != "" { // §2b gap 1: pin the subagent's final text on its card
+			m.applySubagentMessage(ev.Type, p)
+			break
+		}
 		text := p.Content
 		if text == "" {
 			text = m.assistantBuf.String()
@@ -597,6 +617,16 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		}
 
 	case session.EventReasoningStarted:
+		// §2b gap 1: a subagent's thinking is internal to its Task — dropping it
+		// (rather than resetting the MAIN reasoning tail, which may be mid-think)
+		// is the correctness fix; surfacing it per-agent is the follow-up.
+		{
+			var p session.MessagePayload
+			_ = json.Unmarshal(ev.Payload, &p)
+			if p.ParentToolUseID != "" {
+				break
+			}
+		}
 		// A reasoning/thinking block is beginning. Initialize the buffer and show
 		// the live "∴ Thinking" tail immediately (§2b gap 3) instead of a bare
 		// spinner — syncItems reconciles the ephemeral reasoning tail into the list.
@@ -611,6 +641,9 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		if m.reasoning {
 			var p session.MessagePayload // same {Content} shape as message.delta
 			_ = json.Unmarshal(ev.Payload, &p)
+			if p.ParentToolUseID != "" { // §2b gap 1: subagent thinking never feeds the main tail
+				break
+			}
 			m.reasoningBuf.WriteString(p.Content)
 			m.streamDelta()
 		}
@@ -622,6 +655,9 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		// which resets the delta buffer, so the buffer alone would be empty here).
 		var p session.MessagePayload // {Content}, same shape as message.delta
 		_ = json.Unmarshal(ev.Payload, &p)
+		if p.ParentToolUseID != "" { // §2b gap 1: a subagent's think block is not the main one
+			break
+		}
 		text := strings.TrimSpace(p.Content)
 		if text == "" {
 			text = strings.TrimSpace(m.reasoningBuf.String())

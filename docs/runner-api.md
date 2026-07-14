@@ -343,6 +343,13 @@ schema and run `just gen` (see "Event model" in `docs/architecture.md`). The
 runner maps Claude Agent SDK messages into these normalized types before
 persisting to `events.db` and streaming to clients.
 
+**Subagent (Task) attribution:** every `message.*`, `reasoning.*`, and `tool.*`
+event emitted from a dispatched subagent's stream carries
+`parentToolUseId: <Task tool_use id>`; the field is absent on the main thread.
+Clients must route parented events to that Task's presentation (the CLI nests
+child tools and the live narration under the Task card) — never into the main
+streaming transcript, where they would interleave with the main reply.
+
 The `todo.updated` event surfaces the agent's plan/checklist. Payload:
 `{ todos: [{ content, status, activeForm }] }`, where `status` is one of
 `pending` | `in_progress` | `completed`. The runner emits it when the SDK uses
