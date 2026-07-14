@@ -175,41 +175,51 @@ func (m *TranscriptModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				if !answerable {
 					return m, nil
 				}
-				return m, m.resolvePermission(false)
+				return m, m.resolvePermission(false, "once")
 			case "a":
 				// approve, stay in plan mode.
 				if !answerable {
 					return m, nil
 				}
-				return m, m.resolvePermission(true)
+				return m, m.resolvePermission(true, "once")
 			case "enter":
 				// approve & switch to accept-edits for subsequent turns.
 				if !answerable {
 					return m, nil
 				}
 				m.mode = modeAcceptEdits
-				return m, m.resolvePermission(true)
+				return m, m.resolvePermission(true, "once")
 			}
 			if m.scrollKey(key) {
 				return m, nil
 			}
 			return m, nil
 		}
-		switch key {
-		case "a":
-			if !answerable {
-				return m, nil
+		// §2c numbered-options panel (permprompt.go): ↑/↓ move the ❯ selection,
+		// ↵/number keys resolve the selected/named option, a/d stay as hidden
+		// accelerators. The diff reveal moved to ctrl+o (↵ now confirms). j/k
+		// deliberately stay with scrollKey so the transcript remains scrollable
+		// behind the prompt.
+		if key == "ctrl+o" {
+			if len(m.pending.diffLines) > 0 {
+				m.showDiff = !m.showDiff
+				m.layout()
 			}
-			return m, m.resolvePermission(true)
-		case "d":
-			if !answerable {
-				return m, nil
-			}
-			return m, m.resolvePermission(false)
-		case "enter":
-			m.showDiff = !m.showDiff
-			m.layout()
 			return m, nil
+		}
+		opts := permOptions(m.pending.tool)
+		if newSel, resolve, handled := permPromptKey(key, m.pending.sel, len(opts)); handled {
+			m.pending.sel = newSel
+			if resolve < 0 {
+				return m, nil // navigation only
+			}
+			// Grace gate applies to any resolving key: a keystroke already in
+			// flight when the box popped can't answer it.
+			if !answerable {
+				return m, nil
+			}
+			o := opts[resolve]
+			return m, m.resolvePermission(o.allow, o.scope)
 		}
 		if m.scrollKey(key) {
 			return m, nil

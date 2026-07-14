@@ -28,21 +28,21 @@ func (m *TranscriptModel) buildPermissionBox(width int) string {
 		del := lipgloss.NewStyle().Foreground(theme.Coral).Render("−" + formatInt(p.dels))
 		head += "  " + add + " " + del
 	}
-	// [↵] only does something when there is a diff to reveal; advertising it for
-	// Bash/WebFetch/… was a dead affordance.
-	keys := [][2]string{{"a", "approve"}, {"d", "deny"}}
-	if len(p.diffLines) > 0 {
-		keys = append(keys, [2]string{"↵", "view diff"})
-	}
-	hint := kit.KbdRow(keys...)
-
 	lines := []string{head}
 	// What the agent is actually asking to do: the Bash command, file path, URL,
 	// pattern, … — so an approval is never blind.
 	if p.arg != "" {
 		lines = append(lines, lipgloss.NewStyle().Foreground(theme.TextSecondary).Render(truncate(p.arg, max(4, width-6))))
 	}
-	lines = append(lines, hint)
+	// §2c: the numbered question panel replaces the [a]/[d] hotkey hint row —
+	// options are the affordance (a/d remain hidden accelerators). ↵ now
+	// confirms the selection, so the diff reveal moved to ctrl+o (the tool-card
+	// expansion idiom); only advertise it when there is a diff to reveal.
+	lines = append(lines, "")
+	lines = append(lines, renderPermOptions(p.tool, p.sel, width-4)...)
+	if len(p.diffLines) > 0 {
+		lines = append(lines, kit.KbdRow([2]string{"ctrl+o", "view diff"}))
+	}
 	if m.showDiff && len(p.diffLines) > 0 {
 		const maxDiff = 16
 		shown := condenseDiff(p.diffLines, maxDiff)
@@ -147,19 +147,29 @@ func wrapPlain(s string, width int) []string {
 }
 
 // resolvePermission answers the pending permission and dispatches the decision.
-func (m *TranscriptModel) resolvePermission(allow bool) tea.Cmd {
+// scope "session" records a tool-name grant runner-side (grants.ts) so the tool
+// auto-allows for the rest of this session (§2b gap 2); anything else is a
+// one-shot "once".
+func (m *TranscriptModel) resolvePermission(allow bool, scope string) tea.Cmd {
 	if m.pending == nil {
 		return nil
+	}
+	if scope != "session" {
+		scope = "once"
 	}
 	decision := session.PermissionDecision{
 		Session:    m.ref.ID,
 		Permission: m.pending.id,
 		Allow:      allow,
-		Scope:      "once",
+		Scope:      scope,
 	}
 	label := "denied"
 	if allow {
 		label = "approved"
+		if scope == "session" {
+			// Name the grant's real breadth (tool-level, not this exact argument).
+			label = "approved · " + m.pending.tool + " allowed for this session"
+		}
 	}
 	m.appendBlock(blockInfo, "  [permission "+label+"]")
 	m.pending = nil

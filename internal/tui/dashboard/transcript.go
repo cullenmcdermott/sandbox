@@ -98,10 +98,11 @@ type transcriptPermission struct {
 	arg       string    // headline argument (Bash command, file path, URL, …) so approval is never blind
 	adds      int       // line additions (for the +N stat)
 	dels      int       // line deletions (for the −N stat)
-	diffLines []string  // "+"/"−"-prefixed lines, revealed by [↵] view diff
+	diffLines []string  // "+"/"−"-prefixed lines, revealed by [ctrl+o] view diff
 	isPlan    bool      // ExitPlanMode plan card (gold, three actions)
 	plan      string    // the plan markdown, when isPlan
 	since     time.Time // when the request arrived, for the appear transition
+	sel       int       // selected row of the numbered options panel (§2c; permprompt.go)
 }
 
 // transcript message types (prefixed to avoid colliding with the dashboard's

@@ -84,7 +84,7 @@ func TestTranscriptPermissionFlow(t *testing.T) {
 	}
 
 	// Approve: pending clears and the decision is dispatched to the client.
-	cmd := m.resolvePermission(true)
+	cmd := m.resolvePermission(true, "once")
 	if m.pending != nil {
 		t.Error("pending not cleared on approve")
 	}
@@ -109,13 +109,18 @@ func TestTranscriptViewDiffToggle(t *testing.T) {
 	if m.showDiff {
 		t.Fatal("diff should start collapsed")
 	}
-	// enter toggles the diff view while a permission is pending.
-	m.handleKey(keyMsg("enter"))
+	// ctrl+o toggles the diff view while a permission is pending (§2c: ↵ now
+	// confirms the selected numbered option instead).
+	m.handleKey(keyMsg("ctrl+o"))
 	if !m.showDiff {
-		t.Error("enter did not expand the diff view")
+		t.Error("ctrl+o did not expand the diff view")
 	}
 	if !strings.Contains(m.permBox, "new") {
 		t.Errorf("expanded permission box missing diff content:\n%s", m.permBox)
+	}
+	m.handleKey(keyMsg("ctrl+o"))
+	if m.showDiff {
+		t.Error("ctrl+o did not collapse the diff view")
 	}
 }
 

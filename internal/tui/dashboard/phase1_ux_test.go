@@ -145,7 +145,7 @@ func TestChatPermissionResolveErrorSurfaced(t *testing.T) {
 	m.layout()
 	m.pending = &transcriptPermission{id: "p1", tool: "Bash"}
 
-	cmd := m.resolvePermission(true)
+	cmd := m.resolvePermission(true, "once")
 	if cmd == nil {
 		t.Fatal("resolvePermission returned no command")
 	}
