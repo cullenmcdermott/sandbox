@@ -314,7 +314,7 @@ func (m *Model) backendMix(c sessionPartition) string {
 // bottomBar is the persistent status/hint band.
 func (m *Model) bottomBar(w int) string {
 	m.help.SetWidth(w - 2)
-	left := " " + m.help.ShortHelpView(m.keys.ShortHelp())
+	left := " " + m.help.ShortHelpView(m.shortHelp())
 	// Right-aligned warm-session count: how many running sessions are kept warm
 	// (live model + passive stream) and so resume instantly.
 	warm := ""

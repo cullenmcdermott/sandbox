@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"github.com/cullenmcdermott/sandbox/internal/session"
 )
@@ -81,12 +82,158 @@ func (m *TranscriptModel) permissionAnswerable(prevKeyAt time.Time) bool {
 	return now.Sub(quietSince) >= permissionGraceQuiet
 }
 
+// tctx is the transcript's active input sub-context — the overlay/mode that
+// owns keys once the globals (help, esc, detach, mode/search toggles) have had
+// their turn. Resolution order is fixed by activeSubContext and mirrors the old
+// if-chain: search → permission → palette → normal → compose.
+type tctx int
+
+const (
+	tctxSearch     tctx = iota // m.search.open
+	tctxPermission             // m.pending != nil
+	tctxPalette                // m.paletteOpen()
+	tctxNormal                 // m.vimEnabled && m.imode == modeNormal
+	tctxCompose                // default: the prompt collects keys
+)
+
+// activeSubContext resolves the current transcript sub-context. Order is
+// load-bearing: search preempts a pending permission (both can be open at once),
+// and NORMAL only engages when no overlay claims the keys. Help (m.showHelp) is
+// NOT a sub-context — it is closed ahead of everything in handleKey.
+func (m *TranscriptModel) activeSubContext() tctx {
+	switch {
+	case m.search.open:
+		return tctxSearch
+	case m.pending != nil:
+		return tctxPermission
+	case m.paletteOpen():
+		return tctxPalette
+	case m.vimEnabled && m.imode == modeNormal:
+		return tctxNormal
+	default:
+		return tctxCompose
+	}
+}
+
+// transcriptGlobalTable is the transcript's ordered global binding table: keys
+// that fire regardless of sub-context, so shift+tab cycles the permission mode
+// even while a permission is pending and `?` opens help even while search is
+// open. Table order IS precedence (first match wins). space reports
+// handled=false when there are no subagent cards so it falls through to typing a
+// space in the composer.
+func transcriptGlobalTable() []boundAction[*TranscriptModel] {
+	return []boundAction[*TranscriptModel]{
+		// `?` opens the help when the prompt is empty (otherwise it types).
+		{
+			binding: key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
+			when:    func(m *TranscriptModel) bool { return m.input.Value() == "" },
+			run:     func(m *TranscriptModel, _ tea.KeyPressMsg) (tea.Cmd, bool) { m.openHelp(); return nil, true },
+		},
+		// esc, in priority order: close an open overlay; steer the running turn
+		// with a queued prompt (interrupt + inject); interrupt a running turn
+		// outright; stop an idle driver; leave INSERT for NORMAL. The order lives
+		// in one place — escCascade (modes.go) — which escapeConsumes reads too, so
+		// the two can't drift. Run the first step that applies. When none apply the
+		// App intercepts esc as a detach before delegation (see escapeConsumes);
+		// ctrl+] / ctrl+4 always detach there.
+		{
+			binding: key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "interrupt / steer / close")),
+			run: func(m *TranscriptModel, msg tea.KeyPressMsg) (tea.Cmd, bool) {
+				for _, step := range m.escCascade() {
+					if step.applies() {
+						return step.run(msg), true
+					}
+				}
+				// Vim off: a bare esc has no local meaning here. escapeConsumes
+				// already returned false for this case, so the App intercepted esc as
+				// a detach and this run isn't reached — swallowing is a safe fallback.
+				return nil, true
+			},
+		},
+		{
+			binding: key.NewBinding(key.WithKeys("ctrl+]", "ctrl+4"), key.WithHelp("ctrl+]", "detach")),
+			run: func(m *TranscriptModel, _ tea.KeyPressMsg) (tea.Cmd, bool) {
+				if m.queuedPrompt != "" {
+					return m.queueSteer(), true
+				}
+				return nil, true
+			},
+		},
+		// space on an empty prompt collapses/expands all subagent cards; with no
+		// cards to toggle it reports unhandled so the key types a space.
+		{
+			binding: key.NewBinding(key.WithKeys("space"), key.WithHelp("space", "collapse agents")),
+			when:    func(m *TranscriptModel) bool { return m.input.Value() == "" },
+			run:     func(m *TranscriptModel, _ tea.KeyPressMsg) (tea.Cmd, bool) { return nil, m.toggleSubagents() },
+		},
+		// shift+tab cycles the permission mode (per-attach; reflected in the status
+		// line's mode row and applied to the next turn's StartTurn).
+		{
+			binding: key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("shift+tab", "permission mode")),
+			run:     func(m *TranscriptModel, _ tea.KeyPressMsg) (tea.Cmd, bool) { m.mode = m.mode.next(); return nil, true },
+		},
+		// ctrl+f opens in-transcript search.
+		{
+			binding: key.NewBinding(key.WithKeys("ctrl+f"), key.WithHelp("ctrl+f", "search")),
+			run:     func(m *TranscriptModel, _ tea.KeyPressMsg) (tea.Cmd, bool) { m.openSearch(); return nil, true },
+		},
+	}
+}
+
+// transcriptComposeTable is the compose sub-context's ordered binding table:
+// the keys that act on the draft prompt before it falls through to the textinput
+// and scroll handlers.
+func transcriptComposeTable() []boundAction[*TranscriptModel] {
+	return []boundAction[*TranscriptModel]{
+		// ctrl+o toggles the most recent tool card's output expansion when the
+		// composer is empty (the Claude-Code idiom, and consistent with the other
+		// prompt-empty-gated keys `?` and space) — you're reading the transcript,
+		// not drafting. With text in the composer it keeps its $EDITOR-composition
+		// role, so ctrl+o on a draft opens it in your editor (slice 5g).
+		{
+			binding: key.NewBinding(key.WithKeys("ctrl+o"), key.WithHelp("ctrl+o", "expand output / $EDITOR")),
+			run: func(m *TranscriptModel, _ tea.KeyPressMsg) (tea.Cmd, bool) {
+				if m.input.Value() == "" && m.toggleLatestToolCard() {
+					return nil, true
+				}
+				return m.openEditorPrompt(), true
+			},
+		},
+		// Multi-line composition: shift/alt+enter inserts a newline directly into
+		// the input so multi-line prompts can be edited without leaving the chat.
+		{
+			binding: key.NewBinding(key.WithKeys("shift+enter", "alt+enter"), key.WithHelp("shift+enter", "newline")),
+			run: func(m *TranscriptModel, _ tea.KeyPressMsg) (tea.Cmd, bool) {
+				m.input.SetValue(m.input.Value() + "\n")
+				m.input.CursorEnd()
+				m.layout() // the box grew a row — re-reserve body height
+				return nil, true
+			},
+		},
+		{
+			binding: key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "send")),
+			run: func(m *TranscriptModel, _ tea.KeyPressMsg) (tea.Cmd, bool) {
+				// `!cmd` runs a one-shot shell; otherwise send the prompt as a turn.
+				if val := strings.TrimSpace(m.input.Value()); strings.HasPrefix(val, "!") {
+					cmd := m.runShell(strings.TrimPrefix(val, "!"))
+					m.input.Reset()
+					return cmd, true
+				}
+				return m.submit(), true
+			},
+		},
+	}
+}
+
 func (m *TranscriptModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 	// Track inter-key timing for the permission grace gate (chat-rendering §2.6).
+	// prevKeyAt is republished on the model so permissionKey can read it.
 	prevKeyAt := m.lastKeyAt
 	m.lastKeyAt = nowFunc()
-	// Grouped help overlay: ↑/↓ + space drive it; any other key closes it.
+	m.prevKeyAt = prevKeyAt
+	// Grouped help overlay: ↑/↓ + space drive it; any other key closes it. It
+	// preempts everything else (not a sub-context) — closed ahead of the globals.
 	if m.showHelp {
 		if m.helpUI.handleKey(key) {
 			return m, nil
@@ -94,188 +241,116 @@ func (m *TranscriptModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.showHelp = false
 		return m, nil
 	}
-	// `?` opens the help when the prompt is empty (otherwise it types).
-	if key == "?" && m.input.Value() == "" {
-		m.openHelp()
-		return m, nil
-	}
-	// esc, in priority order: close an open overlay; steer the running turn with
-	// a queued prompt (interrupt + inject); interrupt a running turn outright;
-	// leave INSERT for NORMAL. When none apply the App intercepts esc as a detach
-	// before delegation (see escapeConsumes); ctrl+] / ctrl+4 always detach there.
-	if key == "esc" {
-		if m.search.open {
-			cmd, _ := m.searchKey(msg)
-			return m, cmd
-		}
-		if m.paletteOpen() {
-			cmd, _ := m.paletteKey(msg)
-			return m, cmd
-		}
-		if m.queuedPrompt != "" {
-			return m, m.queueSteer()
-		}
-		if m.turnActive {
-			return m, m.interruptTurn() // also stops any running driver
-		}
-		// A /loop or /goal idle between ticks/turns: esc reclaims control and stops
-		// the driver, honoring the chip's "esc to stop" contract even when there's
-		// no live turn to interrupt (§1e item 5). For the runner-owned driver this
-		// issues the DELETE. Detach stays on ctrl+].
-		if m.driverActive() {
-			return m, m.stopDriver("autopilot stopped")
-		}
-		if m.vimEnabled && m.imode == modeInsert {
-			m.enterNormal()
-			return m, nil
-		}
-		// Vim off: a bare esc has no local meaning here. escapeConsumes already
-		// returned false for this case, so the App intercepted esc as a detach and
-		// this handler isn't reached — the return is just a safe fallthrough.
-		return m, nil
-	}
-	if key == "ctrl+]" || key == "ctrl+4" {
-		if m.queuedPrompt != "" {
-			return m, m.queueSteer()
-		}
-		return m, nil
-	}
-	// space on an empty prompt collapses/expands all subagent cards.
-	if key == "space" && m.input.Value() == "" && m.toggleSubagents() {
-		return m, nil
-	}
-	// shift+tab cycles the permission mode (per-attach; reflected in the status
-	// line's mode row and applied to the next turn's StartTurn).
-	if key == "shift+tab" {
-		m.mode = m.mode.next()
-		return m, nil
-	}
 
-	// ctrl+f opens in-transcript search.
-	if key == "ctrl+f" {
-		m.openSearch()
-		return m, nil
-	}
-
+	// Globals run BEFORE the sub-context delegation: e.g. shift+tab cycles the
+	// permission mode even while a permission is pending, and `?` on an empty
+	// composer opens help even while search is open (§2a input contexts). Table
+	// order is precedence; a global that reports unhandled (space with no cards)
+	// falls through to the sub-context below.
 	// (ctrl+c never reaches here: the App intercepts it as a global quit before
-	// delegating. space-on-empty-prompt above covers card collapse.)
+	// delegating.)
+	if cmd, handled := dispatchKey(m, transcriptGlobalTable(), msg); handled {
+		return m, cmd
+	}
 
-	if m.search.open {
+	switch m.activeSubContext() {
+	case tctxSearch:
 		cmd, _ := m.searchKey(msg)
 		return m, cmd
-	}
-
-	if m.pending != nil {
-		// Grace gate: a key in flight when the box popped can't auto-answer it.
-		answerable := m.permissionAnswerable(prevKeyAt)
-		if m.pending.isPlan {
-			switch key {
-			case "r":
-				// reject: keep plan mode, deny the plan.
-				if !answerable {
-					return m, nil
-				}
-				return m, m.resolvePermission(false, "once")
-			case "a":
-				// approve, stay in plan mode.
-				if !answerable {
-					return m, nil
-				}
-				return m, m.resolvePermission(true, "once")
-			case "enter":
-				// approve & switch to accept-edits for subsequent turns.
-				if !answerable {
-					return m, nil
-				}
-				m.mode = modeAcceptEdits
-				return m, m.resolvePermission(true, "once")
-			}
-			if m.scrollKey(key) {
-				return m, nil
-			}
-			return m, nil
-		}
-		// §2c numbered-options panel (permprompt.go): ↑/↓ move the ❯ selection,
-		// ↵/number keys resolve the selected/named option, a/d stay as hidden
-		// accelerators. The diff reveal moved to ctrl+o (↵ now confirms). j/k
-		// deliberately stay with scrollKey so the transcript remains scrollable
-		// behind the prompt.
-		if key == "ctrl+o" {
-			if len(m.pending.diffLines) > 0 {
-				m.showDiff = !m.showDiff
-				m.layout()
-			}
-			return m, nil
-		}
-		opts := permOptions(m.pending.tool)
-		if newSel, resolve, handled := permPromptKey(key, m.pending.sel, len(opts)); handled {
-			m.pending.sel = newSel
-			if resolve < 0 {
-				return m, nil // navigation only
-			}
-			// Grace gate applies to any resolving key: a keystroke already in
-			// flight when the box popped can't answer it.
-			if !answerable {
-				return m, nil
-			}
-			o := opts[resolve]
-			return m, m.resolvePermission(o.allow, o.scope)
-		}
-		if m.scrollKey(key) {
-			return m, nil
-		}
-		return m, nil
-	}
-
-	// Slash palette: when the prompt starts with "/", keys drive the palette.
-	if m.paletteOpen() {
+	case tctxPermission:
+		return m, m.permissionKey(msg)
+	case tctxPalette:
+		// Slash palette: when the prompt starts with "/", keys drive the palette.
 		cmd, _ := m.paletteKey(msg)
 		return m, cmd
+	case tctxNormal:
+		// NORMAL mode (vim modal editing on) owns the keyboard once the overlays
+		// and permission prompts above have had their turn: i/a enter INSERT,
+		// j/k/g/G scroll, / searches, q detaches, and every other key is swallowed
+		// so the blurred prompt never collects stray letters. With vim off imode is
+		// pinned to INSERT, so this never engages and keys flow to the prompt.
+		cmd, _ := m.normalKey(key, msg)
+		return m, cmd
+	default: // tctxCompose
+		return m.composeKey(msg)
 	}
+}
 
-	// NORMAL mode (vim modal editing on) owns the keyboard once the overlays and
-	// permission prompts above have had their turn: i/a enter INSERT, j/k/g/G
-	// scroll, / searches, q detaches, and every other key is swallowed so the
-	// blurred prompt never collects stray letters. With vim off imode is pinned
-	// to INSERT, so this never engages and keys flow to the prompt.
-	if m.vimEnabled && m.imode == modeNormal {
-		cmd, handled := m.normalKey(key, msg)
-		if handled {
-			return m, cmd
+// permissionKey handles a key while an inline permission box is pending. It is
+// the old `if m.pending != nil` branch, unchanged: the grace gate reads
+// m.prevKeyAt (pinned by permission_clock_test.go), and the numbered-option
+// grammar lives in permPromptKey (permprompt_test.go).
+func (m *TranscriptModel) permissionKey(msg tea.KeyPressMsg) tea.Cmd {
+	key := msg.String()
+	// Grace gate: a key in flight when the box popped can't auto-answer it.
+	answerable := m.permissionAnswerable(m.prevKeyAt)
+	if m.pending.isPlan {
+		switch key {
+		case "r":
+			// reject: keep plan mode, deny the plan.
+			if !answerable {
+				return nil
+			}
+			return m.resolvePermission(false, "once")
+		case "a":
+			// approve, stay in plan mode.
+			if !answerable {
+				return nil
+			}
+			return m.resolvePermission(true, "once")
+		case "enter":
+			// approve & switch to accept-edits for subsequent turns.
+			if !answerable {
+				return nil
+			}
+			m.mode = modeAcceptEdits
+			return m.resolvePermission(true, "once")
 		}
+		if m.scrollKey(key) {
+			return nil
+		}
+		return nil
 	}
-
-	// ctrl+o toggles the most recent tool card's output expansion when the
-	// composer is empty (the Claude-Code idiom, and consistent with the other
-	// prompt-empty-gated keys `?` and space) — you're reading the transcript, not
-	// drafting. With text in the composer it keeps its $EDITOR-composition role, so
-	// ctrl+o on a draft opens it in your editor (slice 5g).
+	// §2c numbered-options panel (permprompt.go): ↑/↓ move the ❯ selection,
+	// ↵/number keys resolve the selected/named option, a/d stay as hidden
+	// accelerators. The diff reveal moved to ctrl+o (↵ now confirms). j/k
+	// deliberately stay with scrollKey so the transcript remains scrollable
+	// behind the prompt.
 	if key == "ctrl+o" {
-		if m.input.Value() == "" && m.toggleLatestToolCard() {
-			return m, nil
+		if len(m.pending.diffLines) > 0 {
+			m.showDiff = !m.showDiff
+			m.layout()
 		}
-		return m, m.openEditorPrompt()
+		return nil
 	}
-
-	// Multi-line composition: shift/alt+enter inserts a newline directly into
-	// the input so multi-line prompts can be edited without leaving the chat.
-	if key == "shift+enter" || key == "alt+enter" {
-		m.input.SetValue(m.input.Value() + "\n")
-		m.input.CursorEnd()
-		m.layout() // the box grew a row — re-reserve body height
-		return m, nil
-	}
-
-	if key == "enter" {
-		// `!cmd` runs a one-shot shell; otherwise send the prompt as a turn.
-		if val := strings.TrimSpace(m.input.Value()); strings.HasPrefix(val, "!") {
-			cmd := m.runShell(strings.TrimPrefix(val, "!"))
-			m.input.Reset()
-			return m, cmd
+	opts := permOptions(m.pending.tool)
+	if newSel, resolve, handled := permPromptKey(key, m.pending.sel, len(opts)); handled {
+		m.pending.sel = newSel
+		if resolve < 0 {
+			return nil // navigation only
 		}
-		return m, m.submit()
+		// Grace gate applies to any resolving key: a keystroke already in
+		// flight when the box popped can't answer it.
+		if !answerable {
+			return nil
+		}
+		o := opts[resolve]
+		return m.resolvePermission(o.allow, o.scope)
 	}
 	if m.scrollKey(key) {
+		return nil
+	}
+	return nil
+}
+
+// composeKey handles a key in the default compose sub-context: the compose
+// binding table (ctrl+o / newline / send), then the shared scroll keys, then the
+// textinput fallthrough that also opens the slash palette on the first "/".
+func (m *TranscriptModel) composeKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if cmd, handled := dispatchKey(m, transcriptComposeTable(), msg); handled {
+		return m, cmd
+	}
+	if m.scrollKey(msg.String()) {
 		return m, nil
 	}
 

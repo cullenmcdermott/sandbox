@@ -1,9 +1,10 @@
 package dashboard
 
-// KeyMap holds the dashboard's key bindings as bubbles key.Binding values, so
-// the footer (help.ShortHelpView) and the `?` overlay (help.FullHelpView)
-// render from this single source and can never drift from the real handlers.
-// KeyMap implements the bubbles help.KeyMap interface.
+// KeyMap holds the dashboard's key bindings as bubbles key.Binding values so the
+// `?` overlay (help.FullHelpView, via FullHelp) renders from this single source
+// and can never drift from the real handlers. The footer no longer renders from
+// here: it is derived from the dctxList binding table itself (Model.shortHelp →
+// footerBindings), so its advertising can never lie about the live keys (§2d).
 
 import (
 	"charm.land/bubbles/v2/key"
@@ -27,12 +28,13 @@ type KeyMap struct {
 	AttentionToggle key.Binding
 
 	// Session actions
-	New     key.Binding
-	Suspend key.Binding
-	Resume  key.Binding
-	Approve key.Binding
-	Deny    key.Binding
-	Destroy key.Binding
+	New       key.Binding
+	Suspend   key.Binding
+	Resume    key.Binding
+	Approve   key.Binding
+	Deny      key.Binding
+	Destroy   key.Binding
+	PermQueue key.Binding
 
 	// Global
 	Help     key.Binding
@@ -66,34 +68,25 @@ func DefaultKeyMap() KeyMap {
 		Approve:         key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "approve")),
 		Deny:            key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "deny")),
 		Destroy:         key.NewBinding(key.WithKeys("!"), key.WithHelp("!", "destroy")),
+		PermQueue:       key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "perm queue (when waiting)")),
 		Help:            key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 		Quit:            key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 		Command:         key.NewBinding(key.WithKeys(":"), key.WithHelp(":", "command"), key.WithDisabled()),
 		Switcher:        key.NewBinding(key.WithKeys("ctrl+k"), key.WithHelp("^k", "quick switch")),
-		GroupToggle:     key.NewBinding(key.WithKeys("g"), key.WithHelp("g", "group view")),
+		GroupToggle:     key.NewBinding(key.WithKeys("g"), key.WithHelp("g", "group view · gg top")),
 		Rename:          key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "rename")),
 		Branch:          key.NewBinding(key.WithKeys("b"), key.WithHelp("b", "branch")),
 	}
 }
 
-// ShortHelp returns the footer bindings, in display order. Implements
-// help.KeyMap.
-func (km KeyMap) ShortHelp() []key.Binding {
-	// Keep the footer to the handful of actions a user reaches for at a glance
-	// (T4). Suspend / destroy / sort live in the `?` full-help overlay — they
-	// cluttered the band and the destructive ones don't belong in muscle memory.
-	return []key.Binding{
-		km.Up, km.Down, km.Attach, km.Filter, km.New, km.Help, km.Quit,
-	}
-}
-
 // FullHelp returns the grouped bindings for the `?` overlay (one inner slice
-// per column). Implements help.KeyMap.
+// per column). It is the `?` overlay's source (via keymapCategories); the footer
+// derives from the dctxList table instead (Model.shortHelp).
 func (km KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{km.Up, km.Down, km.Top, km.Bottom, km.Attach, km.Detach, km.NextAttention},
 		{km.Filter, km.SortCycle, km.SortFlip, km.AttentionToggle, km.GroupToggle},
-		{km.New, km.Suspend, km.Resume, km.Approve, km.Deny, km.Destroy},
+		{km.New, km.Suspend, km.Resume, km.Approve, km.Deny, km.Destroy, km.PermQueue},
 		{km.Rename, km.Branch, km.Help, km.Switcher, km.Quit},
 	}
 }

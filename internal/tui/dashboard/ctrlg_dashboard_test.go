@@ -74,3 +74,97 @@ func TestCtrlGGroupViewLandsOnRowAndExpands(t *testing.T) {
 		t.Fatalf("selectedSession after ctrl+g = %v, want b2", sel)
 	}
 }
+
+// jumpToPrevNeedingAttention scans backward and picks the previous attention
+// session, mirroring the forward jump. With the cursor between two attention
+// sessions, prev lands on the one above; next on the one below — a direction
+// check that also guards the forward jump against regressions.
+func TestJumpPrevPicksPreviousAttentionSession(t *testing.T) {
+	m := New(nil)
+	m.sessions = []Session{
+		{
+			State:            session.State{ID: "top", Status: session.StatusRunning},
+			sessionReadModel: sessionReadModel{DashStatus: StatusFailed},
+		},
+		{
+			State:            session.State{ID: "mid", Status: session.StatusRunning},
+			sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+		},
+		{
+			State:            session.State{ID: "bot", Status: session.StatusRunning},
+			sessionReadModel: sessionReadModel{DashStatus: StatusFailed},
+		}}
+	m.cursor = 1 // on "mid"
+
+	if got := m.jumpToPrevNeedingAttention(); got == nil || got.ID() != "top" {
+		t.Fatalf("prev jump = %v, want top", got)
+	}
+
+	// Forward from the same middle position must still pick "bot" (next-direction
+	// behavior unchanged).
+	m.cursor = 1
+	if got := m.jumpToNextNeedingAttention(); got == nil || got.ID() != "bot" {
+		t.Fatalf("next jump = %v, want bot", got)
+	}
+}
+
+// prev wraps around the top of the list back to the bottom-most attention
+// session (the negative-modulo normalization in the scan index).
+func TestJumpPrevWrapsAroundTop(t *testing.T) {
+	m := New(nil)
+	m.sessions = []Session{
+		{
+			State:            session.State{ID: "first", Status: session.StatusRunning},
+			sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+		},
+		{
+			State:            session.State{ID: "last", Status: session.StatusRunning},
+			sessionReadModel: sessionReadModel{DashStatus: StatusFailed},
+		}}
+	m.cursor = 0 // on "first"; scanning backward wraps past index 0 to "last"
+
+	if got := m.jumpToPrevNeedingAttention(); got == nil || got.ID() != "last" {
+		t.Fatalf("prev jump = %v, want last (wrapped)", got)
+	}
+}
+
+// prev skips the currently attached session just like next does.
+func TestJumpPrevSkipsAttachedSession(t *testing.T) {
+	m := New(nil)
+	m.sessions = []Session{
+		{
+			State:            session.State{ID: "attached", Status: session.StatusRunning},
+			sessionReadModel: sessionReadModel{DashStatus: StatusFailed},
+		},
+		{
+			State:            session.State{ID: "other", Status: session.StatusRunning},
+			sessionReadModel: sessionReadModel{DashStatus: StatusFailed},
+		}}
+	m.attachedID = "attached"
+	m.cursor = 1 // on "other"
+
+	// Only "other" is a valid target; scanning backward must skip "attached" and
+	// wrap back to "other" itself.
+	if got := m.jumpToPrevNeedingAttention(); got == nil || got.ID() != "other" {
+		t.Fatalf("prev jump = %v, want other (attached skipped)", got)
+	}
+}
+
+// prev returns nil when nothing needs attention, matching next.
+func TestJumpPrevNilWhenNoneNeedAttention(t *testing.T) {
+	m := New(nil)
+	m.sessions = []Session{
+		{
+			State:            session.State{ID: "a", Status: session.StatusRunning},
+			sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+		},
+		{
+			State:            session.State{ID: "b", Status: session.StatusRunning},
+			sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
+		}}
+	m.cursor = 0
+
+	if got := m.jumpToPrevNeedingAttention(); got != nil {
+		t.Fatalf("prev jump = %v, want nil", got)
+	}
+}

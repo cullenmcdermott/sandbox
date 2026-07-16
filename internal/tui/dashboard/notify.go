@@ -225,16 +225,27 @@ func firstLineOf(s string) string {
 // jumpToNextNeedingAttention moves the cursor to the next session that needs
 // attention, wrapping around the list. Returns the
 // selected session or nil if none need attention.
-func (m *Model) jumpToNextNeedingAttention() *Session {
-	// Scan the flat, filtered+sorted session list (visibleSessions) forward from
-	// the current selection — resolved by session *identity*, never by treating the
-	// row cursor as a session index — for the next session that needs attention and
-	// isn't already attached. Then translate the target back into the ONE row model
-	// (visibleRows): expand its group first in group view so its row exists, and
-	// move the row cursor onto that row (§1b — a raw session index must never be
-	// stuffed into a display-row cursor).
+func (m *Model) jumpToNextNeedingAttention() *Session { return m.jumpNeedingAttention(1) }
+
+// jumpToPrevNeedingAttention moves the cursor to the previous session that needs
+// attention, wrapping around the top of the list. Returns the selected session
+// or nil if none need attention.
+func (m *Model) jumpToPrevNeedingAttention() *Session { return m.jumpNeedingAttention(-1) }
+
+// jumpNeedingAttention is the direction-parameterized core behind ctrl+g and
+// the external-pane leader chord's g/k jumps: dir=+1 scans forward, dir=-1
+// scans backward.
+func (m *Model) jumpNeedingAttention(dir int) *Session {
+	// Scan the flat, filtered+sorted session list (visibleSessions) from the
+	// current selection — resolved by session *identity*, never by treating the
+	// row cursor as a session index — for the next/previous session that needs
+	// attention and isn't already attached. Then translate the target back into
+	// the ONE row model (visibleRows): expand its group first in group view so its
+	// row exists, and move the row cursor onto that row (§1b — a raw session index
+	// must never be stuffed into a display-row cursor).
 	visible := m.visibleSessions()
-	if len(visible) == 0 {
+	n := len(visible)
+	if n == 0 {
 		return nil
 	}
 	start := 0
@@ -246,8 +257,9 @@ func (m *Model) jumpToNextNeedingAttention() *Session {
 			}
 		}
 	}
-	for offset := 1; offset <= len(visible); offset++ {
-		idx := (start + offset) % len(visible)
+	for offset := 1; offset <= n; offset++ {
+		// Go's % can be negative for a negative dir, so normalize into [0, n).
+		idx := ((start+dir*offset)%n + n) % n
 		s := visible[idx]
 		if s.ID() == m.attachedID || !needsAttention(s) {
 			continue

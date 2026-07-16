@@ -312,6 +312,12 @@ type TranscriptModel struct {
 	// can't auto-approve/deny it (chat-rendering §2.6).
 	lastKeyAt time.Time
 
+	// prevKeyAt is the time of the key event before the one being handled — the
+	// same value handleKey derives from lastKeyAt, republished on the model so the
+	// permission sub-context handler can read the grace gate without threading it
+	// through the dispatch tables (§2a input contexts).
+	prevKeyAt time.Time
+
 	// imode is the input mode. With vim modal editing off (the default) the
 	// transcript stays in INSERT — the prompt is always focused so every key
 	// types. /vim turns modal editing on (vimEnabled), opening in NORMAL where

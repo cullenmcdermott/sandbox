@@ -36,26 +36,68 @@ func (m *TranscriptModel) enterNormal() {
 	m.input.Blur()
 }
 
+// escStep is one level of the transcript's esc priority cascade. applies
+// reports whether the step has a local meaning right now; run performs it.
+type escStep struct {
+	name    string
+	applies func() bool
+	run     func(msg tea.KeyPressMsg) tea.Cmd
+}
+
+// escCascade returns the ordered esc priority list. escapeConsumes and the
+// esc key handler both read this list — it is the single encoding of the
+// cascade (§2a input contexts): close an open overlay (search, then slash
+// palette); steer a running turn with a queued prompt (interrupt + inject);
+// interrupt a running turn outright; stop an idle /loop or /goal driver; leave
+// INSERT for NORMAL. Help is handled ahead of this (any key closes it), so it
+// is not a cascade step — see escapeConsumes.
+func (m *TranscriptModel) escCascade() []escStep {
+	return []escStep{
+		{"search", func() bool { return m.search.open }, func(msg tea.KeyPressMsg) tea.Cmd {
+			cmd, _ := m.searchKey(msg)
+			return cmd
+		}},
+		{"palette", m.paletteOpen, func(msg tea.KeyPressMsg) tea.Cmd {
+			cmd, _ := m.paletteKey(msg)
+			return cmd
+		}},
+		// A queued prompt steers the running turn (interrupt + inject) instead of
+		// detaching. queueSteer retains the prompt until turn.interrupted so the
+		// follow-up POST doesn't 409 the still-active turn (R4).
+		{"steer", func() bool { return m.queuedPrompt != "" }, func(tea.KeyPressMsg) tea.Cmd { return m.queueSteer() }},
+		{"interrupt", func() bool { return m.turnActive }, func(tea.KeyPressMsg) tea.Cmd { return m.interruptTurn() }},
+		// A /loop or /goal idle between ticks/turns: esc reclaims control and stops
+		// the driver, honoring the chip's "esc to stop" contract even when there's
+		// no live turn to interrupt (§1e item 5). Detach stays on ctrl+].
+		{"driver", m.driverActive, func(tea.KeyPressMsg) tea.Cmd { return m.stopDriver("autopilot stopped") }},
+		// Vim on, INSERT: esc returns to NORMAL rather than detaching.
+		{"vim-insert", func() bool { return m.vimEnabled && m.imode == modeInsert }, func(tea.KeyPressMsg) tea.Cmd {
+			m.enterNormal()
+			return nil
+		}},
+	}
+}
+
 // escapeConsumes reports whether esc should be handled inside the transcript
-// rather than detaching to the dashboard. True when an overlay is open (help,
-// search, slash palette) or a turn is active — esc has a local meaning there
-// (close / interrupt the turn). With vim modal editing on, esc in INSERT is also
-// consumed (it returns to NORMAL). With vim off the prompt is always focused, so
-// a bare idle esc has no local meaning and falls through to the App's detach
-// (preserving the old NORMAL-mode esc-detach). ctrl+] / ctrl+4 (and NORMAL-mode
-// q) always detach regardless.
+// rather than detaching to the dashboard. It derives entirely from escCascade:
+// esc is consumed when any cascade step has a local meaning right now (an
+// overlay is open, a turn/driver is active, a prompt is queued to steer, or vim
+// INSERT can return to NORMAL). showHelp is a separate leading term because the
+// help overlay is closed ahead of the esc branch (any key closes it), so it is
+// not a cascade step. With vim off and none of these true, a bare idle esc has
+// no local meaning and falls through to the App's detach (preserving the old
+// NORMAL-mode esc-detach). ctrl+] / ctrl+4 (and NORMAL-mode q) always detach
+// regardless.
 func (m *TranscriptModel) escapeConsumes() bool {
-	if m.showHelp || m.search.open || m.paletteOpen() || m.turnActive {
+	if m.showHelp {
 		return true
 	}
-	// A running /loop or /goal (local OR runner-owned) gives a bare esc a local
-	// meaning even when idle between ticks: it stops the driver (the chip promises
-	// "esc to stop") rather than detaching with the driver still armed (§1e item
-	// 5). Detach is ctrl+].
-	if m.driverActive() {
-		return true
+	for _, step := range m.escCascade() {
+		if step.applies() {
+			return true
+		}
 	}
-	return m.vimEnabled && m.imode == modeInsert
+	return false
 }
 
 // setVim turns vim-style modal editing on or off and returns the follow-up Cmd

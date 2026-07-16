@@ -458,7 +458,9 @@ func TestAppAttachOpencodeExternalPane(t *testing.T) {
 // TestAppExternalPaneEscIsForwardedNotDetached guards the triage fix:
 // esc must NOT detach from the opencode external pane — the embedded opencode
 // TUI uses esc to dismiss its own overlays/escape input mode, so the App must
-// let it pass through to the child. Only ctrl+] / ctrl+4 detach.
+// let it pass through to the child. Only the ctrl+] / ctrl+4 leader chord
+// detaches (double-tap here; a lone press resolves at the leader timeout —
+// §2d leader-chord decision 2026-07-07).
 func TestAppExternalPaneEscIsForwardedNotDetached(t *testing.T) {
 	// The external pane spawns a real `opencode attach` child inside a PTY. In
 	// environments missing either prerequisite — no opencode binary (Depot CI's
@@ -500,10 +502,15 @@ func TestAppExternalPaneEscIsForwardedNotDetached(t *testing.T) {
 		t.Error("external pane was torn down on esc; expected to stay live for re-attach")
 	}
 
-	// ctrl+] is the explicit detach chord for the external pane.
+	// ctrl+] is the leader: the first press arms the chord (still attached; the
+	// key is swallowed, never forwarded), the second press detaches.
+	app.Update(keyMsg("ctrl+]"))
+	if app.screen != ScreenExternal {
+		t.Fatalf("lone ctrl+] detached immediately: screen = %v, want ScreenExternal (leader armed)", app.screen)
+	}
 	app.Update(keyMsg("ctrl+]"))
 	if app.screen != ScreenDashboard {
-		t.Errorf("ctrl+] did not detach the external pane: screen = %v, want ScreenDashboard", app.screen)
+		t.Errorf("ctrl+] ctrl+] did not detach the external pane: screen = %v, want ScreenDashboard", app.screen)
 	}
 
 	// Re-attaching minimizes a still-live pane instantly (no connector run);

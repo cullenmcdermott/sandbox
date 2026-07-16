@@ -106,6 +106,20 @@ type connectUpdateMsg struct {
 // connectTickMsg drives the connecting-screen spinner animation.
 type connectTickMsg struct{}
 
+// leaderTimeoutMsg fires leaderTimeout after the external pane's ctrl+] leader is
+// armed. gen pins it to the arming that scheduled it (App.leaderGen): a tick whose
+// gen no longer matches was superseded by a re-arm or an already-resolved chord
+// and is ignored. Mirrors the toastTickMsg / toastTickCmd pattern in notify.go.
+type leaderTimeoutMsg struct{ gen int }
+
+// leaderTimeoutCmd schedules the lone-ctrl+] → detach resolution for an armed
+// leader, tagged with the arming generation so a stale tick can be discarded.
+func leaderTimeoutCmd(gen int) tea.Cmd {
+	return tea.Tick(leaderTimeout, func(time.Time) tea.Msg {
+		return leaderTimeoutMsg{gen: gen}
+	})
+}
+
 // --------------------------------------------------------------------------
 // App
 // --------------------------------------------------------------------------
@@ -230,6 +244,21 @@ type App struct {
 	// restored into the new TranscriptModel so compose buffers, queued prompts, and
 	// search queries survive a detach→reattach cycle.
 	parkedTranscripts map[session.ID]ParkedTranscriptState
+
+	// leaderArmed marks that the external (PTY) pane's ctrl+] leader chord is
+	// waiting for its next key. ctrl+] was already the reserved detach key there;
+	// arming it into a leader lets the pane reach attention-nav (jump next/prev,
+	// TODO §2d, decided 2026-07-07) WITHOUT stealing any key the embedded opencode
+	// client itself binds — nothing changes until the user first presses ctrl+].
+	// A lone ctrl+] still detaches, but now only once the leader lapses (double-tap
+	// or the leaderTimeout), a deliberate trade for making ctrl+] a prefix.
+	leaderArmed bool
+
+	// leaderGen invalidates in-flight leaderTimeout ticks. It is bumped on every
+	// arm and every resolve (detach / jump / forward), so a timeout scheduled for
+	// an earlier arming is recognized as stale and dropped rather than detaching
+	// out from under a re-armed or already-resolved chord.
+	leaderGen int
 }
 
 // NewApp constructs the root App with a dashboard backed by the given k8s
@@ -751,6 +780,19 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// ingest() would otherwise have its Cmds discarded. Handled early so it
 		// never double-dispatches through the per-screen delegation below.
 		return a, a.autopilotTick(msg)
+
+	case leaderTimeoutMsg:
+		// A lone ctrl+] on the external pane resolves to detach when the leader
+		// lapses. Only act on the tick from the CURRENT arming while still armed
+		// and on the external screen: the gen guard drops a tick superseded by a
+		// re-arm, and the screen guard keeps a stale tick from leaking into another
+		// screen. This is exactly the leaderDetach path.
+		if a.leaderArmed && msg.gen == a.leaderGen && a.screen == ScreenExternal {
+			a.leaderArmed = false
+			a.leaderGen++
+			a.screen = ScreenDashboard
+		}
+		return a, nil
 	}
 	// Keep the dashboard's notion of the attached session current so background
 	// attention toasts never fire for the session the user is already viewing.
@@ -877,22 +919,52 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, tea.Batch(cmd, dashCmd)
 	case ScreenExternal:
 		if a.external == nil {
+			// Pane vanished: leave the external screen and disarm so a stale leader
+			// can't outlive it. (The leaderTimeoutMsg guard already refuses to act
+			// off ScreenExternal, but keeping the state clean is cheap.)
+			a.leaderArmed = false
+			a.leaderGen++
 			a.screen = ScreenDashboard
 			return a, dashCmd
 		}
 		if kp, ok := msg.(tea.KeyPressMsg); ok {
-			switch kp.String() {
-			case "ctrl+]", "ctrl+4":
-				// Detach (back to the dashboard) without tearing down the pane —
-				// the child keeps running so re-open is instant. esc is NOT in
-				// this set: the embedded opencode TUI uses esc to dismiss its own
-				// overlays / escape input mode, so intercepting it here would
-				// trap the user inside opencode's screen with no way out for the
-				// pane's own UI. Use ctrl+] (or ctrl+4) to detach.
+			// ctrl+] is a leader chord here, not an instant detach. It was already
+			// the reserved detach key, so extending it into a prefix gives the pane
+			// attention-nav (ctrl+] g / ctrl+] k jump to the next/prev session
+			// needing you) without stealing any key the embedded opencode client
+			// binds — the arming ctrl+] is swallowed, never forwarded. esc is still
+			// forwarded so opencode keeps it for its own overlays; a lone ctrl+]
+			// detaches once the chord lapses (a second ctrl+] or the leaderTimeout),
+			// the deliberate cost of making ctrl+] a prefix (TODO §2d, 2026-07-07).
+			switch leaderStep(a.leaderArmed, kp.String()) {
+			case leaderArm:
+				a.leaderArmed = true
+				a.leaderGen++
+				return a, tea.Batch(dashCmd, leaderTimeoutCmd(a.leaderGen))
+			case leaderDetach:
+				// Detach (back to the dashboard) without tearing down the pane — the
+				// child keeps running so re-open is instant.
+				a.leaderArmed = false
+				a.leaderGen++
 				a.screen = ScreenDashboard
 				return a, dashCmd
-			default:
-				// Everything else (incl. esc) is forwarded to the embedded opencode client.
+			case leaderJumpNext:
+				a.leaderArmed = false
+				a.leaderGen++
+				return a, a.leaderJump(dashCmd, a.dashboard.jumpToNextNeedingAttention())
+			case leaderJumpPrev:
+				a.leaderArmed = false
+				a.leaderGen++
+				return a, a.leaderJump(dashCmd, a.dashboard.jumpToPrevNeedingAttention())
+			case leaderForward:
+				// Disarm and forward THIS key to the child; the earlier arming
+				// ctrl+] never reached it.
+				a.leaderArmed = false
+				a.leaderGen++
+				a.external.handleKey(kp)
+				return a, dashCmd
+			default: // leaderIgnore
+				// Not armed, not a leader key (incl. esc): forward to opencode.
 				a.external.handleKey(kp)
 				return a, dashCmd
 			}
@@ -920,6 +992,22 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// duplicate self-perpetuating liveSSENextCmd reader per event.
 		return a, dashCmd
 	}
+}
+
+// leaderJump completes an external-pane leader g/k jump. With a target session it
+// minimizes the current pane (screen → dashboard; the child keeps running, and
+// attachReadyMsg's O1 branch closes it only if a different session's pane comes
+// up) and emits an attachMsg for the target — mirroring the transcript ctrl+g
+// path (app.go, ScreenTranscript) minus its transcript-only park/live-SSE work.
+// With nil (nothing needs attention) it stays on the external screen, already
+// disarmed by the caller.
+func (a *App) leaderJump(dashCmd tea.Cmd, target *Session) tea.Cmd {
+	if target == nil {
+		return dashCmd
+	}
+	a.screen = ScreenDashboard
+	sess := *target
+	return tea.Batch(dashCmd, func() tea.Msg { return attachMsg{sess: sess} })
 }
 
 // attachedSessionID returns the id of the session the user is currently attached
