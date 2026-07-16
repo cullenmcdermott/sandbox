@@ -211,7 +211,7 @@ func (p *permPrompt) Render(width int) string {
 	if p.m.pending == nil {
 		return ""
 	}
-	var border color.Color = theme.Gold
+	border := theme.Gold
 	if !p.m.pending.isPlan {
 		// Permission-appear: fade the gold border in from dim over the appear
 		// window (§C.3), softening the mid-stream interruption.
