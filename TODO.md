@@ -215,12 +215,12 @@ all landed (done log) — the items below are what remains.
   screen-router; detach sequence duplicated 4×; recursive
   `a.Update(*msg.ready)` re-entry (`app.go:676,691`); B17 single-delegation
   enforced only by comments. `app.go:368`.
-- [ ] **Explicit input contexts + binding tables (MED).** ~180 lines of raw
-  string-compare if-chains encode key precedence by code order (esc cascade =
-  5 levels); half of Model.handleKey bypasses KeyMap so help/footer can't tell
-  the truth and rebinding is impossible. Fix: context enum + per-context
-  binding table; esc cascade = ordered action list, unit-testable.
-  `transcript.go:1602`, `model.go:1745`.
+- [x] **Explicit input contexts + binding tables — done 2026-07-15** (done
+  log): derived context enums both layers + ordered `boundAction` tables
+  (`inputctx.go` — precedence is data, help text rides the binding); esc
+  cascade = one `escStep` list read by BOTH handleKey and escapeConsumes
+  (closed a real queued-prompt divergence); overlay internals stay as
+  delegate fallbacks. Landed WITH the §2d q/g footer fix + leader chord.
 - [ ] **permissionPrompt component (MED) — base landed 2026-07-13.** The
   numbered-options panel is now a component (`permprompt.go`: options,
   question, pure key grammar, options render) and the §2c redesign shipped on
@@ -384,18 +384,18 @@ there. HIGH items are the at-a-glance tells; most are renderer-local.
 
 - [ ] **No prompt history (MED).** No up-arrow recall of previously sent
   prompts in the composer. `transcript.go:1762` (scrollKey owns ↑/↓).
-- [ ] **`q`/`g` overloads on the dashboard (LOW-MED).** `q` opens the perm
-  queue when any session waits (footer still says quit); lone `g` toggles
-  group view, `gg` = top. Surprising vs advertised bindings.
-  `model.go:1817,1866`. (Fix alongside the §2a input-context tables.)
-- [ ] **External-pane nav keys — DECIDED 2026-07-07: leader-chord,
-  IMPLEMENT with the §2a binding tables.** Reserve NEITHER ctrl+g nor ctrl+k
-  (both keep forwarding to the embedded client, `app.go` ScreenExternal);
-  instead extend the already-reserved detach key into a leader inside
-  external panes: `ctrl+]` then `g`/`k` = next/prev-attention, `ctrl+]`
-  `ctrl+]` (or timeout) = detach as today. One reserved prefix scales to
-  codex and any future backend. (Dashboard-side `NextAttention` binding
-  already landed 2026-07-06.)
+- [x] **`q`/`g` overloads — advertising fixed 2026-07-15** (done log): the
+  footer now derives from the dispatching dctxList table (`shortHelp` →
+  `footerBindings`), so `q` truthfully reads "perm queue" when sessions
+  wait and "quit" otherwise; `g` help reads "group view · gg top" (footer +
+  `?` overlay). Behavior unchanged by design.
+- [x] **External-pane leader chord — done 2026-07-15** (done log): `ctrl+]`
+  arms a leader inside external panes — `g`/`k` = next/prev-attention
+  (minimize pane + attach target), double-tap or 500ms timeout = detach,
+  other keys disarm + forward; pure `leaderStep` classifier + gen-guarded
+  tick; `jumpToPrevNeedingAttention` added. Lone-ctrl+] detach now resolves
+  at the timeout (accepted trade). Live-verify wanted: chord + jumps in a
+  real cluster `opencode attach` pane.
 - [ ] **First-account path — DECIDED 2026-07-07: always enter the account
   stage, IMPLEMENT.** Zero stored accounts currently skips the picker
   entirely (`account_picker.go:123`); change it to always show the stage

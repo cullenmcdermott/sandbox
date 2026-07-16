@@ -1601,3 +1601,55 @@ actionable wording pinned by test). Post-commit `just check` fully green
 - Residuals kept open in §2b item 2: editedInput still never sent; SDK
   canUseTool suggestions (3rd arg) still dropped. §2a component item stays
   open for the full 4-place consolidation (plan variant + permqueue reuse).
+
+## 2026-07-15 — §2a input contexts + binding tables; §2d q/g truthful footer + external-pane leader chord
+
+- **The refactor (§2a):** key dispatch in all three layers is now
+  context-resolved tables instead of ~180 lines of string-compare if-chains.
+  `inputctx.go`: generic `boundAction[M]` (key.Binding + when-gate + run
+  returning handled + footerRank) and `dispatchKey` — precedence is table
+  order, not code order. Contexts are DERIVED from existing state, never
+  stored (`Model.activeContext()`: confirm→help→switcher→permQueue→filter→
+  rename→convert→list; `TranscriptModel.activeSubContext()`: search→
+  permission→palette→normal→compose). The transcript is deliberately NOT a
+  strict stack: its globals (`?`-on-empty, esc, ctrl+], space-collapse,
+  shift+tab, ctrl+f) run before the sub-context, preserving e.g. shift+tab
+  cycling the mode while a permission is pending. Overlay internals
+  (switcherKey/permQueueKey/filter/rename/convert/search/palette/normalKey/
+  permissionKey) stay as delegate fallbacks — contexts were the win, not
+  exploding working components.
+- **Esc cascade single-encoded:** `escStep` list in modes.go (search →
+  palette → steer → interrupt → driver → vim-insert); `escapeConsumes()` =
+  showHelp || any applies; the esc handler runs the first applicable step.
+  This closed a REAL divergence: a queued prompt with no active turn was
+  invisible to escapeConsumes and patched around at the App layer — the
+  steer step now covers it (the App's queuedPrompt guard remains only for
+  the ctrl+] leg, which steers rather than detaches). Pins: cascade order by
+  name, first-applicable-only (search open + turn active ⇒ no interrupt),
+  escapeConsumes⇔cascade equivalence table, steer-after-turn-ended.
+- **Truthful footer (§2d q/g):** `KeyMap.ShortHelp()` deleted; the footer
+  renders from the SAME dctxList table that dispatches
+  (`Model.shortHelp()` → `footerBindings`, rank-ordered Up/Down/Attach/
+  Filter/New/Help/{q-perm-queue|Quit} — the rank-7 slot flips on
+  `permQueueItems()` with complementary when-gates, so advertising can't
+  lie). `?` overlay: GroupToggle now reads "group view · gg top"; new
+  PermQueue row. Goldens byte-identical (fixture queue is empty).
+- **External-pane ctrl+] leader chord (§2d, decided 2026-07-07):** pure
+  `leaderStep(armed,key)` classifier (leader.go, table-tested) + gen-guarded
+  500ms `tea.Tick` timeout in the App. ctrl+]/ctrl+4 arms (swallowed, never
+  forwarded); double-tap or timeout = detach (pane minimized, child kept);
+  `g`/`k` = jump next/prev session needing attention (minimize + attachMsg,
+  mirroring transcript ctrl+g minus its park/SSE work); any other key
+  disarms + forwards. `jumpToPrevNeedingAttention` added via a
+  direction-parameterized `jumpNeedingAttention(dir)` core (§1b row-model
+  comments intact). UX break accepted per the decision: a lone ctrl+] now
+  detaches after 500ms, not instantly — the real-PTY test
+  (`TestAppExternalPaneEscIsForwardedNotDetached`) was updated to pin the
+  new contract (arm-then-detach), the one deliberate test change of the
+  batch.
+- Verified: `just check` fully green (incl. the real-opencode PTY test,
+  race-twice, e2e); goldens untouched. NOT yet live-verified: the leader
+  chord + attention jumps inside a real cluster `opencode attach` pane
+  (maintainer eyeball at next natural use).
+- STILL OPEN (§2a): App.Update flat dispatch; permissionPrompt 4-place
+  consolidation; the deferred clock-injection sweep items.
