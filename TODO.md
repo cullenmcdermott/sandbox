@@ -211,10 +211,12 @@ all landed (done log) — the items below are what remains.
   `[]listRow` from `visibleRows()`; cursor indexes it; `sessionAt(cursor)`
   is the single accessor for render/nav/actions/attention routing.
   `visibleSessions()` remains the flat data source only.
-- [ ] **App.Update flat dispatch + one detachTranscript() (MED).** 450-line
-  screen-router; detach sequence duplicated 4×; recursive
-  `a.Update(*msg.ready)` re-entry (`app.go:676,691`); B17 single-delegation
-  enforced only by comments. `app.go:368`.
+- [x] **App.Update flat dispatch + one detachTranscript() — done 2026-07-15**
+  (done log): Update is a ~158-line flat router of named `handle*` methods;
+  the 4 detach sites share `detachTranscript()`; the recursive
+  `a.Update(*msg.ready/failed)` re-entry replaced by direct
+  `handleAttachReady/Failed` calls (verified equivalent); `delegateDashboard`
+  is the single B17 call site; per-screen tails extracted.
 - [x] **Explicit input contexts + binding tables — done 2026-07-15** (done
   log): derived context enums both layers + ordered `boundAction` tables
   (`inputctx.go` — precedence is data, help text rides the binding); esc
@@ -258,12 +260,12 @@ changes go through `schema/events.json` + `just gen` (never hand-edit `*.gen.*`)
   `editedInput` (runner validates it; TUI never sends an edited input) and
   SDK `canUseTool` suggestions (3rd arg still dropped — `claude.ts` two-arg
   callback; no PermissionPayload field; would inform richer option rows).
-- [ ] **3. Thinking invisible until complete.** `reasoning.delta` streams fine;
-  TUI buffers silently, flushes only on completed (`transcript.go:2445-2468`)
-  — long thinks show a bare spinner where Claude Code streams live.
-  Renderer-only: mirror the streamAI live path (`:2284-2306`); make blocks
-  expandable. (Folds in the earlier "multi-line reasoning unrecoverable" item;
-  target presentation in §2c.)
+- [x] **3. Thinking streaming + recoverable blocks — CLOSED 2026-07-15**
+  (done log): the live-streaming half had already landed with the §1a/§2a
+  cluster (live "∴ Thinking" tail; this item was stale — doc drift); the
+  remaining half (multi-line thinks unrecoverable after commit) closed with
+  the §2c thinking render: capped italic body + ctrl+o expansion, same
+  6-line shape live and committed.
 - [ ] **5. Background tasks / tool progress dropped.** `tool_progress` ignored
   (`mapping.ts:81-85`), no progress/notification event type — background Bash
   + async completion (signature Claude Code features) unrepresentable. Fix:
@@ -373,9 +375,12 @@ there. HIGH items are the at-a-glance tells; most are renderer-local.
   pending = ○ dim; attach under the TodoWrite card, drop the standalone
   `▤ todo list` header; updates should mutate one pinned widget, not append
   blocks (§2b pipeline note). `transcript.go:1094`.
-- [ ] **Thinking: italic dim body, same shape streaming and completed (LOW).**
-  Target render for §2b gap 3: `Thinking…` label + italic TextMuted body,
-  ~6-line cap + `… +N lines (ctrl+o)`. `transcript.go:1076`.
+- [x] **Thinking render — done 2026-07-15** (done log): committed multi-line
+  thinks show `∴ Thought` + italic TextMuted body capped at 6 wrapped lines
+  + `… +N lines (ctrl+o)`; live tail shows the same 6-line window
+  (tail-following, `… +N earlier lines`); ctrl+o generalized to
+  `toggleLatestExpandable` (tool cards + capped thinks). Single-line thinks
+  unchanged; goldens unchanged (none carry multi-line thinks).
 - [ ] **Transient scrollbar (LOW).** Permanent bright thumb is constant
   peripheral noise; show only when off-bottom (+ dim `↓ new output · G bottom`
   pill during live turns). `transcript_list.go:297`.

@@ -1653,3 +1653,38 @@ actionable wording pinned by test). Post-commit `just check` fully green
   (maintainer eyeball at next natural use).
 - STILL OPEN (§2a): App.Update flat dispatch; permissionPrompt 4-place
   consolidation; the deferred clock-injection sweep items.
+
+## 2026-07-15 — §2a App.Update flat dispatch + §2c thinking render (closes §2b gap 3)
+
+- **App.Update flat dispatch (§2a, the last structural enabler):** pure
+  refactor of app.go — Update is now a ~158-line flat router (type-switch of
+  one-line dispatches to named `handle*` methods → attachedID mirror →
+  `delegateDashboard` → OSC/sync mirrors → per-screen switch). The 4
+  duplicated detach sites (detachMsg, transcript detach keys, ctrl+g jump,
+  ctrl+k switcher) share one `detachTranscript()` (park B3 → SSE restore B2
+  → release §1d C1; callers keep their own screen flips). The recursive
+  `a.Update(*msg.ready/failed)` re-entry in connectUpdateMsg replaced by
+  direct `handleAttachReady/Failed` calls — verified equivalent because both
+  original case arms returned before the delegation preamble. B17 is now
+  structural: `delegateDashboard` is the only `a.dashboard.Update` call site
+  (grep-pinned: 1 occurrence, 0 `a.Update(` self-calls). Per-screen tails
+  extracted (`updateTranscriptScreen`/`updateExternalScreen`). Zero behavior
+  change; no test or golden modified.
+- **Thinking render (§2c; closes §2b gap 3):** the gap-3 live-streaming half
+  had ALREADY landed with the §1a/§2a cluster commits (reducer streams
+  reasoning.delta into a live "∴ Thinking" tail — the TODO entry was stale
+  doc drift). The remaining half — a committed multi-line think collapsed to
+  a one-line summary, full text unrecoverable — closed now: committed render
+  = `∴ Thought` label + italic TextMuted body wrapped at assistantWrapWidth,
+  capped at `reasoningCapLines` (6) with a dim `… +N lines (ctrl+o)` trailer;
+  expanded shows all. Live tail capped to the same 6-line window
+  (tail-following, `… +N earlier lines` marker; slices wrapLiveReasoning's
+  OUTPUT — the E6 prefix cache untouched). ctrl+o generalized:
+  `toggleLatestToolCard` → `toggleLatestExpandable` (backward walk hits tool
+  cards AND capped thinks; the wrap-aware `reasoningExpandable` gate shares
+  `reasoningWrappedLines` with the render so gate and trailer can't
+  disagree; H7 no-silent-strand semantics preserved). Single-line thinks
+  render unchanged; width parity live/committed verified (both
+  assistantWrapWidth + italic TextMuted). Goldens unchanged — none carry a
+  multi-line think; 6 new render/toggle tests + live-cap test.
+- Verified: `just check` fully green after both changes together.
