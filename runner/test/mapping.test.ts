@@ -287,6 +287,67 @@ test('user tool_result carries the schema-required tool name via streamTools (D8
   assert.equal(failed!.payload.tool, 'Bash');
 });
 
+// ORACLE: a Bash exit code recorded in streamTools.exitCodes by the PostToolUse
+// hook rides the matching tool.completed, and the map entry is consumed (deleted)
+// so it can't leak onto a later tool_result reusing the id.
+test('user tool_result carries the recorded Bash exitCode and consumes it', () => {
+  const { events, emit } = collector();
+  const streamTools = newStreamToolIndex();
+  streamTools.exitCodes.set('toolu_ec', 0);
+  mapMessage(
+    asMsg({
+      type: 'user',
+      message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_ec', content: 'ok' }] },
+    }),
+    emit,
+    streamTools,
+  );
+  const completed = events.filter((e) => e.type === 'tool.completed');
+  assert.equal(completed.length, 1, 'exactly one tool.completed');
+  assert.equal(completed[0].payload.exitCode, 0, 'exitCode 0 rides the event');
+  assert.equal(streamTools.exitCodes.has('toolu_ec'), false, 'map entry consumed');
+});
+
+// ORACLE: with no recorded exit code, tool.completed omits the exitCode key
+// entirely (matches the optional-field omit style — never a null/undefined key).
+test('user tool_result without a recorded exitCode omits the field', () => {
+  const { events, emit } = collector();
+  const streamTools = newStreamToolIndex();
+  mapMessage(
+    asMsg({
+      type: 'user',
+      message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_none', content: 'ok' }] },
+    }),
+    emit,
+    streamTools,
+  );
+  const completed = events.find((e) => e.type === 'tool.completed');
+  assert.ok(completed, 'expected a tool.completed');
+  assert.equal('exitCode' in completed!.payload, false, 'no exitCode key when none recorded');
+});
+
+// ORACLE: an is_error tool_result with a recorded non-zero exit code carries it
+// on tool.failed (a failed Bash command reports its code the same way).
+test('user tool_result (error) carries the recorded Bash exitCode', () => {
+  const { events, emit } = collector();
+  const streamTools = newStreamToolIndex();
+  streamTools.exitCodes.set('toolu_fail', 127);
+  mapMessage(
+    asMsg({
+      type: 'user',
+      message: {
+        content: [{ type: 'tool_result', tool_use_id: 'toolu_fail', content: 'not found', is_error: true }],
+      },
+    }),
+    emit,
+    streamTools,
+  );
+  const failed = events.find((e) => e.type === 'tool.failed');
+  assert.ok(failed, 'expected a tool.failed');
+  assert.equal(failed!.payload.exitCode, 127);
+  assert.equal(streamTools.exitCodes.has('toolu_fail'), false, 'map entry consumed');
+});
+
 // ORACLE (D8): the streaming content_block_start(tool_use) also populates the
 // id→name map, so tool.delta — which schema-requires `tool` but only knows the
 // block index — carries the tool name too.

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/cullenmcdermott/sandbox/internal/session"
@@ -32,7 +33,7 @@ func (m *TranscriptModel) appendBlock(kind tblockKind, text string) {
 // startToolCard appends a running tool card and queues it for result matching.
 func (m *TranscriptModel) startToolCard(tool, arg string) {
 	card := m.newBlockCard(blockToolCard, "")
-	card.tool = &toolCard{tool: tool, arg: arg, status: toolRunning, card: card}
+	card.tool = &toolCard{tool: tool, arg: arg, status: toolRunning, startedAt: nowFunc(), card: card}
 	m.blocks = append(m.blocks, card)
 	m.pendingTools = append(m.pendingTools, len(m.blocks)-1)
 	m.syncItems()
@@ -88,7 +89,7 @@ func (m *TranscriptModel) startOrUpdateToolCard(p session.ToolPayload) {
 // id is present (the PreToolUse-hook synthetic tool.failed in claude.ts omits
 // it, as do pre-toolUseId runners) do we fall back to matching in start order;
 // toolName (if present, e.g. on failure) is a label fallback for the orphan case.
-func (m *TranscriptModel) finishToolCard(status toolStatus, summary, toolName, output, toolUseID string) {
+func (m *TranscriptModel) finishToolCard(status toolStatus, summary, toolName, output, toolUseID string, exitCode *int) {
 	// Remap any ANSI the tool emitted in its result onto the theme palette (§A.2).
 	summary = kit.RemapANSI(summary)
 	if toolUseID != "" {
@@ -97,6 +98,7 @@ func (m *TranscriptModel) finishToolCard(status toolStatus, summary, toolName, o
 			m.blocks[idx].tool.status = status
 			m.blocks[idx].tool.summary = summary
 			m.blocks[idx].tool.output = output
+			m.blocks[idx].tool.exitCode = exitCode
 			m.blocks[idx].Bump()
 			m.syncItems()
 			return
@@ -109,6 +111,7 @@ func (m *TranscriptModel) finishToolCard(status toolStatus, summary, toolName, o
 			m.blocks[idx].tool.status = status
 			m.blocks[idx].tool.summary = summary
 			m.blocks[idx].tool.output = output
+			m.blocks[idx].tool.exitCode = exitCode
 			m.blocks[idx].Bump()
 			m.syncItems()
 			return
@@ -116,9 +119,55 @@ func (m *TranscriptModel) finishToolCard(status toolStatus, summary, toolName, o
 	}
 	// Orphan result (no matching start): render a standalone finished card.
 	card := m.newBlockCard(blockToolCard, "")
-	card.tool = &toolCard{tool: toolName, status: status, summary: summary, output: output, card: card}
+	card.tool = &toolCard{tool: toolName, status: status, summary: summary, output: output, exitCode: exitCode, card: card}
 	m.blocks = append(m.blocks, card)
 	m.syncItems()
+}
+
+// applyToolProgress re-anchors a running card's elapsed clock from a
+// tool.progress heartbeat. The server-reported elapsedSeconds wins over the
+// local create-time anchor: on an attach/replay the local startedAt is the
+// attach time, not the tool's real start, so we back-date startedAt to
+// evTime - elapsed. Anchoring from the event's recorded time (not nowFunc())
+// makes replayed heartbeats correct after re-attach — otherwise a tool that has
+// been running 10m would show 30s because "now" is the attach instant. The
+// deliberate trade-off is that live display now includes pod↔host clock skew,
+// negligible on NTP-synced machines and strictly better than the detach-duration
+// error it replaces. If evTime is empty or unparseable we fall back to nowFunc().
+// A progress event with no elapsed or no toolUseId is ignored (nothing to anchor
+// on). A late heartbeat targeting an already-completed card is a no-op — flatTools
+// entries persist after completion, so we re-anchor only while the card is still
+// running. Child-tool progress is deliberately dropped — like the D6
+// parented-delta decision, we keep the render surface minimal and don't surface
+// an elapsed clock on nested child lines.
+func (m *TranscriptModel) applyToolProgress(p session.ToolPayload, evTime string) {
+	if p.ElapsedSeconds == nil || p.ToolUseID == "" {
+		return
+	}
+	base := nowFunc()
+	if parsed, err := time.Parse(time.RFC3339, evTime); err == nil {
+		base = parsed
+	}
+	anchor := base.Add(-time.Duration(*p.ElapsedSeconds * float64(time.Second)))
+	if idx, ok := m.flatTools[p.ToolUseID]; ok && idx >= 0 && idx < len(m.blocks) && m.blocks[idx].tool != nil {
+		if m.blocks[idx].tool.status != toolRunning {
+			return
+		}
+		m.blocks[idx].tool.startedAt = anchor
+		m.blocks[idx].Bump()
+		m.syncItems()
+		return
+	}
+	if sub := m.subagents[p.ToolUseID]; sub != nil {
+		if sub.status != toolRunning {
+			return
+		}
+		sub.startedAt = anchor
+		sub.card.Bump()
+		m.syncItems()
+		return
+	}
+	// Unknown or child id — drop silently (see the doc comment above).
 }
 
 // removePending drops a block index from the pendingTools FIFO wherever it sits,
@@ -557,11 +606,16 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 			m.startOrUpdateToolCard(p)
 		}
 
+	case session.EventToolProgress:
+		var p session.ToolPayload
+		_ = json.Unmarshal(ev.Payload, &p)
+		m.applyToolProgress(p, ev.Time)
+
 	case session.EventToolCompleted:
 		var p session.ToolPayload
 		_ = json.Unmarshal(ev.Payload, &p)
 		if !m.finishNested(p, toolOK, toolSummary(p.Output)) {
-			m.finishToolCard(toolOK, toolSummary(p.Output), p.Tool, p.Output, p.ToolUseID)
+			m.finishToolCard(toolOK, toolSummary(p.Output), p.Tool, p.Output, p.ToolUseID, p.ExitCode)
 		}
 
 	case session.EventToolFailed:
@@ -576,7 +630,7 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 			summary = toolSummary(p.Output)
 		}
 		if !m.finishNested(p, toolErr, summary) {
-			m.finishToolCard(toolErr, summary, p.Tool, p.Output, p.ToolUseID)
+			m.finishToolCard(toolErr, summary, p.Tool, p.Output, p.ToolUseID, p.ExitCode)
 		}
 
 	case session.EventPermissionRequested:

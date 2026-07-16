@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"charm.land/lipgloss/v2"
@@ -35,6 +36,10 @@ type subagentCard struct {
 	// main transcript.
 	narrationBuf strings.Builder
 	narration    string
+	// startedAt anchors the live elapsed clock on the running Task header. Set at
+	// create, re-anchored from the server-reported elapsed on each tool.progress
+	// (see the toolCard.startedAt note; matters after attach/replay).
+	startedAt time.Time
 	// card is the list card that renders this subagent (the Task header + its child
 	// tree). Mutating the subagent (a new child, a status change, collapse) bumps
 	// card's version so the list re-renders.
@@ -52,6 +57,7 @@ func (m *TranscriptModel) startSubagent(p session.ToolPayload) {
 		agentName: p.AgentName,
 		prompt:    taskPrompt(p.Input),
 		status:    toolRunning,
+		startedAt: nowFunc(),
 	}
 	if m.subagents == nil {
 		m.subagents = map[string]*subagentCard{}
@@ -260,6 +266,14 @@ func (m *TranscriptModel) renderSubagentCard(sub *subagentCard, width int) strin
 
 	switch sub.status {
 	case toolRunning:
+		// Live elapsed while the Task runs, appended in the header's "  · " metadata
+		// idiom (elapsedClockMin threshold). The header re-renders every workTick
+		// via bumpRunningCards so the clock ticks smoothly.
+		if !sub.startedAt.IsZero() {
+			if d := nowFunc().Sub(sub.startedAt); d >= elapsedClockMin {
+				header += lipgloss.NewStyle().Foreground(theme.TextMuted).Render(" · " + fmtElapsed(d))
+			}
+		}
 		header += " " + theme.SpinnerFrame(m.workFrame)
 	case toolOK:
 		header += " " + lipgloss.NewStyle().Foreground(theme.Guac).Render("✓")

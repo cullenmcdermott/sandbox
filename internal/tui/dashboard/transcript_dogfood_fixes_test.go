@@ -81,7 +81,7 @@ func TestInputRowsSoftWrap(t *testing.T) {
 func TestCtrlOExpandsWithDraft(t *testing.T) {
 	m := toolCardTM(t)
 	m.startToolCard("Bash", "make")
-	m.finishToolCard(toolOK, "3 lines", "Bash", "one\ntwo\nthree", "")
+	m.finishToolCard(toolOK, "3 lines", "Bash", "one\ntwo\nthree", "", nil)
 	card := m.blocks[len(m.blocks)-1]
 	m.input.SetValue("a draft prompt")
 
@@ -102,7 +102,7 @@ func TestCtrlOExpandsWithDraft(t *testing.T) {
 func TestCtrlONoExpandableIsNoop(t *testing.T) {
 	m := toolCardTM(t)
 	m.startToolCard("Bash", "true")
-	m.finishToolCard(toolOK, "done", "Bash", "", "") // content-less: nothing to expand
+	m.finishToolCard(toolOK, "done", "Bash", "", "", nil) // content-less: nothing to expand
 	card := m.blocks[len(m.blocks)-1]
 
 	_, cmd := m.handleKey(keyMsg("ctrl+o"))
@@ -123,7 +123,7 @@ func TestCtrlEComposesInEditor(t *testing.T) {
 	for _, draft := range []string{"", "some draft"} {
 		m := toolCardTM(t)
 		m.startToolCard("Bash", "make")
-		m.finishToolCard(toolOK, "3 lines", "Bash", "one\ntwo\nthree", "")
+		m.finishToolCard(toolOK, "3 lines", "Bash", "one\ntwo\nthree", "", nil)
 		card := m.blocks[len(m.blocks)-1]
 		m.input.SetValue(draft)
 

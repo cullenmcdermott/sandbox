@@ -359,6 +359,11 @@ events it is ephemeral: the runner compacts `tool.progress` rows of turns older
 than the most recent N (`DELTA_COMPACT_KEEP_TURNS`) once a turn completes, so a
 full replay reconstructs the transcript without the intra-turn heartbeat tail.
 
+The `tool.completed` / `tool.failed` events carry an optional `exitCode`
+(`ToolPayload.exitCode`), populated for Bash tool completions from the exit code
+the PostToolUse hook observes; it is absent for non-Bash tools (and whenever no
+code was recorded).
+
 The `todo.updated` event surfaces the agent's plan/checklist. Payload:
 `{ todos: [{ content, status, activeForm }] }`, where `status` is one of
 `pending` | `in_progress` | `completed`. The runner emits it when the SDK uses

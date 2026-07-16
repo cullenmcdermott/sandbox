@@ -97,7 +97,7 @@ func TestToolCardBulletTone(t *testing.T) {
 func TestToolCardExpandToggle(t *testing.T) {
 	m := toolCardTM(t)
 	m.startToolCard("Bash", "echo hi")
-	m.finishToolCard(toolOK, "3 lines", "Bash", "one\ntwo\nthree", "")
+	m.finishToolCard(toolOK, "3 lines", "Bash", "one\ntwo\nthree", "", nil)
 
 	last := m.blocks[len(m.blocks)-1]
 	if last.kind != blockToolCard || last.tool == nil {
@@ -224,11 +224,11 @@ func TestExpandedOutputTabsExpanded(t *testing.T) {
 func TestToggleSkipsInexpandableCards(t *testing.T) {
 	m := toolCardTM(t)
 	m.startToolCard("Bash", "make")
-	m.finishToolCard(toolOK, "3 lines", "Bash", "one\ntwo\nthree", "")
+	m.finishToolCard(toolOK, "3 lines", "Bash", "one\ntwo\nthree", "", nil)
 	expandable := m.blocks[len(m.blocks)-1]
 	// A newer card with nothing to reveal: no output, no diff, arg fits in full.
 	m.startToolCard("Bash", "true")
-	m.finishToolCard(toolOK, "done", "Bash", "", "")
+	m.finishToolCard(toolOK, "done", "Bash", "", "", nil)
 	bare := m.blocks[len(m.blocks)-1]
 
 	if !m.toggleLatestExpandable() {
@@ -253,7 +253,7 @@ func TestToggleSkipsInexpandableCards(t *testing.T) {
 func TestToggleNoExpandableCardFallsThrough(t *testing.T) {
 	m := toolCardTM(t)
 	m.startToolCard("Bash", "true")
-	m.finishToolCard(toolOK, "done", "Bash", "", "")
+	m.finishToolCard(toolOK, "done", "Bash", "", "", nil)
 	if m.toggleLatestExpandable() {
 		t.Error("toggle claimed a card with nothing to expand")
 	}

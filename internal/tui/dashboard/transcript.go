@@ -79,6 +79,15 @@ type toolCard struct {
 	status         toolStatus
 	summary        string
 	output         string // captured (runner-capped) tool output, revealed on ctrl+o expansion
+	// startedAt anchors the live elapsed clock shown on a RUNNING card. Set to
+	// nowFunc() at create, then re-anchored from the server-reported elapsed on
+	// each tool.progress (so it stays correct after an attach/replay, where the
+	// local create time is the attach time, not the tool's real start). Zero when
+	// unknown (e.g. an orphan card built from a bare completion).
+	startedAt time.Time
+	// exitCode is the Bash exit code carried on tool.completed/tool.failed, shown
+	// as "exit N" on the elbow. nil for non-Bash tools or runners that omit it.
+	exitCode *int
 	// expanded is the ctrl+o expansion state: when set the card renders its
 	// available content (arg / edit diff / captured output) under the elbow.
 	expanded bool
@@ -739,9 +748,9 @@ func (m *TranscriptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case workTickMsg:
 		m.workFrame++
-		// Re-render only the in-flight subagent cards, so their header/child
-		// spinner animates without forcing a re-render for flat cards.
-		if m.bumpRunningSubagents() {
+		// Re-render the in-flight cards whose display animates on the tick: subagent
+		// header/child spinners and flat running cards' live elapsed clock.
+		if m.bumpRunningCards() {
 			m.syncItems()
 		}
 		// Keep the 150ms work-tick loop running only while a turn is genuinely

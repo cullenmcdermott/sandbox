@@ -132,7 +132,7 @@ func TestToggleLatestExpandableReasoning(t *testing.T) {
 		m := reasoningModel(t)
 		think := appendReasoning(m, eightLineThink)
 		m.startToolCard("Bash", "echo hi")
-		m.finishToolCard(toolOK, "3 lines", "Bash", "one\ntwo\nthree", "")
+		m.finishToolCard(toolOK, "3 lines", "Bash", "one\ntwo\nthree", "", nil)
 		card := m.blocks[len(m.blocks)-1]
 
 		if !m.toggleLatestExpandable() {

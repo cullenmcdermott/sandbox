@@ -314,23 +314,28 @@ func (m *TranscriptModel) streamDelta() {
 	}
 }
 
-// bumpRunningSubagents re-renders every in-flight subagent card (its header/child
-// spinner animates on the work tick). Flat running tool cards use a static marker,
-// so they are deliberately excluded — they must not force a re-render each tick.
-// Returns whether any card was bumped.
-func (m *TranscriptModel) bumpRunningSubagents() bool {
+// bumpRunningCards re-renders every in-flight card whose display animates on the
+// work tick: subagent cards (header/child spinner) and flat running tool cards
+// (which now carry a live elapsed clock, so they re-render on the tick too). A
+// flat card with a zero startedAt anchor has no clock to advance, so it stays
+// excluded. Returns whether any card was bumped.
+func (m *TranscriptModel) bumpRunningCards() bool {
 	bumped := false
 	for _, b := range m.blocks {
-		if b.kind != blockSubagent || b.sub == nil {
-			continue
-		}
-		running := b.sub.status == toolRunning
-		for _, c := range b.sub.children {
-			if c.status == toolRunning {
-				running = true
+		switch {
+		case b.kind == blockSubagent && b.sub != nil:
+			running := b.sub.status == toolRunning
+			for _, c := range b.sub.children {
+				if c.status == toolRunning {
+					running = true
+				}
 			}
-		}
-		if running {
+			if running {
+				b.Bump()
+				bumped = true
+			}
+		case b.kind == blockToolCard && b.tool != nil &&
+			b.tool.status == toolRunning && !b.tool.startedAt.IsZero():
 			b.Bump()
 			bumped = true
 		}

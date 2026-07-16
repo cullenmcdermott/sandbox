@@ -80,15 +80,22 @@ export function capToolOutput(s: string): string {
  *     emitters recover it. Populated at every tool_use content_block_start AND
  *     full-message tool_use, both of which precede the tool_result, so the name is
  *     available whether or not partial-message streaming is on.
+ *
+ *   exitCodes — per-attempt tool_use_id → Bash exit code recorded by the
+ *     PostToolUse hook (claude.ts), consumed (and deleted) when the tool_result
+ *     maps to tool.completed/tool.failed. Ordering assumption: PostToolUse
+ *     resolves before the SDK yields the tool_result user message; if it ever
+ *     didn't, the field is optional and simply absent — degrade, never block.
  */
 export interface StreamToolIndex {
   byIndex: Map<string, string>;
   names: Map<string, string>;
+  exitCodes: Map<string, number>;
 }
 
 /** Fresh per-turn StreamToolIndex (block indexes + ids restart with each query()). */
 export function newStreamToolIndex(): StreamToolIndex {
-  return { byIndex: new Map(), names: new Map() };
+  return { byIndex: new Map(), names: new Map(), exitCodes: new Map() };
 }
 
 function streamToolKey(parentToolUseId: string | undefined, index: number): string {
@@ -304,6 +311,14 @@ function handleUserMessage(
       // D8: a tool_result carries only tool_use_id, but ToolPayload.tool is
       // schema-required — recover the name captured on the matching tool.started.
       const tool = toolNameFor(streamTools, block.tool_use_id);
+      // The Bash exit code the PostToolUse hook recorded for this tool_use_id;
+      // consume-and-delete so it rides exactly one terminal event. Omit the
+      // field entirely when absent (no code recorded, or a non-Bash tool).
+      let exitCode: number | undefined;
+      if (block.tool_use_id !== undefined) {
+        exitCode = streamTools?.exitCodes.get(block.tool_use_id);
+        if (exitCode !== undefined) streamTools?.exitCodes.delete(block.tool_use_id);
+      }
       if (block.is_error) {
         // Populate `error` (not just `output`) so the documented
         // ToolPayload.Error field carries the failure reason. A consumer that
@@ -315,6 +330,7 @@ function handleUserMessage(
           error: outputStr,
           toolUseId: block.tool_use_id,
           parentToolUseId,
+          ...(exitCode !== undefined ? { exitCode } : {}),
         });
       } else {
         emit('tool.completed', {
@@ -322,6 +338,7 @@ function handleUserMessage(
           output: outputStr,
           toolUseId: block.tool_use_id,
           parentToolUseId,
+          ...(exitCode !== undefined ? { exitCode } : {}),
         });
       }
     }

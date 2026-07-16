@@ -747,6 +747,11 @@ const (
 	elbowChromeW = 5
 )
 
+// elapsedClockMin is the minimum running duration before a live elapsed clock is
+// shown on a tool/subagent card. The threshold keeps fast tools (and the
+// fixed-clock goldens, which see 0s) on the bare word rather than "(0s)".
+const elapsedClockMin = 2 * time.Second
+
 // toolBulletColor maps a tool card's status to its ⏺ head-bullet color via theme
 // tokens (running=Malibu, ok=Guac, error=Coral), so a /theme swap re-skins it.
 func toolBulletColor(s toolStatus) color.Color {
@@ -765,7 +770,10 @@ func toolBulletColor(s toolStatus) color.Color {
 //	⏺ Bash(npm test)
 //	  ⎿  exit 0 · 42 lines (ctrl+o to expand)
 //
-// The head bullet is colored by status; the elbow shows the result summary (plus
+// A completed Bash card prefixes the elbow with its exit code ("exit N · …");
+// a running card shows a live elapsed clock once it has run ~2s
+// ("running… (12s)"). The head bullet is colored by status; the elbow shows the
+// result summary (plus
 // a dim ctrl+o hint when collapsed content exists), and when expanded the card
 // reveals its available content (arg / edit diff / captured output). Every line
 // is budgeted from the measured remaining width (ANSI-aware) and truncated as a
@@ -799,10 +807,29 @@ func (m *TranscriptModel) renderToolCard(c *toolCard, width int) string {
 
 	// Line 2 — elbow: "  ⎿  <result> (ctrl+o hint)".
 	elbowText := c.summary
-	if elbowText == "" {
+	switch {
+	case c.status == toolRunning && elbowText == "":
+		// Live elapsed on a running card, but only once it has been running
+		// elapsedClockMin. The clock ticks off each tool.progress heartbeat
+		// (applyToolProgress re-anchors startedAt) and every workTick
+		// (bumpRunningCards re-renders the card).
+		elbowText = "running…"
+		if !c.startedAt.IsZero() {
+			if d := nowFunc().Sub(c.startedAt); d >= elapsedClockMin {
+				elbowText = "running… (" + fmtElapsed(d) + ")"
+			}
+		}
+	case c.exitCode != nil:
+		// Bash exit code on a completed/failed card: "exit N · <summary>" (or just
+		// "exit N" when there is no summary). Status coloring below is unchanged.
+		ec := fmt.Sprintf("exit %d", *c.exitCode)
+		if elbowText != "" {
+			elbowText = ec + " · " + elbowText
+		} else {
+			elbowText = ec
+		}
+	case elbowText == "":
 		switch c.status {
-		case toolRunning:
-			elbowText = "running…"
 		case toolErr:
 			elbowText = "failed"
 		default:

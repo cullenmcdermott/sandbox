@@ -299,6 +299,11 @@ export function buildOptions(
   model: string | undefined,
   effort: string | undefined,
   abort: AbortController,
+  // Per-turn tool_use_id → Bash exit code map (mapping.ts StreamToolIndex),
+  // handed to the PostToolUse audit hook so the exit code it observes rides the
+  // mapper's tool.completed/tool.failed. Optional + last so existing callers and
+  // tests compile unchanged; when omitted the hook just records nothing extra.
+  exitCodes?: Map<string, number>,
 ): Options {
   const reg = getRegistry();
   const sessionId = reg.state.sandbox_session_id;
@@ -359,7 +364,7 @@ export function buildOptions(
       PostToolUse: [
         {
           matcher: 'Edit|Write|Bash',
-          hooks: [makePostToolUseAuditHook(sessionId, turnId)],
+          hooks: [makePostToolUseAuditHook(sessionId, turnId, exitCodes)],
         },
       ],
       SessionEnd: [
@@ -453,9 +458,16 @@ export function makePreToolUseBashHook(
     return { continue: true };
   };
 }
+// makePostToolUseAuditHook builds the SDK PostToolUse(Edit|Write|Bash) hook. It
+// writes the audit row and — for Bash — records the tool's exit code into the
+// per-turn `exitCodes` map (keyed by tool_use_id) so the mapper can carry it onto
+// the matching tool.completed/tool.failed event (the event model otherwise loses
+// the code, which reaches only the audit log). The mapping-level tests pin that a
+// recorded code rides the terminal event and an absent one omits the field.
 function makePostToolUseAuditHook(
   sessionId: string,
   turnId: string,
+  exitCodes?: Map<string, number>,
 ): HookCallback {
   return async (input: HookInput): Promise<SyncHookJSONOutput> => {
     if (input.hook_event_name !== 'PostToolUse') return { continue: true };
@@ -465,6 +477,12 @@ function makePostToolUseAuditHook(
       // Bash tool_response is { stdout, stderr, exitCode, interrupted }.
       const resp = input.tool_response as { exitCode?: number; interrupted?: boolean } | undefined;
       exitCode = resp?.exitCode;
+      // Stash it for the mapper to attach to tool.completed/tool.failed. Only for
+      // Bash and only when the response actually carried a numeric code; a
+      // tool_use_id is required to key it (the SDK always supplies one).
+      if (exitCodes && typeof exitCode === 'number' && input.tool_use_id) {
+        exitCodes.set(input.tool_use_id, exitCode);
+      }
     }
     appendAudit({
       time: new Date().toISOString(),
@@ -707,12 +725,25 @@ export async function runTurn(
 
   try {
     for (;;) {
-      const options = buildOptions(cfg, turnId, clientResume, allowedToolsOverride, mode, model, effort, abort);
+      // Per-attempt content-block→tool_use-id attribution for tool.delta (D6);
+      // fresh per query() because block indexes restart with the stream. Created
+      // BEFORE buildOptions so its exitCodes map can be handed to the PostToolUse
+      // hook — the hook records each Bash tool's exit code there and the mapper
+      // attaches it to the matching tool.completed/tool.failed.
+      const streamTools: StreamToolIndex = newStreamToolIndex();
+      const options = buildOptions(
+        cfg,
+        turnId,
+        clientResume,
+        allowedToolsOverride,
+        mode,
+        model,
+        effort,
+        abort,
+        streamTools.exitCodes,
+      );
       const usedResume = options.resume;
       const q: Query = query({ prompt, options });
-      // Per-attempt content-block→tool_use-id attribution for tool.delta (D6);
-      // fresh per query() because block indexes restart with the stream.
-      const streamTools: StreamToolIndex = newStreamToolIndex();
       let rateLimitsFetched = false;
       let modelsFetched = false;
       let staleResume = false;
