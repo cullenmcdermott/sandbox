@@ -57,6 +57,27 @@ done log.)
   Nix is the preferred install mechanism everywhere in the chain. Triage
   alongside the §7b sign-off.*
 
+### 0a. Live-dogfood reports (maintainer screenshot, 2026-07-15) — fixes in flight
+
+* **User prompt lines don't wrap** — `renderBlockBody` blockUser renders
+  `styleTUser.Render(b.text)` with NO width (`transcript_render.go:500`);
+  assistant blocks wrap at `assistantWrapWidth`. Long prompts clip at the
+  frame edge. Fix: wrap at assistantWrapWidth before `quotePrefix`.
+* **Composer doesn't grow on soft wrap** — `inputRows()` uses
+  `textarea.LineCount()` (= logical lines only, verified in bubbles v2.1.1);
+  soft-wrapped text scrolls inside one row until a hard shift+enter. Fix:
+  wrap-aware row count (sum per-line ceil(width/inner)), still capped at
+  maxInputRows.
+* **ctrl+o hint vs $EDITOR surprise** — tool-card hint says "ctrl+o to
+  expand" but with a draft (and on the empty+no-expandable fallthrough)
+  ctrl+o opens $EDITOR (`transcript_input.go` compose table). Fix: ctrl+o =
+  expand only (ungated); $EDITOR composition moves to ctrl+e; help/hints
+  updated.
+* **Model selector** (maintainer ask, design approved 2026-07-15): CC-style
+  `/model` picker overlay replacing the /opus //sonnet /haiku aliases + the
+  per-model palette entries; static fallback list includes Fable 5 until
+  `models.available` arrives.
+
 ## 1) Correctness bugs
 
 §1a (TUI SSE / state-machine cluster) and §1b (group view / sort / search /
