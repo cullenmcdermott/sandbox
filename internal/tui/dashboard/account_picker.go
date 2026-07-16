@@ -102,9 +102,15 @@ func (a *App) beginCreate(params CreateParams) tea.Cmd {
 }
 
 // enterAccountStage is called when the user picks "claude". With no injected
-// store or zero stored accounts it keeps today's UX and creates immediately on
-// the shared Secret. When accounts exist it opens the account picker. A store
-// List() error is surfaced (fail closed) instead of a silent legacy create.
+// store it keeps today's UX and creates immediately on the shared Secret.
+// Otherwise it ALWAYS opens the account picker (TODO §2d, DECIDED 2026-07-07):
+// even with zero stored accounts the stage still shows, offering the "cluster
+// default" row (identical to the old silent skip) and "＋ add account" so a
+// first-time user discovers per-account login instead of being dropped onto the
+// shared Secret invisibly. A store List() error is surfaced (fail closed).
+//
+// This stage is where the row set is decided; it is also the future home of the
+// §6 reauth flow (a re-login entry for an existing account slots in here).
 func (a *App) enterAccountStage() tea.Cmd {
 	if a.accountStore == nil {
 		return a.beginCreate(CreateParams{Backend: session.BackendClaudeSDK})
@@ -120,11 +126,8 @@ func (a *App) enterAccountStage() tea.Cmd {
 		a.picker.sel = 0
 		return nil
 	}
-	if len(accounts) == 0 {
-		// Zero accounts stored → today's UX unchanged (add accounts via
-		// `sandbox auth login`).
-		return a.beginCreate(CreateParams{Backend: session.BackendClaudeSDK})
-	}
+	// Zero accounts no longer skips: accountRowCount() is len(accounts)+2, so an
+	// empty list still yields the two-row stage (cluster default + add account).
 	a.picker.stage = stageAccount
 	a.picker.accounts = accounts
 	a.picker.listErr = nil

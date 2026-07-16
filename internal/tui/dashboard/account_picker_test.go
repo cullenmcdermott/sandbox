@@ -119,26 +119,106 @@ func waitParams(t *testing.T, ch chan CreateParams) CreateParams {
 // Tests
 // --------------------------------------------------------------------------
 
-// TestAccountPickerZeroAccountsSkips: with no stored accounts, picking claude
-// skips the account step entirely and creates on the shared Secret (empty id),
-// preserving today's UX.
-func TestAccountPickerZeroAccountsSkips(t *testing.T) {
+// TestAccountPickerZeroAccountsOpensStage: with no stored accounts, picking claude
+// now ALWAYS enters the account stage (TODO §2d) instead of silently skipping. The
+// stage shows exactly two rows — "cluster default" and "＋ add account" — and no
+// per-account rows.
+func TestAccountPickerZeroAccountsOpensStage(t *testing.T) {
+	app, _ := newAccountPickerApp(t, &fakeAccountStore{accounts: nil})
+
+	app.Update(createSessionMsg{})
+	app.Update(keyMsg("enter")) // claude
+	if !app.picker.open || app.picker.stage != stageAccount {
+		t.Fatalf("zero accounts: overlay should stay on the account stage: open=%v stage=%v", app.picker.open, app.picker.stage)
+	}
+	if app.screen != ScreenDashboard {
+		t.Errorf("zero accounts: screen = %v, want ScreenDashboard (no silent create)", app.screen)
+	}
+	if got := app.accountRowCount(); got != 2 {
+		t.Fatalf("zero accounts: row count = %d, want 2 (cluster default + add account)", got)
+	}
+	if len(app.picker.accounts) != 0 {
+		t.Errorf("zero accounts: account rows = %d, want 0", len(app.picker.accounts))
+	}
+	content := app.View().Content
+	if !strings.Contains(content, "cluster default") {
+		t.Error("zero accounts: the cluster default row is not rendered")
+	}
+	if !strings.Contains(content, "add account") {
+		t.Error("zero accounts: the add account row is not rendered")
+	}
+}
+
+// TestAccountPickerZeroAccountsClusterDefaultParity: with zero accounts, selecting
+// the "cluster default" row (sel 0, the first of the two rows) must create on the
+// shared Secret with an empty account id — byte-identical to the old skip path.
+func TestAccountPickerZeroAccountsClusterDefaultParity(t *testing.T) {
 	app, ch := newAccountPickerApp(t, &fakeAccountStore{accounts: nil})
 
 	app.Update(createSessionMsg{})
-	_, cmd := app.Update(keyMsg("enter")) // claude
+	app.Update(keyMsg("enter")) // claude → account stage
+	if app.picker.stage != stageAccount || app.picker.sel != 0 {
+		t.Fatalf("zero accounts: stage=%v sel=%d, want stageAccount sel=0 (cluster default)", app.picker.stage, app.picker.sel)
+	}
+	// Rows: [cluster-default(0), add-account(1)]. sel 0 is cluster default.
+	_, cmd := app.Update(keyMsg("enter"))
 	if app.picker.open {
-		t.Error("zero accounts: picker should have closed and created immediately")
+		t.Error("zero accounts: cluster default should have closed the picker and created")
 	}
 	if app.screen != ScreenConnecting {
 		t.Errorf("zero accounts: screen = %v, want ScreenConnecting", app.screen)
 	}
 	if cmd == nil {
-		t.Fatal("zero accounts: enter returned no create command")
+		t.Fatal("zero accounts: cluster default returned no create command")
 	}
 	p := waitParams(t, ch)
 	if p.Backend != session.BackendClaudeSDK || p.AnthropicAccountID != "" {
-		t.Errorf("zero accounts: params = %+v, want {claude-sdk, \"\"}", p)
+		t.Errorf("zero accounts cluster default: params = %+v, want {claude-sdk, \"\"}", p)
+	}
+}
+
+// TestAccountPickerZeroAccountsAddAccountEntersAddFlow: with zero accounts, the
+// second row ("＋ add account") enters the existing add-account type chooser — the
+// same flow reused when accounts are present.
+func TestAccountPickerZeroAccountsAddAccountEntersAddFlow(t *testing.T) {
+	app, _ := newAccountPickerApp(t, &fakeAccountStore{accounts: nil})
+
+	app.Update(createSessionMsg{})
+	app.Update(keyMsg("enter")) // claude → account stage
+	// Rows: [cluster-default(0), add-account(1)]. Move to add account.
+	app.Update(keyMsg("down"))
+	if app.picker.sel != 1 {
+		t.Fatalf("zero accounts: sel=%d, want 1 (add account)", app.picker.sel)
+	}
+	app.Update(keyMsg("enter"))
+	if app.picker.stage != stageAddType {
+		t.Fatalf("zero accounts: enter on add-account: stage=%v, want stageAddType", app.picker.stage)
+	}
+	if app.picker.sel != 0 {
+		t.Errorf("zero accounts: add-type initial sel=%d, want 0", app.picker.sel)
+	}
+}
+
+// TestAccountPickerNonEmptyRowsUnchanged: pins the non-empty stage layout — the
+// §2d zero-account change must NOT alter it. With N accounts the stage has N+2
+// rows (each account, then cluster default, then add account) and renders every
+// account label plus the two trailing rows.
+func TestAccountPickerNonEmptyRowsUnchanged(t *testing.T) {
+	store := &fakeAccountStore{accounts: []AccountInfo{
+		{ID: "acct-aaaa", Label: "personal", Type: "subscription", Default: true},
+		{ID: "acct-bbbb", Label: "work", Type: "console"},
+	}}
+	app, _ := newAccountPickerApp(t, store)
+	openAccountStage(t, app)
+
+	if got := app.accountRowCount(); got != 4 {
+		t.Fatalf("non-empty row count = %d, want 4 (2 accounts + cluster default + add account)", got)
+	}
+	content := app.View().Content
+	for _, want := range []string{"personal", "work", "cluster default", "add account"} {
+		if !strings.Contains(content, want) {
+			t.Errorf("non-empty stage missing row %q", want)
+		}
 	}
 }
 
