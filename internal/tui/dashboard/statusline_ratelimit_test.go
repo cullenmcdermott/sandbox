@@ -270,8 +270,9 @@ func TestParseResetTime(t *testing.T) {
 	}
 }
 
-// ORACLE (① in-session /model): selecting /sonnet records a model override that
-// is sent as TurnInput.Model on the next turn, while plain prompts send "".
+// ORACLE (① in-session /model): picking a model from the /model picker records a
+// model override that is sent as TurnInput.Model on the next turn, while plain
+// prompts send "". The picker's Default row reverts to the account default.
 func TestModelOverrideThreadedToTurn(t *testing.T) {
 	fc := &fakeRunnerClient{}
 	m := NewTranscript(fc, transcriptSession(), nil)
@@ -283,23 +284,24 @@ func TestModelOverrideThreadedToTurn(t *testing.T) {
 		t.Fatalf("default model = %v, want one empty entry", fc.startedModels)
 	}
 
-	// /sonnet sets the override.
-	m.input.SetValue("/sonnet")
+	// Picking Sonnet 5 (index 3 in the static fallback rows) sets the override.
+	m.openModelPicker()
+	m.modelPicker.sel = 3
 	m.handleKey(keyMsg("enter"))
-	if m.modelOverride != "sonnet" {
-		t.Fatalf("modelOverride = %q, want sonnet", m.modelOverride)
+	if m.modelOverride != "claude-sonnet-5" {
+		t.Fatalf("modelOverride = %q, want claude-sonnet-5", m.modelOverride)
 	}
 
 	// The next turn carries the selected model.
 	startTurnCmd(fc, m.ref, "second", m.mode.apiValue(), m.modelOverride, m.effortOverride, false)()
-	if got := fc.startedModels[len(fc.startedModels)-1]; got != "sonnet" {
-		t.Errorf("turn model = %q, want sonnet", got)
+	if got := fc.startedModels[len(fc.startedModels)-1]; got != "claude-sonnet-5" {
+		t.Errorf("turn model = %q, want claude-sonnet-5", got)
 	}
 
-	// /model-default reverts to the account default.
-	m.input.SetValue("/model-default")
-	m.handleKey(keyMsg("enter"))
+	// The Default row reverts to the account default (empty override).
+	m.openModelPicker()
+	m.handleKey(keyMsg("1"))
 	if m.modelOverride != "" {
-		t.Errorf("modelOverride after /model-default = %q, want empty", m.modelOverride)
+		t.Errorf("modelOverride after Default = %q, want empty", m.modelOverride)
 	}
 }

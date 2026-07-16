@@ -82,14 +82,14 @@ func (m *TranscriptModel) escCascade() []escStep {
 // rather than detaching to the dashboard. It derives entirely from escCascade:
 // esc is consumed when any cascade step has a local meaning right now (an
 // overlay is open, a turn/driver is active, a prompt is queued to steer, or vim
-// INSERT can return to NORMAL). showHelp is a separate leading term because the
-// help overlay is closed ahead of the esc branch (any key closes it), so it is
-// not a cascade step. With vim off and none of these true, a bare idle esc has
-// no local meaning and falls through to the App's detach (preserving the old
-// NORMAL-mode esc-detach). ctrl+] / ctrl+4 (and NORMAL-mode q) always detach
-// regardless.
+// INSERT can return to NORMAL). showHelp and the /model picker are separate
+// leading terms because both overlays are closed ahead of the esc branch (they
+// preempt in handleKey), so neither is a cascade step. With vim off and none of
+// these true, a bare idle esc has no local meaning and falls through to the
+// App's detach (preserving the old NORMAL-mode esc-detach). ctrl+] / ctrl+4
+// (and NORMAL-mode q) always detach regardless.
 func (m *TranscriptModel) escapeConsumes() bool {
-	if m.showHelp {
+	if m.showHelp || m.modelPicker.open {
 		return true
 	}
 	for _, step := range m.escCascade() {

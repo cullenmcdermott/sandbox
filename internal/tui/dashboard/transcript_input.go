@@ -228,20 +228,45 @@ func transcriptComposeTable() []boundAction[*TranscriptModel] {
 				return m.submit(), true
 			},
 		},
-		// ↑/↓ recall previously sent prompts (§2d) — but ONLY when the composer is
-		// empty or already navigating history, so a non-empty draft keeps today's
-		// scroll meaning (the keys fall through to scrollKey below). histPrev/
-		// histNext report unhandled when there's nothing to recall / no nav to
-		// unwind, so the key still scrolls.
+		// ↑/↓ in the composer own history recall and cursor movement (§2d) — they
+		// are ALWAYS consumed here and NEVER scroll the transcript (the wheel,
+		// pgup/pgdn, ctrl+u/d, and vim NORMAL j/k own scrolling). ↑: keep walking
+		// history when already navigating; else move the cursor up a logical line
+		// when it isn't on the first line; else enter recall (saving the draft), or
+		// a consumed no-op when there's no history. ↓ mirrors it: walk newer while
+		// navigating (past the newest restores the draft); else move the cursor
+		// down a line; else a consumed no-op on the last line.
 		{
-			binding: key.NewBinding(key.WithKeys("up"), key.WithHelp("↑", "prev prompt")),
-			when:    func(m *TranscriptModel) bool { return m.input.Value() == "" || m.histIdx >= 0 },
-			run:     func(m *TranscriptModel, _ tea.KeyPressMsg) (tea.Cmd, bool) { return nil, m.histPrev() },
+			binding: key.NewBinding(key.WithKeys("up"), key.WithHelp("↑", "prev prompt / cursor up")),
+			run: func(m *TranscriptModel, msg tea.KeyPressMsg) (tea.Cmd, bool) {
+				switch {
+				case m.histIdx >= 0:
+					m.histPrev() // already navigating: step older (clamps at oldest)
+				case m.input.Line() > 0:
+					var cmd tea.Cmd
+					m.input, cmd = m.input.Update(msg) // cursor up within a multi-line draft
+					return cmd, true
+				default:
+					m.histPrev() // first line / empty: enter recall (no-op when no history)
+				}
+				return nil, true
+			},
 		},
 		{
-			binding: key.NewBinding(key.WithKeys("down"), key.WithHelp("↓", "next prompt")),
-			when:    func(m *TranscriptModel) bool { return m.input.Value() == "" || m.histIdx >= 0 },
-			run:     func(m *TranscriptModel, _ tea.KeyPressMsg) (tea.Cmd, bool) { return nil, m.histNext() },
+			binding: key.NewBinding(key.WithKeys("down"), key.WithHelp("↓", "next prompt / cursor down")),
+			run: func(m *TranscriptModel, msg tea.KeyPressMsg) (tea.Cmd, bool) {
+				switch {
+				case m.histIdx >= 0:
+					m.histNext() // navigating: step newer (past newest restores the draft)
+				case m.input.Line() < m.input.LineCount()-1:
+					var cmd tea.Cmd
+					m.input, cmd = m.input.Update(msg) // cursor down within a multi-line draft
+					return cmd, true
+				default:
+					// last line (or single-line): consumed no-op — never scrolls.
+				}
+				return nil, true
+			},
 		},
 	}
 }
@@ -268,8 +293,9 @@ func (m *TranscriptModel) resetHistoryNav() {
 
 // histPrev steps one entry older in the prompt history (↑). The first step saves
 // the current composer text as the draft (empty is valid) and shows the newest
-// entry; further steps walk older, clamping at the oldest. Returns false (so the
-// key falls through to scrollKey) when there is no history to recall.
+// entry; further steps walk older, clamping at the oldest. Returns whether a
+// recall happened (false when there is no history); the compose caller consumes
+// ↑ regardless — it never falls through to scrollKey.
 func (m *TranscriptModel) histPrev() bool {
 	if len(m.promptHistory) == 0 {
 		return false
@@ -288,8 +314,9 @@ func (m *TranscriptModel) histPrev() bool {
 }
 
 // histNext steps one entry newer in the prompt history (↓). Paging forward past
-// the newest entry restores the saved draft and exits nav. Returns false when
-// not navigating so ↓ keeps its scroll meaning.
+// the newest entry restores the saved draft and exits nav. Returns whether it
+// navigated (false when not in nav); the compose caller consumes ↓ regardless —
+// it never falls through to scrollKey.
 func (m *TranscriptModel) histNext() bool {
 	if m.histIdx < 0 {
 		return false
@@ -332,6 +359,13 @@ func (m *TranscriptModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		m.showHelp = false
 		return m, nil
+	}
+	// /model picker overlay: a full-capture overlay like showHelp — closed ahead
+	// of the globals so a bare esc closes it instead of detaching (escapeConsumes
+	// mirrors this). esc closes; the pure grammar handles nav/digit/enter; other
+	// keys are swallowed (CC parity: numbered model selection).
+	if m.modelPicker.open {
+		return m, m.modelPickerKeyHandler(msg)
 	}
 
 	// Globals run BEFORE the sub-context delegation: e.g. shift+tab cycles the
@@ -428,6 +462,10 @@ func (m *TranscriptModel) composeKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 // scrollKey moves the viewport for navigation keys, returning true if handled.
+// NB: the compose sub-context no longer routes ↑/↓ here — there they own history
+// recall and cursor movement and are always consumed. The "up"/"down" cases stay
+// for the remaining callers: the plan-permission scroll fallback (permissionKey)
+// and the vim NORMAL arrow fallthrough (normalKey).
 func (m *TranscriptModel) scrollKey(key string) bool {
 	page := max(1, m.body.Height())
 	switch key {

@@ -157,6 +157,12 @@ type TranscriptModel struct {
 	showHelp bool
 	helpUI   helpModel
 
+	// /model picker overlay (CC parity; see modelpicker.go). Full-capture like
+	// showHelp: while open it owns every key and closes on esc without detaching.
+	// Its Default row replaces the old /model-default command, and its static
+	// fallback list makes Fable reachable before models.available lands.
+	modelPicker modelPicker
+
 	blocks       []*blockCard // the transcript blocks; each IS a list.Item
 	assistantBuf strings.Builder
 	streaming    bool
@@ -896,6 +902,14 @@ func (m *TranscriptModel) View() tea.View {
 	if m.showHelp {
 		overlay := lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center,
 			m.helpUI.view(m.width), pageWhitespace())
+		v := tea.NewView(overlay)
+		v.AltScreen = true
+		return v
+	}
+	// /model picker overlay — composited exactly like showHelp above (CC parity).
+	if m.modelPicker.open {
+		overlay := lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center,
+			m.renderModelPicker(m.width), pageWhitespace())
 		v := tea.NewView(overlay)
 		v.AltScreen = true
 		return v

@@ -1,15 +1,18 @@
 package dashboard
 
 import (
+	"fmt"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
 )
 
-// These tests pin the §2d prompt-history recall state machine: ↑/↓ walk the
-// prompts the user actually submitted this attach, a non-empty draft keeps the
-// keys' scroll meaning, consecutive repeats collapse, and only user-origin
-// submits (submit(), never the driver / initialPrompt path) land in history.
+// These tests pin the §2d prompt-history recall state machine and its §2d-followup
+// arrow-ownership contract: in the composer ↑/↓ ALWAYS belong to history recall and
+// cursor movement and NEVER scroll the transcript. ↑ walks history when navigating
+// or on the first line, otherwise moves the cursor up; ↓ mirrors it. Consecutive
+// repeats collapse, and only user-origin submits (submit(), never the driver /
+// initialPrompt path) land in history.
 
 // newHistoryModel builds a focused, sized transcript for the recall tests.
 func newHistoryModel(t *testing.T) *TranscriptModel {
@@ -18,6 +21,27 @@ func newHistoryModel(t *testing.T) *TranscriptModel {
 	m.width, m.height = 80, 24
 	m.input.Focus()
 	return m
+}
+
+// scrollableBody fills the transcript body with enough one-line blocks to be
+// scrollable, sizes it, and parks the viewport off the bottom. It returns the
+// resulting (non-zero) offset so a test can assert the arrows leave it untouched.
+func scrollableBody(t *testing.T, m *TranscriptModel) int {
+	t.Helper()
+	texts := make([]string, 60)
+	for i := range texts {
+		texts[i] = fmt.Sprintf("line %d", i)
+	}
+	m.blocks = infoCards(m, texts...)
+	m.syncItems()
+	m.layout()
+	m.body.GotoBottom()
+	m.body.ScrollBy(-3) // move up off the bottom so a stray ↑ (or ↓) would be visible
+	off := m.body.Offset()
+	if off <= 0 {
+		t.Fatalf("setup: body offset = %d, want a scrollable, off-bottom body", off)
+	}
+	return off
 }
 
 // submitViaEnter drives the full compose→submit dispatch for one prompt.
@@ -74,35 +98,40 @@ func TestPromptHistoryRecallAndRestore(t *testing.T) {
 	}
 }
 
-// TestPromptHistoryDraftPreservation pins the gate: a non-empty draft keeps ↑'s
-// scroll meaning (no recall), an empty composer recalls, and editing a recalled
-// entry exits nav so the typed text becomes the live draft.
+// TestPromptHistoryDraftPreservation pins the NEW contract (the flip from the old
+// scroll-with-a-draft behavior): a single-line draft + ↑ RECALLS with the draft
+// saved, ↓ past the newest restores that draft, and editing a recalled entry exits
+// nav so the typed text becomes the live draft.
 func TestPromptHistoryDraftPreservation(t *testing.T) {
 	m := newHistoryModel(t)
 	submitViaEnter(m, "hello")
 
-	// Non-empty draft (not from history): ↑ must NOT recall — it scrolls, so the
-	// composer text is left untouched.
+	// A single-line draft (cursor on the only line): ↑ now RECALLS, saving the
+	// draft — it no longer scrolls.
 	m.input.SetValue("draft")
 	m.handleKey(keyUp)
-	if got := m.input.Value(); got != "draft" {
-		t.Fatalf("↑ with a draft recalled %q, want the draft left as \"draft\"", got)
-	}
-	if m.histIdx != -1 {
-		t.Fatalf("↑ with a draft entered nav (histIdx=%d), want -1", m.histIdx)
-	}
-
-	// Empty composer: ↑ recalls the newest entry.
-	m.input.SetValue("")
-	m.handleKey(keyUp)
 	if got := m.input.Value(); got != "hello" {
-		t.Fatalf("↑ on empty composer = %q, want hello", got)
+		t.Fatalf("↑ with a single-line draft = %q, want recall of hello", got)
 	}
 	if m.histIdx != 0 {
 		t.Fatalf("histIdx = %d after recall, want 0", m.histIdx)
 	}
 
-	// Typing over the recalled entry exits nav (the edited text is now the draft).
+	// ↓ past the newest restores the saved draft and exits nav.
+	m.handleKey(keyDown)
+	if got := m.input.Value(); got != "draft" {
+		t.Fatalf("↓ past newest = %q, want the saved draft \"draft\"", got)
+	}
+	if m.histIdx != -1 {
+		t.Fatalf("histIdx = %d after restoring draft, want -1 (nav exited)", m.histIdx)
+	}
+
+	// Recall again, then type over it: editing a recalled entry exits nav and the
+	// typed text becomes the live draft.
+	m.handleKey(keyUp) // recall "hello" (draft "draft" saved again)
+	if got := m.input.Value(); got != "hello" {
+		t.Fatalf("second recall = %q, want hello", got)
+	}
 	m.handleKey(keyMsg("x"))
 	if got := m.input.Value(); got != "hellox" {
 		t.Fatalf("after typing over recall = %q, want hellox", got)
@@ -110,18 +139,99 @@ func TestPromptHistoryDraftPreservation(t *testing.T) {
 	if m.histIdx != -1 {
 		t.Fatalf("histIdx = %d after editing recalled entry, want -1 (nav exited)", m.histIdx)
 	}
+}
 
-	// With the edited (non-empty) draft, ↑ scrolls again — no recall.
-	m.handleKey(keyUp)
-	if got := m.input.Value(); got != "hellox" {
-		t.Fatalf("↑ with edited draft recalled %q, want hellox untouched", got)
+// TestPromptHistoryMultiLineDraftUpMovesCursorThenRecalls pins that ↑ inside a
+// multi-line draft moves the cursor up a logical line (no recall) until it reaches
+// the first line, and only then enters history recall.
+func TestPromptHistoryMultiLineDraftUpMovesCursorThenRecalls(t *testing.T) {
+	m := newHistoryModel(t)
+	submitViaEnter(m, "recalled")
+
+	m.input.SetValue("line one\nline two") // cursor at end → line 1 (the 2nd line)
+	if got := m.input.Line(); got != 1 {
+		t.Fatalf("setup: cursor line = %d, want 1 (end of a 2-line draft)", got)
 	}
 
-	// Clearing the composer lets ↑ start recall from the newest entry again.
-	m.input.SetValue("")
+	// ↑ from line 2: the textarea moves the cursor up a line — draft untouched, no nav.
 	m.handleKey(keyUp)
-	if got := m.input.Value(); got != "hello" {
-		t.Fatalf("↑ after clearing = %q, want hello (restart from newest)", got)
+	if got := m.input.Value(); got != "line one\nline two" {
+		t.Fatalf("↑ on line 2 changed the draft to %q, want it untouched", got)
+	}
+	if got := m.input.Line(); got != 0 {
+		t.Fatalf("↑ on line 2 cursor line = %d, want 0", got)
+	}
+	if m.histIdx != -1 {
+		t.Fatalf("↑ on line 2 entered nav (histIdx=%d), want -1", m.histIdx)
+	}
+
+	// ↑ from the first line: now recall the newest entry.
+	m.handleKey(keyUp)
+	if got := m.input.Value(); got != "recalled" {
+		t.Fatalf("↑ on first line = %q, want recall of recalled", got)
+	}
+	if m.histIdx != 0 {
+		t.Fatalf("histIdx = %d after recall, want 0", m.histIdx)
+	}
+}
+
+// TestPromptHistoryMultiLineDraftDownMovesCursorNotScroll pins that ↓ inside a
+// multi-line draft moves the cursor down a line, and ↓ on the last line is a
+// consumed no-op — neither ever scrolls the transcript.
+func TestPromptHistoryMultiLineDraftDownMovesCursorNotScroll(t *testing.T) {
+	m := newHistoryModel(t)
+	beforeOff := scrollableBody(t, m)
+
+	m.input.SetValue("line one\nline two")
+	m.input.CursorUp() // park the cursor on the first line
+	if got := m.input.Line(); got != 0 {
+		t.Fatalf("setup: cursor line = %d, want 0", got)
+	}
+
+	// ↓ from the first line: cursor moves down; no recall, no scroll.
+	m.handleKey(keyDown)
+	if got := m.input.Line(); got != 1 {
+		t.Fatalf("↓ cursor line = %d, want 1", got)
+	}
+	if got := m.input.Value(); got != "line one\nline two" {
+		t.Fatalf("↓ changed the draft to %q, want it untouched", got)
+	}
+	if m.histIdx != -1 {
+		t.Fatalf("↓ entered nav (histIdx=%d), want -1", m.histIdx)
+	}
+	if got := m.body.Offset(); got != beforeOff {
+		t.Fatalf("↓ within the draft scrolled the transcript: offset %d -> %d", beforeOff, got)
+	}
+
+	// ↓ on the last line: consumed no-op — cursor stays, nothing scrolls.
+	m.handleKey(keyDown)
+	if got := m.input.Line(); got != 1 {
+		t.Fatalf("↓ on last line moved the cursor to %d, want 1", got)
+	}
+	if got := m.input.Value(); got != "line one\nline two" {
+		t.Fatalf("↓ on last line changed the draft to %q", got)
+	}
+	if got := m.body.Offset(); got != beforeOff {
+		t.Fatalf("↓ on last line scrolled the transcript: offset %d -> %d", beforeOff, got)
+	}
+}
+
+// TestPromptHistoryUpNoHistoryDoesNotScroll pins that ↑ on an empty composer with
+// no history is a consumed no-op that must NOT fall through to the scroll handler.
+func TestPromptHistoryUpNoHistoryDoesNotScroll(t *testing.T) {
+	m := newHistoryModel(t)
+	before := scrollableBody(t, m)
+
+	// Empty composer, no history: ↑ is consumed and must leave the viewport put.
+	m.handleKey(keyUp)
+	if got := m.body.Offset(); got != before {
+		t.Fatalf("↑ with no history scrolled the transcript: offset %d -> %d", before, got)
+	}
+	if m.input.Value() != "" {
+		t.Fatalf("↑ changed the composer to %q, want empty", m.input.Value())
+	}
+	if m.histIdx != -1 {
+		t.Fatalf("↑ entered nav (histIdx=%d) with no history, want -1", m.histIdx)
 	}
 }
 

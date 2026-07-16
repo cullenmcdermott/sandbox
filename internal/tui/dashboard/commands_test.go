@@ -25,30 +25,37 @@ func TestModelSwitchUpdatesStatuslineImmediately(t *testing.T) {
 		t.Fatalf("default ctxLimit = %d, want 200000", m.CtxLimit)
 	}
 
-	// /opus updates the displayed model + ctx window immediately (200k → 1M).
-	m.input.SetValue("/opus")
+	// Picking Opus 4.8 from the picker updates the displayed model + ctx window
+	// immediately (200k → 1M). Opus is index 2 in the static fallback rows
+	// [Default, Fable 5, Opus 4.8, Sonnet 5, Haiku 4.5].
+	m.openModelPicker()
+	m.modelPicker.sel = 2
 	m.handleKey(keyMsg("enter"))
-	if m.Model != "opus" {
-		t.Errorf("after /opus, model = %q, want opus", m.Model)
+	if m.modelPicker.open {
+		t.Error("picker should close after choosing")
+	}
+	if m.Model != "claude-opus-4-8" {
+		t.Errorf("after picking Opus, model = %q, want claude-opus-4-8", m.Model)
 	}
 	if m.CtxLimit != 1_000_000 {
-		t.Errorf("after /opus, ctxLimit = %d, want 1000000 (window must track the switch)", m.CtxLimit)
+		t.Errorf("after picking Opus, ctxLimit = %d, want 1000000 (window must track the switch)", m.CtxLimit)
 	}
 
-	// /model-default restores the captured default and its window (1M → 200k).
-	m.input.SetValue("/model-default")
-	m.handleKey(keyMsg("enter"))
+	// The Default row restores the captured default and its window (1M → 200k).
+	// Digit "1" jumps to and selects row 0 (Default) in one keystroke.
+	m.openModelPicker()
+	m.handleKey(keyMsg("1"))
 	if m.Model != "claude-haiku-4-5" {
-		t.Errorf("after /model-default, model = %q, want claude-haiku-4-5", m.Model)
+		t.Errorf("after Default, model = %q, want claude-haiku-4-5", m.Model)
 	}
 	if m.CtxLimit != 200_000 {
-		t.Errorf("after /model-default, ctxLimit = %d, want 200000", m.CtxLimit)
+		t.Errorf("after Default, ctxLimit = %d, want 200000", m.CtxLimit)
 	}
 }
 
 func TestSlashFilter(t *testing.T) {
-	// Fresh model: no models.available yet, so the Model group uses the alias
-	// fallback (/opus /sonnet /haiku /model-default).
+	// Fresh model: the Model group is a single /model entry that opens the picker
+	// (per-model commands moved into the picker overlay).
 	mf := &TranscriptModel{}
 	if got := len(filteredGroups(mf, "")); got != 7 {
 		t.Errorf("empty query groups = %d, want 7 (Session/Mode/Autopilot/Model/Effort/Tools/Help)", got)
@@ -57,17 +64,10 @@ func TestSlashFilter(t *testing.T) {
 	if len(cmds) != 1 || cmds[0].name != "/plan" {
 		t.Errorf("filter 'plan' = %v, want [/plan]", cmds)
 	}
-	// The Model group adds a /sonnet switch (and matches by name substring).
-	if c := flatCmds(mf, "/sonnet"); len(c) != 1 || c[0].name != "/sonnet" {
-		t.Errorf("filter '/sonnet' = %v, want [/sonnet]", c)
-	}
-	// Typing "model" matches the "Model" group name, so all four model commands
-	// (/opus, /sonnet, /haiku, /model-default) should appear — not just
-	// /model-default (the only one with "model" in its own name/desc). This is
-	// the bug that made /model appear broken: the palette collapsed to one entry
-	// and pressing Enter accidentally ran /model-default.
-	if c := flatCmds(mf, "model"); len(c) != 4 {
-		t.Errorf("filter 'model' (group-name match) = %d cmds, want 4 (/opus /sonnet /haiku /model-default)", len(c))
+	// Typing "model" (name or group-name match) surfaces the one /model entry —
+	// the picker replaced the old /opus /sonnet /haiku /model-default fan-out.
+	if c := flatCmds(mf, "model"); len(c) != 1 || c[0].name != "/model" {
+		t.Errorf("filter 'model' = %v, want [/model]", c)
 	}
 	// Likewise typing "effort" matches the "Effort" group name, surfacing all six
 	// static levels (low/medium/high/xhigh/ultracode/auto), not just those with
@@ -121,60 +121,6 @@ func TestModelsAvailableEventPopulatesModel(t *testing.T) {
 	}
 }
 
-// COUNTER: once models.available has landed, the /model palette lists the real
-// account models by slug (not the opus/sonnet/haiku aliases), keeps
-// /model-default last, and each entry's handler selects the full model id.
-func TestModelPaletteUsesDynamicListWhenPresent(t *testing.T) {
-	m := NewTranscript(&fakeRunnerClient{}, transcriptSession(), nil)
-	m.width, m.height = 80, 24
-	m.availableModels = []session.ModelInfo{
-		{Value: "claude-opus-4-8", DisplayName: "Opus 4.8", Description: "most capable"},
-		{Value: "claude-haiku-4-5", DisplayName: "Haiku 4.5"},
-	}
-	cmds := flatCmds(m, "model") // group-name match → whole Model group
-	var names []string
-	for _, c := range cmds {
-		names = append(names, c.name)
-	}
-	want := []string{"/opus-4-8", "/haiku-4-5", "/model-default"}
-	if len(names) != len(want) {
-		t.Fatalf("dynamic model palette = %v, want %v", names, want)
-	}
-	for i, w := range want {
-		if names[i] != w {
-			t.Errorf("model cmd[%d] = %q, want %q", i, names[i], w)
-		}
-	}
-	// No bare aliases when the dynamic list is present.
-	for _, c := range cmds {
-		if c.name == "/opus" || c.name == "/sonnet" || c.name == "/haiku" {
-			t.Errorf("dynamic palette should not include bare alias %q", c.name)
-		}
-	}
-	// The first entry's handler selects the FULL model id, not the slug.
-	cmds[0].run(m)
-	if m.modelOverride != "claude-opus-4-8" {
-		t.Errorf("dynamic /opus-4-8 set modelOverride=%q, want claude-opus-4-8", m.modelOverride)
-	}
-}
-
-// COUNTER: with no models.available yet, the palette falls back to the stable
-// opus/sonnet/haiku aliases (nil model also yields the fallback).
-func TestModelPaletteFallsBackToAliases(t *testing.T) {
-	for _, m := range []*TranscriptModel{nil, {}} {
-		got := modelGroupCmds(m)
-		want := []string{"/opus", "/sonnet", "/haiku", "/model-default"}
-		if len(got) != len(want) {
-			t.Fatalf("fallback model cmds = %d, want %d", len(got), len(want))
-		}
-		for i, w := range want {
-			if got[i].name != w {
-				t.Errorf("fallback cmd[%d] = %q, want %q", i, got[i].name, w)
-			}
-		}
-	}
-}
-
 // ORACLE (in-session /effort): the static Effort palette records the SDK wire
 // value as the per-turn override and threads it onto the next turn. The crux is
 // the label→wire mapping — /effort-ultracode stores "max", not "ultracode" — and
@@ -215,20 +161,6 @@ func TestEffortOverrideThreadedToTurn(t *testing.T) {
 	m.handleKey(keyMsg("enter"))
 	if m.effortOverride != "" {
 		t.Errorf("effortOverride after /effort-auto = %q, want empty", m.effortOverride)
-	}
-}
-
-func TestModelSlug(t *testing.T) {
-	cases := map[string]string{
-		"claude-opus-4-8":           "opus-4-8",
-		"claude-3-5-haiku-20241022": "3-5-haiku-20241022",
-		"some-other-model":          "some-other-model",
-		"Opus 4":                    "opus-4",
-	}
-	for in, want := range cases {
-		if got := modelSlug(in); got != want {
-			t.Errorf("modelSlug(%q) = %q, want %q", in, got, want)
-		}
 	}
 }
 

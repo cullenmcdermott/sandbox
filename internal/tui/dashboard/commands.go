@@ -110,37 +110,20 @@ func setModeCmd(mode permMode) func(*TranscriptModel) tea.Cmd {
 	}
 }
 
-// modelGroupCmds builds the Model palette group. With a live supportedModels()
-// list (from a models.available event), it lists each real account model by its
-// id; before that arrives — or with no session (nil m) — it falls back to the
-// stable opus/sonnet/haiku aliases. /model-default is always the last entry.
-func modelGroupCmds(m *TranscriptModel) []slashCmd {
-	var cmds []slashCmd
-	if m != nil && len(m.availableModels) > 0 {
-		for _, mi := range m.availableModels {
-			desc := mi.DisplayName
-			if mi.Description != "" {
-				desc += " — " + mi.Description
-			}
-			cmds = append(cmds, slashCmd{"/" + modelSlug(mi.Value), desc, setModelCmd(mi.Value, mi.DisplayName)})
-		}
-	} else {
-		cmds = []slashCmd{
-			{"/opus", "switch to Opus for new turns", setModelCmd("opus", "Opus")},
-			{"/sonnet", "switch to Sonnet for new turns", setModelCmd("sonnet", "Sonnet")},
-			{"/haiku", "switch to Haiku for new turns", setModelCmd("haiku", "Haiku")},
-		}
+// modelGroupCmds is the Model palette group: a single /model entry that opens
+// the numbered picker overlay (CC parity; see modelpicker.go). The picker — not
+// per-model commands — is how a model is chosen now: its Default row replaces
+// the old /model-default, and its static fallback list surfaces Fable before
+// models.available arrives (the retired /opus /sonnet /haiku trio couldn't).
+// The run handler fires only when a session drives it, so m is non-nil there;
+// commandGroups(nil) (the static help reference) still gets the entry safely.
+func modelGroupCmds(_ *TranscriptModel) []slashCmd {
+	return []slashCmd{
+		{"/model", "choose the model for new turns", func(m *TranscriptModel) tea.Cmd {
+			m.openModelPicker()
+			return nil
+		}},
 	}
-	return append(cmds, slashCmd{"/model-default", "revert to the account/session default model", setModelCmd("", "account default")})
-}
-
-// modelSlug turns a model id into a short, unique palette-command suffix:
-// "claude-opus-4-8" -> "opus-4-8". Strips the "claude-" prefix when present and
-// normalizes spaces to dashes; otherwise returns the lowercased value.
-func modelSlug(value string) string {
-	s := strings.ToLower(value)
-	s = strings.TrimPrefix(s, "claude-")
-	return strings.ReplaceAll(s, " ", "-")
 }
 
 // setModelCmd returns a handler that selects the model for subsequent turns
