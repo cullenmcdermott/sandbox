@@ -115,8 +115,8 @@ func TestTranscriptViewDiffToggle(t *testing.T) {
 	if !m.showDiff {
 		t.Error("ctrl+o did not expand the diff view")
 	}
-	if !strings.Contains(m.permBox, "new") {
-		t.Errorf("expanded permission box missing diff content:\n%s", m.permBox)
+	if box := m.buildPermissionBox(m.width); !strings.Contains(box, "new") {
+		t.Errorf("expanded permission box missing diff content:\n%s", box)
 	}
 	m.handleKey(keyMsg("ctrl+o"))
 	if m.showDiff {

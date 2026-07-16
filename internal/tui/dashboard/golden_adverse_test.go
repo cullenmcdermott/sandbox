@@ -29,7 +29,7 @@ func TestGoldenAdversePermissionBox(t *testing.T) {
 			PermissionID: "perm-1", Tool: "Bash", Input: jraw(`{"command":"rm -rf build/"}`),
 		}))
 		m.layout()
-		golden.RequireEqual(t, []byte(m.permBox))
+		golden.RequireEqual(t, []byte(m.permComp().Render(m.width)))
 	})
 }
 
@@ -43,7 +43,7 @@ func TestGoldenAdversePlanCard(t *testing.T) {
 			Input: jraw(`{"plan":"1. Add the parser\n2. Wire the CLI flag\n3. Cover with tests"}`),
 		}))
 		m.layout()
-		golden.RequireEqual(t, []byte(m.permBox))
+		golden.RequireEqual(t, []byte(m.permComp().Render(m.width)))
 	})
 }
 

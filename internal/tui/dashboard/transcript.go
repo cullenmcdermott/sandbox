@@ -149,7 +149,7 @@ type TranscriptModel struct {
 	streamItem *blockCard          // ephemeral trailing card for the live streaming turn
 	streamAI   *chat.AssistantItem // persistent AI for live tail (A2 incremental render)
 	input      textarea.Model      // multi-line composer (boxed; shift+enter inserts a newline)
-	permBox    string              // cached rendered permission box (recomputed in layout)
+	perm       permPrompt          // §2a permission-decision component (owns the tool box + plan card; permprompt.go)
 	palette    string              // cached rendered slash palette (recomputed in layout)
 	cmdSel     int                 // selected index in the slash palette
 

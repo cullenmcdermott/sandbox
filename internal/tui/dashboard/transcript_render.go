@@ -192,8 +192,11 @@ func (m *TranscriptModel) stack(above, below []region, bodyView func() string) v
 // liveLayout builds the attached (composer) transcript's region stack at the
 // current size. Fixed bands measure themselves exactly as the former
 // layout()/renderTranscript() pair did; the body flexes to fill the rest. It
-// builds m.permBox / m.palette as a side effect so the render closures reuse the
-// same strings the heights were measured from.
+// builds m.palette as a side effect so the render closure reuses the same
+// string the height was measured from. The permission region is owned by the
+// §2a permPrompt component (permprompt.go): its static body is cached and its
+// border fade assembles live in Render, so Height/Render share one discipline
+// and the closure needs no plan-vs-tool branch.
 func (m *TranscriptModel) liveLayout() vlayout {
 	// Size the composer's textarea first so inputRows() (which wraps on this
 	// width) is accurate before its height is reserved. Must match renderInput()
@@ -202,24 +205,13 @@ func (m *TranscriptModel) liveLayout() vlayout {
 
 	var below []region
 
-	// Inline permission / plan-approval box, when one is pending.
-	m.permBox = ""
+	// Inline permission / plan-approval box, when one is pending — one component
+	// for both variants. Height is fade-stable (color-only), so the reserved band
+	// matches what Render draws every frame.
 	if m.pending != nil {
-		if m.pending.isPlan {
-			m.permBox = m.renderPlanCard(m.width)
-		} else {
-			m.permBox = m.buildPermissionBox(m.width)
-		}
-		permH := strings.Count(m.permBox, "\n") + 1
-		below = append(below, region{regionPerm, permH, func() string {
-			// Rebuild the non-plan box at render time so the permission-appear
-			// border fade (§C.3) reads the live elapsed time rather than the
-			// cached build; the plan card is static, so reuse it.
-			if m.pending.isPlan {
-				return m.permBox
-			}
-			return m.buildPermissionBox(m.width)
-		}})
+		p := m.permComp()
+		permH := p.Height(m.width)
+		below = append(below, region{regionPerm, permH, func() string { return p.Render(m.width) }})
 	}
 
 	// Slash-command palette, when the composer starts with '/'.

@@ -69,12 +69,11 @@ func (m *Model) renderPermQueue(w int) string {
 			header := glyph + " " + lipgloss.NewStyle().Foreground(theme.TextBright).Bold(true).Render(s.DisplayTitle())
 			note := ""
 			if s.PendingPermissionTool != "" {
-				note = "wants: " + s.PendingPermissionTool
-				// Show what is being approved (command/path/url), not just the
-				// tool name — batch-approving blind defeats the queue's purpose.
-				if s.PendingPermissionArg != "" {
-					note += "  " + truncate(s.PendingPermissionArg, max(8, boxW-len(note)-6))
-				}
+				// Shared "wants:" vocabulary with the §2a permPrompt component
+				// (permprompt.go). The queue stays a flat allow-once list — it does
+				// not adopt the component's numbered panel; see permPrompt for any
+				// future richer per-item rendering.
+				note = permWantsSummary(s.PendingPermissionTool, s.PendingPermissionArg, boxW)
 			} else {
 				note = ClientLabel(s.State.Backend) + " · " + filepathBaseLocal(s.State.ProjectPath)
 				if g := BackendGlyph(s.State.Backend); g != "" {
