@@ -88,11 +88,12 @@ type MessagePayload struct {
 
 // ToolPayload is the payload for tool.* events.
 type ToolPayload struct {
-	Tool            string          `json:"tool"`                  // "Bash", "Edit", etc.
-	Input           json.RawMessage `json:"input,omitempty"`       // tool input
-	Output          string          `json:"output,omitempty"`      // tool output (completed)
-	PartialJSON     string          `json:"partialJson,omitempty"` // tool.delta: a chunk of the tool's input JSON as it streams (input_json_delta)
-	ExitCode        *int            `json:"exitCode,omitempty"`    // Bash exit code
+	Tool            string          `json:"tool"`                     // "Bash", "Edit", etc.
+	Input           json.RawMessage `json:"input,omitempty"`          // tool input
+	Output          string          `json:"output,omitempty"`         // tool output (completed)
+	PartialJSON     string          `json:"partialJson,omitempty"`    // tool.delta: a chunk of the tool's input JSON as it streams (input_json_delta)
+	ElapsedSeconds  *float64        `json:"elapsedSeconds,omitempty"` // tool.progress: seconds the tool has been running (SDK heartbeat)
+	ExitCode        *int            `json:"exitCode,omitempty"`       // Bash exit code
 	Error           string          `json:"error,omitempty"`
 	ToolUseID       string          `json:"toolUseId,omitempty"`       // this tool_use block's id
 	ParentToolUseID string          `json:"parentToolUseId,omitempty"` // Task tool_use id that spawned a subagent's child tool (empty on main thread)

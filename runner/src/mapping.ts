@@ -158,9 +158,28 @@ export function mapMessage(msg: SDKMessage, emit: EmitFn, streamTools?: StreamTo
     case 'result': {
       return handleResultMessage(msg, emit);
     }
+    case 'tool_progress': {
+      // Long-running tools (and the SDK's background Task runner) heartbeat their
+      // elapsed time so a client can show a live "…running Ns" pill instead of a
+      // frozen tool card. Map to tool.progress, attributing it to its tool_use id
+      // and (for a subagent's tool) its parent Task the same bare-key way the
+      // other tool.* emits do — JSON.stringify drops parentToolUseId when the SDK
+      // reports null (main thread). task_id is DROPPED for now: it correlates a
+      // heartbeat to a background task the SDK later summarizes via
+      // SDKToolUseSummaryMessage; wiring that background-task correlation through
+      // the event model is a separate future task.
+      const parentToolUseId = msg.parent_tool_use_id ?? undefined;
+      emit('tool.progress', {
+        tool: msg.tool_name,
+        toolUseId: msg.tool_use_id,
+        elapsedSeconds: msg.elapsed_time_seconds,
+        parentToolUseId,
+      });
+      return {};
+    }
     default:
-      // Other SDK message types (tool_progress, status, api_retry, etc.) are
-      // not part of the normalized event model; ignore them.
+      // Other SDK message types (status, api_retry, etc.) are not part of the
+      // normalized event model; ignore them.
       return {};
   }
 }

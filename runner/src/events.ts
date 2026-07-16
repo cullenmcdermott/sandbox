@@ -163,10 +163,14 @@ const RETENTION_MAX_EVENTS = ((): number => {
 const DELTA_COMPACT_KEEP_TURNS_DEFAULT = 2;
 
 /**
- * E4: how many most-recent turns whose `*.delta` events survive compaction.
- * On every `turn.completed` we DELETE delta events (message.delta / reasoning.delta
- * / tool.delta — high-volume, worthless once the turn's completed/full events
- * exist) older than the last N turns. Unlike M34's rejected all-or-nothing
+ * E4: how many most-recent turns whose `*.delta` (and `tool.progress`) events
+ * survive compaction.
+ * On every `turn.completed` we DELETE ephemeral streaming events (message.delta /
+ * reasoning.delta / tool.delta, plus tool.progress heartbeats — all high-volume
+ * and worthless once the turn's completed/full events exist) older than the last
+ * N turns. tool.progress rides the same set for the same reason: a long-running
+ * tool can emit many elapsed-time heartbeats, and only the recent turns' matter
+ * for a just-detached client's replay. Unlike M34's rejected all-or-nothing
  * RETENTION_MAX_EVENTS, this touches ONLY deltas: the completed events
  * (message.completed, tool.completed, …) are never deleted, so an after=0 replay
  * still reconstructs the full transcript — just without the intra-turn streaming
@@ -372,16 +376,18 @@ export function appendEvent(
 }
 
 /**
- * E4: delete `*.delta` events for `sessionId` that belong to turns older than the
- * most-recent DELTA_COMPACT_KEEP_TURNS turns. One bounded SQL DELETE — no row
- * materialization: an inner query finds the seq of the `turn.started` of the
- * Nth-most-recent turn, and everything with type LIKE '%.delta' AND seq < that is
- * removed. If fewer than N turns exist the inner query is empty and nothing is
- * deleted (COALESCE floor of 0 → `seq < 0` matches nothing).
+ * E4: delete `*.delta` (and `tool.progress`) events for `sessionId` that belong
+ * to turns older than the most-recent DELTA_COMPACT_KEEP_TURNS turns. One bounded
+ * SQL DELETE — no row materialization: an inner query finds the seq of the
+ * `turn.started` of the Nth-most-recent turn, and everything matching the
+ * ephemeral-type predicate AND seq < that is removed. If fewer than N turns exist
+ * the inner query is empty and nothing is deleted (COALESCE floor of 0 → `seq < 0`
+ * matches nothing).
  *
  * Resulting seq gaps are fine: the after=<seq> replay contract tolerates gaps
- * (remaining rows stay in seq order), and only deltas — never the completed/full
- * events — are touched, so a full replay still reconstructs the transcript.
+ * (remaining rows stay in seq order), and only deltas + tool.progress heartbeats —
+ * never the completed/full events — are touched, so a full replay still
+ * reconstructs the transcript.
  *
  * Interlock with E2's chunked replay: deleting a row BETWEEN two replay chunks is
  * safe. The replay cursor is seq-based (`WHERE seq > cursor ORDER BY seq LIMIT`),
@@ -392,7 +398,7 @@ export function appendEvent(
  */
 function compactDeltas(d: Database.Database, sessionId: string): void {
   d.prepare(
-    "DELETE FROM events WHERE session_id = ? AND type LIKE '%.delta' AND seq < (" +
+    "DELETE FROM events WHERE session_id = ? AND (type LIKE '%.delta' OR type = 'tool.progress') AND seq < (" +
       "  SELECT COALESCE(MIN(seq), 0) FROM (" +
       "    SELECT seq FROM events" +
       "    WHERE session_id = ? AND type = 'turn.started'" +

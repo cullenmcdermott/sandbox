@@ -612,7 +612,53 @@ test('stream_event index reuse by a text block clears the tool attribution', () 
 // ORACLE: an unknown SDK message type emits nothing and returns {}.
 test('unknown message type → no events', () => {
   const { events, emit } = collector();
-  const res = mapMessage(asMsg({ type: 'tool_progress' }), emit);
+  const res = mapMessage(asMsg({ type: 'api_retry' }), emit);
   assert.equal(events.length, 0);
   assert.deepEqual(res, {});
+});
+
+// ORACLE: a tool_progress heartbeat → exactly one tool.progress event carrying the
+// tool name, tool_use id, and elapsed seconds. On the main thread parentToolUseId
+// is undefined (dropped by JSON.stringify); it returns no registry observation.
+test('tool_progress → single tool.progress (main thread)', () => {
+  const { events, emit } = collector();
+  const res = mapMessage(
+    asMsg({
+      type: 'tool_progress',
+      tool_use_id: 'toolu_run',
+      tool_name: 'Bash',
+      parent_tool_use_id: null,
+      elapsed_time_seconds: 12.5,
+    }),
+    emit,
+  );
+  assert.equal(events.length, 1);
+  assert.equal(events[0].type, 'tool.progress');
+  assert.deepEqual(events[0].payload, {
+    tool: 'Bash',
+    toolUseId: 'toolu_run',
+    elapsedSeconds: 12.5,
+    parentToolUseId: undefined, // main thread: undefined key, dropped on the wire
+  });
+  assert.deepEqual(res, {});
+});
+
+// ORACLE (§2b gap 1): a subagent's tool_progress carries its Task's
+// parent_tool_use_id so the heartbeat routes to the Task card, not the main thread.
+test('tool_progress from a subagent carries parentToolUseId', () => {
+  const { events, emit } = collector();
+  mapMessage(
+    asMsg({
+      type: 'tool_progress',
+      tool_use_id: 'toolu_child',
+      tool_name: 'Read',
+      parent_tool_use_id: 'task_7',
+      elapsed_time_seconds: 3,
+    }),
+    emit,
+  );
+  assert.equal(events.length, 1);
+  assert.equal(events[0].type, 'tool.progress');
+  assert.equal(events[0].payload.toolUseId, 'toolu_child');
+  assert.equal(events[0].payload.parentToolUseId, 'task_7');
 });

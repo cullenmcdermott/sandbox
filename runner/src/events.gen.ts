@@ -29,6 +29,7 @@ export type EventType =
   | 'reasoning.completed'
   | 'tool.started'
   | 'tool.delta'
+  | 'tool.progress'
   | 'tool.completed'
   | 'tool.failed'
   | 'permission.requested'
@@ -60,6 +61,7 @@ export const ALL_EVENT_TYPES: EventType[] = [
   'reasoning.completed',
   'tool.started',
   'tool.delta',
+  'tool.progress',
   'tool.completed',
   'tool.failed',
   'permission.requested',
@@ -178,6 +180,8 @@ export interface ToolPayload {
   output?: string;
   /** tool.delta: a chunk of the tool's input JSON as it streams (input_json_delta) */
   partialJson?: string;
+  /** tool.progress: seconds the tool has been running (SDK heartbeat) */
+  elapsedSeconds?: number;
   /** Bash exit code */
   exitCode?: number;
   error?: string;

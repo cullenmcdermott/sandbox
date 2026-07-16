@@ -290,9 +290,9 @@ head (the client tails live from there) rather than silently swallowing every
 live event.
 
 Replay notes: sequence numbers may have gaps — the runner compacts `*.delta`
-events of turns older than the most recent N (`DELTA_COMPACT_KEEP_TURNS`,
-default 2) once a turn completes; the non-delta events always survive, so a
-full replay still reconstructs the transcript. Payloads of `turn.started`,
+and `tool.progress` events of turns older than the most recent N
+(`DELTA_COMPACT_KEEP_TURNS`, default 2) once a turn completes; the non-ephemeral
+events always survive, so a full replay still reconstructs the transcript. Payloads of `turn.started`,
 `tool.*`, `permission.*`, and role-`user` `message.*` events are
 secret-redacted before they are persisted or broadcast (same masking as
 `audit.jsonl`), so log, live stream, and replay all carry the masked form.
@@ -349,6 +349,15 @@ event emitted from a dispatched subagent's stream carries
 Clients must route parented events to that Task's presentation (the CLI nests
 child tools and the live narration under the Task card) — never into the main
 streaming transcript, where they would interleave with the main reply.
+
+The `tool.progress` event is a heartbeat for a long-running tool (and the SDK's
+background Task runner): the runner maps the SDK's `tool_progress` message to it,
+carrying `{ tool, toolUseId, elapsedSeconds, parentToolUseId? }` (see
+`schema/events.json` `ToolPayload`) so a client can show a live "…running Ns"
+pill on the tool card instead of a frozen one. Like the `*.delta` streaming
+events it is ephemeral: the runner compacts `tool.progress` rows of turns older
+than the most recent N (`DELTA_COMPACT_KEEP_TURNS`) once a turn completes, so a
+full replay reconstructs the transcript without the intra-turn heartbeat tail.
 
 The `todo.updated` event surfaces the agent's plan/checklist. Payload:
 `{ todos: [{ content, status, activeForm }] }`, where `status` is one of

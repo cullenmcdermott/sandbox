@@ -221,6 +221,46 @@ test('E4 compaction: DELTA_COMPACT_KEEP_TURNS override (N=1) keeps only the newe
   }
 });
 
+test('E4 compaction: tool.progress heartbeats compact like deltas (turns older than N gone, non-ephemeral survive)', { skip }, () => {
+  delete process.env.DELTA_COMPACT_KEEP_TURNS;
+  const { db, cleanup } = setupDb();
+  try {
+    const sid = 'sess-P';
+    // A turn that also emits tool.progress heartbeats alongside the deltas.
+    const runProgressTurn = (n: number): void => {
+      const tid = `turn-${n}`;
+      appendEvent(sid, tid, T('turn.started'), { n });
+      appendEvent(sid, tid, T('tool.started'), { n, tool: 'Bash' });
+      appendEvent(sid, tid, T('tool.progress'), { n, tool: 'Bash', elapsedSeconds: 1 });
+      appendEvent(sid, tid, T('tool.progress'), { n, tool: 'Bash', elapsedSeconds: 2 });
+      appendEvent(sid, tid, T('tool.completed'), { n, tool: 'Bash' });
+      appendEvent(sid, tid, T('turn.completed'), { n });
+    };
+    for (let n = 1; n <= 4; n++) runProgressTurn(n);
+
+    // tool.progress rows survive only for the most-recent N=2 turns (3 and 4).
+    const progressTurns = db
+      .prepare("SELECT turn_id FROM events WHERE session_id = ? AND type = 'tool.progress' ORDER BY seq")
+      .all(sid) as Array<{ turn_id: string }>;
+    assert.deepEqual(
+      [...new Set(progressTurns.map((r) => Number(r.turn_id.split('-')[1])))],
+      [3, 4],
+      'tool.progress heartbeats of turns 1-2 compacted away',
+    );
+
+    // Non-ephemeral events (turn.started + tool.started + tool.completed +
+    // turn.completed = 4 per turn * 4 turns = 16) are never deleted.
+    const nonEphemeral = db
+      .prepare(
+        "SELECT COUNT(*) AS c FROM events WHERE session_id = ? AND type NOT LIKE '%.delta' AND type != 'tool.progress'",
+      )
+      .get(sid) as { c: number };
+    assert.equal(nonEphemeral.c, 16, 'no completed/full event ever deleted');
+  } finally {
+    cleanup();
+  }
+});
+
 test('E4 compaction: a compaction that throws (closed DB) is caught and never throws out of appendEvent', { skip }, () => {
   const { db, cleanup } = setupDb();
   try {

@@ -29,6 +29,7 @@ const (
 	EventReasoningCompleted   EventType = "reasoning.completed"
 	EventToolStarted          EventType = "tool.started"
 	EventToolDelta            EventType = "tool.delta"
+	EventToolProgress         EventType = "tool.progress"
 	EventToolCompleted        EventType = "tool.completed"
 	EventToolFailed           EventType = "tool.failed"
 	EventPermissionRequested  EventType = "permission.requested"
@@ -62,6 +63,7 @@ var AllEventTypes = []EventType{
 	EventReasoningCompleted,
 	EventToolStarted,
 	EventToolDelta,
+	EventToolProgress,
 	EventToolCompleted,
 	EventToolFailed,
 	EventPermissionRequested,
