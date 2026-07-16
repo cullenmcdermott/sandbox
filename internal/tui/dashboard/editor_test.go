@@ -48,11 +48,14 @@ func TestApplyEditorResult(t *testing.T) {
 }
 
 func TestRenderTodos(t *testing.T) {
-	out := renderTodos([]session.TodoItem{
+	// renderTodos now styles each item inline (§2c calm checkbox progression:
+	// strikethrough completed, bright in-progress, dim pending), so assert on the
+	// ANSI-stripped visible text.
+	out := stripANSICodes(renderTodos([]session.TodoItem{
 		{Content: "write the code", Status: "completed"},
 		{Content: "run the tests", Status: "in_progress", ActiveForm: "running the tests"},
 		{Content: "open a PR", Status: "pending"},
-	})
+	}))
 	for _, want := range []string{"✓ write the code", "▸ running the tests", "○ open a PR"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("renderTodos output missing %q:\n%s", want, out)
@@ -62,7 +65,7 @@ func TestRenderTodos(t *testing.T) {
 		t.Errorf("in_progress item should prefer ActiveForm, got:\n%s", out)
 	}
 
-	if got := renderTodos(nil); !strings.Contains(got, "cleared") {
+	if got := stripANSICodes(renderTodos(nil)); !strings.Contains(got, "cleared") {
 		t.Errorf("empty list should note cleared, got %q", got)
 	}
 }

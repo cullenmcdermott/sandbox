@@ -163,8 +163,11 @@ func TestLiveLayoutBodyAgreesWithHitTest(t *testing.T) {
 	m.layout()
 
 	v := m.liveLayout()
-	if got := v.top(regionBody); got != 2 {
-		t.Errorf("body top = %d, want 2 (header+divider)", got)
+	// §2c dropped the persistent header/divider in the normal state, so the body
+	// now starts at row 0. The invariant this test guards is cross-consumer
+	// agreement (bodyTop() == region top == list height), not the literal value.
+	if got := v.top(regionBody); got != 0 {
+		t.Errorf("body top = %d, want 0 (no persistent header)", got)
 	}
 	if got := m.bodyTop(); got != v.top(regionBody) {
 		t.Errorf("bodyTop() = %d disagrees with region top %d", got, v.top(regionBody))
@@ -192,7 +195,7 @@ func TestPermissionBandShiftsBodyNotFrame(t *testing.T) {
 		t.Errorf("permission band did not shrink the body: before=%d after=%d", beforeBody, afterBody)
 	}
 	v := m.liveLayout()
-	if v.top(regionBody) != 2 {
+	if v.top(regionBody) != 0 {
 		t.Errorf("body top drifted to %d with a permission open", v.top(regionBody))
 	}
 	if got := sumRegions(v); got != m.height {
@@ -215,8 +218,8 @@ func TestPreviewLayoutRegionsTileFrame(t *testing.T) {
 		if got := sumRegions(v); got != m.height {
 			t.Errorf("preview bands sum to %d, want %d (banner %dh)", got, m.height, lipgloss.Height(banner))
 		}
-		if v.top(regionBody) != 2 {
-			t.Errorf("preview body top = %d, want 2", v.top(regionBody))
+		if v.top(regionBody) != 0 {
+			t.Errorf("preview body top = %d, want 0", v.top(regionBody))
 		}
 		if got := v.heightOf(regionBanner); got != lipgloss.Height(banner) {
 			t.Errorf("banner band height = %d, want %d", got, lipgloss.Height(banner))

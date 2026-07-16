@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"image/color"
-	"path/filepath"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -135,10 +134,19 @@ func (v vlayout) view() string {
 	return strings.Join(parts, "\n")
 }
 
-// headerBands are the fixed bands stacked above the body — the title header and
-// the divider rule. Shared by the live and preview layouts (and, via bodyTop, by
-// the scrollbar hit-test) so a band added above the body updates every consumer.
+// headerBands are the fixed bands stacked above the body. §2c dropped the
+// persistent title bar: normally there are NONE and the body starts at row 0 —
+// the statusline owns identity and the terminal tab owns the title (see
+// App.windowTitle), so a permanent top band only duplicated them. The two-band
+// alert (title header + divider) returns ONLY in the exceptional connect states
+// (reconnecting / gave up), where an in-frame alert is still warranted because a
+// live error doesn't belong solely in a possibly-hidden tab title. bodyTop, the
+// scrollbar hit-test, and the live/preview layouts all walk this, so they follow
+// automatically.
 func (m *TranscriptModel) headerBands() []region {
+	if !m.reconnecting && !m.reconnectGaveUp {
+		return nil
+	}
 	return []region{
 		{regionHeader, 1, m.renderHeader},
 		{regionDivider, 1, func() string { return styleDivider.Render(strings.Repeat("─", m.width)) }},
@@ -524,6 +532,11 @@ func (m *TranscriptModel) renderBlockBody(b *blockCard) string {
 	case blockShell, blockFooter:
 		// Pre-styled block; render verbatim.
 		return b.text
+	case blockTodos:
+		// The single pinned todo checklist (§2b). The payload lives on the model
+		// (m.todoItems), not the card, so a mutate-in-place update re-renders the
+		// current list; the card only bumps its version to invalidate the cache.
+		return renderTodos(m.todoItems)
 	case blockSubagent:
 		if b.sub != nil {
 			return m.renderSubagentCard(b.sub, m.cardWidth())
@@ -665,32 +678,48 @@ func (m *TranscriptModel) resetReasoningWrapCache() {
 	m.reasoningWrapLen = 0
 }
 
-// renderTodos formats a todo.updated checklist as one line per item with a
-// status glyph (completed ✓, in_progress ▸, pending ○). For in-progress items
-// the present-tense ActiveForm is preferred when set.
+// renderTodos formats a todo.updated checklist as one styled line per item — a
+// calm checkbox progression (§2c) rendered by the pinned blockTodos card (§2b).
+// There is no header line: completed items strike through in dim green, the
+// in-progress item is bright (its present-tense ActiveForm preferred when set),
+// and pending items are dim. An empty list collapses to a single dim
+// "todos cleared" line. renderBlock place-indents the whole block by msgIndent,
+// so lines here carry no leading indent of their own.
 func renderTodos(todos []session.TodoItem) string {
 	if len(todos) == 0 {
-		return "▤ todo list cleared"
+		return lipgloss.NewStyle().Foreground(theme.TextDim).Render("todos cleared")
 	}
-	var b strings.Builder
-	b.WriteString("▤ todo list")
+	doneStyle := lipgloss.NewStyle().Foreground(theme.Success).Strikethrough(true).Faint(true)
+	activeStyle := lipgloss.NewStyle().Foreground(theme.TextBright).Bold(true)
+	pendingStyle := lipgloss.NewStyle().Foreground(theme.TextDim)
+	lines := make([]string, 0, len(todos))
 	for _, t := range todos {
-		var glyph string
 		switch t.Status {
 		case "completed":
-			glyph = "✓"
+			lines = append(lines, doneStyle.Render("✓ "+t.Content))
 		case "in_progress":
-			glyph = "▸"
+			text := t.Content
+			if t.ActiveForm != "" {
+				text = t.ActiveForm
+			}
+			lines = append(lines, activeStyle.Render("▸ "+text))
 		default: // pending and any unknown status
-			glyph = "○"
+			lines = append(lines, pendingStyle.Render("○ "+t.Content))
 		}
-		text := t.Content
-		if t.Status == "in_progress" && t.ActiveForm != "" {
-			text = t.ActiveForm
-		}
-		b.WriteString("\n  " + glyph + " " + text)
 	}
-	return b.String()
+	return strings.Join(lines, "\n")
+}
+
+// appendElbowNotice appends a Coral elbow line ("⎿  <text>") that reads as
+// attached under the block above it — the §2c calm-chrome replacement for the
+// old bracketed system notices ("[interrupted]", "[interrupt failed: …]") that
+// scanned like debug logs. It is pre-styled and appended as a verbatim blockShell
+// because blockInfo would re-style it dim (styleTInfo), overriding the Coral tone
+// that marks it as an interruption. renderBlock place-indents it by msgIndent, so
+// the "⎿" aligns with tool-card elbows.
+func (m *TranscriptModel) appendElbowNotice(text string) {
+	styled := lipgloss.NewStyle().Foreground(theme.Coral).Render(toolElbow + "  " + text)
+	m.appendBlock(blockShell, styled)
 }
 
 // Tool-card glyph vocabulary: the ⏺ status head bullet and the ⎿ result elbow.
@@ -1150,13 +1179,20 @@ func chatStatusLabel(s SessionStatus) string {
 	}
 }
 
+// renderHeader renders the exceptional alert band shown above the transcript ONLY
+// while reconnecting or after giving up — headerBands includes it solely in those
+// states. §2c removed the persistent title header (the statusline owns identity;
+// the terminal tab owns the title — see App.windowTitle), so the non-exceptional
+// title+status branch is gone: this now always pairs the session title with the
+// live connect/gone alert, so a stalled resume reads as real progress even when
+// the tab title isn't visible.
 func (m *TranscriptModel) renderHeader() string {
 	left := styleDetailTitle.Render(m.title)
 
 	var right string
 	if m.reconnectGaveUp {
 		right = styleTError.Render("session gone")
-	} else if m.reconnecting {
+	} else {
 		// Show the live connect stage (FU1) — "reconnecting — Starting pod" — so a
 		// slow cold-pod resume reads as real progress, falling back to a plain
 		// label until the first stage arrives. Elapsed time is appended (Fix D).
@@ -1173,14 +1209,10 @@ func (m *TranscriptModel) renderHeader() string {
 			}
 		}
 		right = styleTError.Render(label)
-	} else {
-		glyph := glyphStyle(m.DashStatus).Render(m.DashStatus.Glyph() + " " + chatStatusLabel(m.DashStatus))
-		meta := styleTInfo.Render(m.agent + " · " + filepath.Base(m.projectPath))
-		right = meta + "  " + glyph
 	}
 
 	// spread truncates a long title rather than letting it overflow and clip the
-	// status glyph / reconnect state off the right edge (§1c spot 1).
+	// reconnect state off the right edge (§1c spot 1).
 	return spread(left, right, m.width)
 }
 

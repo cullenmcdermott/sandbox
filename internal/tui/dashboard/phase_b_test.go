@@ -657,8 +657,9 @@ func TestToolDeltaUpdatesRunningCard(t *testing.T) {
 	}
 }
 
-// ORACLE: TodoUpdated produces an info block — it is no longer silently
-// dropped. [B8]
+// ORACLE: TodoUpdated produces a pinned todo block — it is no longer silently
+// dropped (§2b pins ONE mutated-in-place checklist instead of the old per-update
+// info block). [B8]
 func TestInfoEventsPreviouslyDropped(t *testing.T) {
 	sess := Session{State: session.State{ID: "i1"}}
 	m := NewTranscript(&fakeRunnerClient{}, sess, nil)
@@ -668,10 +669,10 @@ func TestInfoEventsPreviouslyDropped(t *testing.T) {
 
 	added := len(m.blocks) - before
 	if added != 1 {
-		t.Errorf("expected 1 info block for todo event, got %d", added)
+		t.Errorf("expected 1 todo block for todo event, got %d", added)
 	}
-	if m.blocks[before].kind != blockInfo {
-		t.Errorf("expected blockInfo, got %v", m.blocks[before].kind)
+	if m.blocks[before].kind != blockTodos {
+		t.Errorf("expected blockTodos, got %v", m.blocks[before].kind)
 	}
 }
 

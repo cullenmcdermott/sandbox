@@ -10,7 +10,7 @@ import (
 )
 
 // RV17: session.terminating must NOT trigger an immediate reconnect (it would
-// port-forward to the still-dying pod and flap [reconnected]/[connection lost]).
+// port-forward to the still-dying pod and flap "Reconnected"/"Connection lost").
 // The reconnect is deferred to stream-end, when the old pod is actually gone.
 func TestTerminatingDefersReconnectToStreamEnd(t *testing.T) {
 	reconnect := func(context.Context, func(ConnectStage, string)) (RunnerClient, error) {
@@ -76,7 +76,7 @@ func TestTurnErrMsgRollsBackOptimisticBusyState(t *testing.T) {
 
 // RV (error-resilience HIGH): when the SSE stream fails to OPEN on attach, the
 // open-error must route into the same stream-ended/reconnect path a mid-stream
-// drop uses (which shows "[connection lost — reconnecting…]" and retries) rather
+// drop uses (which shows "Connection lost — reconnecting…" and retries) rather
 // than returning a nil Cmd and leaving a connected-looking but inert transcript.
 func TestStartEventStreamOpenFailureRoutesToReconnect(t *testing.T) {
 	fc := &fakeRunnerClient{eventsErr: errors.New("runner events: status 502")}

@@ -15,6 +15,9 @@ func TestHeaderAndHintNeverOverflow(t *testing.T) {
 	m.width, m.height = 40, 24
 	m.title = strings.Repeat("verylongtitle", 5)
 	m.queuedPrompt = strings.Repeat("queuedtext", 10)
+	// The header band renders only in the exceptional reconnect state now (§2c);
+	// exercise it there so the title-vs-alert spread truncation is under test.
+	m.reconnecting = true
 	m.layout()
 
 	for _, l := range strings.Split(m.renderHeader(), "\n") {

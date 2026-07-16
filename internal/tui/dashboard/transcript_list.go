@@ -53,9 +53,9 @@ type blockCard struct {
 	sub  *subagentCard // non-nil only for blockSubagent
 
 	// Per-commit display state, recomputed by commitItems; a change bumps the
-	// version so the "new since you left" divider / turn gap re-render.
-	unread  bool
-	turnGap bool // a blank line before a user block that begins a non-first turn
+	// version so the "new since you left" divider / entry gap re-render.
+	unread   bool
+	entryGap bool // a blank line before a block that begins a new top-level entry (D2)
 
 	// expanded flips a capped block open to its full body. Only meaningful for
 	// blockReasoning today (a multi-line think whose wrapped body exceeds
@@ -80,13 +80,31 @@ func (m *TranscriptModel) newBlockCard(kind tblockKind, text string) *blockCard 
 // setDisplay updates the per-commit display flags, bumping the version only when
 // they actually change so an immutable committed block is never needlessly
 // re-rendered (the memoization the old fingerprint gate provided).
-func (b *blockCard) setDisplay(unread, turnGap bool) {
-	if b.unread == unread && b.turnGap == turnGap {
+func (b *blockCard) setDisplay(unread, entryGap bool) {
+	if b.unread == unread && b.entryGap == entryGap {
 		return
 	}
 	b.unread = unread
-	b.turnGap = turnGap
+	b.entryGap = entryGap
 	b.Bump()
+}
+
+// startsEntry reports whether a committed block of kind cur, following a block of
+// kind prev, begins a new top-level entry — the boundary that earns a leading
+// blank line (D2). One blank line precedes EVERY new top-level entry (Claude
+// Code's calm), while consecutive tool cards stay tight. User / assistant /
+// reasoning / subagent / todos always open a new entry; a tool card opens one
+// only when it doesn't directly follow another tool card; info/error/shell/
+// footer (and any other attachment kind) fold into the entry above them.
+func startsEntry(prev, cur tblockKind) bool {
+	switch cur {
+	case blockUser, blockAssistant, blockReasoning, blockSubagent, blockTodos:
+		return true
+	case blockToolCard:
+		return prev != blockToolCard
+	default:
+		return false
+	}
 }
 
 func (b *blockCard) Render(width int) string {
@@ -94,9 +112,10 @@ func (b *blockCard) Render(width int) string {
 		return b.renderStreamTail()
 	}
 	body := b.m.renderBlock(b)
-	// A2.3 (Calm) turn gap: a blank line before each user turn after the first,
-	// so turns read as distinct without a heavy divider.
-	if b.kind == blockUser && b.turnGap {
+	// D2 (Calm) entry gap: one blank line before each block that opens a new
+	// top-level entry (see startsEntry), so entries read as distinct without a
+	// heavy divider while consecutive tool cards stay tight.
+	if b.entryGap {
 		body = "\n" + body
 	}
 	if b.unread {
@@ -108,39 +127,44 @@ func (b *blockCard) Render(width int) string {
 // renderStreamTail renders the ephemeral live tail from the model's buffers.
 func (b *blockCard) renderStreamTail() string {
 	m := b.m
+	var body string
 	if b.streamReasoning {
 		// Live THINKING tail (§2b gap 3): stream the reasoning text as it arrives,
 		// muted+italic under a "∴ Thinking" header, instead of buffering silently
 		// until reasoning.completed. It collapses to the compact "∴ Thought (N
 		// lines): …" summary (renderBlockBody's blockReasoning) when the block commits.
-		if b.unread {
-			return m.renderUnreadDivider() + "\n" + m.renderLiveReasoning(m.reasoningBuf.String())
-		}
-		return m.renderLiveReasoning(m.reasoningBuf.String())
-	}
-	// A2: use persistent AssistantItem + StreamingMarkdown for incremental rendering
-	// of the live tail instead of creating a new item per delta. The live tail wears
-	// the same ⏺ bullet + hanging indent as the finalized assistant block (renderBlock)
-	// so it doesn't shift left when the turn completes. It MUST wrap at the same width as
-	// the finalized block (assistantWrapWidth) — keyed off m.width, not the
-	// list-provided width — or the block reflows at message.completed and the view
-	// lurches (T1).
-	w := m.assistantWrapWidth()
-	var body string
-	if m.streamAI != nil {
-		m.streamAI.SetMessage(&chat.AssistantMessage{Content: m.assistantBuf.String(), Streaming: true})
-		body = m.streamAI.RawRender(w)
+		body = m.renderLiveReasoning(m.reasoningBuf.String())
 	} else {
-		body = m.renderBlockBody(&blockCard{m: m, kind: blockAssistant, text: m.assistantBuf.String()})
+		// A2: use persistent AssistantItem + StreamingMarkdown for incremental rendering
+		// of the live tail instead of creating a new item per delta. The live tail wears
+		// the same ⏺ bullet + hanging indent as the finalized assistant block (renderBlock)
+		// so it doesn't shift left when the turn completes. It MUST wrap at the same width as
+		// the finalized block (assistantWrapWidth) — keyed off m.width, not the
+		// list-provided width — or the block reflows at message.completed and the view
+		// lurches (T1).
+		w := m.assistantWrapWidth()
+		if m.streamAI != nil {
+			m.streamAI.SetMessage(&chat.AssistantMessage{Content: m.assistantBuf.String(), Streaming: true})
+			body = m.streamAI.RawRender(w)
+		} else {
+			body = m.renderBlockBody(&blockCard{m: m, kind: blockAssistant, text: m.assistantBuf.String()})
+		}
+		// Match the finalized block's trailing-newline handling. renderBlockBody strips
+		// ALL trailing newlines (TrimRight), but the streaming renderer only trims one
+		// (TrimSuffix), so glamour's trailing blank line survives as an empty gutter row
+		// that disappears at message.completed — shifting the view up a line (T1 drift).
+		// Trim it here so the tail and the finalized block are the same height.
+		body = strings.TrimRight(body, "\n")
+		if body != "" {
+			body = bulletPrefix(body, theme.TextMuted)
+		}
 	}
-	// Match the finalized block's trailing-newline handling. renderBlockBody strips
-	// ALL trailing newlines (TrimRight), but the streaming renderer only trims one
-	// (TrimSuffix), so glamour's trailing blank line survives as an empty gutter row
-	// that disappears at message.completed — shifting the view up a line (T1 drift).
-	// Trim it here so the tail and the finalized block are the same height.
-	body = strings.TrimRight(body, "\n")
-	if body != "" {
-		body = bulletPrefix(body, theme.TextMuted)
+	// The tail is a would-be blockAssistant/blockReasoning entry: give it the SAME
+	// leading blank the committed block will get at commit time (entryGap set by
+	// ensureStreamTail), or the frame height jumps by a row at the commit boundary
+	// (T1). Applied before the unread divider, matching Render's ordering.
+	if b.entryGap {
+		body = "\n" + body
 	}
 	if b.unread {
 		return m.renderUnreadDivider() + "\n" + body
@@ -208,14 +232,12 @@ func (m *TranscriptModel) commitItems() {
 		}
 	}
 
-	sawUser := false
 	for i, b := range m.blocks {
 		unread := i == m.unreadIndex && m.unreadIndex > 0
-		turnGap := b.kind == blockUser && sawUser
-		if b.kind == blockUser {
-			sawUser = true
-		}
-		b.setDisplay(unread, turnGap)
+		// A block earns a leading blank when it is not the first committed block and
+		// it opens a new top-level entry relative to the block before it (D2).
+		entryGap := i > 0 && startsEntry(m.blocks[i-1].kind, b.kind)
+		b.setDisplay(unread, entryGap)
 	}
 
 	items := make([]list.Item, 0, len(m.blocks)+1)
@@ -257,6 +279,14 @@ func (m *TranscriptModel) ensureStreamTail(reasoning bool) {
 		m.streamItem = &blockCard{Versioned: list.NewVersioned(), m: m, streaming: true}
 	}
 	m.streamItem.streamReasoning = reasoning
+	// The tail is a would-be blockReasoning/blockAssistant entry; give it the same
+	// entryGap the committed block will get, computed against the last committed
+	// block, so the leading blank is identical before and after commit (T1 parity).
+	tailKind := blockAssistant
+	if reasoning {
+		tailKind = blockReasoning
+	}
+	m.streamItem.entryGap = len(m.blocks) > 0 && startsEntry(m.blocks[len(m.blocks)-1].kind, tailKind)
 	mode, n := "stream", m.assistantBuf.Len()
 	if reasoning {
 		mode, n = "think", m.reasoningBuf.Len()
@@ -340,7 +370,15 @@ func (m *TranscriptModel) bodyView() string {
 	// viewport (§D). The body width was reserved one column short in layout, so
 	// the bar (or a blank filler column) sits flush without shifting content.
 	total, offset := m.body.Metrics()
-	bar := kit.Scrollbar(h, total, h, offset)
+	// Transient thumb (§2c): show the scrollbar only while reading scrollback.
+	// At the bottom (follow mode, the default), offset >= total-h — including the
+	// content-fits guard (total <= h) — so we skip Scrollbar and let the blank
+	// filler branch run. The gutter column stays reserved either way, so content
+	// width never shifts.
+	var bar string
+	if offset < total-h {
+		bar = kit.Scrollbar(h, total, h, offset)
+	}
 	// Normalize to an exact (m.width-1)×h rectangle so the scrollbar attaches
 	// flush and short content fills the height. fitModal is the cheap ANSI-aware
 	// pad/truncate; the equivalent lipgloss Style.Width().Height().Render() costs

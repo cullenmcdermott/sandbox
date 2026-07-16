@@ -1191,7 +1191,33 @@ func (a *App) View() tea.View {
 	if a.screen != ScreenExternal {
 		v.BackgroundColor = theme.Page
 	}
+	// §2c: the session identity moved off a persistent in-frame header onto the
+	// terminal tab. bubbletea v2 diffs v.WindowTitle per frame and emits the OSC
+	// itself, so we just declare the desired title — no manual escapes, no edge
+	// tracking.
+	v.WindowTitle = a.windowTitle()
 	return v
+}
+
+// windowTitle is the terminal tab title for the current screen (§2c). It carries
+// the session identity that used to live in the transcript's top header band:
+// the attached session's display title on the transcript/external screens, and a
+// plain "sandbox" everywhere else (dashboard, connecting, picker). bubbletea v2
+// emits the OSC title sequence whenever this string changes between frames.
+func (a *App) windowTitle() string {
+	switch a.screen {
+	case ScreenTranscript:
+		if a.transcript != nil && a.transcript.title != "" {
+			return a.transcript.title
+		}
+	case ScreenExternal:
+		if a.external != nil {
+			if t := a.external.session().DisplayTitle(); t != "" {
+				return t
+			}
+		}
+	}
+	return "sandbox"
 }
 
 // withToast composites the active cross-session "needs you" notification over the

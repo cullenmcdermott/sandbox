@@ -136,7 +136,9 @@ func TestScrollbarDragMapsToOffset(t *testing.T) {
 		t.Fatalf("precondition: content must overflow the viewport (maxOffset=%d)", maxOffset)
 	}
 	bar := m.width - 1
-	const bodyTop = 2
+	// §2c: no persistent header in the normal state, so the body starts at row 0.
+	// Track the live value rather than a hard-coded constant.
+	bodyTop := m.bodyTop()
 
 	if !m.scrollbarDragTo(bar, bodyTop) {
 		t.Fatal("drag on the scrollbar top was not consumed")
@@ -155,7 +157,7 @@ func TestScrollbarDragMapsToOffset(t *testing.T) {
 	if m.scrollbarDragTo(bar-1, bodyTop+1) {
 		t.Error("a column that isn't the scrollbar must not be consumed")
 	}
-	if m.scrollbarDragTo(bar, 0) {
-		t.Error("a row above the body must not be consumed")
+	if m.scrollbarDragTo(bar, bodyTop+bodyH) {
+		t.Error("a row below the body must not be consumed")
 	}
 }

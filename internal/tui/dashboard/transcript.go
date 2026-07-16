@@ -45,6 +45,7 @@ const (
 	blockSubagent  // a dispatched Task rendered as a nested card (see subagentCard)
 	blockFooter    // a dim per-turn model/cost footer (pre-styled, render verbatim)
 	blockReasoning // thinking/reasoning block emitted by Reasoning* events (B8)
+	blockTodos     // the single pinned todo checklist, mutated in place on each todo.updated (§2b/§2c)
 )
 
 // toolStatus is the lifecycle of a tool-call card.
@@ -172,6 +173,20 @@ type TranscriptModel struct {
 	// result. tool.completed/failed events carry no tool name, so cards are
 	// matched to results in start order.
 	pendingTools []int
+
+	// todoBlock is the SINGLE pinned todo checklist card (§2b pinned-widget
+	// pipeline; §2c calm chrome). todo.updated events mutate this one block in
+	// place — refreshing m.todoItems and bumping the card — rather than appending
+	// a fresh checklist per update, which used to bury the transcript in
+	// duplicate lists. The pointer can't dangle: blocks are append-only except
+	// dropTrailingFooter, which only pops a trailing blockFooter (never this
+	// blockTodos). nil until the first todo.updated arrives.
+	todoBlock *blockCard
+	// todoItems is the current checklist payload rendered by todoBlock's
+	// blockTodos arm. renderBlockBody reads it via the model because blockCard
+	// (owned by transcript_list.go) carries no per-card todo field; there is only
+	// ever one pinned todo block, so a single model-level slice is unambiguous.
+	todoItems []session.TodoItem
 
 	// reasoningBuf accumulates ReasoningDelta text between ReasoningStarted and
 	// ReasoningCompleted events (B8). Flushed to a blockReasoning block on
@@ -416,6 +431,26 @@ type TranscriptModel struct {
 	composeBuf    string
 	composeCursor int
 
+	// Prompt history for ↑/↓ recall in the composer (§2d). promptHistory is the
+	// session-local list of prompts the user actually submitted this attach —
+	// manual sends and queued steers, recorded in submit() (the sole user-origin
+	// entry point). The auto-submitted initialPrompt and /loop-/goal driver ticks
+	// reach submitText WITHOUT passing through submit(), so they are excluded.
+	// Consecutive duplicates are collapsed; newest is last; unbounded (prompts are
+	// small). Not parked across detach/reattach — a fresh attach starts empty.
+	promptHistory []string
+	// histIdx is the recall cursor: -1 = not navigating, 0 = newest entry,
+	// len-1 = oldest. Reset to -1 on any submit and whenever the user edits the
+	// recalled text (nav exits and the shown entry becomes the live draft).
+	histIdx int
+	// histDraft is the composer text saved when recall began (an empty string is a
+	// valid draft), restored when ↓ pages back past the newest entry.
+	histDraft string
+	// histShown is the history entry currently loaded into the composer, used to
+	// detect an edit while navigating: once input.Value() diverges from it, recall
+	// exits and the edited text becomes the draft.
+	histShown string
+
 	events       <-chan session.Event
 	streamCancel context.CancelFunc // cancels the live Events() stream (NEW-5)
 
@@ -517,6 +552,9 @@ func NewTranscript(client RunnerClient, sess Session, reconnect ReconnectFunc) *
 		attachSeq: sess.lastSeq,
 
 		droppedPartialIdx: -1,
+		// -1 = not navigating prompt history (§2d); 0 would mean "showing the
+		// newest entry", so the cursor must start out of band.
+		histIdx: -1,
 		// Seed the epoch so the first commit doesn't spuriously force-bump every
 		// card: a fresh model's cards render fresh (version 0, no cache entry), so
 		// the §1c force is only needed on a genuine later /theme swap.
@@ -697,13 +735,13 @@ func (m *TranscriptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// transcripts always have a non-nil reconnect).
 			m.replaying = false
 			m.working = false
-			m.appendBlock(blockInfo, "[stream ended]")
+			m.appendBlock(blockInfo, "Stream ended")
 			return m, nil
 		}
 		if !m.reconnecting {
 			m.reconnecting = true
 			m.reconnectStartedAt = nowFunc()
-			m.appendBlock(blockInfo, "[connection lost — reconnecting…]")
+			m.appendBlock(blockInfo, "Connection lost — reconnecting…")
 		}
 		return m, m.startReconnect()
 
@@ -722,7 +760,7 @@ func (m *TranscriptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pending.since = nowFunc()
 		}
 		m.reconnectAttempts = 0
-		m.appendBlock(blockInfo, "[reconnected]")
+		m.appendBlock(blockInfo, "Reconnected")
 		return m, m.startEventStream()
 
 	case tReconnectFailedMsg:
@@ -746,9 +784,9 @@ func (m *TranscriptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// few seconds forever (RV29).
 		switch {
 		case m.reconnectAttempts <= reconnectVerboseAttempts:
-			m.appendBlock(blockInfo, fmt.Sprintf("[reconnect failed: %v — retrying in %s]", msg.err, delay))
+			m.appendBlock(blockInfo, fmt.Sprintf("Reconnect failed: %v — retrying in %s", msg.err, delay))
 		case m.reconnectAttempts == reconnectVerboseAttempts+1:
-			m.appendBlock(blockInfo, "[still trying to reconnect in the background…]")
+			m.appendBlock(blockInfo, "Still trying to reconnect in the background…")
 		}
 		return m, tea.Tick(delay, func(time.Time) tea.Msg { return tRetryReconnectMsg{} })
 
@@ -784,7 +822,7 @@ func (m *TranscriptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// The interrupt request didn't reach the runner (the turn keeps running).
 		// Surface it as a dim notice rather than silently doing nothing, so a
 		// future regression in the interrupt path is visible.
-		m.appendBlock(blockInfo, "[interrupt failed: "+msg.err.Error()+"]")
+		m.appendElbowNotice("Interrupt failed: " + msg.err.Error())
 		return m, nil
 
 	case permResolveErrMsg:

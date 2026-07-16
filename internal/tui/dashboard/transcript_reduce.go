@@ -215,7 +215,7 @@ func (m *TranscriptModel) reasoningExpandable(b *blockCard) bool {
 // the last thing appended on turn.completed. This keeps the removal strictly
 // index-safe (truncating the tail shifts no earlier flatTools/droppedPartialIdx
 // index). If a post-turn block was appended after the footer (e.g. an
-// "[interrupted]"/"[reconnected]" notice or an orphan tool result), the footer is
+// "Interrupted"/"Reconnected" notice or an orphan tool result), the footer is
 // buried and intentionally left in place rather than risk an interior splice that
 // would invalidate those index maps; the result is at most one extra dim footer.
 func (m *TranscriptModel) dropTrailingFooter() {
@@ -419,7 +419,7 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		// card "running" forever and the next turn's tool.completed FIFO-pops it.
 		m.drainPendingTools("interrupted")
 		m.turnActive = false
-		m.appendBlock(blockInfo, "[interrupted]")
+		m.appendElbowNotice("Interrupted by user")
 		// A queued prompt here means the interrupt was a steer (queueSteer keeps
 		// queuedPrompt set): now that the turn is torn down, submit it as the next
 		// turn — sequenced after the interrupt so it can't 409 against the old one.
@@ -628,7 +628,7 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		if !m.reconnecting {
 			m.reconnecting = true
 			m.reconnectStartedAt = nowFunc()
-			m.appendBlock(blockInfo, "[auto-reconnecting…]")
+			m.appendBlock(blockInfo, "Auto-reconnecting…")
 		}
 
 	// ---- B8: Previously-dropped events, now handled ----
@@ -756,12 +756,21 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		}
 
 	case session.EventTodoUpdated:
-		// Todo list changed; render the agent's current checklist so users can
-		// follow its plan. Each event carries the full list (it replaces any
-		// prior one), so we show it as a compact one-line-per-item block.
+		// Todo list changed. Each event carries the FULL list (it replaces any
+		// prior one), so we pin ONE checklist block (§2b pinned-widget pipeline)
+		// and mutate it in place on every update instead of appending a fresh
+		// checklist per event — the old behavior buried the transcript in a stack
+		// of near-identical lists. The render (renderTodos) reads m.todoItems.
 		var p session.TodoUpdatedPayload
 		_ = json.Unmarshal(ev.Payload, &p)
-		m.appendBlock(blockInfo, renderTodos(p.Todos))
+		m.todoItems = p.Todos
+		if m.todoBlock == nil {
+			m.todoBlock = m.newBlockCard(blockTodos, "")
+			m.blocks = append(m.blocks, m.todoBlock)
+		} else {
+			m.todoBlock.Bump()
+		}
+		m.syncItems()
 
 	case session.EventError:
 		var p session.ErrorPayload

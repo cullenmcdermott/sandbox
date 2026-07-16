@@ -184,22 +184,30 @@ func TestTranscriptSubmitIgnoresBlank(t *testing.T) {
 // Header
 // --------------------------------------------------------------------------
 
-func TestTranscriptHeaderShowsAgentAndStatus(t *testing.T) {
+// §2c dropped the persistent title/status header: in the normal (non-exceptional)
+// state there is NO header band, so the body starts at row 0 and identity lives in
+// the statusline + terminal tab (App.windowTitle). The header band returns only
+// while reconnecting / after giving up (covered by reconnect_stage_test /
+// reconnect_giveup_test).
+func TestTranscriptHasNoPersistentHeader(t *testing.T) {
 	m := NewTranscript(&fakeRunnerClient{}, transcriptSession(), nil)
 	m.width, m.height = 80, 24
 	m.layout()
 
-	h := m.renderHeader()
-	if !strings.Contains(h, "claude-sdk") {
-		t.Errorf("header missing agent: %q", h)
+	if bands := m.headerBands(); bands != nil {
+		t.Errorf("normal state should have no header bands, got %d", len(bands))
 	}
-	// The chat header uses action-oriented labels (T12): a finished turn reads
-	// "ready for input", not the internal "needs-input".
-	if !strings.Contains(h, "ready for input") {
-		t.Errorf("header missing status: %q", h)
+	if got := m.bodyTop(); got != 0 {
+		t.Errorf("bodyTop = %d, want 0 (no persistent header)", got)
 	}
-	if !strings.Contains(h, "proj") {
-		t.Errorf("header missing title/project: %q", h)
+
+	// The alert header returns in the exceptional reconnecting state.
+	m.reconnecting = true
+	if bands := m.headerBands(); len(bands) != 2 {
+		t.Errorf("reconnecting state should have header+divider bands, got %d", len(bands))
+	}
+	if !strings.Contains(stripANSI(m.renderHeader()), "reconnecting") {
+		t.Errorf("reconnecting header missing alert: %q", m.renderHeader())
 	}
 }
 

@@ -14,7 +14,7 @@ func parityFixture(m *TranscriptModel) []*blockCard {
 	asst := m.newBlockCard(blockAssistant, "Here is **bold** text and a list:\n\n- one\n- two\n")
 	tool := m.newBlockCard(blockToolCard, "")
 	tool.tool = &toolCard{tool: "Read", arg: "main.go", status: toolOK, summary: "10 lines", card: tool}
-	info := m.newBlockCard(blockInfo, "[reconnected]")
+	info := m.newBlockCard(blockInfo, "Reconnected")
 	return []*blockCard{user, asst, tool, info}
 }
 
@@ -29,10 +29,16 @@ func TestTranscriptParitySnapshot(t *testing.T) {
 	m.blocks = parityFixture(m)
 	m.layout()
 
-	// Independent oracle: the pre-rewrite assembly (join of per-block renders).
+	// Independent oracle: the pre-rewrite assembly (join of per-block renders),
+	// plus the D2 entry gap — one leading blank before each block that opens a new
+	// top-level entry, exactly as blockCard.Render applies it.
 	var parts []string
-	for _, b := range m.blocks {
-		parts = append(parts, m.renderBlock(b))
+	for i, b := range m.blocks {
+		body := m.renderBlock(b)
+		if i > 0 && startsEntry(m.blocks[i-1].kind, b.kind) {
+			body = "\n" + body
+		}
+		parts = append(parts, body)
 	}
 	oracle := strings.Join(parts, "\n")
 
@@ -54,11 +60,16 @@ func TestTranscriptParityWithUnread(t *testing.T) {
 
 	var parts []string
 	for i, b := range m.blocks {
-		if i == m.unreadIndex && m.unreadIndex > 0 {
-			parts = append(parts, m.renderUnreadDivider()+"\n"+m.renderBlock(b))
-			continue
+		body := m.renderBlock(b)
+		// D2 entry gap first, then the unread divider — matching blockCard.Render's
+		// ordering (divider + "\n" + gap + body).
+		if i > 0 && startsEntry(m.blocks[i-1].kind, b.kind) {
+			body = "\n" + body
 		}
-		parts = append(parts, m.renderBlock(b))
+		if i == m.unreadIndex && m.unreadIndex > 0 {
+			body = m.renderUnreadDivider() + "\n" + body
+		}
+		parts = append(parts, body)
 	}
 	oracle := strings.Join(parts, "\n")
 

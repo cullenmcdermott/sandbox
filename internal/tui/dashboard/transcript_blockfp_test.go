@@ -33,11 +33,18 @@ func TestReconcileMemoizesImmutableBlocks(t *testing.T) {
 		}
 	}
 
-	// The committed blocks must all sit at version 0: they were never mutated after
-	// creation, so no bump ever fired (linear seeding, not quadratic re-hashing).
+	// Each committed block is seeded at most once: block 0 opens the transcript (no
+	// leading gap → version 0), and every later block sets its one-time entryGap
+	// flag (D2) at first commit (version 1). Crucially the version never CLIMBS with
+	// M — a value >1 would mean a block was re-processed on subsequent appends (the
+	// quadratic re-hashing this guards).
 	for i := 0; i < M; i++ {
-		if got := m.blocks[i].Version(); got != 0 {
-			t.Fatalf("committed block %d has version %d, want 0 (was reprocessed after creation)", i, got)
+		want := uint64(1)
+		if i == 0 {
+			want = 0
+		}
+		if got := m.blocks[i].Version(); got != want {
+			t.Fatalf("committed block %d has version %d, want %d (entryGap set once, never re-processed)", i, got, want)
 		}
 	}
 }
