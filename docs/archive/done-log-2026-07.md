@@ -1734,3 +1734,45 @@ actionable wording pinned by test). Post-commit `just check` fully green
   prompt_history/account_picker; deliberate test updates limited to the
   behavior that changed (blockfp memoization, parity oracles, region rows,
   repurposed header test).
+
+## 2026-07-15 — permPrompt consolidation, tool.progress pipeline, dogfood-fix wave, /model picker, arrow-key history
+
+- **§2a permissionPrompt consolidation (closes §2a entirely):** `permPrompt`
+  component (permprompt.go) — Render/Height/HandleKey for BOTH the tool panel
+  and plan card; static bodies cached (keyed pending+width+sel+showDiff+theme
+  epoch), border/appear-fade assembled live — one refresh discipline replaces
+  the plan-stale/tool-double-build permBox asymmetry. Plan r/a/enter grammar
+  joined the tool grammar; grace gate + resolvePermission stay model-side;
+  perm queue shares the wants-summary vocabulary. Zero golden drift.
+- **§2b gap 5 pipeline half:** `tool.progress` schema event (+ optional
+  `ToolPayload.elapsedSeconds`, protocol stays v2), mapper emit from SDK
+  tool_progress heartbeats (task_id noted for future background-task
+  correlation via SDKToolUseSummaryMessage), heartbeats join the E4
+  delta-compaction class, runner-api.md documented. STILL OPEN: the TUI
+  render half (elapsed on running tool cards).
+- **Live-dogfood fixes (maintainer screenshot):** user blocks now wrap at
+  assistantWrapWidth (were unwrapped + clipped); `inputRows()` counts
+  soft-wrapped visual rows (bubbles LineCount is logical-only) so the
+  composer grows as text wraps; ctrl+o = expand-only with ctrl+e taking
+  $EDITOR composition (the dual role was the trap: hints said expand,
+  drafts got $EDITOR); `tea.PasteMsg` routed by input context (composer with
+  full post-edit hooks / search append / dropped while permission pending —
+  was silently dropped everywhere).
+- **CC-style /model picker (maintainer ask):** `/model` opens a numbered
+  selector (Default row + account models from models.available; static
+  fallback Fable 5/Opus 4.8/Sonnet 5/Haiku 4.5 until it arrives — Fable
+  reachable pre-first-turn); per-model slash commands, the /opus /sonnet
+  /haiku trio, /model-default, and modelSlug all removed; full-capture
+  preempt like help; escapeConsumes covers it; selection runs setModelCmd.
+- **Composer arrows own history (maintainer directive, supersedes the
+  same-day gate):** compose-context ↑/↓ never scroll — ↑ recalls on the
+  first line (draft saved) / moves the cursor above it; ↓ walks newer /
+  restores draft / moves the cursor; wheel/PgUp/PgDn/ctrl+u+d/vim NORMAL
+  keep scrolling.
+- **Ops/infra:** `sandbox --version` now embeds dev-<revCount>-<shortRev>
+  (a stale flake.lock cost a rebuild-debugging session — the system-config
+  lock pinned b68df9d while worktrees landed 45 commits later); worktree
+  agents provision from a stale base — caught by an agent refusing to edit,
+  recovered via fast-forward merge (watch for this in future fan-outs).
+- Verified: `just check` fully green on the integrated tree (one
+  staticcheck nit caught by the CI-parity lint and fixed).

@@ -57,26 +57,12 @@ done log.)
   Nix is the preferred install mechanism everywhere in the chain. Triage
   alongside the §7b sign-off.*
 
-### 0a. Live-dogfood reports (maintainer screenshot, 2026-07-15) — fixes in flight
+### 0a. Live-dogfood reports (2026-07-15) — ALL RESOLVED same day (done log)
 
-* **User prompt lines don't wrap** — `renderBlockBody` blockUser renders
-  `styleTUser.Render(b.text)` with NO width (`transcript_render.go:500`);
-  assistant blocks wrap at `assistantWrapWidth`. Long prompts clip at the
-  frame edge. Fix: wrap at assistantWrapWidth before `quotePrefix`.
-* **Composer doesn't grow on soft wrap** — `inputRows()` uses
-  `textarea.LineCount()` (= logical lines only, verified in bubbles v2.1.1);
-  soft-wrapped text scrolls inside one row until a hard shift+enter. Fix:
-  wrap-aware row count (sum per-line ceil(width/inner)), still capped at
-  maxInputRows.
-* **ctrl+o hint vs $EDITOR surprise** — tool-card hint says "ctrl+o to
-  expand" but with a draft (and on the empty+no-expandable fallthrough)
-  ctrl+o opens $EDITOR (`transcript_input.go` compose table). Fix: ctrl+o =
-  expand only (ungated); $EDITOR composition moves to ctrl+e; help/hints
-  updated.
-* **Model selector** (maintainer ask, design approved 2026-07-15): CC-style
-  `/model` picker overlay replacing the /opus //sonnet /haiku aliases + the
-  per-model palette entries; static fallback list includes Fable 5 until
-  `models.available` arrives.
+All five maintainer reports fixed + landed: user-block wrap, wrap-aware
+composer growth, ctrl+o/ctrl+e split, PasteMsg routing, and the two
+directives (CC-style `/model` picker with Fable in the fallback; composer
+↑/↓ own history/cursor, never scroll). Detail in the done log.
 
 ## 1) Correctness bugs
 
@@ -244,13 +230,13 @@ all landed (done log) — the items below are what remains.
   cascade = one `escStep` list read by BOTH handleKey and escapeConsumes
   (closed a real queued-prompt divergence); overlay internals stay as
   delegate fallbacks. Landed WITH the §2d q/g footer fix + leader chord.
-- [ ] **permissionPrompt component (MED) — base landed 2026-07-13.** The
-  numbered-options panel is now a component (`permprompt.go`: options,
-  question, pure key grammar, options render) and the §2c redesign shipped on
-  it. REMAINING: consolidate the smear — pre-rendered strings held as model
-  state with asymmetric refresh (plan cards read stale cache, perm boxes
-  re-render live), the plan-card variant, and permqueue.go's independent
-  surface reusing one component with Height()/Render(w)/HandleKey.
+- [x] **permissionPrompt component — CONSOLIDATED 2026-07-15** (done log):
+  one `permPrompt` component (Render/Height/HandleKey) owns the tool panel
+  AND plan card — static bodies cached, fade chrome live (kills the permBox
+  asymmetric refresh); plan grammar joined permPromptKey; queue shares the
+  wants-summary vocabulary (full panel reuse deliberately NOT done — the
+  queue is a cross-session list, allow-once by design). §2a structural work
+  is now fully closed (clock-sweep deferrals remain below).
 - [~] **Clock injection sweep** — dashboard-package clocks all on `nowFunc`
   (grace gate, turn elapsed, toast lifecycle, motion loop, transitions), with
   clock-swap tests; Fable-approved 2026-07-06. DEFERRED: (a) `statusChangedAt`
@@ -287,10 +273,12 @@ changes go through `schema/events.json` + `just gen` (never hand-edit `*.gen.*`)
   remaining half (multi-line thinks unrecoverable after commit) closed with
   the §2c thinking render: capped italic body + ctrl+o expansion, same
   6-line shape live and committed.
-- [ ] **5. Background tasks / tool progress dropped.** `tool_progress` ignored
-  (`mapping.ts:81-85`), no progress/notification event type — background Bash
-  + async completion (signature Claude Code features) unrepresentable. Fix:
-  schema event + updating tool-card status.
+- [~] **5. Background tasks / tool progress — pipeline half DONE 2026-07-15**
+  (done log): `tool.progress` schema event + `elapsedSeconds` (additive,
+  protocol v2), mapper emit with parent attribution, E4-class compaction,
+  runner-api.md. REMAINING: the TUI render half (elapsed on running tool
+  cards; unlocks the §2c `⎿ exit 0 · 42 lines` combo) and background-task
+  correlation (SDK task_id + SDKToolUseSummaryMessage, noted in mapping.ts).
 - [ ] **6. Citations + server-tool results discarded.** Text-block citations
   stripped (`mapping.ts:121-123`); `server_tool_use`/`web_search_tool_result`
   hit default-drop (`:153-156`) — WebSearch shows sourceless flattened text.
