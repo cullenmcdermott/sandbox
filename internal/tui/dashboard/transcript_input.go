@@ -223,7 +223,93 @@ func transcriptComposeTable() []boundAction[*TranscriptModel] {
 				return m.submit(), true
 			},
 		},
+		// ↑/↓ recall previously sent prompts (§2d) — but ONLY when the composer is
+		// empty or already navigating history, so a non-empty draft keeps today's
+		// scroll meaning (the keys fall through to scrollKey below). histPrev/
+		// histNext report unhandled when there's nothing to recall / no nav to
+		// unwind, so the key still scrolls.
+		{
+			binding: key.NewBinding(key.WithKeys("up"), key.WithHelp("↑", "prev prompt")),
+			when:    func(m *TranscriptModel) bool { return m.input.Value() == "" || m.histIdx >= 0 },
+			run:     func(m *TranscriptModel, _ tea.KeyPressMsg) (tea.Cmd, bool) { return nil, m.histPrev() },
+		},
+		{
+			binding: key.NewBinding(key.WithKeys("down"), key.WithHelp("↓", "next prompt")),
+			when:    func(m *TranscriptModel) bool { return m.input.Value() == "" || m.histIdx >= 0 },
+			run:     func(m *TranscriptModel, _ tea.KeyPressMsg) (tea.Cmd, bool) { return nil, m.histNext() },
+		},
 	}
+}
+
+// recordPrompt appends a user-submitted prompt to the recall history, collapsing
+// a consecutive duplicate, and resets any in-progress recall (§2d). Called only
+// from the user-origin submit() path so the auto initialPrompt and driver ticks
+// are excluded.
+func (m *TranscriptModel) recordPrompt(text string) {
+	if n := len(m.promptHistory); n == 0 || m.promptHistory[n-1] != text {
+		m.promptHistory = append(m.promptHistory, text)
+	}
+	m.resetHistoryNav()
+}
+
+// resetHistoryNav clears the recall cursor and its saved draft/shown state
+// without touching the composer text. Invoked on submit, on paging past the
+// newest entry, and when the user edits a recalled prompt.
+func (m *TranscriptModel) resetHistoryNav() {
+	m.histIdx = -1
+	m.histDraft = ""
+	m.histShown = ""
+}
+
+// histPrev steps one entry older in the prompt history (↑). The first step saves
+// the current composer text as the draft (empty is valid) and shows the newest
+// entry; further steps walk older, clamping at the oldest. Returns false (so the
+// key falls through to scrollKey) when there is no history to recall.
+func (m *TranscriptModel) histPrev() bool {
+	if len(m.promptHistory) == 0 {
+		return false
+	}
+	switch {
+	case m.histIdx < 0:
+		m.histDraft = m.input.Value() // entering nav: preserve the draft
+		m.histIdx = 0
+	case m.histIdx < len(m.promptHistory)-1:
+		m.histIdx++
+	default:
+		// already at the oldest entry — clamp, but stay in nav.
+	}
+	m.showHistoryEntry()
+	return true
+}
+
+// histNext steps one entry newer in the prompt history (↓). Paging forward past
+// the newest entry restores the saved draft and exits nav. Returns false when
+// not navigating so ↓ keeps its scroll meaning.
+func (m *TranscriptModel) histNext() bool {
+	if m.histIdx < 0 {
+		return false
+	}
+	if m.histIdx == 0 {
+		draft := m.histDraft
+		m.resetHistoryNav()
+		m.input.SetValue(draft)
+		m.input.CursorEnd()
+		m.layout()
+		return true
+	}
+	m.histIdx--
+	m.showHistoryEntry()
+	return true
+}
+
+// showHistoryEntry loads the entry at the current cursor (0 = newest) into the
+// composer and records it as histShown so a later edit can be detected.
+func (m *TranscriptModel) showHistoryEntry() {
+	entry := m.promptHistory[len(m.promptHistory)-1-m.histIdx]
+	m.input.SetValue(entry)
+	m.input.CursorEnd()
+	m.histShown = entry
+	m.layout() // the box may have grown/shrunk rows — re-reserve body height
 }
 
 func (m *TranscriptModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -357,6 +443,12 @@ func (m *TranscriptModel) composeKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
+	// Editing while a recalled history entry is showing exits recall: the shown
+	// entry becomes the live draft (§2d — any non-↑/↓ key that changes the
+	// composer clears nav state, but is otherwise handled normally).
+	if m.histIdx >= 0 && m.input.Value() != m.histShown {
+		m.resetHistoryNav()
+	}
 	// Typing the first "/" opens the palette; relayout so it appears immediately.
 	if m.paletteOpen() {
 		m.cmdSel = 0
@@ -398,6 +490,11 @@ func (m *TranscriptModel) submit() tea.Cmd {
 	if text == "" {
 		return nil
 	}
+	// Record the prompt for ↑/↓ recall (§2d). submit() is the sole user-origin
+	// entry point — whether the prompt sends now or queues behind a running turn,
+	// the user authored it here. The auto initialPrompt and driver ticks reach
+	// submitText directly, so they never land in history.
+	m.recordPrompt(text)
 	// A manually typed prompt means the user is taking over from a running
 	// /loop or /goal; stop the driver so it doesn't keep firing turns underneath
 	// them. (Loop ticks and goal continuations submit via submitText, not here,
