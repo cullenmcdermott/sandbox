@@ -1,6 +1,6 @@
 package dashboard
 
-// editor.go — $EDITOR prompt composition helper (slice 5g). Pressing ctrl+o in
+// editor.go — $EDITOR prompt composition helper (slice 5g). Pressing ctrl+e in
 // the chat opens the user's preferred editor with the current prompt buffer;
 // on save the content is read back into the input.
 

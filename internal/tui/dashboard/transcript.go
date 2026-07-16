@@ -642,6 +642,42 @@ func (m *TranscriptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
 
+	case tea.PasteMsg:
+		// Bracketed paste arrives as its own message type, never as a KeyPressMsg,
+		// so without this case the pasted text is silently dropped (the bubbles
+		// textarea consumes tea.PasteMsg natively in its own Update). Route it by
+		// sub-context so a paste lands in whatever field legitimately owns text.
+		switch m.activeSubContext() {
+		case tctxCompose:
+			rows := m.inputRows()
+			var cmd tea.Cmd
+			m.input, cmd = m.input.Update(msg)
+			// Mirror composeKey's post-edit hooks: editing exits history recall;
+			// a paste that starts the draft with "/" opens the palette (relayout);
+			// and a multi-line paste grows the box (bug-2's wrap-aware inputRows),
+			// so re-reserve the body height when the row count changed.
+			if m.histIdx >= 0 && m.input.Value() != m.histShown {
+				m.resetHistoryNav()
+			}
+			if m.paletteOpen() {
+				m.cmdSel = 0
+				m.layout()
+			} else if m.inputRows() != rows {
+				m.layout()
+			}
+			return m, cmd
+		case tctxSearch:
+			// The search query is a hand-rolled string buffer (search.go), not a
+			// textinput — append the pasted text directly.
+			m.search.query += msg.Content
+			m.updateSearchMatches()
+			return m, nil
+		default:
+			// Permission / palette-nav / NORMAL: no text field owns a paste, so
+			// drop it — matching how those contexts drop stray keys.
+			return m, nil
+		}
+
 	case submitTextMsg:
 		return m, m.submitText(msg.text)
 

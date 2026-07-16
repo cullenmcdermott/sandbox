@@ -166,8 +166,8 @@ func (m *TranscriptModel) drainPendingTools(summary string) {
 // exceeded the cap. Already-expanded blocks stay toggleable regardless, so
 // collapse always works. Bumps the block's version so the list re-renders, and
 // returns whether a block was toggled (false when there is no expandable block,
-// so ctrl+o falls through to $EDITOR composition). Per-block focus navigation
-// is a follow-up; toggling the latest expandable block is the smallest correct
+// in which case ctrl+o is a swallowed no-op). Per-block focus navigation is a
+// follow-up; toggling the latest expandable block is the smallest correct
 // affordance.
 func (m *TranscriptModel) toggleLatestExpandable() bool {
 	for i := len(m.blocks) - 1; i >= 0; i-- {

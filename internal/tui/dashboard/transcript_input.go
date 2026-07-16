@@ -185,18 +185,23 @@ func transcriptGlobalTable() []boundAction[*TranscriptModel] {
 // and scroll handlers.
 func transcriptComposeTable() []boundAction[*TranscriptModel] {
 	return []boundAction[*TranscriptModel]{
-		// ctrl+o toggles the most recent expandable block (a tool card's output
-		// or a capped thinking block) when the
-		// composer is empty (the Claude-Code idiom, and consistent with the other
-		// prompt-empty-gated keys `?` and space) — you're reading the transcript,
-		// not drafting. With text in the composer it keeps its $EDITOR-composition
-		// role, so ctrl+o on a draft opens it in your editor (slice 5g).
+		// ctrl+o toggles the most recent expandable block (a tool card's output or a
+		// capped thinking block) — the Claude-Code idiom. It is expand-ONLY and
+		// ungated by composer content: a draft in the box no longer surprise-opens
+		// $EDITOR (that moved to ctrl+e below). When nothing is expandable
+		// toggleLatestExpandable returns false and ctrl+o is a swallowed no-op.
 		{
-			binding: key.NewBinding(key.WithKeys("ctrl+o"), key.WithHelp("ctrl+o", "expand output / $EDITOR")),
+			binding: key.NewBinding(key.WithKeys("ctrl+o"), key.WithHelp("ctrl+o", "expand output")),
 			run: func(m *TranscriptModel, _ tea.KeyPressMsg) (tea.Cmd, bool) {
-				if m.input.Value() == "" && m.toggleLatestExpandable() {
-					return nil, true
-				}
+				m.toggleLatestExpandable()
+				return nil, true
+			},
+		},
+		// ctrl+e composes the current draft in $EDITOR (slice 5g). Split out from
+		// ctrl+o so expanding a tool card and opening your editor are distinct keys.
+		{
+			binding: key.NewBinding(key.WithKeys("ctrl+e"), key.WithHelp("ctrl+e", "compose in $EDITOR")),
+			run: func(m *TranscriptModel, _ tea.KeyPressMsg) (tea.Cmd, bool) {
 				return m.openEditorPrompt(), true
 			},
 		},

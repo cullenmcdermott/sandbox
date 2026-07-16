@@ -328,7 +328,23 @@ func (m *TranscriptModel) composerInnerWidth() int {
 }
 
 func (m *TranscriptModel) inputRows() int {
-	n := m.input.LineCount()
+	// bubbles v2.1.1 textarea.LineCount() returns len(m.value) — the count of
+	// LOGICAL lines only — so soft-wrapped text scrolls inside one row and the box
+	// never grows until a hard newline. Count VISUAL rows instead: sum, over each
+	// logical line, the soft-wrapped row count at the textarea's own content width
+	// (m.input.Width(), which already subtracts the 2-col prompt). We mirror the
+	// textarea's placeholderView wrapping (word-wrap, then hard-wrap long words) at
+	// that same width; an off-by-one vs the textarea's internal wrap is acceptable.
+	w := m.input.Width()
+	var n int
+	if w <= 0 {
+		n = m.input.LineCount() // width not yet set (pre-layout) — logical fallback
+	} else {
+		for _, line := range strings.Split(m.input.Value(), "\n") {
+			wrapped := ansi.Hardwrap(ansi.Wordwrap(line, w, ""), w, true)
+			n += strings.Count(wrapped, "\n") + 1
+		}
+	}
 	if n < 1 {
 		n = 1
 	}
@@ -498,7 +514,13 @@ func renderAssistantMD(text string, width int) string {
 func (m *TranscriptModel) renderBlockBody(b *blockCard) string {
 	switch b.kind {
 	case blockUser:
-		return styleTUser.Render(b.text)
+		// Word-wrap the prompt at the same width discipline as assistant bodies
+		// (assistantWrapWidth reserves msgIndent for the "> " hanging indent plus
+		// the scrollbar + margin column), so a long prompt wraps into the frame
+		// instead of rendering as one clipped line at the edge. renderBlock then
+		// adds the dim "> " quote via quotePrefix (continuation lines indent under
+		// the text, not the ">").
+		return styleTUser.Width(m.assistantWrapWidth()).Render(b.text)
 	case blockAssistant:
 		wrap := m.assistantWrapWidth()
 		// Route assistant blocks through chat.AssistantItem + the pooled

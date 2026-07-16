@@ -249,7 +249,7 @@ func TestToggleSkipsInexpandableCards(t *testing.T) {
 }
 
 // TestToggleNoExpandableCardFallsThrough (H7): when every card is content-less
-// the toggle reports false so ctrl+o falls through to $EDITOR composition.
+// the toggle reports false so ctrl+o is a swallowed no-op.
 func TestToggleNoExpandableCardFallsThrough(t *testing.T) {
 	m := toolCardTM(t)
 	m.startToolCard("Bash", "true")
