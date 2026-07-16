@@ -9,7 +9,13 @@
 }:
 
 let
-  version = "dev";
+  # Embed the source rev so `sandbox --version` identifies the build —
+  # "dev-<revCount>-<shortRev>" makes a stale flake.lock diagnosable in one
+  # glance (the 2026-07-15 worktree-feature confusion: a rebuilt binary
+  # printed just "dev" and gave no hint it was 45 commits behind). shortRev
+  # is absent on dirty local builds; dirtyShortRev needs newer Nix — fall
+  # back progressively.
+  version = "dev-${toString (self.revCount or 0)}-${self.shortRev or self.dirtyShortRev or "dirty"}";
 in
 buildGoModule {
   pname = "sandbox";
