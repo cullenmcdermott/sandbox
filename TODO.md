@@ -356,39 +356,44 @@ there. HIGH items are the at-a-glance tells; most are renderer-local.
   (`permprompt.go`); a/d hidden accelerators; ↵ confirms, diff reveal moved
   to ctrl+o; grace gate covers all resolving keys; goldens regenerated.
   "2. Yes, allow <tool> this session" landed WITH §2b gap 2.
-- [ ] **De-bracket system notices (MED).** `[interrupted]`/`[reconnected]`/
-  `[permission approved]` read as debug logs. → `⎿  Interrupted by user`
-  (Coral, attached under the cut block), `⎿  Permission approved` under the
-  tool card, plain dim sentences for connection state. One helper replaces the
-  appendBlock(blockInfo, "[…]") sites.
-  `transcript.go:2297,631,650,2050,2467,625`.
-- [ ] **Blank line between every top-level block, not just before user turns
-  (MED).** CC's perceived calm comes from one blank line per ⏺ entry; keep
-  consecutive tool cards tight. Must adjust the streaming tail identically (T1
-  height-jump invariant). `transcript_list.go:109`.
-- [ ] **Drop the persistent title header + divider (MED).** CC has no top bar;
-  ours duplicates the statusline and double-reports working state. Render only
-  for exceptional states (reconnecting/terminating); emit title via OSC 0/2
-  (tea signal plumbing exists from Phase 3). `transcript.go:851`.
-- [ ] **Todo list: checkbox + strikethrough progression under the tool elbow
-  (MED).** completed = ✓ strikethrough dim-green, in_progress = ▸ bright,
-  pending = ○ dim; attach under the TodoWrite card, drop the standalone
-  `▤ todo list` header; updates should mutate one pinned widget, not append
-  blocks (§2b pipeline note). `transcript.go:1094`.
+- [x] **De-bracket system notices — done 2026-07-15** (done log): connection
+  lifecycle = plain dim sentences; interrupted/interrupt-failed = Coral
+  `⎿  Interrupted by user` elbow via `appendElbowNotice` (blockShell so the
+  Coral survives blockInfo's dim restyle).
+- [x] **Blank line per top-level entry — done 2026-07-15** (done log):
+  `turnGap` → `entryGap` with one `startsEntry(prev,cur)` predicate shared by
+  committed blocks AND the streaming tail (T1 held); consecutive tool cards
+  tight, info/footer attach gapless. Goldens regenerated, diffs
+  blank-lines-only.
+- [x] **Persistent title header dropped — done 2026-07-15** (done log):
+  `headerBands()` returns bands only while reconnecting/session-gone; body
+  starts at row 0 normally; session title now rides the terminal tab via
+  `tea.View.WindowTitle` (`App.windowTitle`); bodyTop/scrollbar/preview
+  followed via the §2a band walk.
+- [x] **Todo pinned widget + checkbox progression — done 2026-07-15** (done
+  log): `todo.updated` mutates ONE `blockTodos` block (payload on the model);
+  ✓ strikethrough dim-green / ▸ bright / ○ dim, no `▤ todo list` header;
+  empty list → dim "todos cleared".
 - [x] **Thinking render — done 2026-07-15** (done log): committed multi-line
   thinks show `∴ Thought` + italic TextMuted body capped at 6 wrapped lines
   + `… +N lines (ctrl+o)`; live tail shows the same 6-line window
   (tail-following, `… +N earlier lines`); ctrl+o generalized to
   `toggleLatestExpandable` (tool cards + capped thinks). Single-line thinks
   unchanged; goldens unchanged (none carry multi-line thinks).
-- [ ] **Transient scrollbar (LOW).** Permanent bright thumb is constant
-  peripheral noise; show only when off-bottom (+ dim `↓ new output · G bottom`
-  pill during live turns). `transcript_list.go:297`.
+- [x] **Transient scrollbar — done 2026-07-15** (done log): thumb renders
+  only when off-bottom (`offset < total-h` gates kit.Scrollbar); blank gutter
+  at bottom, width math unchanged. STILL OPEN residual (LOW): the dim
+  `↓ new output · G bottom` pill during live turns — needs body-overlay
+  machinery (§2e-A/F territory).
 
 ### 2d. Transcript/dashboard UX — still-open items from earlier passes
 
-- [ ] **No prompt history (MED).** No up-arrow recall of previously sent
-  prompts in the composer. `transcript.go:1762` (scrollKey owns ↑/↓).
+- [x] **Prompt history — done 2026-07-15** (done log): ↑/↓ recall in the
+  compose context, gated on empty-composer-or-navigating so drafts keep
+  their scroll meaning; draft preserved on entry, restored on ↓ past newest;
+  edit exits nav; recorded only at user-origin `submit()` (driver ticks +
+  initialPrompt excluded), consecutive dedupe. Session-local by design
+  (parked-state survival = documented residual).
 - [x] **`q`/`g` overloads — advertising fixed 2026-07-15** (done log): the
   footer now derives from the dispatching dctxList table (`shortHelp` →
   `footerBindings`), so `q` truthfully reads "perm queue" when sessions
@@ -401,11 +406,11 @@ there. HIGH items are the at-a-glance tells; most are renderer-local.
   tick; `jumpToPrevNeedingAttention` added. Lone-ctrl+] detach now resolves
   at the timeout (accepted trade). Live-verify wanted: chord + jumps in a
   real cluster `opencode attach` pane.
-- [ ] **First-account path — DECIDED 2026-07-07: always enter the account
-  stage, IMPLEMENT.** Zero stored accounts currently skips the picker
-  entirely (`account_picker.go:123`); change it to always show the stage
-  with "cluster default" + "＋ add account" rows. Also the natural home for
-  the §6 launch-preflight reauth stage — build the stage machinery once.
+- [x] **First-account path — done 2026-07-15** (done log): zero stored
+  accounts now always shows the account stage ("cluster default" + "＋ add
+  account"); cluster-default selection is byte-identical to the old silent
+  skip (same `beginCreate` params, pinned); §6 reauth-stage signpost left
+  where the row set is decided.
 - [x] **Yolo default — done 2026-07-12** (done log): runner default flipped
   to `bypassPermissions` (SDK gate verified to cover it); statusline renders
   bypass as an inverted coral `⚠ bypass` chip (never invisible); the TUI

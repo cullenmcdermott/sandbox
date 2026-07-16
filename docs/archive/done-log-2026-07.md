@@ -1688,3 +1688,49 @@ actionable wording pinned by test). Post-commit `just check` fully green
   assistantWrapWidth + italic TextMuted). Goldens unchanged — none carry a
   multi-line think; 6 new render/toggle tests + live-cap test.
 - Verified: `just check` fully green after both changes together.
+
+## 2026-07-15 — §2c calm-chrome batch + §2d prompt history + first-account stage
+
+- **De-bracket notices:** the 7 `appendBlock(blockInfo,"[…]")` sites are calm
+  sentences now ("Stream ended", "Reconnected", "Auto-reconnecting…" — dim via
+  blockInfo's existing style); interrupted/interrupt-failed render
+  `⎿  Interrupted by user` / `⎿  Interrupt failed: <err>` in Coral through
+  `appendElbowNotice` (pre-styled blockShell — blockInfo would restyle the
+  Coral dim), place-indented so the elbow aligns with tool cards.
+- **Entry gaps:** `blockCard.turnGap` → `entryGap`; one `startsEntry(prev,
+  cur)` predicate (user/assistant/reasoning/subagent/todos always; toolCard
+  only after a non-toolCard; info/error/shell/footer never) computed in
+  commitItems AND by ensureStreamTail for the live assistant/reasoning tails
+  — identical leading blank before/after commit, T1 pinned. Golden diffs:
+  blank lines + padding rebalance only (attribution reviewed per-file).
+- **Header dropped:** `headerBands()` nil normally; header+divider return
+  only while reconnecting/session-gone (renderHeader simplified to the alert
+  content). bodyTop/scrollbar-hit-test/preview all follow via the §2a band
+  walk; preview keeps its own banner band. Title moved to the terminal tab:
+  `App.View` sets `tea.View.WindowTitle` (`windowTitle()`: transcript title /
+  external DisplayTitle / "sandbox"), bubbletea v2.0.7 diffs + emits the OSC.
+- **Todo pinned widget:** `EventTodoUpdated` mutates ONE `blockTodos` card
+  (payload on the model — blockCard was owned by a concurrent landing);
+  render = ✓ strikethrough dim-green (Success+Faint) / ▸ bright (ActiveForm
+  preferred) / ○ dim, header dropped, empty list → dim "todos cleared".
+  Append-only-blocks invariant documented at the pointer.
+- **Transient scrollbar:** thumb only when `offset < total-h`; at-bottom
+  routes through the existing blank-gutter branch (width math untouched).
+  Pill (`↓ new output · G bottom`) deferred — needs overlay machinery.
+- **Prompt history (§2d):** ↑/↓ compose-table entries gated on
+  empty-or-navigating (drafts keep scrolling); histPrev saves the draft and
+  walks newest→oldest with clamp; ↓ past newest restores the draft and exits;
+  editing a recalled entry exits nav (post-fallthrough value-vs-histShown
+  check); recorded ONLY in `submit()` (covers queued steers; driver ticks +
+  initialPrompt reach submitText directly and are excluded); consecutive
+  dedupe. Session-local; parked-state survival is a documented residual.
+- **First-account stage (§2d, decided 2026-07-07):** zero-account stores no
+  longer skip the picker — the stage shows "cluster default" (byte-identical
+  `beginCreate(CreateParams{claude-sdk})` to the old skip, pinned by test) +
+  "＋ add account" (existing add flow reused); §6 reauth signpost comment at
+  the row-set decision point.
+- Verified: `just check` fully green on the combined batch. 15 new tests
+  across calm_notices/transient_scrollbar/transcript_entrygap/
+  prompt_history/account_picker; deliberate test updates limited to the
+  behavior that changed (blockfp memoization, parity oracles, region rows,
+  repurposed header test).
