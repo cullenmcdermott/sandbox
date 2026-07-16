@@ -185,7 +185,8 @@ func transcriptGlobalTable() []boundAction[*TranscriptModel] {
 // and scroll handlers.
 func transcriptComposeTable() []boundAction[*TranscriptModel] {
 	return []boundAction[*TranscriptModel]{
-		// ctrl+o toggles the most recent tool card's output expansion when the
+		// ctrl+o toggles the most recent expandable block (a tool card's output
+		// or a capped thinking block) when the
 		// composer is empty (the Claude-Code idiom, and consistent with the other
 		// prompt-empty-gated keys `?` and space) — you're reading the transcript,
 		// not drafting. With text in the composer it keeps its $EDITOR-composition
@@ -193,7 +194,7 @@ func transcriptComposeTable() []boundAction[*TranscriptModel] {
 		{
 			binding: key.NewBinding(key.WithKeys("ctrl+o"), key.WithHelp("ctrl+o", "expand output / $EDITOR")),
 			run: func(m *TranscriptModel, _ tea.KeyPressMsg) (tea.Cmd, bool) {
-				if m.input.Value() == "" && m.toggleLatestToolCard() {
+				if m.input.Value() == "" && m.toggleLatestExpandable() {
 					return nil, true
 				}
 				return m.openEditorPrompt(), true

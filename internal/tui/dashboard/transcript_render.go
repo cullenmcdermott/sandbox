@@ -529,36 +529,78 @@ func (m *TranscriptModel) renderBlockBody(b *blockCard) string {
 			return m.renderSubagentCard(b.sub, m.cardWidth())
 		}
 	case blockReasoning:
-		// Render reasoning/thinking text as a muted "Thought:" prefix box
-		// (chat-rendering §4.4). Shown in a compact single-line summary when
-		// short, or multi-line for longer reasoning.
-		lines := strings.Count(b.text, "\n") + 1
+		// Render reasoning/thinking text as a muted "∴ Thought" block. A single
+		// raw line stays a compact inline summary; a multi-line think shows an
+		// italic muted body — the SAME shape the live "∴ Thinking" tail shows
+		// (§2c), so the block doesn't change form when it commits. The collapsed
+		// body is capped at reasoningCapLines wrapped lines with a dim
+		// "… +N lines (ctrl+o)" trailer; ctrl+o (toggleLatestExpandable) flips
+		// b.expanded to reveal the full body.
 		// "∴" keeps the geometric glyph vocabulary (◐◆❯○▌◇…) — emoji here broke
 		// the set and renders double-width in some terminals.
 		label := lipgloss.NewStyle().Foreground(theme.TextMuted).Bold(true).Render("∴ Thought")
-		if lines <= 1 {
+		if strings.Count(b.text, "\n") == 0 {
 			return label + lipgloss.NewStyle().Foreground(theme.TextMuted).Render(": "+b.text)
 		}
-		summary := firstLine(b.text)
-		return label + lipgloss.NewStyle().Foreground(theme.TextMuted).
-			Render(fmt.Sprintf(" (%d lines): %s…", lines, truncate(summary, 40)))
+		lines := m.reasoningWrappedLines(b.text)
+		if b.expanded || len(lines) <= reasoningCapLines {
+			return label + "\n" + strings.Join(lines, "\n")
+		}
+		hidden := len(lines) - reasoningCapLines
+		trailer := lipgloss.NewStyle().Foreground(theme.TextDim).
+			Render(fmt.Sprintf("… +%d lines (ctrl+o)", hidden))
+		return label + "\n" + strings.Join(lines[:reasoningCapLines], "\n") + "\n" + trailer
 	}
 	return b.text
 }
 
+// reasoningCapLines is how many wrapped body lines a thinking block shows before
+// it caps — the same window for the committed "∴ Thought" block and the live
+// "∴ Thinking" tail (§2c, Claude-Code parity), so the block keeps one shape from
+// streaming through commit. Committed collapses cap the FIRST lines + a
+// "… +N lines (ctrl+o)" trailer; the live tail follows the LAST lines (a
+// terminal-style tail) + a "… +N earlier lines" marker.
+const reasoningCapLines = 6
+
+// reasoningWrappedLines word-wraps a committed think body at the assistant wrap
+// width and returns the styled (italic + muted) wrapped lines. Committed blocks
+// render once per version, so wrapping the whole buffer here is fine — this is
+// deliberately NOT the E6 live hot path (that stays in wrapLiveReasoning, whose
+// prefix cache we never touch). Both the render and toggleLatestExpandable's
+// "is anything hidden?" gate call this, so their line counts can't disagree.
+func (m *TranscriptModel) reasoningWrappedLines(text string) []string {
+	w := m.assistantWrapWidth()
+	style := lipgloss.NewStyle().Foreground(theme.TextMuted).Italic(true).Width(w)
+	return strings.Split(style.Render(strings.TrimSpace(text)), "\n")
+}
+
 // renderLiveReasoning renders the in-flight thinking text as a muted, italic,
 // word-wrapped block under a "∴ Thinking" header — the live counterpart of the
-// compact finalized blockReasoning summary (§2b gap 3). It shares placeIndent
-// placement with the finalized block, so when the think collapses to its
-// one-line summary at reasoning.completed the content stays in the same column.
-// Empty text (thinking just started) shows the header alone as a live indicator.
+// finalized blockReasoning block (§2b gap 3). It shares placeIndent placement
+// with the finalized block, so when the think commits at reasoning.completed the
+// content stays in the same column. Empty text (thinking just started) shows the
+// header alone as a live indicator. The body is capped to the LAST
+// reasoningCapLines wrapped lines — the window follows the newest text like a
+// terminal tail, giving the live think the same 6-line shape as the committed
+// block (§2c). When lines are hidden above the window, a dim "… +N earlier
+// lines" marker is prepended (mirrors the committed trailer, reversed because
+// the window tails the newest text).
 func (m *TranscriptModel) renderLiveReasoning(text string) string {
 	label := lipgloss.NewStyle().Foreground(theme.TextMuted).Bold(true).Render("∴ Thinking")
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return placeIndent(label)
 	}
-	body := m.wrapLiveReasoning(text)
+	// Slice the OUTPUT of wrapLiveReasoning (keep the last reasoningCapLines) —
+	// the E6 prefix cache inside it is untouched.
+	lines := strings.Split(m.wrapLiveReasoning(text), "\n")
+	body := strings.Join(lines, "\n")
+	if len(lines) > reasoningCapLines {
+		hidden := len(lines) - reasoningCapLines
+		marker := lipgloss.NewStyle().Foreground(theme.TextDim).
+			Render(fmt.Sprintf("… +%d earlier lines", hidden))
+		body = marker + "\n" + strings.Join(lines[len(lines)-reasoningCapLines:], "\n")
+	}
 	return placeIndent(label + "\n" + body)
 }
 

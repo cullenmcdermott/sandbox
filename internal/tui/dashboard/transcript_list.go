@@ -57,6 +57,14 @@ type blockCard struct {
 	unread  bool
 	turnGap bool // a blank line before a user block that begins a non-first turn
 
+	// expanded flips a capped block open to its full body. Only meaningful for
+	// blockReasoning today (a multi-line think whose wrapped body exceeds
+	// reasoningCapLines renders capped + a "… +N lines (ctrl+o)" trailer;
+	// ctrl+o → toggleLatestExpandable flips this). Toggling it must Bump the
+	// version so the list re-renders. Tool cards track their own expansion on
+	// toolCard.expanded, not here.
+	expanded bool
+
 	// Streaming tail only (kind is unused then): streamReasoning selects the live
 	// THINKING tail (m.reasoningBuf) over the assistant-message tail (m.assistantBuf).
 	streaming       bool

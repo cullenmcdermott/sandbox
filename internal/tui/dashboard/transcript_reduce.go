@@ -156,21 +156,24 @@ func (m *TranscriptModel) drainPendingTools(summary string) {
 	m.syncItems()
 }
 
-// toggleLatestToolCard flips the expansion of the most recent flat tool card
-// (ctrl+o on an empty composer). Expanding reveals the card's available content —
-// the edit diff, the captured output, or the full argument — under the elbow.
-// Cards with nothing to expand are skipped (H7): toggling one was a silent
-// no-op that stranded expanded=true, making the card pop open by itself when a
-// later tool.completed delivered output. Already-expanded cards stay
-// toggleable regardless, so collapse always works. Bumps the card's version so
-// the list re-renders, and returns whether a card was toggled (false when
-// there is no expandable card, so ctrl+o falls through to $EDITOR
-// composition). Per-card focus navigation is a follow-up; toggling the latest
-// expandable card is the smallest correct affordance.
-func (m *TranscriptModel) toggleLatestToolCard() bool {
+// toggleLatestExpandable flips the expansion of the most recent expandable block
+// (ctrl+o on an empty composer). Two kinds expand: a flat tool card (revealing
+// its edit diff, captured output, or full argument under the elbow) and a
+// capped thinking block (revealing the full "∴ Thought" body). Blocks with
+// nothing to reveal are skipped (H7): toggling one was a silent no-op that
+// stranded expanded=true, making a tool card pop open by itself when a later
+// tool.completed delivered output — same hazard for a think that hasn't
+// exceeded the cap. Already-expanded blocks stay toggleable regardless, so
+// collapse always works. Bumps the block's version so the list re-renders, and
+// returns whether a block was toggled (false when there is no expandable block,
+// so ctrl+o falls through to $EDITOR composition). Per-block focus navigation
+// is a follow-up; toggling the latest expandable block is the smallest correct
+// affordance.
+func (m *TranscriptModel) toggleLatestExpandable() bool {
 	for i := len(m.blocks) - 1; i >= 0; i-- {
 		b := m.blocks[i]
-		if b.kind == blockToolCard && b.tool != nil {
+		switch {
+		case b.kind == blockToolCard && b.tool != nil:
 			if !b.tool.expanded && !m.toolCardExpandable(b.tool) {
 				continue
 			}
@@ -178,9 +181,31 @@ func (m *TranscriptModel) toggleLatestToolCard() bool {
 			b.Bump()
 			m.syncItems()
 			return true
+		case b.kind == blockReasoning:
+			// Only offer expansion when the collapsed render actually hides
+			// lines (a multi-line think whose wrapped body exceeds the cap).
+			if !b.expanded && !m.reasoningExpandable(b) {
+				continue
+			}
+			b.expanded = !b.expanded
+			b.Bump()
+			m.syncItems()
+			return true
 		}
 	}
 	return false
+}
+
+// reasoningExpandable reports whether a committed thinking block's collapsed
+// render caps its body — i.e. it is multi-line AND its wrapped body exceeds
+// reasoningCapLines, so expanding reveals hidden lines. It counts the wrapped
+// lines exactly as the render does (reasoningWrappedLines), so the ctrl+o gate
+// and the "… +N lines (ctrl+o)" trailer can never disagree.
+func (m *TranscriptModel) reasoningExpandable(b *blockCard) bool {
+	if strings.Count(b.text, "\n") == 0 {
+		return false // single-line think renders inline; nothing to expand
+	}
+	return len(m.reasoningWrappedLines(b.text)) > reasoningCapLines
 }
 
 // dropTrailingFooter removes the previous turn's footer block when a new turn

@@ -91,7 +91,7 @@ func TestToolCardBulletTone(t *testing.T) {
 	}
 }
 
-// TestToolCardExpandToggle asserts ctrl+o's toggleLatestToolCard flips the card's
+// TestToolCardExpandToggle asserts ctrl+o's toggleLatestExpandable flips the card's
 // expanded state, bumps its version (so the list re-renders), and reveals the
 // captured output that the collapsed card hid behind "N lines".
 func TestToolCardExpandToggle(t *testing.T) {
@@ -112,8 +112,8 @@ func TestToolCardExpandToggle(t *testing.T) {
 	}
 
 	verBefore := last.Version()
-	if !m.toggleLatestToolCard() {
-		t.Fatal("toggleLatestToolCard returned false; expected a tool card to toggle")
+	if !m.toggleLatestExpandable() {
+		t.Fatal("toggleLatestExpandable returned false; expected a tool card to toggle")
 	}
 	if !last.tool.expanded {
 		t.Error("card did not become expanded after toggle")
@@ -131,7 +131,7 @@ func TestToolCardExpandToggle(t *testing.T) {
 
 	// Toggling again collapses and bumps the version once more.
 	verExpanded := last.Version()
-	m.toggleLatestToolCard()
+	m.toggleLatestExpandable()
 	if last.tool.expanded {
 		t.Error("second toggle did not collapse the card")
 	}
@@ -231,7 +231,7 @@ func TestToggleSkipsInexpandableCards(t *testing.T) {
 	m.finishToolCard(toolOK, "done", "Bash", "", "")
 	bare := m.blocks[len(m.blocks)-1]
 
-	if !m.toggleLatestToolCard() {
+	if !m.toggleLatestExpandable() {
 		t.Fatal("toggle found no card; expected it to skip to the expandable one")
 	}
 	if bare.tool.expanded {
@@ -240,7 +240,7 @@ func TestToggleSkipsInexpandableCards(t *testing.T) {
 	if !expandable.tool.expanded {
 		t.Error("expandable card was not toggled")
 	}
-	if !m.toggleLatestToolCard() {
+	if !m.toggleLatestExpandable() {
 		t.Fatal("second toggle found no card")
 	}
 	if expandable.tool.expanded {
@@ -254,7 +254,7 @@ func TestToggleNoExpandableCardFallsThrough(t *testing.T) {
 	m := toolCardTM(t)
 	m.startToolCard("Bash", "true")
 	m.finishToolCard(toolOK, "done", "Bash", "", "")
-	if m.toggleLatestToolCard() {
+	if m.toggleLatestExpandable() {
 		t.Error("toggle claimed a card with nothing to expand")
 	}
 }
