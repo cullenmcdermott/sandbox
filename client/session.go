@@ -459,7 +459,7 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 		if !worktreeMissing && privPath == "" {
 			privPath, _, kerr = s.c.ensureSSHKey(string(s.ref.ID))
 		}
-		bgOK := true
+		var bgOK bool
 		switch {
 		case worktreeMissing:
 			syncWarning = appendWarning(syncWarning, fmt.Sprintf(
