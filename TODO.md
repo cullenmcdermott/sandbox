@@ -859,6 +859,17 @@ naming-break, and Shell items each stand alone.
   (4.10): move `ssh/` INSIDE the state root in the same pre-OSS break that
   adds the worktree root; implement with the worktree Spec-split change.
   `client/sync.go`.
+- [ ] **Pod bootstrap files + generic env/secret injection** (upstream
+  integration request, 2026-07-17): `CreateOptions.ExtraEnv`/`ExtraSecretEnv`
+  (per-session-Secret-backed env escape hatch) then
+  `CreateOptions.BootstrapFiles` (operator files materialized in pod `$HOME`
+  before the agent starts — NOT in the synced workspace); operator binaries
+  stay a derived-`--runner-image` pattern, not SDK surface. Full design +
+  validation rules: `docs/design-pod-bootstrap-and-tool-injection.md`
+  (Status: draft — needs maintainer sign-off). Touch points:
+  `client/client.go` (CreateOptions/validate), `internal/k8s/backend.go`
+  (Secret + buildEnv), runner boot materialize step; sdktest pins in the
+  same change.
 
 ## 9) Unbuilt features
 
