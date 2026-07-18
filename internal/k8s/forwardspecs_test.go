@@ -25,3 +25,21 @@ func TestForwardSpecsRunnerOnly(t *testing.T) {
 		t.Errorf("ForwardSpecs should be [runner, ssh], got %+v", full)
 	}
 }
+
+// TestForwardSpecsWithCodex: codex-app-server sessions forward the runner HTTP,
+// SSH, and codex websocket ports, in that order (mirrors ForwardSpecsWithOpencode).
+func TestForwardSpecsWithCodex(t *testing.T) {
+	specs := ForwardSpecsWithCodex(0, 0, 0)
+	if len(specs) != 3 {
+		t.Fatalf("codex forward should have exactly 3 specs, got %d", len(specs))
+	}
+	if specs[0].Remote != RunnerPort() {
+		t.Errorf("spec[0] remote = %d, want runner port %d", specs[0].Remote, RunnerPort())
+	}
+	if specs[1].Remote != SSHPort() {
+		t.Errorf("spec[1] remote = %d, want ssh port %d", specs[1].Remote, SSHPort())
+	}
+	if specs[2].Remote != CodexPort() {
+		t.Errorf("spec[2] remote = %d, want codex port %d", specs[2].Remote, CodexPort())
+	}
+}

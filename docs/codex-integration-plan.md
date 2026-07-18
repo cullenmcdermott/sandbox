@@ -1,6 +1,11 @@
 # Codex backend — integration plan (Option B: remote app-server + local TUI)
 
-Status: **planning**. Decision (2026-06-24): ship **Option B** — run the Codex
+Status: **Phase 1 implemented (2026-07-17)** — backend id + credential
+contract (`Spec.CodexAuthJSON`/`CodexAccountID` → per-session Secret →
+`$CODEX_HOME/auth.json` materialization), k8s env/port wiring, runner
+supervisor + passive metrics observer, `sandbox codex` command, Dockerfile
+pin. Phases 2–4 (interactive pane, parity polish, live verification) remain
+planned. Decision (2026-06-24): ship **Option B** — run the Codex
 **app-server daemon** in the pod and drive it from a local `codex --remote …` TUI
 embedded as an external pane, mirroring the OpenCode backend. **Auth (revised
 2026-06-24):** ChatGPT-plan **OAuth tokens delivered via a CLI-injected Secret**

@@ -96,6 +96,7 @@ func NewRoot() *cobra.Command {
 	cmd.PersistentFlags().BoolVar(&traceEnabledFlag, "trace", false, "emit connect/create timing spans to stderr (§10 observability; also via SANDBOX_TRACE=1)")
 	cmd.AddCommand(newClaudeRemoteCmd())
 	cmd.AddCommand(newOpencodeCmd())
+	cmd.AddCommand(newCodexCmd())
 	cmd.AddCommand(newAttachCmd())
 	cmd.AddCommand(newStatusCmd())
 	cmd.AddCommand(newSyncCmd())

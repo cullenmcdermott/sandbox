@@ -43,14 +43,20 @@ survives detach, suspend/resume, and CLI restarts.
 | Pod | `runner/src/opencode-observer.ts` | Second-client observer that surfaces interactive opencode turns as normalized busy/idle + events |
 | Pod | `runner/src/events.ts` | SQLite event log; append-before-stream; SSE replay |
 
-There are **two agent backends**, both implementing the runner's `Agent` turn
-seam (`runner/src/agent.ts`): the default `claude-sdk` (the Claude Agent SDK) and
-`opencode` (a supervised `opencode serve` process). Both accept one-shot runner
-turns through the HTTP+SSE turns API — claude-sdk via the SDK, opencode by
-bridging to `opencode serve`'s own API (`opencode-turn.ts`). The interactive
-`sandbox opencode` PTY pane attaches to that same `opencode serve` process
-directly. The idle reaper is a per-session Kubernetes Job that polls the runner's
-`/idle` and suspends the Sandbox (replicas→0) after the idle timeout.
+There are **two agent backends** today, both implementing the runner's `Agent`
+turn seam (`runner/src/agent.ts`): the default `claude-sdk` (the Claude Agent SDK)
+and `opencode-server` (a supervised `opencode serve` process). Both accept
+one-shot runner turns through the HTTP+SSE turns API — claude-sdk via the SDK,
+opencode by bridging to `opencode serve`'s own API (`opencode-turn.ts`). The
+interactive `sandbox opencode` PTY pane attaches to that same `opencode serve`
+process directly. A third backend, `codex-app-server` (a supervised
+`codex app-server` process the runner drives over a pod-loopback websocket on port
+8788), is being onboarded in waves: its Go-side plumbing — backend id, the
+ChatGPT-OAuth auth.json credential contract, Secret/env/port wiring, and the
+`sandbox codex` command — is in place, while the runner turn adapter and the
+interactive pane land in later phases (see `docs/backend-conformance.md`). The idle
+reaper is a per-session Kubernetes Job that polls the runner's `/idle` and suspends
+the Sandbox (replicas→0) after the idle timeout.
 
 ```mermaid
 flowchart LR

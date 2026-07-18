@@ -596,6 +596,16 @@ opencode supervisor/external-pane pattern + runner metrics-observer. Backend id
 `codex-app-server` reserved (`internal/session/types.go:63`). Auth =
 ChatGPT-plan OAuth owned by the credential manager.
 
+- [ ] **Codex C3 parity: extend the shape-changing-re-create guard to codex**
+  (from the Phase 1 landing, 2026-07-17): `anthropicEnvShape`
+  (`internal/k8s/backend.go`) only detects the anthropic env vars, so a codex
+  account→accountless re-create is NOT rejected — `syncSessionCredential`
+  strips `codex-auth-json` while a resumed pod's baked NOT-Optional
+  `CODEX_AUTH_JSON` SecretKeyRef still points at the stripped key (pod would
+  fail env resolution on restart). Covered + documented by
+  `TestCreateSessionStripsCodexCredentialOnRecreate`; generalize the shape
+  guard over both credential families like `reconcileSecretCredential` did
+  for the sync side.
 - [ ] **CLI-owned credential manager — write side.** Anthropic part DONE
   (multi-account store + Keychain/file backends + `auth
   login/list/logout/default`, public as `client/cred`). Remaining:

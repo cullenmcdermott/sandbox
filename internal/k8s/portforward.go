@@ -363,6 +363,10 @@ func SSHPort() int { return portSSH }
 // need it (opencode-server sessions).
 func OpencodePort() int { return portOpencode }
 
+// CodexPort returns the `codex app-server` websocket port constant for callers
+// that need it (codex-app-server sessions).
+func CodexPort() int { return portCodex }
+
 // ForwardSpecs is a helper that builds the standard port-forward specs for
 // a session: runner HTTP and SSH.
 func ForwardSpecs(httpLocal, sshLocal int) []session.PortSpec {
@@ -387,6 +391,13 @@ func ForwardSpecsRunnerOnly(httpLocal int) []session.PortSpec {
 // forward to port 4096. The returned handles are ordered HTTP, SSH, opencode.
 func ForwardSpecsWithOpencode(httpLocal, sshLocal, opencodeLocal int) []session.PortSpec {
 	return append(ForwardSpecs(httpLocal, sshLocal), session.PortSpec{Local: opencodeLocal, Remote: portOpencode})
+}
+
+// ForwardSpecsWithCodex is ForwardSpecs plus the codex app-server websocket
+// port. Used for codex-app-server sessions where the local codex client needs a
+// forward to port 8788. The returned handles are ordered HTTP, SSH, codex.
+func ForwardSpecsWithCodex(httpLocal, sshLocal, codexLocal int) []session.PortSpec {
+	return append(ForwardSpecs(httpLocal, sshLocal), session.PortSpec{Local: codexLocal, Remote: portCodex})
 }
 
 // Ensure the Backend satisfies the session.Backend interface.

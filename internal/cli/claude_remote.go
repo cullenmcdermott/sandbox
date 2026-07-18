@@ -84,6 +84,39 @@ func newOpencodeCmd() *cobra.Command {
 	return cmd
 }
 
+// newCodexCmd starts a new remote codex-app-server session, mirroring
+// newOpencodeCmd. Flags mirror `opencode` minus the provider flag (codex has no
+// provider selector — its credential is the ChatGPT-OAuth auth.json, or the shared
+// OPENAI_API_KEY fallback). Unlike claude/opencode it takes NO positional prompt:
+// codex owns its own interactive input loop, so there is no headless first turn to
+// seed. Phase 1 is Go-side plumbing — the interactive codex pane is a later wave, so
+// the post-create attach UX is degraded (the dashboard connects but has no codex
+// turn path yet); the session still creates and health-checks.
+func newCodexCmd() *cobra.Command {
+	var (
+		runnerImage  string
+		reaperImage  string
+		nameFlag     string
+		modelFlag    string
+		worktreeFlag string
+	)
+	cmd := &cobra.Command{
+		Use:   "codex",
+		Short: "Start a remote codex-app-server session",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// No initial prompt: codex owns its own input loop.
+			return runStartSession(cmd, session.BackendCodex, "", runnerImage, reaperImage, nameFlag, modelFlag, "", worktreeFlag, "")
+		},
+	}
+	cmd.Flags().StringVar(&runnerImage, "runner-image", client.DefaultRunnerImage, "runner container image")
+	cmd.Flags().StringVar(&reaperImage, "reaper-image", k8s.DefaultReaperImage, "idle-reaper container image")
+	cmd.Flags().StringVar(&nameFlag, "name", "", "custom display name for the session (overrides the auto title)")
+	cmd.Flags().StringVar(&modelFlag, "model", "", "model id for the session default; empty uses the codex server default. Switch in-session with /model")
+	cmd.Flags().StringVar(&worktreeFlag, "worktree", "auto", "per-session git worktree isolation: auto (worktree iff the project is a git repo), on (require a git repo), off (never)")
+	return cmd
+}
+
 // parseWorktreeMode maps the `--worktree` flag string onto a client.WorktreeMode,
 // rejecting any value other than auto|on|off (mirrors how the other enum-ish
 // flags fail closed on an unknown value). Empty and "auto" both select the

@@ -65,6 +65,14 @@ WORKDIR /app
 ARG OPENCODE_VERSION=1.17.7
 RUN npm install -g opencode-ai@${OPENCODE_VERSION}
 
+# codex CLI for codex-app-server sessions: the runner supervises `codex
+# app-server` on a loopback WebSocket and the local `codex` client attaches over
+# a port-forward. Pin CODEX_VERSION to match the local `codex` client — the two
+# share the app-server JSON-RPC protocol and can break across versions. Claude and
+# opencode sessions never invoke it.
+ARG CODEX_VERSION=0.142.5
+RUN npm install -g @openai/codex@${CODEX_VERSION}
+
 # Reuse the production node_modules built (and compiled) in the build stage,
 # avoiding a second native compile and keeping the runtime toolchain-free.
 COPY package.json package-lock.json* ./
@@ -76,7 +84,7 @@ COPY --from=build /app/dist ./dist
 #   /session/state/claude           (CLAUDE_CONFIG_DIR)
 #   /session/workspace/<project>    (cwd passed to the SDK)
 RUN mkdir -p /session/state/sandbox/outputs /session/state/claude \
-      /session/state/opencode/data /session/workspace
+      /session/state/opencode/data /session/state/codex /session/workspace
 
 # Entrypoint: generate host keys, install the per-session authorized_keys from
 # the mounted Secret, start sshd, then exec the runner.

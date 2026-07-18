@@ -334,6 +334,12 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 	}
 
 	stage(StageForward)
+	// Phase 1: a codex-app-server session has no external-pane forward here yet —
+	// it falls through to the default (runner HTTP + SSH) branch below, exactly
+	// like claude-sdk. The codex app-server port-forward + interactive pane land in
+	// a later wave (ForwardSpecsWithCodex exists but is not wired in yet), so a
+	// codex connect creates/health-checks without panicking, just without a codex
+	// turn path. Only opencode currently takes the external-service branch.
 	opencode := st.Backend == session.BackendOpenCode
 	var handles []session.ForwardHandle
 	var err error

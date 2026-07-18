@@ -84,6 +84,49 @@ func TestValidateAnthropicAccount(t *testing.T) {
 	}
 }
 
+// TestValidateCodexAccount mirrors TestValidateAnthropicAccount for the codex
+// fail-closed contract: a named account with empty auth.json bytes errors
+// (ErrCodexCredentialMissing), bytes with no account id error
+// (ErrCodexAccountRequired), a non-label-safe id errors (ErrInvalidCodexAccountID),
+// and the both-set / both-empty cases clear the gate. No error path echoes the
+// credential bytes.
+func TestValidateCodexAccount(t *testing.T) {
+	auth := []byte(`{"tokens":{"access_token":"CODEX-SECRET"}}`)
+	cases := []struct {
+		name    string
+		id      string
+		auth    []byte
+		wantErr error
+	}{
+		{"both empty (shared fallback)", "", nil, nil},
+		{"account with credential", "acct-chatgpt", auth, nil},
+		{"account without credential", "acct-chatgpt", nil, ErrCodexCredentialMissing},
+		{"account with empty credential", "acct-chatgpt", []byte{}, ErrCodexCredentialMissing},
+		{"credential without account", "", auth, ErrCodexAccountRequired},
+		{"id with slash", "acct/gpt", auth, ErrInvalidCodexAccountID},
+		{"id with space", "acct gpt", auth, ErrInvalidCodexAccountID},
+		{"id too long for a label", strings.Repeat("a", 64), auth, ErrInvalidCodexAccountID},
+		{"id with leading dash", "-acct", auth, ErrInvalidCodexAccountID},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := validateCodexAccount(c.id, c.auth)
+			if c.wantErr == nil {
+				if err != nil {
+					t.Fatalf("got %v, want nil", err)
+				}
+				return
+			}
+			if !errors.Is(err, c.wantErr) {
+				t.Fatalf("got %v, want %v", err, c.wantErr)
+			}
+			if strings.Contains(err.Error(), string(auth)) {
+				t.Fatalf("error message leaked the credential bytes: %v", err)
+			}
+		})
+	}
+}
+
 // TestSanitizeLabel checks that sanitizeLabel produces values safe to embed in a
 // Kubernetes resource name: uppercase is lowercased, [a-z0-9-] passes through,
 // and every other rune (including multi-byte ones) is replaced by '-'.

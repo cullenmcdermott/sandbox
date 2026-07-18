@@ -68,6 +68,28 @@ events, the goal is to render them through the **one** transcript renderer.
 - [ ] **External-pane lifecycle** (if the backend also offers a PTY pane) —
       attach/detach/resize/close-reap + the chrome around it.
 
+## Codex — Phase 1 status
+
+The `codex-app-server` backend is being onboarded in waves. **Phase 1 is Go-side
+plumbing only** and deliberately leaves most rows above red:
+
+- **Delivered (Phase 1):** backend id (`codex-app-server`), the ChatGPT-OAuth
+  auth.json credential contract (per-session Secret `codex-auth-json` +
+  `sandbox.cullen.dev/codex-account` label, **fail-closed** — the pod refuses to
+  start if neither the account auth.json nor the shared `OPENAI_API_KEY` is
+  present), `CODEX_HOME` PVC-persisted state, the `codex app-server` websocket
+  port-forward (`ForwardSpecsWithCodex`, port 8788), and the `sandbox codex`
+  command. The pod supervises `codex app-server` (runner-side, landing
+  separately); metrics come from a runner observer connection, and activity/idle
+  is the runner's signal — same source every backend uses.
+- **Deferred (later waves):** the runner turn path (no `Agent.runTurn` adapter yet
+  → no headless turns, no normalized event mapping), the permission flow, the
+  interactive/external codex pane, and the frontend transcript/golden rows. A
+  codex `connect` therefore creates + health-checks the session but has no turn
+  path yet (accepted for Phase 1).
+
+Every deferred item stays a tracked red row below — never a silent omission.
+
 ## The gate
 
 Codex (or any new backend) is "tested to parity" only when **both** lists are

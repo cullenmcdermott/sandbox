@@ -56,6 +56,13 @@ const (
 	// introducing a second prefix.
 	labelAnthropicAccount = "sandbox.cullen.dev/anthropic-account"
 
+	// labelCodexAccount records the stored ChatGPT account id whose auth.json a
+	// per-session Secret holds a copy of, mirroring labelAnthropicAccount for the
+	// codex-app-server backend. `auth logout`/rotation list the sessions to
+	// re-provision with one label-selector query. The value is spec.CodexAccountID
+	// (DNS-safe, guaranteed by the cred store).
+	labelCodexAccount = "sandbox.cullen.dev/codex-account"
+
 	// annotationPinnedRunnerImage records the digest-pinned ref of the runner
 	// image the session's pod actually ran (kubelet-resolved), stamped once the
 	// pod is Ready. Resume rewrites the pod template's image from it before
@@ -89,6 +96,11 @@ const (
 	// used only by opencode-server sessions. The local `opencode attach` client
 	// reaches it over a port-forward.
 	portOpencode = 4096
+	// portCodex is the `codex app-server` websocket port inside the pod, used
+	// only by codex-app-server sessions. It is pod-loopback + port-forward only —
+	// the app-server listens on ws://127.0.0.1:8788 and is deliberately NOT bound
+	// on the pod network; the local codex client reaches it over a port-forward.
+	portCodex = 8788
 	// terminationGraceSeconds is the pod's SIGTERM→SIGKILL window, giving the
 	// runner time to emit session.terminating, abort turns, and flush on drain.
 	terminationGraceSeconds = 60
@@ -118,6 +130,14 @@ const (
 	// wrote it) via CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY per
 	// spec.AnthropicAuth. Absent for the shared-Secret fallback path.
 	secretKeyAnthropicCredential = "anthropic-credential"
+
+	// secretKeyCodexAuthJSON is the key in the per-session Secret holding the
+	// resolved ChatGPT-OAuth auth.json document for an account-backed
+	// codex-app-server session (mirrors secretKeyAnthropicCredential). Written only
+	// when spec.CodexAuthJSON is non-empty; the codex buildEnv branch references it
+	// (not Optional — we wrote it) via CODEX_AUTH_JSON. Absent for the shared
+	// OPENAI_API_KEY fallback path.
+	secretKeyCodexAuthJSON = "codex-auth-json"
 
 	// sshAuthorizedKeyMountPath is where the per-session Secret's SSH public
 	// key is projected into the pod; the entrypoint installs it as the sync
@@ -348,6 +368,14 @@ func (b *Backend) CreateSession(ctx context.Context, spec session.Spec) (_ sessi
 	if len(spec.AnthropicCredential) > 0 {
 		secret.Data[secretKeyAnthropicCredential] = spec.AnthropicCredential
 		secret.Labels[labelAnthropicAccount] = spec.AnthropicAccountID
+	}
+	// Account-backed codex sessions carry their resolved auth.json in the
+	// per-session Secret (the shared OPENAI_API_KEY Secret is the no-account
+	// fallback), mirroring the anthropic path. The account id also labels the
+	// Secret so logout/rotation can enumerate every session holding a copy.
+	if len(spec.CodexAuthJSON) > 0 {
+		secret.Data[secretKeyCodexAuthJSON] = spec.CodexAuthJSON
+		secret.Labels[labelCodexAccount] = spec.CodexAccountID
 	}
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
@@ -595,17 +623,20 @@ func anthropicEnvShape(sb *agentv1alpha1.Sandbox) (envName, secretName string) {
 	return "", ""
 }
 
-// syncSessionCredential reconciles the per-session Secret's anthropic-credential
-// key and account label with the spec, leaving every other key (runner-token,
+// syncSessionCredential reconciles the per-session Secret's account-credential
+// keys and labels with the spec — both the anthropic-credential key/label and the
+// codex-auth-json key/label — leaving every other key (runner-token,
 // opencode-password, ssh-authorized-key) untouched. Used by CreateSession when
 // the Secret already exists: with an account credential in the spec it patches
 // the key + label (re-creating a session id with a different account must not
 // keep the old credential); with none it strips any stale key + label, so
 // logout/rotation label enumeration never false-positives on a session that no
-// longer uses an account and no stale credential copy lingers. A no-op Update is
-// skipped when the Secret already matches. Get+Update under RetryOnConflict
-// matches the existing setReplicas/pin idiom. The returned error never carries
-// credential bytes.
+// longer uses an account and no stale credential copy lingers. A session is a
+// single backend, so at most one credential family is non-empty; the other's
+// strip branch is a no-op. Both families reconcile under ONE Get+Update. A no-op
+// Update is skipped when the Secret already matches. Get+Update under
+// RetryOnConflict matches the existing setReplicas/pin idiom. The returned error
+// never carries credential bytes.
 func (b *Backend) syncSessionCredential(ctx context.Context, spec session.Spec) error {
 	name := sessionSecretName(string(spec.ID))
 	secrets := b.core.CoreV1().Secrets(spec.Namespace)
@@ -615,31 +646,8 @@ func (b *Backend) syncSessionCredential(ctx context.Context, spec session.Spec) 
 			return getErr
 		}
 		changed := false
-		if len(spec.AnthropicCredential) > 0 {
-			if string(secret.Data[secretKeyAnthropicCredential]) != string(spec.AnthropicCredential) {
-				if secret.Data == nil {
-					secret.Data = map[string][]byte{}
-				}
-				secret.Data[secretKeyAnthropicCredential] = spec.AnthropicCredential
-				changed = true
-			}
-			if secret.Labels[labelAnthropicAccount] != spec.AnthropicAccountID {
-				if secret.Labels == nil {
-					secret.Labels = map[string]string{}
-				}
-				secret.Labels[labelAnthropicAccount] = spec.AnthropicAccountID
-				changed = true
-			}
-		} else {
-			if _, ok := secret.Data[secretKeyAnthropicCredential]; ok {
-				delete(secret.Data, secretKeyAnthropicCredential)
-				changed = true
-			}
-			if _, ok := secret.Labels[labelAnthropicAccount]; ok {
-				delete(secret.Labels, labelAnthropicAccount)
-				changed = true
-			}
-		}
+		changed = reconcileSecretCredential(secret, secretKeyAnthropicCredential, labelAnthropicAccount, spec.AnthropicCredential, spec.AnthropicAccountID) || changed
+		changed = reconcileSecretCredential(secret, secretKeyCodexAuthJSON, labelCodexAccount, spec.CodexAuthJSON, spec.CodexAccountID) || changed
 		if !changed {
 			return nil
 		}
@@ -647,9 +655,44 @@ func (b *Backend) syncSessionCredential(ctx context.Context, spec session.Spec) 
 		return updateErr
 	})
 	if err != nil {
-		return fmt.Errorf("k8s: sync anthropic credential on Secret %s: %w", name, err)
+		return fmt.Errorf("k8s: sync account credential on Secret %s: %w", name, err)
 	}
 	return nil
+}
+
+// reconcileSecretCredential patches (credential non-empty) or strips (empty) one
+// account-credential key + account label on a per-session Secret, returning
+// whether it changed anything. Shared by syncSessionCredential across the
+// anthropic and codex credential families so both reconcile with identical
+// patch/strip semantics under one Update. It never echoes the credential bytes.
+func reconcileSecretCredential(secret *corev1.Secret, dataKey, labelKey string, credential []byte, accountID string) bool {
+	changed := false
+	if len(credential) > 0 {
+		if string(secret.Data[dataKey]) != string(credential) {
+			if secret.Data == nil {
+				secret.Data = map[string][]byte{}
+			}
+			secret.Data[dataKey] = credential
+			changed = true
+		}
+		if secret.Labels[labelKey] != accountID {
+			if secret.Labels == nil {
+				secret.Labels = map[string]string{}
+			}
+			secret.Labels[labelKey] = accountID
+			changed = true
+		}
+	} else {
+		if _, ok := secret.Data[dataKey]; ok {
+			delete(secret.Data, dataKey)
+			changed = true
+		}
+		if _, ok := secret.Labels[labelKey]; ok {
+			delete(secret.Labels, labelKey)
+			changed = true
+		}
+	}
+	return changed
 }
 
 // Start waits for the session pod to be running and ready.
@@ -1410,6 +1453,11 @@ func buildSandbox(spec session.Spec) *agentv1alpha1.Sandbox {
 								{Name: "http", ContainerPort: portRunner},
 								{Name: "ssh", ContainerPort: portSSH},
 								{Name: "opencode", ContainerPort: portOpencode},
+								// Informational, mirroring the opencode entry: the SPDY
+								// port-forward targets the pod port directly and does not
+								// require a declared containerPort. codex app-server binds
+								// this on loopback only.
+								{Name: "codex", ContainerPort: portCodex},
 							},
 							Env:          buildEnv(spec, name),
 							VolumeMounts: runnerVolumeMounts(spec),
@@ -1599,6 +1647,10 @@ func buildEnv(spec session.Spec, name string) []corev1.EnvVar {
 
 	if spec.Backend == session.BackendOpenCode {
 		return append(env, opencodeEnv(spec, name)...)
+	}
+
+	if spec.Backend == session.BackendCodex {
+		return append(env, codexEnv(spec, name)...)
 	}
 
 	// Default (claude-sdk): exactly ONE Anthropic credential env is populated per
@@ -1819,6 +1871,47 @@ func opencodeEnv(spec session.Spec, name string) []corev1.EnvVar {
 			},
 		},
 	}
+}
+
+// codexEnv builds the env for a codex-app-server pod, mirroring opencodeEnv's
+// fail-closed shape. CODEX_HOME is always set to the PVC-persisted state dir
+// (mirrors CLAUDE_CONFIG_DIR / XDG_DATA_HOME) so app-server state survives
+// suspend/resume. The credential SOURCE branches on spec.CodexAuthJSON (the pod
+// template cannot see len(bytes) at resume, so the branch keys off it at create):
+//
+//	CodexAuthJSON non-empty → the per-session Secret sessionSecretName(name), key
+//	  "codex-auth-json", NOT Optional — CreateSession wrote it, so a missing key
+//	  means a provisioning bug that should fail the pod loudly rather than start
+//	  it unauthenticated. The pod materializes it as a file at $CODEX_HOME/auth.json.
+//	CodexAuthJSON empty → OPENAI_API_KEY from the shared opencode-credentials
+//	  Secret (key openai-api-key), NOT Optional (fail-closed like opencodeEnv:
+//	  starting uncredentialed is worse than failing the pod).
+func codexEnv(spec session.Spec, name string) []corev1.EnvVar {
+	env := []corev1.EnvVar{
+		{Name: "CODEX_HOME", Value: "/session/state/codex"},
+	}
+	if len(spec.CodexAuthJSON) > 0 {
+		return append(env, corev1.EnvVar{
+			Name: "CODEX_AUTH_JSON",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: sessionSecretName(name)},
+					Key:                  secretKeyCodexAuthJSON,
+					// NOT Optional: CreateSession wrote the key.
+				},
+			},
+		})
+	}
+	return append(env, corev1.EnvVar{
+		Name: "OPENAI_API_KEY",
+		ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: opencodeSecretName},
+				Key:                  opencodeSecretKeyOpenAI,
+				// NOT Optional: fail closed if the shared OpenAI key is absent.
+			},
+		},
+	})
 }
 
 func strPtr(s string) *string { return &s }

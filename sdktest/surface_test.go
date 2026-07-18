@@ -162,6 +162,8 @@ var _ = client.CreateOptions{
 	AnthropicAuth:       "oauth",
 	AnthropicAccountID:  "acct-1234",
 	AnthropicCredential: []byte("secret"),
+	CodexAccountID:      "acct-chatgpt",
+	CodexAuthJSON:       []byte("auth-json"),
 	StorageClass:        "fast",
 	StorageGiB:          10,
 	Worktree:            client.WorktreeAuto,
@@ -250,6 +252,18 @@ var (
 	_ func(*client.CreateOptions, cred.Store, string) error = (*client.CreateOptions).UseAnthropicAccount
 	_ func(*client.CreateOptions, cred.Store, string) error = (*client.CreateOptions).SelectAnthropicAccount
 	_ error                                                 = client.ErrNoDefaultAnthropicAccount
+)
+
+// --- client: codex backend + credential contract (Phase 1) --------------------
+
+var (
+	// BackendCodex re-export: dropping or retyping it breaks a consumer here.
+	_ string = client.BackendCodex
+
+	// Codex account/credential sentinels a consumer branches on with errors.Is.
+	_ error = client.ErrCodexCredentialMissing
+	_ error = client.ErrCodexAccountRequired
+	_ error = client.ErrInvalidCodexAccountID
 )
 
 // --- cred: store + account model ----------------------------------------------

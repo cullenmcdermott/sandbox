@@ -44,19 +44,29 @@ export interface Agent {
 
 // selectAgent returns the Agent implementation for a backend id (the value of
 // SANDBOX_BACKEND / Spec.Backend), or null for backends that are NOT driven
-// through the runner's turn path. Both shipping backends now implement the turn
-// seam: claude-sdk via the Claude Agent SDK, and opencode-server by bridging to
-// the in-pod `opencode serve` over its HTTP API (opencode-turn.ts) — additive to
-// the interactive `opencode attach` path, which still talks to the same server.
-// The null return is kept for any future supervise-only backend. An unknown
-// backend throws so the runner fails fast at startup rather than at first turn.
+// through the runner's turn path. Two backends implement the turn seam: claude-sdk
+// via the Claude Agent SDK, and opencode-server by bridging to the in-pod
+// `opencode serve` over its HTTP API (opencode-turn.ts) — additive to the
+// interactive `opencode attach` path, which still talks to the same server.
+//
+// codex-app-server is SUPERVISE-ONLY: the runner supervises a child `codex
+// app-server` and a passive metrics observer (codex.ts / codex-observer.ts), but
+// codex turns are driven by the interactive `codex` TUI over the app-server's
+// loopback WebSocket, never through the runner's turn path — so it returns null.
+// server.ts guards a null agent (POST /turns 409s) exactly as for any future
+// supervise-only backend. An unknown backend throws so the runner fails fast at
+// startup rather than at first turn.
 export function selectAgent(backend: string): Agent | null {
   switch (backend) {
     case 'claude-sdk':
       return claudeAgent;
     case 'opencode-server':
       return opencodeAgent;
+    case 'codex-app-server':
+      return null;
     default:
-      throw new Error(`unsupported backend: ${backend} (known: claude-sdk, opencode-server)`);
+      throw new Error(
+        `unsupported backend: ${backend} (known: claude-sdk, opencode-server, codex-app-server)`,
+      );
   }
 }

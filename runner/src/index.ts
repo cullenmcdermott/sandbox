@@ -14,6 +14,8 @@ import { resolveWorkspaceDir } from './exec.js';
 import { startOpencodeSupervisor, type OpencodeSupervisor } from './opencode.js';
 import { warmupOpencodeSession } from './opencode-turn.js';
 import { startOpencodeObserver, type OpencodeObserver } from './opencode-observer.js';
+import { materializeCodexAuth, startCodexSupervisor, type CodexSupervisor } from './codex.js';
+import { startCodexObserver, type CodexObserver } from './codex-observer.js';
 import { startBootTrace } from './trace.js';
 
 // Seconds before SIGKILL, reported in session.terminating so the TUI can show
@@ -28,6 +30,12 @@ let opencode: OpencodeSupervisor | null = null;
 // Set for opencode-server sessions: the always-on passive metrics observer that
 // turns interactive opencode turns into normalized SSE events (Phase 4).
 let observer: OpencodeObserver | null = null;
+
+// Set for codex-app-server sessions: the supervised `codex app-server` child and
+// its always-on passive metrics observer (the codex analogue of the opencode
+// supervisor/observer pair above).
+let codex: CodexSupervisor | null = null;
+let codexObserver: CodexObserver | null = null;
 
 /**
  * Graceful shutdown on SIGTERM (node drain/reboot, suspend, eviction). Warn
@@ -46,6 +54,11 @@ function shutdown(signal: string): void {
   // Stop the passive observer too (closes its event-stream subscription) so its
   // reconnect loop doesn't keep the process alive past the grace window.
   const observerStopped = observer ? observer.stop() : Promise.resolve();
+  // Same ordering for the codex supervisor/observer: SIGTERM the child now so it
+  // gets the full grace window, and stop the observer so its ws reconnect loop
+  // doesn't outlive us. Both are awaited in the Promise.all below.
+  const codexStopped = codex ? codex.stop() : Promise.resolve();
+  const codexObserverStopped = codexObserver ? codexObserver.stop() : Promise.resolve();
 
   let turnsAborted = 0;
   try {
@@ -66,7 +79,7 @@ function shutdown(signal: string): void {
   // Give SSE writes a moment to flush to attached clients, then wait for the
   // opencode child to exit (so it never outlives us) and close cleanly.
   setTimeout(() => {
-    void Promise.all([opencodeStopped, observerStopped]).finally(() => {
+    void Promise.all([opencodeStopped, observerStopped, codexStopped, codexObserverStopped]).finally(() => {
       closeEventLog();
       process.exit(0);
     });
@@ -154,6 +167,18 @@ function main(): void {
     // live status/title/cost/tools on the runner SSE channel (Phase 4). It owns
     // its own reconnect loop, so it must not block boot on serve readiness.
     observer = startOpencodeObserver();
+  }
+
+  // codex-app-server sessions: same supervise-only shape as opencode. Materialize
+  // the ChatGPT-OAuth auth.json (fail-closed if no credential), supervise `codex
+  // app-server` on its loopback ws, and start the passive observer so interactive
+  // codex turns surface live status/tokens/tools on the runner SSE channel. The
+  // interactive `codex` TUI attaches to the same app-server over a port-forward.
+  if (reg.state.backend === 'codex-app-server') {
+    materializeCodexAuth();
+    codex = startCodexSupervisor();
+    // Owns its own ws reconnect loop, so it must not block boot on server readiness.
+    codexObserver = startCodexObserver();
   }
   // boot_prep covers everything between registry init and the listen call:
   // orphaned-turn terminals, the session.started emit, agent/autopilot setup,

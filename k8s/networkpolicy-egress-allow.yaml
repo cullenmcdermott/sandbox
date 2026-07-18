@@ -42,6 +42,13 @@ spec:
     #    registries while still being denied the API server / cluster services /
     #    metadata endpoint.
     #
+    #    This example is CIDR-only (not FQDN), so the codex-app-server backend's
+    #    endpoints — api.openai.com (inference), chatgpt.com + auth.openai.com
+    #    (ChatGPT-OAuth token refresh) — are already reachable via this broad
+    #    public-HTTPS allow; no extra rule is needed. If you tighten this to a
+    #    specific-host allowlist (see below), you MUST add those three codex hosts
+    #    alongside api.anthropic.com or codex sessions lose inference + token refresh.
+    #
     #    For a tighter allowlist, replace the broad ipBlock with the specific
     #    CIDRs (or FQDN policy, if your CNI supports it, e.g. Cilium
     #    CiliumNetworkPolicy `toFQDNs`) for only the hosts you trust.

@@ -24,6 +24,12 @@ var ErrSessionGone = errors.New("session no longer exists")
 const (
 	BackendClaudeSDK = "claude-sdk"
 	BackendOpenCode  = "opencode-server"
+	// BackendCodex is the Codex backend: the runner supervises a `codex
+	// app-server` child listening on a pod-loopback websocket and passively
+	// observes it for metrics; turns are driven by the interactive codex client
+	// over a port-forward, not through the runner. Phase 1 ships the supervisor +
+	// observer + credential contract; the interactive pane lands in a later wave.
+	BackendCodex = "codex-app-server"
 )
 
 // OpenCode provider identifiers selecting which SINGLE model-provider API key an
@@ -70,8 +76,8 @@ type Spec struct {
 	// while ProjectPath stays the repo root.
 	WorkspacePath string `json:"workspacePath,omitempty"`
 
-	// Backend selects which agent backend the runner uses ("claude-sdk",
-	// "opencode-server", "codex-app-server").
+	// Backend selects which agent backend the runner uses (BackendClaudeSDK,
+	// BackendOpenCode, BackendCodex).
 	Backend string `json:"backend"`
 
 	// RunnerImage is the container image for the runner pod.
@@ -144,6 +150,29 @@ type Spec struct {
 	// until then opencode sessions always resolve to Anthropic. Ignored by
 	// non-opencode backends.
 	OpencodeProvider string `json:"opencodeProvider,omitempty"`
+
+	// CodexAccountID identifies the stored ChatGPT account a codex-app-server
+	// session is provisioned with. It is plain metadata: serialized so status/the
+	// picker can show which account a session runs on and so rotation/logout can
+	// enumerate affected sessions. A non-empty value is ALSO the fail-closed branch
+	// signal in the k8s backend — when set, the pod's Codex credential comes from
+	// the per-session Secret (key "codex-auth-json") rather than the shared
+	// OPENAI_API_KEY fallback; empty selects the shared-Secret fallback. The id is
+	// used as a Kubernetes label value (sandbox.cullen.dev/codex-account) on that
+	// Secret, so it must be a valid label value / DNS-safe — the cred store
+	// guarantees this. Ignored by non-codex backends.
+	CodexAccountID string `json:"codexAccountId,omitempty"`
+
+	// CodexAuthJSON is the FULL ChatGPT-OAuth auth.json document (NOT an API key)
+	// for CodexAccountID, written into the per-session Secret at CreateSession. It
+	// is NEVER serialized (json:"-") — like SSHPublicKey and AnthropicCredential it
+	// is create-time-only material that must not land in the local session index or
+	// any wire payload. The pod receives it as a SecretKeyRef env var
+	// (CODEX_AUTH_JSON) and materializes it as a FILE at $CODEX_HOME/auth.json — it
+	// is a file contract, not an env-var credential the process reads directly. The
+	// CLI/TUI resolves account → bytes; the client layer just carries and writes
+	// them. Ignored by non-codex backends.
+	CodexAuthJSON []byte `json:"-"`
 
 	// Namespace is the Kubernetes namespace for the Sandbox/PVC. Defaults to
 	// "agent-sessions".

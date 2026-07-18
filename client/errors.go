@@ -78,6 +78,29 @@ var (
 	// mid-create. The error carries no credential material.
 	ErrInvalidAnthropicAccountID = errors.New("sandbox: anthropic account id is not a valid kubernetes label value")
 
+	// ErrCodexCredentialMissing is returned by Create when
+	// CreateOptions.CodexAccountID names an account but CodexAuthJSON is empty —
+	// the resolver produced no bytes (e.g. a denied Keychain read or manifest/store
+	// drift). Create fails closed rather than silently launching on the shared
+	// OPENAI_API_KEY fallback, since a wrong-account session is a worse failure than
+	// a refused launch. The error carries no credential material.
+	ErrCodexCredentialMissing = errors.New("sandbox: codex account selected but credential is empty")
+
+	// ErrCodexAccountRequired is returned by Create when CodexAuthJSON bytes are
+	// supplied without a CodexAccountID. The account id is the branch signal and the
+	// Secret label the backend keys rotation/logout on, so credential bytes with no
+	// id would provision an unlabeled, unenumerable Secret — rejected. The error
+	// carries no credential material.
+	ErrCodexAccountRequired = errors.New("sandbox: codex credential supplied without an account id")
+
+	// ErrInvalidCodexAccountID is returned by Create when
+	// CreateOptions.CodexAccountID is not a valid Kubernetes label value (the id
+	// labels the per-session Secret for rotation/logout enumeration). The cred store
+	// guarantees DNS-safe ids, so this only fires on ids from other sources; failing
+	// fast here beats an apiserver Invalid error surfacing mid-create. The error
+	// carries no credential material.
+	ErrInvalidCodexAccountID = errors.New("sandbox: codex account id is not a valid kubernetes label value")
+
 	// ErrNotAGitRepo is returned by Create when CreateOptions.Worktree is
 	// WorktreeOn but ProjectPath is not inside a git work tree (or the git binary
 	// is unavailable), so a per-session worktree cannot be created. Under

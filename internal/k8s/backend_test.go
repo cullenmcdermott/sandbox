@@ -1133,3 +1133,205 @@ func TestSuspendResume(t *testing.T) {
 		t.Errorf("after resume: replicas=%d, want 1", *sb3.Spec.Replicas)
 	}
 }
+
+// TestCodexEnv (codex Phase 1): a codex-app-server pod always gets CODEX_HOME on
+// the PVC-persisted state dir. Its credential is the ChatGPT-OAuth auth.json from
+// the PER-SESSION Secret (key codex-auth-json, NOT Optional) when the spec carries
+// it, else the shared OPENAI_API_KEY from the opencode-credentials Secret (NOT
+// Optional — fail closed). The two credential env vars are mutually exclusive.
+func TestCodexEnv(t *testing.T) {
+	t.Run("account-auth-json", func(t *testing.T) {
+		spec := session.Spec{
+			Backend:        session.BackendCodex,
+			CodexAccountID: "acct-chatgpt",
+			CodexAuthJSON:  []byte(`{"tokens":{"access_token":"secret"}}`),
+		}
+		env := buildEnv(spec, "cx")
+
+		if got := envValue(env, "CODEX_HOME"); got != "/session/state/codex" {
+			t.Errorf("CODEX_HOME = %q, want /session/state/codex", got)
+		}
+		auth := envVar(env, "CODEX_AUTH_JSON")
+		if auth == nil || auth.ValueFrom == nil || auth.ValueFrom.SecretKeyRef == nil {
+			t.Fatal("CODEX_AUTH_JSON should reference a secret key")
+		}
+		ref := auth.ValueFrom.SecretKeyRef
+		if ref.Name != sessionSecretName("cx") {
+			t.Errorf("CODEX_AUTH_JSON secret name: got %q, want per-session %q", ref.Name, sessionSecretName("cx"))
+		}
+		if ref.Key != secretKeyCodexAuthJSON {
+			t.Errorf("CODEX_AUTH_JSON secret key: got %q, want %q", ref.Key, secretKeyCodexAuthJSON)
+		}
+		if ref.Optional != nil && *ref.Optional {
+			t.Error("CODEX_AUTH_JSON must NOT be Optional on the account path (we wrote the key)")
+		}
+		if auth.Value != "" {
+			t.Errorf("CODEX_AUTH_JSON must be a SecretKeyRef, never an inline Value (got %q)", auth.Value)
+		}
+		if envVar(env, "OPENAI_API_KEY") != nil {
+			t.Error("OPENAI_API_KEY must be absent when an account auth.json is present")
+		}
+	})
+
+	t.Run("fallback-openai-key", func(t *testing.T) {
+		env := buildEnv(session.Spec{Backend: session.BackendCodex}, "cx")
+
+		if got := envValue(env, "CODEX_HOME"); got != "/session/state/codex" {
+			t.Errorf("CODEX_HOME = %q, want /session/state/codex", got)
+		}
+		key := envVar(env, "OPENAI_API_KEY")
+		if key == nil || key.ValueFrom == nil || key.ValueFrom.SecretKeyRef == nil {
+			t.Fatal("OPENAI_API_KEY should reference a secret key on the fallback path")
+		}
+		ref := key.ValueFrom.SecretKeyRef
+		if ref.Name != opencodeSecretName {
+			t.Errorf("OPENAI_API_KEY secret name: got %q, want %q", ref.Name, opencodeSecretName)
+		}
+		if ref.Key != opencodeSecretKeyOpenAI {
+			t.Errorf("OPENAI_API_KEY secret key: got %q, want %q", ref.Key, opencodeSecretKeyOpenAI)
+		}
+		if ref.Optional != nil && *ref.Optional {
+			t.Error("OPENAI_API_KEY must NOT be Optional (fail closed)")
+		}
+		if envVar(env, "CODEX_AUTH_JSON") != nil {
+			t.Error("CODEX_AUTH_JSON must be absent on the fallback path")
+		}
+	})
+}
+
+// TestCodexEnvNoCredentialInline is the anti-leak guard: with an auth.json set,
+// the literal bytes must appear NOWHERE in the built env slice — the pod receives
+// it only via SecretKeyRef, never an inline Value.
+func TestCodexEnvNoCredentialInline(t *testing.T) {
+	const authBytes = `{"tokens":{"access_token":"LITERAL-CODEX-AUTH-BYTES"}}`
+	spec := session.Spec{
+		Backend:        session.BackendCodex,
+		CodexAccountID: "acct-chatgpt",
+		CodexAuthJSON:  []byte(authBytes),
+	}
+	for _, e := range buildEnv(spec, "cx") {
+		if strings.Contains(e.Value, "LITERAL-CODEX-AUTH-BYTES") {
+			t.Fatalf("env %q inlines the codex auth.json bytes (must be SecretKeyRef only)", e.Name)
+		}
+	}
+}
+
+// TestCreateSessionCodexCredential: an account-backed codex session writes the
+// auth.json to the per-session Secret under codex-auth-json and labels the Secret
+// with the account id; other keys stay present and the bytes never inline into the
+// Sandbox object.
+func TestCreateSessionCodexCredential(t *testing.T) {
+	ctx := context.Background()
+	b := newTestBackend(t)
+
+	const auth = `{"tokens":{"access_token":"CODEX-ACCOUNT-AUTH"}}`
+	spec := session.Spec{
+		ID:             "codex-app-server-acct",
+		ProjectPath:    "/tmp",
+		Backend:        session.BackendCodex,
+		RunnerImage:    "test:latest",
+		SSHPublicKey:   "ssh-ed25519 AAAAKEY user@host",
+		CodexAccountID: "acct-chatgpt",
+		CodexAuthJSON:  []byte(auth),
+	}
+	if _, err := b.CreateSession(ctx, spec); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	secret, err := b.core.CoreV1().Secrets("agent-sessions").Get(ctx, sessionSecretName("codex-app-server-acct"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get secret: %v", err)
+	}
+	if string(secret.Data[secretKeyCodexAuthJSON]) != auth {
+		t.Errorf("codex-auth-json: got %q, want %q", secret.Data[secretKeyCodexAuthJSON], auth)
+	}
+	if secret.Labels[labelCodexAccount] != "acct-chatgpt" {
+		t.Errorf("codex account label: got %q, want acct-chatgpt", secret.Labels[labelCodexAccount])
+	}
+	if len(secret.Data[secretKeyRunnerToken]) == 0 {
+		t.Error("runner token should still be set alongside the credential")
+	}
+
+	sb, err := b.agents.AgentsV1alpha1().Sandboxes("agent-sessions").Get(ctx, "codex-app-server-acct", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get sandbox: %v", err)
+	}
+	raw, err := json.Marshal(sb)
+	if err != nil {
+		t.Fatalf("marshal sandbox: %v", err)
+	}
+	if strings.Contains(string(raw), "CODEX-ACCOUNT-AUTH") {
+		t.Fatal("codex auth.json bytes leaked into the Sandbox object (must be SecretKeyRef only)")
+	}
+}
+
+// TestCreateSessionNoCodexCredential: without an account auth.json the per-session
+// Secret carries neither the codex-auth-json key nor the account label (shared
+// OPENAI_API_KEY fallback path).
+func TestCreateSessionNoCodexCredential(t *testing.T) {
+	ctx := context.Background()
+	b := newTestBackend(t)
+	spec := session.Spec{ID: "codex-app-server-noacct", ProjectPath: "/tmp", Backend: session.BackendCodex, RunnerImage: "test:latest"}
+	if _, err := b.CreateSession(ctx, spec); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	secret, err := b.core.CoreV1().Secrets("agent-sessions").Get(ctx, sessionSecretName("codex-app-server-noacct"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get secret: %v", err)
+	}
+	if _, ok := secret.Data[secretKeyCodexAuthJSON]; ok {
+		t.Error("codex-auth-json key must be absent without an account credential")
+	}
+	if _, ok := secret.Labels[labelCodexAccount]; ok {
+		t.Error("codex account label must be absent without an account credential")
+	}
+}
+
+// TestCreateSessionStripsCodexCredentialOnRecreate: re-creating a codex session id
+// without an account strips the stale codex-auth-json key + label (the codex env
+// shape is not detected by anthropicEnvShape, so unlike the anthropic path the
+// re-create is not rejected — it reconciles via syncSessionCredential). Other keys
+// stay intact.
+func TestCreateSessionStripsCodexCredentialOnRecreate(t *testing.T) {
+	ctx := context.Background()
+	b := newTestBackend(t)
+
+	withAccount := session.Spec{
+		ID:             "codex-app-server-strip",
+		ProjectPath:    "/tmp",
+		Backend:        session.BackendCodex,
+		RunnerImage:    "test:latest",
+		SSHPublicKey:   "ssh-ed25519 AAAAKEY user@host",
+		CodexAccountID: "acct-old",
+		CodexAuthJSON:  []byte(`{"tokens":{"access_token":"OLD"}}`),
+	}
+	if _, err := b.CreateSession(ctx, withAccount); err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+	before, err := b.core.CoreV1().Secrets("agent-sessions").Get(ctx, sessionSecretName("codex-app-server-strip"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get secret: %v", err)
+	}
+	origToken := before.Data[secretKeyRunnerToken]
+
+	noAccount := withAccount
+	noAccount.CodexAccountID = ""
+	noAccount.CodexAuthJSON = nil
+	if _, err := b.CreateSession(ctx, noAccount); err != nil {
+		t.Fatalf("second create: %v", err)
+	}
+
+	after, err := b.core.CoreV1().Secrets("agent-sessions").Get(ctx, sessionSecretName("codex-app-server-strip"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get secret after: %v", err)
+	}
+	if _, ok := after.Data[secretKeyCodexAuthJSON]; ok {
+		t.Error("codex-auth-json key must be stripped on accountless re-create")
+	}
+	if _, ok := after.Labels[labelCodexAccount]; ok {
+		t.Error("codex account label must be stripped on accountless re-create")
+	}
+	if string(after.Data[secretKeyRunnerToken]) != string(origToken) {
+		t.Error("runner-token must be preserved across the credential strip")
+	}
+}

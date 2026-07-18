@@ -128,6 +128,7 @@ var _ Backend = (*k8s.Backend)(nil)
 const (
 	BackendClaudeSDK = session.BackendClaudeSDK
 	BackendOpenCode  = session.BackendOpenCode
+	BackendCodex     = session.BackendCodex
 
 	StatusUnknown   = session.StatusUnknown
 	StatusCreating  = session.StatusCreating
@@ -394,6 +395,24 @@ type CreateOptions struct {
 	// not select a different provider's credential). Ignored by non-opencode
 	// backends.
 	OpencodeProvider string
+	// CodexAccountID names the stored ChatGPT account a codex-app-server session
+	// runs on. When set, CodexAuthJSON MUST hold the resolved auth.json bytes for
+	// that account — the caller (CLI/TUI) resolves account → bytes before calling
+	// Create; the client layer only carries and writes them. Setting the id without
+	// bytes fails closed with ErrCodexCredentialMissing rather than falling back to
+	// the shared OPENAI_API_KEY Secret. Must be a valid Kubernetes label value (the
+	// id labels the per-session Secret; guaranteed by the cred store) — else
+	// ErrInvalidCodexAccountID. Empty selects the shared-Secret fallback
+	// (backward-compatible). Ignored by non-codex backends.
+	CodexAccountID string
+	// CodexAuthJSON is the resolved FULL ChatGPT-OAuth auth.json document (NOT an
+	// API key) for CodexAccountID. Never serialized (json:"-" keeps a consumer's
+	// debug json.Marshal of the options from leaking it); provisioned into the
+	// per-session Secret and surfaced to the pod as a SecretKeyRef env var
+	// (CODEX_AUTH_JSON), which the pod materializes as a file at $CODEX_HOME/auth.json.
+	// Bytes without a CodexAccountID are rejected with ErrCodexAccountRequired.
+	// Ignored by non-codex backends.
+	CodexAuthJSON []byte `json:"-"`
 	// StorageClass is the PVC storage class (empty uses the cluster default).
 	StorageClass string
 	// StorageGiB is the PVC size in GiB (0 uses the backend default, 50).
@@ -439,6 +458,14 @@ func (c *Client) Create(ctx context.Context, opt CreateOptions) (_ *Session, err
 	// shared cluster Secret, and bytes with no account id would provision an
 	// unlabeled, unenumerable Secret. Both are rejected before any cluster call.
 	if err := validateAnthropicAccount(opt.AnthropicAccountID, opt.AnthropicCredential); err != nil {
+		return nil, err
+	}
+	// Fail closed on the codex account/credential contract, mirroring the
+	// Anthropic path: a named account with no resolved auth.json bytes must NOT
+	// silently fall back to the shared OPENAI_API_KEY Secret, and bytes with no
+	// account id would provision an unlabeled, unenumerable Secret. Both rejected
+	// before any cluster call.
+	if err := validateCodexAccount(opt.CodexAccountID, opt.CodexAuthJSON); err != nil {
 		return nil, err
 	}
 	runnerImage := opt.RunnerImage
@@ -508,6 +535,8 @@ func (c *Client) Create(ctx context.Context, opt CreateOptions) (_ *Session, err
 		AnthropicAccountID:  opt.AnthropicAccountID,
 		AnthropicCredential: opt.AnthropicCredential,
 		OpencodeProvider:    opt.OpencodeProvider,
+		CodexAccountID:      opt.CodexAccountID,
+		CodexAuthJSON:       opt.CodexAuthJSON,
 		StorageClass:        opt.StorageClass,
 		StorageGiB:          opt.StorageGiB,
 	}
@@ -720,6 +749,30 @@ func validateAnthropicAccount(accountID string, credential []byte) error {
 	if accountID != "" {
 		if errs := validation.IsValidLabelValue(accountID); len(errs) > 0 {
 			return fmt.Errorf("%w: %q (%s)", ErrInvalidAnthropicAccountID, accountID, strings.Join(errs, "; "))
+		}
+	}
+	return nil
+}
+
+// validateCodexAccount enforces the fail-closed codex account/credential
+// contract, mirroring validateAnthropicAccount: a named account requires
+// resolved auth.json bytes (else the session would silently launch on the shared
+// OPENAI_API_KEY Secret), and auth.json bytes require a naming account (else the
+// per-session Secret would be unlabeled and unenumerable for rotation/logout).
+// The account id must also be a valid Kubernetes label value — it labels the
+// per-session Secret — so an invalid id fails fast here with a clear sentinel.
+// The empty/empty case is the shared-Secret fallback and is allowed. It never
+// inspects or echoes the credential bytes.
+func validateCodexAccount(accountID string, authJSON []byte) error {
+	switch {
+	case accountID != "" && len(authJSON) == 0:
+		return ErrCodexCredentialMissing
+	case accountID == "" && len(authJSON) > 0:
+		return ErrCodexAccountRequired
+	}
+	if accountID != "" {
+		if errs := validation.IsValidLabelValue(accountID); len(errs) > 0 {
+			return fmt.Errorf("%w: %q (%s)", ErrInvalidCodexAccountID, accountID, strings.Join(errs, "; "))
 		}
 	}
 	return nil
