@@ -73,6 +73,15 @@ type TurnInterruptedPayload struct {
 	Reason string `json:"reason"`
 }
 
+// Citation is one source citation attached to an assistant message
+// (message.completed only), flattened from the SDK's citation location shapes
+// to what a footnote render needs (§2b gap 6).
+type Citation struct {
+	URL       string `json:"url,omitempty"`       // source URL (web citations)
+	Title     string `json:"title,omitempty"`     // source / document title
+	CitedText string `json:"citedText,omitempty"` // quoted snippet, mapper-capped
+}
+
 // MessagePayload is the payload for message.* events (reasoning.* events reuse
 // this shape, carrying Content only). ParentToolUseID marks a subagent's
 // stream: when set, the chunk belongs to the Task tool_use id named there, and
@@ -80,10 +89,11 @@ type TurnInterruptedPayload struct {
 // main streaming transcript, where it would interleave with (and corrupt) the
 // main reply (§2b gap 1).
 type MessagePayload struct {
-	Role            string `json:"role"`                      // "user" | "assistant"
-	Content         string `json:"content"`                   // text content or delta
-	Delta           bool   `json:"delta,omitempty"`           // true for message.delta
-	ParentToolUseID string `json:"parentToolUseId,omitempty"` // Task tool_use id that spawned the emitting subagent (empty on the main thread)
+	Role            string     `json:"role"`                      // "user" | "assistant"
+	Content         string     `json:"content"`                   // text content or delta
+	Delta           bool       `json:"delta,omitempty"`           // true for message.delta
+	ParentToolUseID string     `json:"parentToolUseId,omitempty"` // Task tool_use id that spawned the emitting subagent (empty on the main thread)
+	Citations       []Citation `json:"citations,omitempty"`       // sources cited by this text (message.completed only, §2b gap 6)
 }
 
 // ToolPayload is the payload for tool.* events.

@@ -364,6 +364,25 @@ The `tool.completed` / `tool.failed` events carry an optional `exitCode`
 the PostToolUse hook observes; it is absent for non-Bash tools (and whenever no
 code was recorded).
 
+A `message.completed` event may carry an optional `citations` array (see
+`schema/events.json` `MessagePayload.citations` / the `Citation` object):
+sources the assistant cited, flattened to `{ url?, title?, citedText? }` (web
+citations carry url+title; document/search citations title only; `citedText` is
+the quoted snippet, capped at 200 chars). Citations never appear on
+`message.started`/`message.delta` — the full-message completed is the
+authoritative source. The CLI renders them as a dim numbered "Sources:"
+footnote under the reply.
+
+**Server-executed tools:** the runner also maps server-side `web_search` /
+`web_fetch` invocations (SDK `server_tool_use` blocks) to normal
+`tool.started` events, and their `web_search_tool_result` /
+`web_fetch_tool_result` blocks to `tool.completed` / `tool.failed` — note there
+is **no client-side `tool_result` user message** for these; the terminal event
+comes from the result block inside the assistant message itself. Result shapes
+outside the known union map to a degraded `tool.completed` (never an orphaned
+running card, never a thrown turn). Other server-tool names (the
+`code_execution` family, `advisor`, …) are not mapped and emit nothing.
+
 The `todo.updated` event surfaces the agent's plan/checklist. Payload:
 `{ todos: [{ content, status, activeForm }] }`, where `status` is one of
 `pending` | `in_progress` | `completed`. The runner emits it when the SDK uses

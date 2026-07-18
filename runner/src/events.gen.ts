@@ -97,6 +97,16 @@ export interface ModelInfo {
   description?: string;
 }
 
+/** one source citation attached to an assistant message (message.completed only, §2b gap 6). Flattened from the SDK's five citation location shapes to what a footnote render needs: web citations carry url+title, document/search citations carry title (document_title or source) only. citedText is the quoted snippet, capped by the mapper. */
+export interface Citation {
+  /** source URL (web_search_result_location citations) */
+  url?: string;
+  /** source title (or document title / search-result source for non-web citations) */
+  title?: string;
+  /** the cited snippet, mapper-capped at 200 chars */
+  citedText?: string;
+}
+
 /** payload for session.started events: the model, pod cwd, tools, and applied permission mode reported by the SDK init message. The CLI uses model+cwd for the status line and the model id to look up the context-window limit (ctx%). */
 export interface SessionStartedPayload {
   model: string;
@@ -168,6 +178,8 @@ export interface MessagePayload {
   delta?: boolean;
   /** Task tool_use id that spawned the emitting subagent (empty on the main thread) */
   parentToolUseId?: string;
+  /** sources cited by this text (message.completed only; never on started/delta). Clients render as a footnote list under the message (§2b gap 6). */
+  citations?: Citation[];
 }
 
 /** payload for tool.* events. */

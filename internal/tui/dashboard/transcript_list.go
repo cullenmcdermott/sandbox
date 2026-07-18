@@ -18,6 +18,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 
+	"github.com/cullenmcdermott/sandbox/internal/session"
 	"github.com/cullenmcdermott/sandbox/tui/chat"
 	"github.com/cullenmcdermott/sandbox/tui/kit"
 	"github.com/cullenmcdermott/sandbox/tui/list"
@@ -51,6 +52,9 @@ type blockCard struct {
 	text string // raw (markdown for assistant blocks) so it re-wraps on resize
 	tool *toolCard
 	sub  *subagentCard // non-nil only for blockSubagent
+	// citations are the sources cited by an assistant block (message.completed
+	// only, §2b gap 6), rendered as a dim numbered footnote list under the body.
+	citations []session.Citation
 
 	// Per-commit display state, recomputed by commitItems; a change bumps the
 	// version so the "new since you left" divider / entry gap re-render.

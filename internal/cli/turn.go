@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -102,11 +103,20 @@ func newTurnCmd() *cobra.Command {
 						// printing it would interleave Task narration into the reply.
 						if msg.Role == "assistant" && msg.ParentToolUseID == "" {
 							fmt.Fprintln(out, msg.Content)
+							printCitationSources(out, msg.Citations)
 						}
 					case session.EventTurnCompleted:
 						return nil
 					case session.EventTurnFailed:
 						return fmt.Errorf("turn %s failed: %s", turn.Turn, string(ev.Payload))
+					case session.EventTurnInterrupted:
+						// [V29] turn.interrupted is the third terminal turn event
+						// (`sandbox cancel` / an attached TUI's esc) — without this
+						// case the command would block until --timeout with a
+						// misleading "timed out" error.
+						var p session.TurnInterruptedPayload
+						_ = json.Unmarshal(ev.Payload, &p)
+						return fmt.Errorf("turn %s was interrupted: %s", turn.Turn, p.Reason)
 					}
 				}
 			}
@@ -121,4 +131,30 @@ func newTurnCmd() *cobra.Command {
 	cmd.Flags().DurationVar(&timeout, "timeout", 300*time.Second, "maximum time to wait for the turn to complete")
 	_ = cmd.MarkFlagRequired("prompt")
 	return cmd
+}
+
+// printCitationSources prints a plain-text numbered "Sources:" list for a
+// reply's citations (§2b gap 6 [V24]) — the headless mirror of the TUI's
+// renderCitations footnote: title — url per line, renderless entries (neither
+// title nor url) skipped, nothing printed when every entry is renderless.
+func printCitationSources(out io.Writer, citations []session.Citation) {
+	n := 0
+	for _, c := range citations {
+		var src string
+		switch {
+		case c.Title != "" && c.URL != "":
+			src = c.Title + " — " + c.URL
+		case c.Title != "":
+			src = c.Title
+		case c.URL != "":
+			src = c.URL
+		default:
+			continue
+		}
+		if n == 0 {
+			fmt.Fprintln(out, "Sources:")
+		}
+		n++
+		fmt.Fprintf(out, "  %d. %s\n", n, src)
+	}
 }

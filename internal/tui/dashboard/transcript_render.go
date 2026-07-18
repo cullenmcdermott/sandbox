@@ -529,7 +529,15 @@ func (m *TranscriptModel) renderBlockBody(b *blockCard) string {
 		// byte-for-byte parity with the former m.md.Render + TrimRight path.
 		ai := chat.NewAssistantItem(&chat.AssistantMessage{Content: b.text, Finished: true})
 		ai.SetRenderContentMD(renderAssistantMD)
-		return ai.RawRender(wrap)
+		body := ai.RawRender(wrap)
+		// §2b gap 6: sources cited by this reply (message.completed) render as a
+		// dim numbered footnote list under the body — inside the body so the ⏺
+		// hanging indent covers them too. renderCitations returns "" when every
+		// citation is renderless; don't append a stray blank line then.
+		if fn := renderCitations(b.citations, wrap); fn != "" {
+			body += "\n" + fn
+		}
+		return body
 	case blockToolCard:
 		if b.tool != nil {
 			return m.renderToolCard(b.tool, m.cardWidth())
@@ -722,6 +730,56 @@ func renderTodos(todos []session.TodoItem) string {
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// renderCitations formats an assistant block's sources (§2b gap 6) as a dim
+// numbered footnote list under the message body: a "Sources:" header then one
+// "N. title — url" line per citation (title-only / url-only citations render
+// what they have). Lines are truncated, not wrapped — a wrapped URL reads worse
+// than a clipped one — at the same width the body wrapped at, so the block
+// stays width-safe by construction.
+func renderCitations(citations []session.Citation, width int) string {
+	dim := lipgloss.NewStyle().Foreground(theme.TextDim)
+	lines := make([]string, 0, len(citations)+1)
+	n := 0
+	for _, c := range citations {
+		// Citation fields originate from arbitrary web pages (a <title> can
+		// carry newlines or escape sequences) — flatten to one plain-text line
+		// so they can't break the numbered format or smear the frame (the H4
+		// defect class on a new web-controlled surface).
+		title, url := sanitizeCitationField(c.Title), sanitizeCitationField(c.URL)
+		var src string
+		switch {
+		case title != "" && url != "":
+			src = title + " — " + url
+		case title != "":
+			src = title
+		case url != "":
+			src = url
+		default:
+			// Schema-legal but renderless (citedText only, or empty): skip
+			// rather than emit a blank "  N. " line. The runner drops these
+			// too; this guards other event producers.
+			continue
+		}
+		n++
+		lines = append(lines, dim.Render(truncate(fmt.Sprintf("  %d. %s", n, src), width)))
+	}
+	if n == 0 {
+		return ""
+	}
+	return dim.Render("Sources:") + "\n" + strings.Join(lines, "\n")
+}
+
+// sanitizeCitationField flattens a web-controlled citation string (title/url)
+// to one plain-text line: every ANSI sequence dropped (unlike tool output,
+// even SGR — a cited page must not restyle the footnote), whitespace incl.
+// \r\n collapsed to single spaces, then residual C0 controls removed.
+func sanitizeCitationField(s string) string {
+	if !strings.ContainsAny(s, "\r\n\t\x1b\a\b\v\f") {
+		return s
+	}
+	return stripNonSGR(collapseSpaces(ansi.Strip(s)))
 }
 
 // appendElbowNotice appends a Coral elbow line ("⎿  <text>") that reads as

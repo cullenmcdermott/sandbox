@@ -1776,3 +1776,32 @@ actionable wording pinned by test). Post-commit `just check` fully green
   recovered via fast-forward merge (watch for this in future fan-outs).
 - Verified: `just check` fully green on the integrated tree (one
   staticcheck nit caught by the CI-parity lint and fixed).
+
+## 2026-07-18 — §2b gap 6: citations + server-tool results (with audit V6/V24/V25/V29 folded in)
+
+- **Schema/pipeline:** `Citation` object (`url`/`title`/`citedText`) +
+  `MessagePayload.citations` (message.completed only, additive — protocol
+  stays v2); `mapCitations` flattens the SDK's five citation location shapes
+  (dedup by url+title with NUL-separated key, renderless entries dropped,
+  `cited_text` capped at 200 chars with surrogate-pair-safe truncation).
+- **Server tools:** `server_tool_use` (web_search/web_fetch only, allowlisted
+  via one shared `mappedToolBlock` predicate across all three
+  registration/emit sites) maps to normal `tool.started`;
+  `web_search_tool_result` → formatted result list / `tool.failed` on the
+  error shape; `web_fetch_tool_result` → fetched-URL line / `tool.failed`.
+  Unknown result shapes map to a degraded `tool.completed` — total mapping,
+  no orphaned "running" card, never a thrown turn. Unmapped server tools
+  (code_execution family) stay dropped, including their stream-index slots.
+- **TUI render:** citations pinned on the assistant block (append path
+  pre-syncItems so the list cache sees them; droppedPartialIdx replay path
+  assigns + Bumps) and render as a dim numbered "Sources:" footnote inside
+  the body (hanging-indent covered, truncated at wrap width). **[V6]**
+  title/url sanitized web-controlled input (`sanitizeCitationField`: all-ANSI
+  strip + whitespace collapse + C0 strip — the H4 class on a new surface).
+- **[V24]** headless `sandbox turn` prints a plain-text Sources list under
+  the reply (mirrors renderCitations selection). **[V29]** (same file)
+  `turn.interrupted` is now a terminal event for `sandbox turn` — distinct
+  error instead of blocking until --timeout. **[V25]** replay-path citations
+  pinned by test (TestCitationsSurviveDroppedPartialReplay).
+- 16 new runner mapping tests + 7 Go TUI/render tests; runner-api.md
+  documents the citations array + server-tool mapping contract.

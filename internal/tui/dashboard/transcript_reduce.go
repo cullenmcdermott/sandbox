@@ -534,6 +534,11 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		var p session.MessagePayload
 		_ = json.Unmarshal(ev.Payload, &p)
 		if p.ParentToolUseID != "" { // §2b gap 1: pin the subagent's final text on its card
+			// A parented completed may carry citations too; they are deliberately
+			// dropped with the rest of the subagent's rich content — the Task card
+			// renders one bounded narration line, not a footnoted transcript (the
+			// event log retains everything; per-agent transcripts are the recorded
+			// gap-1 follow-up).
 			m.applySubagentMessage(ev.Type, p)
 			break
 		}
@@ -582,6 +587,7 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 			// of appending a second copy of the same reply.
 			if strings.TrimSpace(text) != "" {
 				m.blocks[m.droppedPartialIdx].text = text
+				m.blocks[m.droppedPartialIdx].citations = p.Citations // §2b gap 6: the replay carries them too
 				// In-place text mutation of a committed block: bump its version so
 				// tui/list re-renders it with the replayed full text.
 				m.blocks[m.droppedPartialIdx].Bump()
@@ -589,7 +595,14 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 			m.droppedPartialIdx = -1
 			m.syncItems()
 		case strings.TrimSpace(text) != "":
-			m.appendBlock(blockAssistant, text)
+			// §2b gap 6: sources cited by this reply ride message.completed; pin
+			// them on the block BEFORE syncItems — the list renders and caches the
+			// new block during the append (GotoBottom → renderItemEntry), so a
+			// later assignment without a Bump would be invisible forever.
+			b := m.newBlockCard(blockAssistant, text)
+			b.citations = p.Citations
+			m.blocks = append(m.blocks, b)
+			m.syncItems()
 		default:
 			m.syncItems()
 		}

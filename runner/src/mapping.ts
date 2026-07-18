@@ -17,11 +17,14 @@ import type {
   BetaContentBlock,
   BetaRawContentBlockDeltaEvent,
   BetaRawContentBlockStartEvent,
+  BetaServerToolUseBlock,
   BetaTextBlock,
   BetaThinkingBlock,
   BetaToolUseBlock,
+  BetaWebFetchToolResultBlock,
+  BetaWebSearchToolResultBlock,
 } from '@anthropic-ai/sdk/resources/beta/messages/messages';
-import type { EventType, TodoItem } from './types.js';
+import type { Citation, EventType, TodoItem } from './types.js';
 
 /** Append a normalized event (append-before-stream in production). */
 export type EmitFn = (type: EventType, payload: Record<string, unknown>) => void;
@@ -62,6 +65,86 @@ export function capToolOutput(s: string): string {
   const tail = s.slice(s.length - half);
   const omitted = s.length - head.length - tail.length;
   return `${head}\n… ${omitted} bytes truncated …\n${tail}`;
+}
+
+/**
+ * CITED_TEXT_CAP bounds each citation's quoted snippet on message.completed —
+ * a citation's cited_text can be a whole paragraph, and a heavily-cited reply
+ * would otherwise multiply its own size in the event log (§2b gap 6).
+ */
+const CITED_TEXT_CAP = 200;
+
+/**
+ * mapCitations flattens the SDK's five citation location shapes into the
+ * schema's Citation objects (§2b gap 6): url (web_search_result_location),
+ * title (title / document_title / search_result source — first non-empty), and
+ * a capped citedText (kept in the event model for richer consumers / a future
+ * snippet expansion even though the TUI footnote renders only title+url).
+ * Entries with neither url nor title are dropped (nothing to render),
+ * duplicates (same url+title) keep first-seen order, and an empty result
+ * returns undefined so JSON.stringify drops the key entirely.
+ */
+export function mapCitations(citations: unknown[] | null | undefined): Citation[] | undefined {
+  if (!Array.isArray(citations) || citations.length === 0) return undefined;
+  const out: Citation[] = [];
+  const seen = new Set<string>();
+  for (const raw of citations) {
+    // Totality: a null/non-object element (SDK drift) is skipped, not
+    // dereferenced — a throw here would abort the whole turn.
+    if (raw === null || typeof raw !== 'object') continue;
+    const c = raw as {
+      url?: unknown;
+      title?: unknown;
+      document_title?: unknown;
+      source?: unknown;
+      cited_text?: unknown;
+    };
+    const url = typeof c.url === 'string' ? c.url : '';
+    const title =
+      [c.title, c.document_title, c.source].find(
+        (v): v is string => typeof v === 'string' && v !== '',
+      ) ?? '';
+    if (!url && !title) continue;
+    // NUL separator: neither field can contain it, so distinct (url, title)
+    // pairs can never collide the way a plain-space join could.
+    const key = `${url}\u0000${title}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const entry: Citation = {};
+    if (url) entry.url = url;
+    if (title) entry.title = title;
+    if (typeof c.cited_text === 'string' && c.cited_text !== '') {
+      let snippet = c.cited_text.slice(0, CITED_TEXT_CAP);
+      // slice() cuts at UTF-16 code units; a cap landing inside an astral pair
+      // would leave a lone high surrogate that Go-side JSON decoding turns
+      // into U+FFFD — drop it for a clean truncation.
+      const last = snippet.charCodeAt(snippet.length - 1);
+      if (last >= 0xd800 && last <= 0xdbff) snippet = snippet.slice(0, -1);
+      entry.citedText = snippet;
+    }
+    out.push(entry);
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+/**
+ * Server tools whose invocations/results map to normal tool.* events (§2b gap
+ * 6). Only names whose result blocks we also map are listed — emitting
+ * tool.started for an unmapped name (code_execution & friends) would leave a
+ * dangling "running" card until the turn-boundary drain.
+ */
+const MAPPED_SERVER_TOOLS = new Set(['web_search', 'web_fetch']);
+
+/**
+ * mappedToolBlock is the single "does this block open a tool card" predicate:
+ * a client tool_use, or a server_tool_use whose result block we also map. All
+ * three registration/emit sites share it so adding a server tool later can't
+ * update one site and silently reintroduce the dangling-card / stale-index
+ * bugs the allowlist exists to prevent.
+ */
+function mappedToolBlock(block: { type: string; name?: string }): boolean {
+  if (block.type === 'tool_use') return true;
+  return block.type === 'server_tool_use' && MAPPED_SERVER_TOOLS.has(block.name ?? '');
 }
 
 /**
@@ -231,10 +314,15 @@ function handleAssistantMessage(
         // card instead of interleaving into the main streaming reply.
         // JSON.stringify drops the key when undefined (main thread).
         emit('message.started', { role: 'assistant', content: '', parentToolUseId });
+        // §2b gap 6: citations ride the completed emit only (never started/
+        // delta) — the full-message text block is the authoritative citation
+        // source; streaming citations_delta events are ignored.
+        const citations = mapCitations((block as BetaTextBlock).citations);
         emit('message.completed', {
           role: 'assistant',
           content: (block as BetaTextBlock).text,
           parentToolUseId,
+          ...(citations ? { citations } : {}),
         });
         break;
       }
@@ -267,9 +355,100 @@ function handleAssistantMessage(
         }
         break;
       }
+      case 'server_tool_use': {
+        // §2b gap 6: a server-side tool invocation (executed by the API, no
+        // tool_result user message follows — its result arrives as a sibling
+        // *_tool_result block below). Map the two names whose results we also
+        // map onto a normal tool.started so the TUI renders a tool card for
+        // free; others keep the default-drop (a started with no terminal would
+        // dangle "running" until the turn-boundary drain). The TUI's
+        // startOrUpdateToolCard tolerates the duplicate started from the
+        // streaming path, same as regular tool_use.
+        const st = block as BetaServerToolUseBlock;
+        if (mappedToolBlock(st)) {
+          streamTools?.names.set(st.id, st.name); // D8: id→name for the result block
+          emit('tool.started', {
+            tool: st.name,
+            input: st.input,
+            toolUseId: st.id,
+            parentToolUseId,
+          });
+        }
+        break;
+      }
+      case 'web_search_tool_result': {
+        // §2b gap 6: the server-side web_search result — previously dropped,
+        // leaving WebSearch answers sourceless. Success carries the result
+        // list; the error shape maps to tool.failed. Mapping stays total AND
+        // every recognized result closes its card: a content outside the known
+        // union (SDK drift) maps to a degraded tool.completed instead of
+        // throwing (turn abort) or dropping (an orphaned "running" card until
+        // the turn-boundary drain).
+        const wr = block as BetaWebSearchToolResultBlock;
+        const tool = toolNameFor(streamTools, wr.tool_use_id) || 'web_search';
+        if (Array.isArray(wr.content)) {
+          // Per-entry validation: an entry outside the known shape renders
+          // what it has instead of a literal "undefined — undefined" line.
+          const lines = wr.content.map((r) => {
+            const title = typeof r?.title === 'string' ? r.title : '';
+            const url = typeof r?.url === 'string' ? r.url : '';
+            return `\n${title && url ? `${title} — ${url}` : title || url || '(unrecognized result)'}`;
+          });
+          const output = capToolOutput(
+            `${wr.content.length} result${wr.content.length === 1 ? '' : 's'}` + lines.join(''),
+          );
+          emit('tool.completed', { tool, output, toolUseId: wr.tool_use_id, parentToolUseId });
+        } else if (wr.content?.type === 'web_search_tool_result_error') {
+          emit('tool.failed', {
+            tool,
+            error: `web_search failed: ${wr.content.error_code}`,
+            toolUseId: wr.tool_use_id,
+            parentToolUseId,
+          });
+        } else {
+          emit('tool.completed', {
+            tool,
+            output: '(unrecognized web_search result shape)',
+            toolUseId: wr.tool_use_id,
+            parentToolUseId,
+          });
+        }
+        break;
+      }
+      case 'web_fetch_tool_result': {
+        // §2b gap 6: the server-side web_fetch result. The fetched document
+        // body stays server-side (BetaDocumentBlock is for the model, not the
+        // transcript) — surface the URL as the card's terminal line. Same
+        // totality + no-orphan discipline as web_search above.
+        const wf = block as BetaWebFetchToolResultBlock;
+        const tool = toolNameFor(streamTools, wf.tool_use_id) || 'web_fetch';
+        if (wf.content?.type === 'web_fetch_tool_result_error') {
+          emit('tool.failed', {
+            tool,
+            error: `web_fetch failed: ${wf.content.error_code}`,
+            toolUseId: wf.tool_use_id,
+            parentToolUseId,
+          });
+        } else if (wf.content?.type === 'web_fetch_result') {
+          emit('tool.completed', {
+            tool,
+            output: `fetched ${typeof wf.content.url === 'string' ? wf.content.url : '(unknown url)'}`,
+            toolUseId: wf.tool_use_id,
+            parentToolUseId,
+          });
+        } else {
+          emit('tool.completed', {
+            tool,
+            output: '(unrecognized web_fetch result shape)',
+            toolUseId: wf.tool_use_id,
+            parentToolUseId,
+          });
+        }
+        break;
+      }
       default:
-        // Other block kinds (redacted_thinking, server_tool_use, mcp_*,
-        // compaction, etc.) are not normalized.
+        // Other block kinds (redacted_thinking, unmapped server tools like the
+        // code_execution family, mcp_*, compaction, etc.) are not normalized.
         break;
     }
   }
@@ -360,8 +539,11 @@ function handleStreamEvent(
       // id (indexes restart per assistant message within the stream). names is
       // keyed by id (not index), so it is NOT cleared on index reuse — a
       // tool_result for an already-finished tool still needs its name (D8).
-      if (block.type === 'tool_use') {
-        const tu = block as BetaToolUseBlock;
+      // §2b gap 6: a mapped server_tool_use (web_search/web_fetch) is tracked
+      // exactly like tool_use — its input streams via input_json_delta at this
+      // index too; unmapped server tools clear the slot like any other block.
+      if (mappedToolBlock(block)) {
+        const tu = block as BetaToolUseBlock | BetaServerToolUseBlock;
         streamTools?.byIndex.set(streamToolKey(parentToolUseId, e.index), tu.id);
         streamTools?.names.set(tu.id, tu.name); // D8: id→name for the later tool_result
       } else {
@@ -376,18 +558,25 @@ function handleStreamEvent(
           emit('reasoning.started', { parentToolUseId });
           break;
         case 'tool_use':
+        case 'server_tool_use': {
           // NOTE: this streaming tool.started is intentionally lighter than the
           // full-message tool.started in handleAssistantMessage — it omits
           // agentName because the subagent_type is not reliably present until
           // the tool input has fully streamed. The full-message tool.started is
           // the authoritative source for agentName.
+          // §2b gap 6: mapped server tools share the same emit; unmapped names
+          // emit nothing (their results are unmapped too, so a card would
+          // dangle "running").
+          if (!mappedToolBlock(block)) break;
+          const tu = block as BetaToolUseBlock | BetaServerToolUseBlock;
           emit('tool.started', {
-            tool: (block as BetaToolUseBlock).name,
-            input: (block as BetaToolUseBlock).input,
-            toolUseId: (block as BetaToolUseBlock).id,
+            tool: tu.name,
+            input: tu.input,
+            toolUseId: tu.id,
             parentToolUseId,
           });
           break;
+        }
         default:
           break;
       }

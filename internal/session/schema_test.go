@@ -70,6 +70,7 @@ func objectRegistry() map[string]reflect.Type {
 	return map[string]reflect.Type{
 		"TodoItem":  reflect.TypeOf(TodoItem{}),
 		"ModelInfo": reflect.TypeOf(ModelInfo{}),
+		"Citation":  reflect.TypeOf(Citation{}),
 	}
 }
 

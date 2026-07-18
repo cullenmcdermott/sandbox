@@ -279,10 +279,13 @@ changes go through `schema/events.json` + `just gen` (never hand-edit `*.gen.*`)
   runner-api.md. REMAINING: the TUI render half (elapsed on running tool
   cards; unlocks the §2c `⎿ exit 0 · 42 lines` combo) and background-task
   correlation (SDK task_id + SDKToolUseSummaryMessage, noted in mapping.ts).
-- [ ] **6. Citations + server-tool results discarded.** Text-block citations
-  stripped (`mapping.ts:121-123`); `server_tool_use`/`web_search_tool_result`
-  hit default-drop (`:153-156`) — WebSearch shows sourceless flattened text.
-  Fix: optional citations field + footnote render.
+- [x] **6. Citations + server-tool results — done 2026-07-18** (done log):
+  `Citation` schema object + `MessagePayload.citations` (message.completed
+  only, additive); mapper flattens/dedups/caps; web_search/web_fetch
+  server_tool_use + result blocks map to normal tool.* (total, no orphan
+  cards); TUI "Sources:" footnote (sanitized, width-safe) + headless
+  `sandbox turn` Sources print. Audit [V6]/[V24]/[V25]/[V29] folded in.
+  Live verify wanted at next natural WebSearch turn.
 - [ ] **7. Images unrepresentable end-to-end.** String-only MessagePayload;
   image blocks dropped (`mapping.ts:153-156,183-188`). Kitty plumbing exists
   TUI-side (gauge). Gap starts at schema (attachment payload or fetch-by-ref

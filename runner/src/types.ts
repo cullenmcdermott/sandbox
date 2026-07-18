@@ -28,6 +28,7 @@ export type {
   TodoItem,
   TodoUpdatedPayload,
   ErrorPayload,
+  Citation,
 } from './events.gen.js';
 export { ALL_EVENT_TYPES, PROTOCOL_VERSION } from './events.gen.js';
 

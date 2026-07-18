@@ -723,3 +723,503 @@ test('tool_progress from a subagent carries parentToolUseId', () => {
   assert.equal(events[0].payload.toolUseId, 'toolu_child');
   assert.equal(events[0].payload.parentToolUseId, 'task_7');
 });
+
+// --- §2b gap 6: citations + server-tool results ---------------------------
+
+// ORACLE: text-block citations ride message.completed (flattened + deduped);
+// message.started never carries them.
+test('text block citations → message.completed carries deduped citations', () => {
+  const { events, emit } = collector();
+  mapMessage(
+    asMsg({
+      type: 'assistant',
+      message: {
+        content: [
+          {
+            type: 'text',
+            text: 'cited answer',
+            citations: [
+              {
+                type: 'web_search_result_location',
+                url: 'https://example.com/a',
+                title: 'Example A',
+                cited_text: 'quoted bit',
+                encrypted_index: 'x',
+              },
+              {
+                type: 'char_location',
+                document_title: 'Doc B',
+                cited_text: 'doc quote',
+                document_index: 0,
+                start_char_index: 0,
+                end_char_index: 9,
+              },
+              {
+                // duplicate of the first (same url+title) — deduped
+                type: 'web_search_result_location',
+                url: 'https://example.com/a',
+                title: 'Example A',
+                cited_text: 'other quote',
+                encrypted_index: 'y',
+              },
+              {
+                // neither url nor title — dropped (nothing to render)
+                type: 'char_location',
+                document_title: null,
+                cited_text: 'orphan',
+                document_index: 1,
+                start_char_index: 0,
+                end_char_index: 6,
+              },
+            ],
+          },
+        ],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    }),
+    emit,
+  );
+  const started = events.find((e) => e.type === 'message.started')!;
+  assert.ok(!('citations' in started.payload), 'message.started must not carry citations');
+  const completed = events.find((e) => e.type === 'message.completed')!;
+  assert.deepEqual(completed.payload.citations, [
+    { url: 'https://example.com/a', title: 'Example A', citedText: 'quoted bit' },
+    { title: 'Doc B', citedText: 'doc quote' },
+  ]);
+});
+
+// citedText is capped at 200 chars at the source (event-log bloat guard).
+test('citation cited_text capped at 200 chars', () => {
+  const { events, emit } = collector();
+  mapMessage(
+    asMsg({
+      type: 'assistant',
+      message: {
+        content: [
+          {
+            type: 'text',
+            text: 'long quote',
+            citations: [
+              {
+                type: 'web_search_result_location',
+                url: 'https://example.com',
+                title: 'T',
+                cited_text: 'x'.repeat(500),
+                encrypted_index: 'x',
+              },
+            ],
+          },
+        ],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    }),
+    emit,
+  );
+  const completed = events.find((e) => e.type === 'message.completed')!;
+  const cites = completed.payload.citations as Array<{ citedText: string }>;
+  assert.equal(cites[0].citedText.length, 200);
+});
+
+// citations: null (the common no-citations case) → no citations key at all.
+test('text block with null citations → no citations key', () => {
+  const { events, emit } = collector();
+  mapMessage(
+    asMsg({
+      type: 'assistant',
+      message: {
+        content: [{ type: 'text', text: 'plain', citations: null }],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    }),
+    emit,
+  );
+  const completed = events.find((e) => e.type === 'message.completed')!;
+  assert.ok(!('citations' in completed.payload));
+});
+
+// ORACLE: a server_tool_use web_search block maps to a normal tool.started.
+test('server_tool_use web_search → tool.started', () => {
+  const { events, emit } = collector();
+  const streamTools = newStreamToolIndex();
+  mapMessage(
+    asMsg({
+      type: 'assistant',
+      message: {
+        content: [
+          { type: 'server_tool_use', id: 'srvtoolu_1', name: 'web_search', input: { query: 'golang generics' } },
+        ],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    }),
+    emit,
+    streamTools,
+  );
+  const started = events.filter((e) => e.type === 'tool.started');
+  assert.equal(started.length, 1);
+  assert.equal(started[0].payload.tool, 'web_search');
+  assert.equal(started[0].payload.toolUseId, 'srvtoolu_1');
+  assert.deepEqual(started[0].payload.input, { query: 'golang generics' });
+});
+
+// ORACLE: a web_search_tool_result maps to tool.completed with the result list;
+// the name is recovered from the server_tool_use registration (D8 path).
+test('web_search_tool_result → tool.completed with formatted results', () => {
+  const { events, emit } = collector();
+  const streamTools = newStreamToolIndex();
+  mapMessage(
+    asMsg({
+      type: 'assistant',
+      message: {
+        content: [
+          { type: 'server_tool_use', id: 'srvtoolu_2', name: 'web_search', input: { query: 'q' } },
+          {
+            type: 'web_search_tool_result',
+            tool_use_id: 'srvtoolu_2',
+            content: [
+              { type: 'web_search_result', title: 'First', url: 'https://a.example', page_age: null, encrypted_content: 'e1' },
+              { type: 'web_search_result', title: 'Second', url: 'https://b.example', page_age: null, encrypted_content: 'e2' },
+            ],
+          },
+        ],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    }),
+    emit,
+    streamTools,
+  );
+  const completed = events.filter((e) => e.type === 'tool.completed');
+  assert.equal(completed.length, 1);
+  assert.equal(completed[0].payload.tool, 'web_search');
+  assert.equal(completed[0].payload.toolUseId, 'srvtoolu_2');
+  const out = completed[0].payload.output as string;
+  assert.ok(out.startsWith('2 results'), out);
+  assert.ok(out.includes('First — https://a.example'), out);
+  assert.ok(out.includes('Second — https://b.example'), out);
+});
+
+// The web_search error shape maps to tool.failed carrying the error_code.
+test('web_search_tool_result error → tool.failed', () => {
+  const { events, emit } = collector();
+  mapMessage(
+    asMsg({
+      type: 'assistant',
+      message: {
+        content: [
+          {
+            type: 'web_search_tool_result',
+            tool_use_id: 'srvtoolu_3',
+            content: { type: 'web_search_tool_result_error', error_code: 'max_uses_exceeded' },
+          },
+        ],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    }),
+    emit,
+  );
+  const failed = events.filter((e) => e.type === 'tool.failed');
+  assert.equal(failed.length, 1);
+  assert.equal(failed[0].payload.tool, 'web_search'); // fallback name (no registration)
+  assert.ok((failed[0].payload.error as string).includes('max_uses_exceeded'));
+});
+
+// web_fetch result → tool.completed with the fetched URL; error → tool.failed.
+test('web_fetch_tool_result success and error shapes', () => {
+  const { events, emit } = collector();
+  mapMessage(
+    asMsg({
+      type: 'assistant',
+      message: {
+        content: [
+          {
+            type: 'web_fetch_tool_result',
+            tool_use_id: 'srvtoolu_4',
+            content: {
+              type: 'web_fetch_result',
+              url: 'https://example.com/doc',
+              retrieved_at: null,
+              content: { type: 'document', source: { type: 'text', data: 'body', media_type: 'text/plain' }, title: null, citations: null, context: null },
+            },
+          },
+          {
+            type: 'web_fetch_tool_result',
+            tool_use_id: 'srvtoolu_5',
+            content: { type: 'web_fetch_tool_result_error', error_code: 'url_not_accessible' },
+          },
+        ],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    }),
+    emit,
+  );
+  const completed = events.filter((e) => e.type === 'tool.completed');
+  assert.equal(completed.length, 1);
+  assert.equal(completed[0].payload.tool, 'web_fetch');
+  assert.equal(completed[0].payload.output, 'fetched https://example.com/doc');
+  const failed = events.filter((e) => e.type === 'tool.failed');
+  assert.equal(failed.length, 1);
+  assert.ok((failed[0].payload.error as string).includes('url_not_accessible'));
+});
+
+// Unmapped server tools (code_execution family etc.) stay dropped — a started
+// with no mapped terminal would dangle a "running" card.
+test('server_tool_use code_execution → no events', () => {
+  const { events, emit } = collector();
+  mapMessage(
+    asMsg({
+      type: 'assistant',
+      message: {
+        content: [
+          { type: 'server_tool_use', id: 'srvtoolu_6', name: 'code_execution', input: { code: '1+1' } },
+        ],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    }),
+    emit,
+  );
+  assert.deepEqual(
+    events.map((e) => e.type),
+    ['usage.updated'], // only the message-level usage emit — the block itself is dropped
+  );
+});
+
+// Streaming: a server_tool_use content_block_start registers the id at its
+// index so input_json_delta attributes to it (same D6 path as tool_use).
+test('stream server_tool_use start + input_json_delta → attributed tool.delta', () => {
+  const { events, emit } = collector();
+  const streamTools = newStreamToolIndex();
+  mapMessage(
+    asMsg({
+      type: 'stream_event',
+      event: {
+        type: 'content_block_start',
+        index: 2,
+        content_block: { type: 'server_tool_use', id: 'srvtoolu_7', name: 'web_search', input: {} },
+      },
+    }),
+    emit,
+    streamTools,
+  );
+  mapMessage(
+    asMsg({
+      type: 'stream_event',
+      event: { type: 'content_block_delta', index: 2, delta: { type: 'input_json_delta', partial_json: '{"query' } },
+    }),
+    emit,
+    streamTools,
+  );
+  const started = events.filter((e) => e.type === 'tool.started');
+  assert.equal(started.length, 1);
+  assert.equal(started[0].payload.tool, 'web_search');
+  const deltas = events.filter((e) => e.type === 'tool.delta');
+  assert.equal(deltas.length, 1);
+  assert.equal(deltas[0].payload.toolUseId, 'srvtoolu_7');
+  assert.equal(deltas[0].payload.tool, 'web_search'); // D8: name recovered from the registration
+});
+
+// An UNMAPPED server_tool_use at a reused index clears the slot (no stale
+// attribution) and emits nothing.
+test('stream unmapped server_tool_use clears index attribution', () => {
+  const { events, emit } = collector();
+  const streamTools = newStreamToolIndex();
+  mapMessage(
+    asMsg({
+      type: 'stream_event',
+      event: {
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'tool_use', id: 'tu_1', name: 'Bash', input: {} },
+      },
+    }),
+    emit,
+    streamTools,
+  );
+  mapMessage(
+    asMsg({
+      type: 'stream_event',
+      event: {
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'server_tool_use', id: 'srvtoolu_8', name: 'code_execution', input: {} },
+      },
+    }),
+    emit,
+    streamTools,
+  );
+  mapMessage(
+    asMsg({
+      type: 'stream_event',
+      event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{}' } },
+    }),
+    emit,
+    streamTools,
+  );
+  const deltas = events.filter((e) => e.type === 'tool.delta');
+  assert.equal(deltas.length, 1);
+  assert.equal(deltas[0].payload.toolUseId, undefined); // cleared — not tu_1, not srvtoolu_8
+});
+
+// A subagent's server_tool_use carries parentToolUseId like any child tool.
+test('parented server_tool_use → tool.started carries parentToolUseId', () => {
+  const { events, emit } = collector();
+  mapMessage(
+    asMsg({
+      type: 'assistant',
+      parent_tool_use_id: 'task_9',
+      message: {
+        content: [
+          { type: 'server_tool_use', id: 'srvtoolu_9', name: 'web_fetch', input: { url: 'https://x.example' } },
+        ],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    }),
+    emit,
+  );
+  const started = events.filter((e) => e.type === 'tool.started');
+  assert.equal(started.length, 1);
+  assert.equal(started[0].payload.parentToolUseId, 'task_9');
+});
+
+// Truncation must not leave a lone high surrogate (Go-side JSON decode would
+// turn it into U+FFFD): an astral char straddling the 200 cap is dropped whole.
+test('citation cited_text cap never splits a surrogate pair', () => {
+  const { events, emit } = collector();
+  mapMessage(
+    asMsg({
+      type: 'assistant',
+      message: {
+        content: [
+          {
+            type: 'text',
+            text: 'q',
+            citations: [
+              {
+                type: 'web_search_result_location',
+                url: 'https://example.com',
+                title: 'T',
+                cited_text: 'x'.repeat(199) + '😀rest', // surrogate pair spans indexes 199-200
+                encrypted_index: 'x',
+              },
+            ],
+          },
+        ],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    }),
+    emit,
+  );
+  const completed = events.find((e) => e.type === 'message.completed')!;
+  const cites = completed.payload.citations as Array<{ citedText: string }>;
+  assert.equal(cites[0].citedText.length, 199); // the split pair's high half was dropped
+  assert.ok(!/[\ud800-\udbff]$/.test(cites[0].citedText), 'must not end with a lone high surrogate');
+});
+
+// Dedup key uses a NUL separator: url 'a b' + title 'c' must NOT collide with
+// url 'a' + title 'b c'.
+test('citation dedup key does not collide across url/title boundary', () => {
+  const { events, emit } = collector();
+  mapMessage(
+    asMsg({
+      type: 'assistant',
+      message: {
+        content: [
+          {
+            type: 'text',
+            text: 'q',
+            citations: [
+              { type: 'web_search_result_location', url: 'a b', title: 'c', cited_text: '1', encrypted_index: 'x' },
+              { type: 'web_search_result_location', url: 'a', title: 'b c', cited_text: '2', encrypted_index: 'y' },
+            ],
+          },
+        ],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    }),
+    emit,
+  );
+  const completed = events.find((e) => e.type === 'message.completed')!;
+  assert.equal((completed.payload.citations as unknown[]).length, 2);
+});
+
+// Mapping stays total under SDK drift AND never orphans a started card: a
+// *_tool_result whose content is outside the known union maps to a degraded
+// tool.completed (closing the card) instead of throwing or dropping.
+test('server-tool results with unknown content shapes close the card, never throw', () => {
+  const { events, emit } = collector();
+  mapMessage(
+    asMsg({
+      type: 'assistant',
+      message: {
+        content: [
+          { type: 'web_search_tool_result', tool_use_id: 's1', content: null },
+          { type: 'web_search_tool_result', tool_use_id: 's2', content: { type: 'future_shape' } },
+          { type: 'web_fetch_tool_result', tool_use_id: 's3', content: null },
+          { type: 'web_fetch_tool_result', tool_use_id: 's4', content: { type: 'future_shape' } },
+        ],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    }),
+    emit,
+  );
+  const completed = events.filter((e) => e.type === 'tool.completed');
+  assert.equal(completed.length, 4); // every unknown-shape result still terminates its card
+  for (const e of completed) {
+    assert.ok((e.payload.output as string).includes('unrecognized'), String(e.payload.output));
+  }
+});
+
+// A web_search success entry outside the known shape renders what it has, never
+// the literal string "undefined".
+test('web_search result entries missing fields degrade cleanly', () => {
+  const { events, emit } = collector();
+  mapMessage(
+    asMsg({
+      type: 'assistant',
+      message: {
+        content: [
+          {
+            type: 'web_search_tool_result',
+            tool_use_id: 's5',
+            content: [
+              { type: 'web_search_result', title: 'Only Title', page_age: null, encrypted_content: 'e' },
+              { type: 'future_entry' },
+            ],
+          },
+        ],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    }),
+    emit,
+  );
+  const out = events.find((e) => e.type === 'tool.completed')!.payload.output as string;
+  assert.ok(!out.includes('undefined'), out);
+  assert.ok(out.includes('Only Title'), out);
+  assert.ok(out.includes('(unrecognized result)'), out);
+});
+
+// A null element inside a citations array is skipped, not dereferenced — a
+// throw here would abort the whole turn.
+test('null citation elements are skipped, never throw', () => {
+  const { events, emit } = collector();
+  mapMessage(
+    asMsg({
+      type: 'assistant',
+      message: {
+        content: [
+          {
+            type: 'text',
+            text: 'q',
+            citations: [
+              null,
+              42,
+              { type: 'web_search_result_location', url: 'https://ok.example', title: 'OK', cited_text: 'c', encrypted_index: 'x' },
+            ],
+          },
+        ],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    }),
+    emit,
+  );
+  const completed = events.find((e) => e.type === 'message.completed')!;
+  assert.deepEqual(completed.payload.citations, [{ url: 'https://ok.example', title: 'OK', citedText: 'c' }]);
+});

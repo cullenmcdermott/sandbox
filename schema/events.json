@@ -29,6 +29,14 @@
         {"json": "displayName", "type": "string", "optional": false, "doc": "human-readable name (e.g. 'Opus 4.8')"},
         {"json": "description", "type": "string", "optional": true, "doc": "short capability description; may be empty"}
       ]
+    },
+    "Citation": {
+      "doc": "one source citation attached to an assistant message (message.completed only, §2b gap 6). Flattened from the SDK's five citation location shapes to what a footnote render needs: web citations carry url+title, document/search citations carry title (document_title or source) only. citedText is the quoted snippet, capped by the mapper.",
+      "fields": [
+        {"json": "url", "type": "string", "optional": true, "doc": "source URL (web_search_result_location citations)"},
+        {"json": "title", "type": "string", "optional": true, "doc": "source title (or document title / search-result source for non-web citations)"},
+        {"json": "citedText", "type": "string", "optional": true, "doc": "the cited snippet, mapper-capped at 200 chars"}
+      ]
     }
   },
   "eventTypes": [
@@ -123,7 +131,8 @@
         {"json": "role", "type": "string", "optional": false, "doc": "user | assistant"},
         {"json": "content", "type": "string", "optional": false, "doc": "text content or delta"},
         {"json": "delta", "type": "bool", "optional": true, "doc": "true for message.delta events"},
-        {"json": "parentToolUseId", "type": "string", "optional": true, "doc": "Task tool_use id that spawned the emitting subagent (empty on the main thread)"}
+        {"json": "parentToolUseId", "type": "string", "optional": true, "doc": "Task tool_use id that spawned the emitting subagent (empty on the main thread)"},
+        {"json": "citations", "type": "objectArray", "items": "Citation", "optional": true, "doc": "sources cited by this text (message.completed only; never on started/delta). Clients render as a footnote list under the message (§2b gap 6)."}
       ]
     },
     "ToolPayload": {
