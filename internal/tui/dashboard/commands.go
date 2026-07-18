@@ -56,6 +56,16 @@ func commandGroups(m *TranscriptModel) []cmdGroup {
 				m.flatTools = nil
 				m.subagents = nil
 				m.childIndex = nil
+				// The pinned todo checklist pointer lives OUTSIDE m.blocks; clearing
+				// blocks without nilling it orphans the card, so the next todo.updated
+				// takes the non-nil branch and Bumps a block no longer in m.blocks — the
+				// checklist never renders again for the model's lifetime (§V22). Reset
+				// it (and the live reasoning tail, for symmetry) so both re-pin cleanly.
+				m.todoBlock = nil
+				m.todoItems = nil
+				m.reasoning = false
+				m.reasoningBuf.Reset()
+				m.resetReasoningWrapCache()
 				m.unreadIndex = 0        // re-clamp after shrink (B16)
 				m.droppedPartialIdx = -1 // stale index would mis-target after rebuild (RV9)
 				m.syncItems()

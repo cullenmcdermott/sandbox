@@ -319,7 +319,11 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 	// merely caught up history settles to idle.
 	if ev.Type == session.EventStreamLive {
 		m.replaying = false
-		return nil
+		// Release a prompt queued before the (re)attach now that catch-up is done and
+		// no turn is in flight (§V23) — the per-turn flush sites are gated on
+		// !m.replaying, so this is where a turn that completed during an SSE blip
+		// legitimately releases the queue.
+		return m.flushQueuedAtLiveBoundary()
 	}
 	// Seq dedup: drop any persisted event at or below the cursor. After a
 	// detach the dashboard's passive stream resumes from ITS (stale) cursor and
@@ -332,6 +336,7 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		}
 		m.lastSeq = ev.Seq
 	}
+	crossedLive := false
 	if m.replaying {
 		m.replayedCount++
 		// Watermark boundary: once we've caught up to the seq the dashboard knew
@@ -340,6 +345,7 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		// with no known cursor relies solely on the marker.)
 		if m.attachSeq > 0 && m.lastSeq >= m.attachSeq {
 			m.replaying = false
+			crossedLive = true // release any queued prompt after this event reduces (§V23)
 		}
 	}
 
@@ -441,17 +447,24 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		// state (user block, turnActive) while the startTurnCmd is thrown away:
 		// phantom busy, prompt never sent. Keeping it queued preserves it for the
 		// next re-attach.
+		// Gated on !m.replaying (§V23): a REPLAYED historical turn.completed during
+		// cold re-attach catch-up must NOT auto-submit the queued prompt — that POSTs
+		// mid-replay (409s into a spurious error block, or splices a real turn into
+		// streaming history). The legitimate reconnect case (a turn that completed
+		// during an SSE blip should release the queue) is handled once at the
+		// replay→live boundary by flushQueuedAtLiveBoundary instead.
 		queuedFlushed := false
-		if m.queuedPrompt != "" && m.events != nil {
+		if m.queuedPrompt != "" && m.events != nil && !m.replaying {
 			q := m.queuedPrompt
 			m.queuedPrompt = ""
 			cmd = m.submitText(q) // capture so the queued turn's POST actually runs
 			queuedFlushed = true
 		}
 		// Autopilot continuation (foreground only, m.events != nil — a background
-		// ingest() discards the returned Cmd). A queued prompt is a manual steer
-		// that already stopped the driver in submit(), so it takes precedence.
-		if !queuedFlushed && m.events != nil && m.autopilot.active() {
+		// ingest() discards the returned Cmd; not during replay for the same reason as
+		// the queued flush above). A queued prompt is a manual steer that already
+		// stopped the driver in submit(), so it takes precedence.
+		if !queuedFlushed && m.events != nil && !m.replaying && m.autopilot.active() {
 			// ended is ignored foreground: stopAutopilot already appended the
 			// reason and the user is watching. The detached path (handleRunnerEvent)
 			// is where a termination raises a toast/OS notification.
@@ -473,8 +486,10 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		// queuedPrompt set): now that the turn is torn down, submit it as the next
 		// turn — sequenced after the interrupt so it can't 409 against the old one.
 		// Foreground-only for the same reason as turn.completed above: a background
-		// ingest() discards the Cmd, so flushing there would lose the prompt.
-		if m.queuedPrompt != "" && m.events != nil {
+		// ingest() discards the Cmd, so flushing there would lose the prompt. Also
+		// !m.replaying (§V23): a replayed historical turn.interrupted must not submit
+		// mid-catch-up — the boundary flush releases a legitimate queue instead.
+		if m.queuedPrompt != "" && m.events != nil && !m.replaying {
 			q := m.queuedPrompt
 			m.queuedPrompt = ""
 			cmd = m.submitText(q)
@@ -844,5 +859,33 @@ func (m *TranscriptModel) handleEvent(ev session.Event) tea.Cmd {
 		_ = json.Unmarshal(ev.Payload, &p)
 		m.appendBlock(blockError, "error: "+p.Message)
 	}
+	// Watermark-boundary queue release (§V23): when THIS event crossed the
+	// replay→live boundary via the watermark (no EventStreamLive marker), flush a
+	// still-queued prompt now that the boundary event has fully reduced — checking
+	// m.turnActive AFTER reduction so a genuinely in-flight turn (whose turn.started
+	// was the boundary event) isn't 409ed. Skip when this event already produced a
+	// Cmd (its own flush/autopilot fired) so we can't double-submit.
+	if crossedLive && cmd == nil {
+		if c := m.flushQueuedAtLiveBoundary(); c != nil {
+			cmd = c
+		}
+	}
 	return cmd
+}
+
+// flushQueuedAtLiveBoundary submits a prompt queued before the (re)attach once the
+// stream has crossed the replay→live boundary with no turn in flight (§V23). The
+// per-turn flush sites are gated on !m.replaying so a REPLAYED historical
+// turn-terminal can't auto-submit mid-catch-up; this is the single place a
+// legitimately-queued prompt is released after catch-up — preserving the reconnect
+// case where a turn completed during an SSE blip should send the queued prompt,
+// while never POSTing into a genuinely in-flight turn. Foreground-only (m.events
+// != nil): a background ingest() discards the Cmd.
+func (m *TranscriptModel) flushQueuedAtLiveBoundary() tea.Cmd {
+	if m.queuedPrompt == "" || m.events == nil || m.turnActive {
+		return nil
+	}
+	q := m.queuedPrompt
+	m.queuedPrompt = ""
+	return m.submitText(q)
 }

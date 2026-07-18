@@ -1114,6 +1114,13 @@ func (a *App) parkTranscript(m *TranscriptModel) {
 	// and inflates the unread badge. This is the single detach hook, so it covers
 	// every detach path.
 	a.dashboard.syncCursorFromTranscript(m.ref.ID, m.lastSeq)
+	// Carry the transcript's derived read-model (DashStatus, pending permission,
+	// usage/model/branch) back onto the dashboard row before the cursor advance
+	// above makes those events unreplayable — otherwise a permission requested or a
+	// turn that completed during attach is silently lost on detach (§V5: row stuck
+	// Busy with no pending permission, no attention float, no toast). Force-saves
+	// the snapshot so a relaunch reflects it too.
+	a.dashboard.parkReadModelFromTranscript(m.ref.ID, m.sessionReadModel)
 	// Tear down the transcript's own live SSE stream so we don't leave a second
 	// SSE client open after detach (NEW-5). Every detach path parks the
 	// transcript immediately before releasing it, so this is the single hook.

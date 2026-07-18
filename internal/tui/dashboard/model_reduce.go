@@ -446,12 +446,24 @@ func (m *Model) applySeed(states []session.State) (*Model, []tea.Cmd) {
 		for i := range m.sessions {
 			if m.sessions[i].State.Status == session.StatusRunning {
 				id := m.sessions[i].ID()
+				// Never launch for the attached session (§V46): its transcript owns
+				// the live stream, so a background connect here would be immediately
+				// torn down by the liveSSEReadyMsg attachedID guard — the same
+				// start-then-cancel port-forward churn applyPodEvent skips.
+				if id == m.attachedID {
+					continue
+				}
 				// admitObserver holds the steady-state cap on the launch burst
 				// (§1d): once at the cap, cold sessions stay on their watch-derived
 				// row and reconnect on demand when focused/attended, instead of
 				// establishing N>cap forwards.
 				if !m.hasLiveSSE(id) && m.admitObserver(id) {
 					cmds = append(cmds, m.startLiveSSECmd(m.sessions[i]))
+				} else if m.sessions[i].catchingUp && !m.hasLiveSSE(id) {
+					// Cap declined the launch: no stream starts, so the EventStreamLive
+					// boundary that releases catch-up can never arrive — clear it now so
+					// a restored attention state stays toastable (§V47).
+					m.sessions[i].catchingUp = false
 				}
 			}
 		}
@@ -521,6 +533,12 @@ func (m *Model) applyPodEvent(ev k8s.StateEvent) tea.Cmd {
 				m.sessions[i].PendingPermissionID = ""
 				m.sessions[i].PendingPermissionTool = ""
 				m.sessions[i].PendingPermissionArg = ""
+				// Release catch-up suppression (§V47): cancelLiveSSE below deletes the
+				// stream gen, so the closing stream's StreamEnded fails the gen check
+				// and handleStreamEnded's clearing path never runs — a still-armed
+				// catchingUp would then make notifyIfBackgroundAttention skip this row
+				// forever, permanently suppressing the terminal Failed attention toast.
+				m.sessions[i].catchingUp = false
 				m.cancelLiveSSE(id)
 				m.dropRetained(id)
 			} else if ev.State.Status == session.StatusRunning && m.sessions[i].DashStatus == StatusSuspended {
@@ -584,8 +602,20 @@ func (m *Model) applyPodEvent(ev k8s.StateEvent) tea.Cmd {
 	m.sortSessions()
 	m.clampCursor()
 	if ev.State.Status == session.StatusRunning && m.connector != nil &&
-		!m.hasLiveSSE(sess.ID()) && m.admitObserver(sess.ID()) {
-		return m.startLiveSSECmd(sess)
+		!m.hasLiveSSE(sess.ID()) {
+		if m.admitObserver(sess.ID()) {
+			return m.startLiveSSECmd(sess)
+		}
+		// Cap declined the launch: no stream, so the EventStreamLive boundary that
+		// releases catch-up can never arrive. Clear it on the stored row (sess was
+		// copied into m.sessions above, then re-sorted) so a restored attention
+		// state stays toastable — mirrors applySeed's launch loop (§V47).
+		for i := range m.sessions {
+			if m.sessions[i].ID() == sess.ID() {
+				m.sessions[i].catchingUp = false
+				break
+			}
+		}
 	}
 	return nil
 }
@@ -709,6 +739,37 @@ func (m *Model) syncCursorFromTranscript(id session.ID, trLastSeq uint64) {
 				m.sessions[i].lastSeq = trLastSeq
 			}
 			m.sessions[i].seenSeq = m.sessions[i].lastSeq // watched live during attach
+			break
+		}
+	}
+}
+
+// parkReadModelFromTranscript copies the detaching transcript's derived read-model
+// (DashStatus, the pending-permission descriptor, usage/model/branch — everything
+// ApplyEvent derived while the transcript owned the live stream) back onto the
+// dashboard Session, then force-saves the snapshot [V5]. Call it AFTER
+// syncCursorFromTranscript so the forced snapshot rides the advanced cursor.
+//
+// While attached the background observer stream is cancelled (handleAttachReady),
+// so the dashboard Session's read-model is FROZEN at attach time while the
+// transcript's advances. syncCursorFromTranscript then moves the resume cursor
+// past every event that produced that advanced state, and the reconnect replays
+// only events > lastSeq — so the state must be CARRIED here, not re-derived, or a
+// permission requested (or a turn that completed) during attach is lost forever:
+// the row would stay Busy with an empty pending-permission descriptor, no
+// attention float, no toast, while the agent sits blocked. This is the same
+// carry-don't-re-derive invariant handleStreamEnded documents for the reconnect
+// path. Both Session and TranscriptModel embed the identical sessionReadModel, so
+// the copy is wholesale — except that a cluster-authoritative terminal status set
+// by the watch mid-attach (suspend/fail) must survive: the transcript's
+// runner-derived status is stale in that case (mirrors applySeed/applyPodEvent).
+func (m *Model) parkReadModelFromTranscript(id session.ID, rm sessionReadModel) {
+	for i := range m.sessions {
+		if m.sessions[i].ID() == id {
+			if s := m.sessions[i].DashStatus; s != StatusSuspended && s != StatusFailed {
+				m.sessions[i].sessionReadModel = rm
+			}
+			m.saveSnapshot(&m.sessions[i], true)
 			break
 		}
 	}
