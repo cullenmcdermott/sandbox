@@ -1861,3 +1861,29 @@ Five builder batches, every diff orchestrator-reviewed, full Go suite +
   stamped per-finding in `docs/audit-2026-07-18.md`. Uncovered: the 6
   spend-limit-killed auditor subsystems (tui-public, security, docs,
   tests-ci, tui-render, tui-input) — re-run is a maintainer call.
+
+## 2026-07-18 — SDK-example review burndown (§1g + §8 batch)
+
+- **§1g dashboard lifecycle parity (8e6311a):** suspend/resume/destroy
+  keystrokes routed through `client` via a new `clientLifecycleBackend`
+  adapter (internal/cli) — embeds `*k8s.Backend` for List/Watch, delegates
+  lifecycle to `client.Suspend/Resume/Destroy`. Fixes silent worktree-WIP
+  loss on TUI destroy (client.teardownWorktree was skipped) and missing
+  sync pause/resume on TUI suspend/resume. Destroy-hook plumbing
+  (RunOptions.DestroyHook/PreDestroyHook, With*DestroyHook,
+  newLocalDestroyHook/newPreDestroySyncStop) removed;
+  `dashboard.NewApp/Run/RunAttached` now take the `Backend` interface.
+  destroy_order_test.go deleted (ordering pinned by the client F3
+  call-order spy); C2 hook tests reworked to dispatch/report contract.
+- **§8 OpencodeProvider re-exports (5720b70):**
+  `OpencodeProviderAnthropic/OpenAI/Zen` aliased into `client` + sdktest
+  pins; CreateOptions doc no longer names unimportable `session.*`
+  spellings. Note the Zen wire value is `opencode-zen`.
+- **§8 Example_chat (417c334):** compile-only example of the full chat
+  loop: account selection, OnPhase/Warning, delta/tool/permission/usage
+  event handling with ResolvePermission linked via PermissionID,
+  interrupt steering, reattach via Open + Events(afterSeq) +
+  EventStreamLive boundary, detach-vs-destroy teardown.
+- **Infra-name scrub (4ada2b1):** private cluster name replaced with
+  "my-cluster" across 7 files; 8 historical commits still carry it in
+  diffs — history rewrite is a maintainer call (pre-OSS).

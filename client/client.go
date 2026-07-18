@@ -632,8 +632,8 @@ func (c *Client) Resume(ctx context.Context, id ID) error {
 // Destroy stops the session's file sync, destroys the session and its PVC
 // (irreversible), then removes local state (SSH alias, key dir, index entry).
 //
-// Sync is stopped BEFORE the cluster destroy (mirroring the TUI's
-// PreDestroyHook ordering): the mutagen-over-SSH stream must be torn down while
+// Sync is stopped BEFORE the cluster destroy (the TUI relies on this ordering
+// via its lifecycle adapter): the mutagen-over-SSH stream must be torn down while
 // the pod is still up, or it races the pod's disappearance into "connection
 // closed"/EOF errors and leaves orphaned mutagen sessions pointing at a dead
 // endpoint. Best-effort and recoverable, so it runs before — not gated on — the

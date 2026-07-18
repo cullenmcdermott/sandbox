@@ -215,6 +215,7 @@ streamLoop:
 		}
 		lastSeq = ev.Seq
 	}
+	fmt.Println("caught up through seq", lastSeq)
 
 	// 6. Teardown. Close() (deferred above) only detaches — the pod keeps running
 	// and can be reattached later. Destroy is the irreversible teardown: it stops
