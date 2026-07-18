@@ -201,6 +201,47 @@ function asPartDelta(ev: Event): PartDeltaEvent | undefined {
   return e.type === 'message.part.delta' ? (ev as unknown as PartDeltaEvent) : undefined;
 }
 
+// Assistant message ids a runner-driven turn (runTurn) has already consumed. The
+// always-on observer holds a SEPARATE SSE connection that can lag; without this it
+// would replay a just-finished headless turn's trailing message.updated as a
+// phantom synthetic cycle once activeTurns has already dropped to 0 (V43). The
+// observer consults wasRunnerConsumedMessage() at cycle start and skips those ids.
+// Bounded (evict oldest-first) since it only guards the brief lag window after a
+// turn — the live cycle's ids are always the most-recently added.
+const RUNNER_CONSUMED_MESSAGE_CAP = 256;
+const runnerConsumedMessageIds = new Set<string>();
+
+/** Record an assistant message id a runner-driven turn processed (V43). */
+export function markRunnerConsumedMessage(messageId: string): void {
+  if (!messageId) return;
+  runnerConsumedMessageIds.add(messageId);
+  while (runnerConsumedMessageIds.size > RUNNER_CONSUMED_MESSAGE_CAP) {
+    const oldest = runnerConsumedMessageIds.values().next().value as string | undefined;
+    if (oldest === undefined) break;
+    runnerConsumedMessageIds.delete(oldest);
+  }
+}
+
+/** True when a runner-driven turn already consumed this assistant message id, so a
+ * lagging observer must not reopen it as a synthetic interactive cycle (V43). */
+export function wasRunnerConsumedMessage(messageId: string): boolean {
+  return runnerConsumedMessageIds.has(messageId);
+}
+
+/** If `ev` is a message.updated for an assistant message of `ocSession`, claim its
+ * id as runner-consumed (V43) so the always-on observer skips it after this turn. */
+function noteRunnerConsumedMessage(ev: Event, ocSession: string): void {
+  const e = ev as unknown as {
+    type?: string;
+    properties?: { info?: { id?: string; role?: string; sessionID?: string } };
+  };
+  if (e.type !== 'message.updated') return;
+  const info = e.properties?.info;
+  if (info?.role === 'assistant' && info.sessionID === ocSession && info.id) {
+    markRunnerConsumedMessage(info.id);
+  }
+}
+
 type Settled = 'completed' | 'failed' | undefined;
 
 /**
@@ -490,16 +531,82 @@ function turnDeadlineMs(env: NodeJS.ProcessEnv = process.env): number {
   return Number.isFinite(v) && v > 0 ? v : DEFAULT_TURN_DEADLINE_MS;
 }
 
-async function ensureSession(
+/** Retry budget for the session verify/create loops. Injectable so tests can run
+ * the exhaustion paths without waiting out 20×500ms of real timers. */
+export interface SessionRetryOpts {
+  attempts?: number;
+  delayMs?: number;
+}
+
+// A single in-flight session-CREATE promise shared between warmupOpencodeSession
+// and ensureSession so a warmup racing the headless first turn can never create
+// two opencode sessions (V21). Whichever call arrives first owns the create; a
+// concurrent peer awaits the same promise and adopts its id. Cleared once settled.
+let inflightSessionCreate: Promise<string> | undefined;
+
+/**
+ * Create (and persist) a fresh opencode session, coalescing concurrent callers so
+ * only ONE session is ever created (V21). warmupOpencodeSession and ensureSession's
+ * create path both funnel through here: if a session id already landed (a prior
+ * create, or a peer's create resolving), that id is adopted instead of creating a
+ * second, empty session whose head could clobber the one the first prompt ran in.
+ */
+export async function establishOpencodeSession(
+  client: OpencodeClient,
+  signal: AbortSignal,
+  reg: ReturnType<typeof getRegistry>,
+  opts: SessionRetryOpts = {},
+): Promise<string> {
+  if (reg.state.opencode_session_id) return reg.state.opencode_session_id;
+  if (inflightSessionCreate) return inflightSessionCreate;
+  const attempts = opts.attempts ?? 20;
+  const delayMs = opts.delayMs ?? 500;
+  inflightSessionCreate = (async () => {
+    let lastErr: unknown = 'no response';
+    for (let attempt = 0; attempt < attempts && !signal.aborted; attempt++) {
+      // A peer create (warmup vs first turn) may have landed a session between
+      // iterations — adopt it rather than creating another.
+      if (reg.state.opencode_session_id) return reg.state.opencode_session_id;
+      const res = await client.session
+        .create({ body: { title: 'sandbox runner session' } })
+        .catch((e: unknown) => {
+          lastErr = e;
+          return undefined;
+        });
+      if (res && !res.error && res.data) {
+        // Belt-and-braces (V21): re-check the persisted head immediately before
+        // committing, so a peer create that landed while our request was in flight
+        // wins and this create's (now-orphan) session id is never persisted.
+        if (reg.state.opencode_session_id) return reg.state.opencode_session_id;
+        reg.setOpencodeSession(res.data.id);
+        return res.data.id;
+      }
+      if (res?.error) lastErr = res.error;
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+    if (signal.aborted) throw new Error('aborted before opencode session was created');
+    throw new Error(`opencode session.create failed: ${errToString(lastErr)}`);
+  })();
+  try {
+    return await inflightSessionCreate;
+  } finally {
+    inflightSessionCreate = undefined;
+  }
+}
+
+export async function ensureSession(
   client: OpencodeClient,
   signal: AbortSignal,
   reg: ReturnType<typeof getRegistry>,
   resume: string | undefined,
+  opts: SessionRetryOpts = {},
 ): Promise<string> {
   // Continuity (mirrors claude's effectiveResume): a client-supplied resume id
   // wins; otherwise continue the persisted opencode session head so turns share
   // history across pod restarts.
   let lastErr: unknown = 'no response';
+  const attempts = opts.attempts ?? 20;
+  const delayMs = opts.delayMs ?? 500;
   const existing = effectiveOpencodeSession(resume, reg.state.opencode_session_id);
   if (existing) {
     // VERIFY the session is reachable AND still exists before using it — do NOT
@@ -510,7 +617,8 @@ async function ensureSession(
     // path below to absorb that boot delay. A missing-session (404) means the
     // server lost the session (data gone) → clear it and fall through to create a
     // fresh one; a connection error means it is still booting → retry.
-    for (let attempt = 0; attempt < 20 && !signal.aborted; attempt++) {
+    let missing = false; // set true ONLY on a confirmed missing-session 404
+    for (let attempt = 0; attempt < attempts && !signal.aborted; attempt++) {
       const res = await client.session.get({ path: { id: existing } }).catch((e: unknown) => {
         lastErr = e;
         return undefined;
@@ -523,32 +631,27 @@ async function ensureSession(
         lastErr = res.error;
         if (isMissingSessionError(res.error)) {
           reg.clearOpencodeSession(); // session gone → recreate below
+          missing = true;
           break;
         }
       }
-      await new Promise((r) => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, delayMs));
     }
     if (signal.aborted) throw new Error('aborted before opencode session was verified');
-  }
-  // No usable persisted id (first turn, or the persisted one was lost): create a
-  // session and persist it. Retry briefly — a turn can arrive before `opencode
-  // serve` finishes booting.
-  for (let attempt = 0; attempt < 20 && !signal.aborted; attempt++) {
-    const res = await client.session
-      .create({ body: { title: 'sandbox runner session' } })
-      .catch((e: unknown) => {
-        lastErr = e;
-        return undefined;
-      });
-    if (res && !res.error && res.data) {
-      reg.setOpencodeSession(res.data.id);
-      return res.data.id;
+    // Exhausted the verify budget WITHOUT a confirmed 404 (connection errors, a
+    // crashed/booting serve, non-404 server errors): the session is unverified, not
+    // proven gone. Falling through to create would silently abandon the persisted
+    // conversation and start a fresh, history-less session (V20). Fail the turn
+    // instead and leave the persisted head untouched so a later turn — once serve
+    // is reachable — resumes it. Only a confirmed 404 (missing) recreates below.
+    if (!missing) {
+      throw new Error(`opencode serve unreachable / session unverified: ${errToString(lastErr)}`);
     }
-    if (res?.error) lastErr = res.error;
-    await new Promise((r) => setTimeout(r, 500));
   }
-  if (signal.aborted) throw new Error('aborted before opencode session was created');
-  throw new Error(`opencode session.create failed: ${errToString(lastErr)}`);
+  // No usable persisted id (first turn, or the persisted one was confirmed gone
+  // via 404): create a session and persist it (coalesced with any concurrent
+  // warmup so only one session is ever created — V21).
+  return establishOpencodeSession(client, signal, reg, { attempts, delayMs });
 }
 
 async function runTurn(
@@ -643,6 +746,10 @@ async function runTurn(
 
     for await (const ev of stream) {
       if (abort.signal.aborted) break;
+      // Claim this turn's assistant message ids so the always-on observer, whose
+      // separate SSE stream can lag past finishTurn, won't reopen them as a phantom
+      // cycle (V43).
+      noteRunnerConsumedMessage(ev, ocSession);
       const done = mapper.handle(ev);
       // Auto-respond to any permission surfaced this iteration (the I/O the pure
       // mapper must not do). Default "once" = auto-allow; the pod is the isolation
@@ -700,20 +807,13 @@ export async function warmupOpencodeSession(env: NodeJS.ProcessEnv = process.env
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 60_000);
   try {
-    for (let attempt = 0; attempt < 20 && !ctrl.signal.aborted; attempt++) {
-      const res = await client.session
-        .create({ body: { title: 'sandbox runner session' } })
-        .catch(() => undefined);
-      if (res && !res.error && res.data) {
-        reg.setOpencodeSession(res.data.id);
-        console.log(`opencode: pre-created session ${res.data.id}`);
-        return;
-      }
-      await new Promise<void>((r) => setTimeout(r, 500));
-    }
-    console.error('opencode warmup: session.create timed out; turn path will retry');
+    // Share the single in-flight create promise with ensureSession (V21): if the
+    // headless first turn's ensureSession is already creating a session, adopt it
+    // rather than racing a second create whose empty session could win the head.
+    const id = await establishOpencodeSession(client, ctrl.signal, reg);
+    console.log(`opencode: pre-created session ${id}`);
   } catch (e) {
-    console.error('opencode warmup: session pre-create failed:', e);
+    console.error('opencode warmup: session pre-create failed; turn path will retry:', e);
   } finally {
     clearTimeout(timer);
   }

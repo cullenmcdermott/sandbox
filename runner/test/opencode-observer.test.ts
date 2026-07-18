@@ -16,6 +16,7 @@ import {
   hasInterruptedTurn,
   type ObserverDeps,
 } from '../src/opencode-observer.js';
+import { markRunnerConsumedMessage } from '../src/opencode-turn.js';
 
 const OC = 'ses_oc';
 
@@ -95,6 +96,39 @@ function textPart(msgId: string, partId: string, text: string, delta: string, se
         time: { start: 1, end: 2 },
       },
       delta,
+    },
+  } as unknown as Event;
+}
+
+function asstMsgModel(msgId: string, providerID: string, modelID: string): Event {
+  return {
+    type: 'message.updated',
+    properties: {
+      info: {
+        id: msgId,
+        sessionID: OC,
+        role: 'assistant',
+        tokens: { input: 100, output: 50, reasoning: 0, cache: { read: 0, write: 0 } },
+        cost: 0.0123,
+        providerID,
+        modelID,
+      },
+    },
+  } as unknown as Event;
+}
+
+// An assistant message.updated marked with MessageAbortedError — what opencode
+// stamps on the in-flight message when a turn is aborted (SDK types.gen.d.ts).
+function abortedAsstMsg(msgId: string, sessionID = OC): Event {
+  return {
+    type: 'message.updated',
+    properties: {
+      info: {
+        id: msgId,
+        sessionID,
+        role: 'assistant',
+        error: { name: 'MessageAbortedError', data: { message: 'aborted' } },
+      },
     },
   } as unknown as Event;
 }
@@ -319,4 +353,106 @@ test('observer suppresses turn.completed after an explicit interrupt terminal ev
   assert.equal(h.cycleActive, false);
   assert.deepEqual(types(calls), ['turn.started', 'session.started', 'usage.updated']);
   assert.equal(calls.statuses.at(-1), 'idle');
+});
+
+// ORACLE (V19): an interrupted interactive turn must NOT emit turn.failed + error
+// after turn.interrupted. On abort opencode marks the in-flight assistant message
+// with MessageAbortedError (and may emit session.error); the interrupt marker must
+// suppress those so the cycle ends silently on session.idle — not as a failed turn.
+test('an interrupted interactive turn does not emit turn.failed after turn.interrupted (V19)', () => {
+  const { deps, calls } = fakeDeps();
+  const h = createObserverHandler(deps);
+
+  h.handle(asstMsg('m1')); // cycle start → turn-1
+  markObservedTurnInterrupted('turn-1'); // server.ts /interrupt path already emitted turn.interrupted
+  h.handle(abortedAsstMsg('m1')); // opencode stamps MessageAbortedError on the message
+  h.handle(sessionIdle()); // cycle ends here, silently
+
+  const emitted = types(calls);
+  assert.ok(!emitted.includes('turn.failed'), `no turn.failed after interrupt, got ${emitted.join(',')}`);
+  assert.ok(!emitted.includes('error'), 'no error event after interrupt');
+  assert.equal(h.cycleActive, false, 'the cycle still ends on session.idle');
+  assert.equal(calls.statuses.at(-1), 'idle');
+});
+
+// V19 variant: a session.error arriving for an already-interrupted turn is likewise
+// dropped (it too would drive the mapper's fail()).
+test('an interrupted interactive turn drops a trailing session.error (V19)', () => {
+  const { deps, calls } = fakeDeps();
+  const h = createObserverHandler(deps);
+
+  h.handle(asstMsg('m1'));
+  markObservedTurnInterrupted('turn-1');
+  h.handle(sessionError('aborted', OC));
+  h.handle(sessionIdle());
+
+  const emitted = types(calls);
+  assert.ok(!emitted.includes('turn.failed'), 'no turn.failed for the interrupted turn');
+  assert.ok(!emitted.includes('error'), 'no error event for the interrupted turn');
+  assert.equal(h.cycleActive, false);
+});
+
+// ORACLE (V44): a session.error carrying NO sessionID (a server-wide provider/config
+// failure) must not fabricate a failed turn for our session in the pre-cycle path.
+test('a sessionID-less pre-cycle session.error does not fabricate a failed turn (V44)', () => {
+  const { deps, calls } = fakeDeps();
+  const h = createObserverHandler(deps);
+
+  // Build the event with NO sessionID key at all (the builder's default param
+  // would substitute OC for an explicit `undefined`).
+  h.handle({
+    type: 'session.error',
+    properties: { error: { name: 'ProviderError', data: { message: 'global provider failure' } } },
+  } as unknown as Event);
+  assert.deepEqual(types(calls), [], 'no synthetic failed turn for a sessionID-less error');
+  assert.equal(calls.statuses.length, 0, 'no status change');
+  assert.equal(h.cycleActive, false);
+});
+
+// ORACLE (V45): a /models switch in the opencode TUI must re-emit session.started so
+// the dashboard model chip / ctx% / pricing follow the current model, not stay
+// latched to the first-observed one.
+test('the observer re-emits session.started when the model changes across cycles (V45)', () => {
+  const { deps, calls } = fakeDeps();
+  const h = createObserverHandler(deps);
+
+  // Cycle 1 on opencode/big-pickle.
+  h.handle(asstMsg('m1'));
+  h.handle(sessionIdle());
+  // Cycle 2 after a /models switch to a different provider/model.
+  h.handle(asstMsgModel('m2', 'anthropic', 'claude-sonnet-4-5'));
+  h.handle(sessionIdle());
+
+  const started = calls.emitted.filter((e) => e.type === 'session.started');
+  assert.deepEqual(started.map((e) => e.payload.model), ['opencode/big-pickle', 'anthropic/claude-sonnet-4-5']);
+  assert.deepEqual(calls.models, ['opencode/big-pickle', 'anthropic/claude-sonnet-4-5']);
+});
+
+// V45: an unchanged model across cycles must NOT re-emit session.started.
+test('the observer does not re-emit session.started when the model is unchanged (V45)', () => {
+  const { deps, calls } = fakeDeps();
+  const h = createObserverHandler(deps);
+
+  h.handle(asstMsg('m1'));
+  h.handle(sessionIdle());
+  h.handle(asstMsg('m2')); // same model → no re-emit
+  h.handle(sessionIdle());
+
+  assert.equal(calls.emitted.filter((e) => e.type === 'session.started').length, 1);
+  assert.deepEqual(calls.models, ['opencode/big-pickle']);
+});
+
+// ORACLE (V43): a lagging observer must not replay a just-finished runner turn's
+// trailing message.updated as a phantom synthetic cycle. A message id the runner
+// turn already consumed is skipped at cycle start.
+test('the observer ignores a cycle-start for a message a runner turn already consumed (V43)', () => {
+  const { deps, calls } = fakeDeps();
+  const h = createObserverHandler(deps);
+
+  markRunnerConsumedMessage('m_consumed'); // a headless runTurn processed this assistant message
+  h.handle(asstMsg('m_consumed')); // observer's lagging stream sees it after activeTurns already hit 0
+  h.handle(sessionIdle());
+
+  assert.deepEqual(types(calls), [], 'no phantom synthetic turn for a runner-consumed message');
+  assert.equal(h.cycleActive, false);
 });

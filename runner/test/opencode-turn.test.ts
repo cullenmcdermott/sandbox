@@ -21,9 +21,18 @@ import {
   effectiveOpencodeSession,
   effectiveOpencodeModel,
   emitOpencodeUserPrompt,
+  ensureSession,
+  establishOpencodeSession,
+  markRunnerConsumedMessage,
+  wasRunnerConsumedMessage,
   type Emit,
 } from '../src/opencode-turn.js';
 import { assertMapperInvariants } from './backend-contract.js';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { initRegistry, __setSessionJsonPathForTest } from '../src/session.js';
+import type { SessionState } from '../src/types.js';
 
 const SID = 'ses_test';
 const ASSISTANT = 'msg_assistant';
@@ -641,4 +650,131 @@ test('emitOpencodeUserPrompt echoes the prompt as message.started/completed role
     assert.equal(e.payload.role, 'user');
     assert.equal(e.payload.content, 'what is 2+2?');
   }
+});
+
+// --- V20 / V21: session establishment (verify vs create) ------------------
+
+function ocRegistry(overrides: Partial<SessionState> = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'oc-turn-'));
+  __setSessionJsonPathForTest(join(dir, 'session.json'));
+  return initRegistry({
+    sandbox_session_id: 'sandbox-oc',
+    backend: 'opencode-server',
+    project_path: '/p',
+    status: 'idle',
+    claude_session_id: '',
+    opencode_session_id: '',
+    last_turn_id: '',
+    last_activity: new Date().toISOString(),
+    ...overrides,
+  });
+}
+
+type GetResult = { data?: unknown; error?: unknown };
+type CreateResult = { data?: { id: string }; error?: unknown };
+
+function fakeOcClient(handlers: { get?: () => Promise<GetResult>; create?: () => Promise<CreateResult> }) {
+  return {
+    session: {
+      get: handlers.get ?? (async () => ({ data: { id: 'x' } })),
+      create: handlers.create ?? (async () => ({ data: { id: 'ses_created' } })),
+    },
+  } as unknown as Parameters<typeof ensureSession>[0];
+}
+
+const neverAbort = () => new AbortController().signal;
+
+// ORACLE (V20): a persisted/resume session whose verify probe exhausts on
+// connection errors (serve unreachable, no confirmed 404) must NOT fall through to
+// create a fresh, history-less session. The turn fails with a clear error and the
+// persisted head is left intact so a later turn can still resume it.
+test('ensureSession throws (not recreates) when verify exhausts on connection errors (V20)', async () => {
+  const reg = ocRegistry({ opencode_session_id: 'ses_persist' });
+  let creates = 0;
+  const client = fakeOcClient({
+    get: async () => {
+      throw new Error('fetch failed');
+    },
+    create: async () => {
+      creates++;
+      return { data: { id: 'ses_new' } };
+    },
+  });
+  await assert.rejects(
+    () => ensureSession(client, neverAbort(), reg, undefined, { attempts: 3, delayMs: 1 }),
+    /opencode serve unreachable \/ session unverified/,
+  );
+  assert.equal(creates, 0, 'must not create a new session on unverified exhaustion');
+  assert.equal(reg.state.opencode_session_id, 'ses_persist', 'persisted head left untouched');
+  __setSessionJsonPathForTest(null);
+});
+
+// V20: a CONFIRMED missing-session 404 still clears the head and recreates (today's
+// behavior for a server that genuinely lost the session).
+test('ensureSession recreates when the persisted session 404s (V20)', async () => {
+  const reg = ocRegistry({ opencode_session_id: 'ses_persist' });
+  let creates = 0;
+  const client = fakeOcClient({
+    get: async () => ({ error: { status: 404 } }),
+    create: async () => {
+      creates++;
+      return { data: { id: 'ses_new' } };
+    },
+  });
+  const id = await ensureSession(client, neverAbort(), reg, undefined, { attempts: 3, delayMs: 1 });
+  assert.equal(id, 'ses_new');
+  assert.equal(creates, 1, 'a 404 clears the head and creates fresh');
+  assert.equal(reg.state.opencode_session_id, 'ses_new');
+  __setSessionJsonPathForTest(null);
+});
+
+// V20: a reachable persisted session is returned without any create.
+test('ensureSession returns the persisted session when verify succeeds (V20)', async () => {
+  const reg = ocRegistry({ opencode_session_id: 'ses_persist' });
+  let creates = 0;
+  const client = fakeOcClient({
+    get: async () => ({ data: { id: 'ses_persist' } }),
+    create: async () => {
+      creates++;
+      return { data: { id: 'ses_new' } };
+    },
+  });
+  const id = await ensureSession(client, neverAbort(), reg, undefined, { attempts: 3, delayMs: 1 });
+  assert.equal(id, 'ses_persist');
+  assert.equal(creates, 0);
+  __setSessionJsonPathForTest(null);
+});
+
+// ORACLE (V21): a warmup racing the headless first turn's ensureSession must create
+// exactly ONE opencode session — the shared in-flight promise coalesces concurrent
+// callers so the persisted head can't point at an empty warmup session.
+test('concurrent session establishment coalesces to a single create (V21)', async () => {
+  const reg = ocRegistry({ opencode_session_id: '' });
+  let creates = 0;
+  const client = fakeOcClient({
+    create: async () => {
+      creates++;
+      await new Promise((r) => setTimeout(r, 5)); // hold the create in flight so the peer coalesces
+      return { data: { id: `ses_${creates}` } };
+    },
+  });
+  const signal = neverAbort();
+  const [a, b] = await Promise.all([
+    establishOpencodeSession(client, signal, reg, { attempts: 5, delayMs: 1 }),
+    establishOpencodeSession(client, signal, reg, { attempts: 5, delayMs: 1 }),
+  ]);
+  assert.equal(a, b, 'both callers resolve to the same session id');
+  assert.equal(creates, 1, 'exactly one opencode session is created');
+  assert.equal(reg.state.opencode_session_id, a, 'the persisted head is the single created session');
+  __setSessionJsonPathForTest(null);
+});
+
+// V43 tracking primitive: runner-consumed assistant message ids are recorded and
+// the set is bounded (the observer consults this to suppress phantom cycles).
+test('markRunnerConsumedMessage records assistant message ids, ignoring empties (V43)', () => {
+  markRunnerConsumedMessage('mc1');
+  assert.equal(wasRunnerConsumedMessage('mc1'), true);
+  assert.equal(wasRunnerConsumedMessage('mc-never'), false);
+  markRunnerConsumedMessage(''); // empty id is a no-op
+  assert.equal(wasRunnerConsumedMessage(''), false);
 });

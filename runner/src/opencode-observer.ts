@@ -33,7 +33,12 @@ import type { Event } from '@opencode-ai/sdk';
 
 import { appendEvent } from './events.js';
 import { appendAudit } from './audit.js';
-import { createOpencodeTurnMapper, errToString, opencodeTurnClient } from './opencode-turn.js';
+import {
+  createOpencodeTurnMapper,
+  errToString,
+  opencodeTurnClient,
+  wasRunnerConsumedMessage,
+} from './opencode-turn.js';
 import { getRegistry } from './session.js';
 import type { EventType } from './types.js';
 
@@ -114,6 +119,15 @@ function eventSessionId(props: Record<string, unknown>): string | undefined {
   return info?.sessionID ?? part?.sessionID ?? (props.sessionID as string | undefined);
 }
 
+/** True when a message.updated carries an assistant error of MessageAbortedError —
+ * the error opencode stamps on the in-flight assistant message when a turn is
+ * aborted. Used to suppress a mapper-driven turn.failed for an already-interrupted
+ * turn (V19). */
+function isAbortedAssistantError(props: Record<string, unknown>): boolean {
+  const info = props.info as { error?: { name?: string } } | undefined;
+  return info?.error?.name === 'MessageAbortedError';
+}
+
 /**
  * The observer's event-mapping core. handle(ev) maps one opencode event into zero
  * or more normalized events via deps, framing interactive assistant cycles as
@@ -125,7 +139,7 @@ export function createObserverHandler(deps: ObserverDeps) {
   let activeTurnId: string | undefined;
   let mapper: ReturnType<typeof createOpencodeTurnMapper> | undefined;
   let lastTitle = '';
-  let modelEmitted = false;
+  let lastModel = '';
 
   const endCycle = () => {
     // GC the interrupt marker for this turn: it is otherwise only shed when the
@@ -198,7 +212,14 @@ export function createObserverHandler(deps: ObserverDeps) {
       // sit idle. Surface it as a synthetic failed turn (turn.failed + error +
       // status error) so the failure is visible. A session.error DURING a cycle is
       // handled by the cycle's mapper below.
+      //
+      // Strict sessionID match (V44), mirroring the turn mapper (opencode-turn.ts):
+      // the evSession gate above only rejects a PRESENT-but-foreign id, so a
+      // sessionID-LESS session.error (a server-wide provider/config failure not
+      // bound to a session) would otherwise fabricate a failed turn for our session.
+      // Require our exact opencode session id before synthesizing the failure.
       if (activeTurnId === undefined && type === 'session.error') {
+        if ((props as { sessionID?: string }).sessionID !== oc) return;
         const turnId = deps.nextTurnId();
         deps.setLastTurn(turnId);
         const message = errToString((props as { error?: unknown }).error);
@@ -213,8 +234,16 @@ export function createObserverHandler(deps: ObserverDeps) {
       // reliably bookends the assistant turn.
       if (activeTurnId === undefined && type === 'message.updated') {
         const info =
-          (props.info as { role?: string; sessionID?: string; providerID?: string; modelID?: string }) ?? {};
+          (props.info as { id?: string; role?: string; sessionID?: string; providerID?: string; modelID?: string }) ??
+          {};
         if (info.role === 'assistant' && info.sessionID === oc) {
+          // Phantom-turn guard (V43): a runner-driven turn holds a SEPARATE SSE
+          // stream and drops activeTurns to 0 the moment its own stream sees
+          // session.idle. A lagging observer could then process that turn's trailing
+          // message.updated with activeTurnsSize()===0 and reopen it as a synthetic
+          // cycle. Skip cycle-start for any assistant message the runner already
+          // consumed.
+          if (info.id && wasRunnerConsumedMessage(info.id)) return;
           const turnId = deps.nextTurnId();
           deps.setLastTurn(turnId); // satisfies the CLI cancel/suspend st.LastTurnID guard
           deps.setExternalActivity(); // keep the idle reaper from suspending mid-turn
@@ -228,14 +257,20 @@ export function createObserverHandler(deps: ObserverDeps) {
             (tool, input) => deps.audit(cycleTurnId, tool, input),
           );
 
-          // Emit the model once so the Go side resolves a context-window limit for
-          // ctx% (session.go: session.started → sess.Model + CtxLimit). opencode's
+          // Emit the model so the Go side resolves a context-window limit for ctx%
+          // (session.go: session.started → sess.Model + CtxLimit). opencode's
           // assistant message carries providerID/modelID (e.g. opencode/big-pickle).
-          if (!modelEmitted && info.providerID && info.modelID) {
-            modelEmitted = true;
+          // Re-emit whenever it CHANGES (V45): a /models switch in the opencode TUI
+          // must update the dashboard's model chip / ctx% / pricing, not stay latched
+          // to the first-observed model for the pod's life. setModel/session.started
+          // both no-op on an unchanged model, so this only fires on a real switch.
+          if (info.providerID && info.modelID) {
             const model = `${info.providerID}/${info.modelID}`;
-            deps.setModel(model);
-            deps.emit(cycleTurnId, 'session.started', { model, cwd: '' });
+            if (model !== lastModel) {
+              lastModel = model;
+              deps.setModel(model);
+              deps.emit(cycleTurnId, 'session.started', { model, cwd: '' });
+            }
           }
         }
       }
@@ -243,11 +278,22 @@ export function createObserverHandler(deps: ObserverDeps) {
       // Feed the event to the active cycle's mapper. It returns true once the cycle
       // settles (session.idle/error → it already emitted turn.completed/turn.failed).
       if (activeTurnId !== undefined && mapper) {
-        if (interruptedTurns.has(activeTurnId) && type === 'session.idle') {
-          interruptedTurns.delete(activeTurnId);
-          deps.setStatus('idle');
-          endCycle();
-          return;
+        if (interruptedTurns.has(activeTurnId)) {
+          // The turn was interrupted (server.ts already emitted turn.interrupted).
+          // Suppress every mapper-driven terminalization so we never emit
+          // turn.failed + error AFTER turn.interrupted (the no-double-terminal
+          // invariant, V19): opencode marks the in-flight assistant message with
+          // MessageAbortedError and may also emit session.error on abort — both
+          // would drive the mapper's fail(). Drop those two; the cycle still ends
+          // silently on session.idle exactly as before.
+          if (type === 'session.idle') {
+            interruptedTurns.delete(activeTurnId);
+            deps.setStatus('idle');
+            endCycle();
+            return;
+          }
+          if (type === 'session.error') return;
+          if (type === 'message.updated' && isAbortedAssistantError(props)) return;
         }
         const settled = mapper.handle(ev);
         // Discard any queued permission ids WITHOUT responding — the attached
