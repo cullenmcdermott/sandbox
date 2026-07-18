@@ -123,29 +123,36 @@ func TestCancelActiveTurnPropagatesStateError(t *testing.T) {
 // set, and — the fix — never a sync a DIFFERENT context created.
 func TestSelectOrphanSyncs(t *testing.T) {
 	const currentCtx = "omni-prod"
+	const currentNs = "agent-sessions"
 	syncs := []syncpkg.SyncSession{
-		// current ctx, gone session, orphaned → reap
-		{SessionID: "gone", Context: currentCtx, Identifier: "sync_gone", Status: "ConnectingBeta"},
-		// current ctx, live session, orphaned → keep (reconnecting)
-		{SessionID: "live", Context: currentCtx, Identifier: "sync_live", Status: "ConnectingBeta"},
-		// current ctx, gone session, actively watching → keep (not orphaned)
-		{SessionID: "busy", Context: currentCtx, Identifier: "sync_busy", Status: "Watching"},
+		// current ctx+ns, gone session, orphaned → reap
+		{SessionID: "gone", Context: currentCtx, Namespace: currentNs, Identifier: "sync_gone", Status: "ConnectingBeta"},
+		// current ctx+ns, live session, orphaned → keep (reconnecting)
+		{SessionID: "live", Context: currentCtx, Namespace: currentNs, Identifier: "sync_live", Status: "ConnectingBeta"},
+		// current ctx+ns, gone session, actively watching → keep (not orphaned)
+		{SessionID: "busy", Context: currentCtx, Namespace: currentNs, Identifier: "sync_busy", Status: "Watching"},
 		// DIFFERENT ctx, not in this cluster's live set, orphaned → keep (MF3)
-		{SessionID: "other", Context: "staging", Identifier: "sync_other", Status: "Disconnected"},
-		// legacy (no ctx label), gone session, orphaned → reap (migration fallback)
-		{SessionID: "legacy", Context: "", Identifier: "sync_legacy", Status: "Disconnected"},
+		{SessionID: "other", Context: "staging", Namespace: currentNs, Identifier: "sync_other", Status: "Disconnected"},
+		// DIFFERENT namespace, same ctx, gone from THIS ns's live set → keep ([V28])
+		{SessionID: "otherns", Context: currentCtx, Namespace: "team-b", Identifier: "sync_otherns", Status: "Disconnected"},
+		// legacy (no ctx/ns label), gone session, orphaned → reap (migration fallback)
+		{SessionID: "legacy", Context: "", Namespace: "", Identifier: "sync_legacy", Status: "Disconnected"},
+		// [V35] paused sync whose session is GONE → reap (kubectl-deleted suspended)
+		{SessionID: "pausedgone", Context: currentCtx, Namespace: currentNs, Identifier: "sync_pausedgone", Status: "Paused"},
+		// [V35] paused sync whose session STILL EXISTS (merely suspended) → keep
+		{SessionID: "pausedlive", Context: currentCtx, Namespace: currentNs, Identifier: "sync_pausedlive", Status: "Paused"},
 	}
-	live := map[string]bool{"live": true}
+	live := map[string]bool{"live": true, "pausedlive": true}
 
-	orphanIDs, bySession := selectOrphanSyncs(syncs, live, currentCtx)
+	orphanIDs, bySession := selectOrphanSyncs(syncs, live, currentCtx, currentNs)
 
 	got := map[string]bool{}
 	for _, id := range orphanIDs {
 		got[id] = true
 	}
-	want := map[string]bool{"sync_gone": true, "sync_legacy": true}
+	want := map[string]bool{"sync_gone": true, "sync_legacy": true, "sync_pausedgone": true}
 	if len(got) != len(want) {
-		t.Fatalf("selected %v, want %v", orphanIDs, []string{"sync_gone", "sync_legacy"})
+		t.Fatalf("selected %v, want %v", orphanIDs, want)
 	}
 	for id := range want {
 		if !got[id] {
@@ -155,10 +162,16 @@ func TestSelectOrphanSyncs(t *testing.T) {
 	if got["sync_other"] {
 		t.Error("MF3 violation: a different context's sync was selected for reap")
 	}
+	if got["sync_otherns"] {
+		t.Error("[V28] violation: a different namespace's sync was selected for reap")
+	}
+	if got["sync_pausedlive"] {
+		t.Error("[V35] violation: a suspended-but-alive session's paused sync was reaped")
+	}
 	if got["sync_live"] || got["sync_busy"] {
 		t.Error("a live or actively-syncing sync was wrongly selected")
 	}
-	if bySession["gone"] != 1 || bySession["legacy"] != 1 {
+	if bySession["gone"] != 1 || bySession["legacy"] != 1 || bySession["pausedgone"] != 1 {
 		t.Errorf("per-session counts wrong: %v", bySession)
 	}
 }

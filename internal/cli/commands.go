@@ -359,34 +359,48 @@ func newSyncCmd() *cobra.Command {
 // selection is unit-testable without a cluster.
 type clusterLister interface {
 	List(ctx context.Context) ([]session.State, error)
+	// Namespace is the client's effective k8s namespace, used to scope the sync GC
+	// to the current namespace ([V28] — a sync stamped with a DIFFERENT namespace
+	// label belongs to a live session this namespace-scoped live set can't see).
+	Namespace() string
 }
 
 // selectOrphanSyncs picks the orphaned syncs to terminate. It is conservative:
-//   - skips actively-syncing syncs (only IsOrphanStatus transport-down ones);
+//   - considers only syncs whose transport is down (IsOrphanStatus) OR that are
+//     Paused ([V35] — a paused sync of a session that no longer exists, e.g. a
+//     `kubectl delete sandbox` on a suspended session, is otherwise immortal);
 //   - skips a sync whose session is still live in THIS context's cluster
-//     (running or suspended — it reconnects/resumes);
+//     (running or suspended — it reconnects/resumes); this is what keeps a merely
+//     suspended (still-existing) session's paused syncs protected;
 //   - skips a sync a DIFFERENT kube context created (its sandbox-context label
 //     is set and != currentCtx) — the MF3 cross-context over-reap fix: the live
 //     set only covers the current context, so another context's session would
-//     otherwise look "gone" and be wrongly reaped.
+//     otherwise look "gone" and be wrongly reaped;
+//   - skips a sync a DIFFERENT namespace created (its sandbox-namespace label is
+//     set and != currentNs) — [V28], the same shape as MF3 but for namespaces:
+//     the live set is namespace-scoped, so a same-context sync in another
+//     namespace would otherwise look "gone".
 //
-// A legacy sync with no sandbox-context label ("" — created before MF3) falls
-// through to the live-set check: it is GC-able by whichever context is running
-// (so it never becomes immortal), reproducing the pre-MF3 behavior. It is
-// re-stamped with the context label the next time the connect path (re)creates
-// it, closing the migration window. Returns the mutagen identifiers to terminate
-// and a per-session orphan count for reporting.
-func selectOrphanSyncs(syncs []syncpkg.SyncSession, live map[string]bool, currentCtx string) (orphanIDs []string, bySession map[string]int) {
+// A legacy sync with no sandbox-context / sandbox-namespace label ("" — created
+// before MF3 / [V28]) falls through to the live-set check: it is GC-able by
+// whichever context/namespace is running (so it never becomes immortal),
+// reproducing the pre-fix behavior. It is re-stamped with both labels the next
+// time the connect path (re)creates it, closing the migration window. Returns the
+// mutagen identifiers to terminate and a per-session orphan count for reporting.
+func selectOrphanSyncs(syncs []syncpkg.SyncSession, live map[string]bool, currentCtx, currentNs string) (orphanIDs []string, bySession map[string]int) {
 	bySession = map[string]int{}
 	for _, s := range syncs {
-		if !syncpkg.IsOrphanStatus(s.Status) {
-			continue // actively syncing → keep
+		if !syncpkg.IsOrphanStatus(s.Status) && !syncpkg.IsPausedStatus(s.Status) {
+			continue // actively syncing / connected → keep
 		}
 		if s.Context != "" && s.Context != currentCtx {
 			continue // another kube context owns it — not ours to judge (MF3)
 		}
+		if s.Namespace != "" && s.Namespace != currentNs {
+			continue // another namespace owns it — not ours to judge ([V28])
+		}
 		if live[s.SessionID] {
-			continue // session still exists (running/suspended) → keep
+			continue // session still exists (running/suspended) → keep (reconnects/resumes)
 		}
 		orphanIDs = append(orphanIDs, s.Identifier)
 		bySession[s.SessionID]++
@@ -420,7 +434,7 @@ func syncGCCore(ctx context.Context, mgr *syncpkg.Manager, c clusterLister) (gcR
 	for _, st := range states {
 		live[string(st.ID)] = true
 	}
-	orphanIDs, bySession := selectOrphanSyncs(syncs, live, mgr.CurrentContext())
+	orphanIDs, bySession := selectOrphanSyncs(syncs, live, mgr.CurrentContext(), c.Namespace())
 	return gcResult{orphanIDs: orphanIDs, bySession: bySession}, nil
 }
 

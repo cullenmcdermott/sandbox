@@ -35,10 +35,12 @@ func syncManager() *syncpkg.Manager {
 }
 
 // localSSHConfig returns the per-session SSH alias manager at the default state
-// root — the same include file the client package writes (a sibling "ssh" dir
-// of the state root, Include'd from ~/.ssh/config) — without needing a
+// root — the same include file the client package writes (the "ssh" dir INSIDE
+// the state root, Include'd from ~/.ssh/config) — without needing a
 // cluster-connected client. Used by `sandbox sync --terminate`, which must work
-// when the kubeconfig is gone.
+// when the kubeconfig is gone. It computes the path via client.SSHConfigPath so
+// it can never drift from where the client actually writes it ([V13] — this once
+// pointed at the pre-migration sibling dir and silently failed to remove aliases).
 func localSSHConfig() (*syncpkg.SSHConfig, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -48,7 +50,7 @@ func localSSHConfig() (*syncpkg.SSHConfig, error) {
 	if err != nil {
 		return nil, err
 	}
-	include := filepath.Join(filepath.Dir(root), "ssh", "config")
+	include := client.SSHConfigPath(root)
 	return syncpkg.NewSSHConfig(include, filepath.Join(home, ".ssh", "config")), nil
 }
 
@@ -60,9 +62,10 @@ func localSSHConfig() (*syncpkg.SSHConfig, error) {
 const syncHealMinInterval = 30 * time.Second
 
 // syncProber is the stateful backing for the dashboard's sync-health probe. It
-// maps a SyncState to the dashboard's decoupled SyncHealth and, on a SyncStalled
-// reading, fires a debounced background self-heal (MF5) — the layer that owns the
-// prober, not the dashboard, drives the recovery.
+// maps a SyncState to the dashboard's decoupled SyncHealth and, on a heal-eligible
+// reading (a transport stall or a paused-while-running sync — never a safety
+// halt; see healEligible), fires a debounced background self-heal (MF5) — the
+// layer that owns the prober, not the dashboard, drives the recovery.
 type syncProber struct {
 	mu         sync.Mutex
 	lastHealAt map[session.ID]time.Time
@@ -80,7 +83,7 @@ func (p *syncProber) probe(ctx context.Context, id session.ID) dashboard.SyncHea
 	if err != nil {
 		return dashboard.SyncHealth{Status: "unknown"}
 	}
-	if st == syncpkg.SyncStalled {
+	if healEligible(st) {
 		p.maybeHeal(id)
 	}
 	h := dashboard.SyncHealth{Status: st.String()}
@@ -95,6 +98,19 @@ func (p *syncProber) probe(ctx context.Context, id session.ID) dashboard.SyncHea
 		h.Hint = syncpkg.ConflictResolutionHint
 	}
 	return h
+}
+
+// healEligible reports whether a sync state should trigger the debounced MF5
+// self-heal (ResumeAll+FlushAll). A plain transport stall and a paused-while-
+// running sync are both safely resumable ([V14]), but a SyncSafetyHalted state is
+// deliberately EXCLUDED ([V2]): resuming a mutagen safety halt (root emptied/
+// deleted/type change) is its documented CONFIRM-and-propagate action for a mass
+// deletion, so it must wait for explicit user review, never an auto-heal. Healthy
+// / unknown / conflicted states need no transport heal. The prober only probes
+// running sessions, so healing a paused sync is safe (a deliberate `sync --pause`
+// self-resumes; a suspended session is not probed).
+func healEligible(st syncpkg.SyncState) bool {
+	return st == syncpkg.SyncStalled || st == syncpkg.SyncPaused
 }
 
 // maybeHeal fires a background Reconcile (ResumeAll+FlushAll) for a stalled
@@ -146,13 +162,15 @@ func (reaperAdapter) ListOrphans(ctx context.Context) ([]dashboard.OrphanSync, e
 	if err != nil {
 		return nil, err
 	}
-	// Scope to the current kube context (MF3): a sync a DIFFERENT context created
-	// carries that context's sandbox-context label. The dashboard's GC confirms a
-	// candidate against the current cluster's live set before terminating, but that
-	// live set can't see another context's sessions — so an out-of-context sync
-	// would look orphaned and be wrongly reaped. Legacy syncs (no label, "") fall
-	// through as before so they never become immortal.
+	// Scope to the current kube context (MF3) AND namespace ([V28]): a sync a
+	// DIFFERENT context or namespace created carries that owner's sandbox-context /
+	// sandbox-namespace label. The dashboard's GC confirms a candidate against the
+	// current cluster's live set before terminating, but that live set is scoped to
+	// the current context+namespace and can't see another owner's sessions — so an
+	// out-of-scope sync would look orphaned and be wrongly reaped. Legacy syncs (no
+	// label, "") fall through as before so they never become immortal.
 	currentCtx := mgr.CurrentContext()
+	currentNs := effectiveNamespace()
 	var orphans []dashboard.OrphanSync
 	for _, s := range sessions {
 		if !syncpkg.IsOrphanStatus(s.Status) {
@@ -161,6 +179,9 @@ func (reaperAdapter) ListOrphans(ctx context.Context) ([]dashboard.OrphanSync, e
 		if s.Context != "" && s.Context != currentCtx {
 			continue // another kube context owns it — not ours to reap
 		}
+		if s.Namespace != "" && s.Namespace != currentNs {
+			continue // another namespace owns it — not ours to reap ([V28])
+		}
 		orphans = append(orphans, dashboard.OrphanSync{
 			Identifier: s.Identifier,
 			SessionID:  session.ID(s.SessionID),
@@ -168,6 +189,24 @@ func (reaperAdapter) ListOrphans(ctx context.Context) ([]dashboard.OrphanSync, e
 	}
 	return orphans, nil
 }
+
+// effectiveNamespace resolves the k8s namespace the CLI operates in for GC
+// scoping ([V28]) — the --namespace flag, or the default the client/backend
+// applies when it is unset. It must match what the client stamps into the
+// sandbox-namespace sync label (c.backend.Namespace()) so a same-namespace sync
+// is never skipped as foreign. k8s namespaces are DNS-1123 labels, already valid
+// mutagen label values, so no sanitization is needed here.
+func effectiveNamespace() string {
+	if namespaceFlag != "" {
+		return namespaceFlag
+	}
+	return defaultCLINamespace
+}
+
+// defaultCLINamespace mirrors internal/k8s's defaultNamespace: the namespace the
+// backend applies when --namespace is unset. Kept as a local const rather than an
+// import so the GC's namespace comparison ([V28]) stays a pure-local computation.
+const defaultCLINamespace = "agent-sessions"
 
 func (reaperAdapter) Terminate(ctx context.Context, identifiers []string) error {
 	return syncManager().TerminateByIdentifier(ctx, identifiers...)
@@ -190,20 +229,21 @@ func (indexTitleStore) LoadTitle(id session.ID) string {
 	return entry.RenamedTitle
 }
 
-// SaveTitle persists the user-chosen title, preserving the rest of the entry.
+// SaveTitle persists the user-chosen title. [V7] It writes a PARTIAL entry (only
+// the identity fields Save needs plus the field it owns) and lets Save's locked
+// load-merge fill the rest, so a concurrent snapshot/driver write can't have its
+// newer LastEventSeq/Snapshot clobbered by a full entry this adapter loaded
+// earlier outside the lock.
 func (indexTitleStore) SaveTitle(id session.ID, title string) {
 	idx, err := newIndex()
 	if err != nil {
 		return
 	}
-	entry, err := idx.Load(string(id))
-	if err != nil {
-		// No entry yet (e.g. session created outside this host): start a minimal
-		// one so the rename isn't dropped.
-		entry = index.Entry{SandboxSessionID: string(id), SandboxName: string(id)}
-	}
-	entry.RenamedTitle = title
-	_ = idx.Save(string(id), entry)
+	_ = idx.Save(string(id), index.Entry{
+		SandboxSessionID: string(id),
+		SandboxName:      string(id),
+		RenamedTitle:     title,
+	})
 }
 
 // SaveAgentSessionID persists the backend's resume id (the Claude SDK session
@@ -218,19 +258,28 @@ func (indexTitleStore) SaveAgentSessionID(id session.ID, agentID string) {
 	if err != nil {
 		return
 	}
-	entry, err := idx.Load(string(id))
-	if err != nil {
-		entry = index.Entry{SandboxSessionID: string(id), SandboxName: string(id)}
+	// [V7] Locked read-modify-write: this adapter both reads (dedup + the
+	// ProjectPath the audit line needs) and writes, so it must run inside the
+	// per-path lock rather than loading a full entry, mutating, and re-Saving it
+	// (which would clobber a concurrent snapshot writer's newer LastEventSeq).
+	var (
+		changed     bool
+		projectPath string
+	)
+	if uerr := idx.Update(string(id), func(e *index.Entry) {
+		if e.AgentSessionID == agentID {
+			return // already recorded; no change
+		}
+		e.AgentSessionID = agentID
+		changed = true
+		projectPath = e.ProjectPath
+	}); uerr != nil || !changed {
+		return
 	}
-	if entry.AgentSessionID == agentID {
-		return // already recorded; avoid a redundant write
-	}
-	entry.AgentSessionID = agentID
-	_ = idx.Save(string(id), entry)
 	// Record the provenance to the append-only audit log (§1d). Done here, at the
 	// single point a new mapping is learned, so the log grows once per session —
 	// not on every event — and outlives the index entry a later destroy removes.
-	appendTranscriptAudit(string(id), agentID, entry.ProjectPath)
+	appendTranscriptAudit(string(id), agentID, projectPath)
 }
 
 // transcriptAuditRecord is one line of the append-only transcript audit log
@@ -299,12 +348,12 @@ func (indexTitleStore) SaveAutoTitle(id session.ID, title string) {
 	if err != nil {
 		return
 	}
-	entry, err := idx.Load(string(id))
-	if err != nil {
-		entry = index.Entry{SandboxSessionID: string(id), SandboxName: string(id)}
-	}
-	entry.AutoTitle = title
-	_ = idx.Save(string(id), entry)
+	// [V7] Partial entry + Save's locked merge — see SaveTitle.
+	_ = idx.Save(string(id), index.Entry{
+		SandboxSessionID: string(id),
+		SandboxName:      string(id),
+		AutoTitle:        title,
+	})
 }
 
 // indexSnapshotStore implements dashboard.SnapshotStore on top of the local
@@ -348,24 +397,31 @@ func (indexSnapshotStore) SaveSnapshot(id session.ID, snap dashboard.SessionSnap
 	if err != nil {
 		return
 	}
-	entry, err := idx.Load(string(id))
-	if err != nil {
-		entry = index.Entry{SandboxSessionID: string(id), SandboxName: string(id)}
-	}
-	entry.LastEventSeq = snap.LastSeq
-	entry.LastActivity = time.Now()
-	entry.Snapshot = &index.Snapshot{
-		DashStatus:            snap.DashStatus.String(),
-		PendingPermissionID:   snap.PendingPermissionID,
-		PendingPermissionTool: snap.PendingPermissionTool,
-		Model:                 snap.Model,
-		InputTokens:           snap.InputTokens,
-		OutputTokens:          snap.OutputTokens,
-		CacheReadTokens:       snap.CacheReadTokens,
-		CacheWriteTokens:      snap.CacheWriteTokens,
-		TotalCostUSD:          snap.TotalCostUSD,
-	}
-	_ = idx.Save(string(id), entry)
+	// [V7] Snapshot/LastEventSeq must OVERWRITE — a non-zero-deferred merge can't
+	// express "advance the cursor" (a stale concurrent title Save loaded outside
+	// the lock would otherwise reintroduce an older LastEventSeq/Snapshot). So this
+	// uses Index.Update, a locked read-modify-write, rather than a partial Save.
+	_ = idx.Update(string(id), func(e *index.Entry) {
+		if e.SandboxSessionID == "" {
+			e.SandboxSessionID = string(id)
+		}
+		if e.SandboxName == "" {
+			e.SandboxName = string(id)
+		}
+		e.LastEventSeq = snap.LastSeq
+		e.LastActivity = time.Now()
+		e.Snapshot = &index.Snapshot{
+			DashStatus:            snap.DashStatus.String(),
+			PendingPermissionID:   snap.PendingPermissionID,
+			PendingPermissionTool: snap.PendingPermissionTool,
+			Model:                 snap.Model,
+			InputTokens:           snap.InputTokens,
+			OutputTokens:          snap.OutputTokens,
+			CacheReadTokens:       snap.CacheReadTokens,
+			CacheWriteTokens:      snap.CacheWriteTokens,
+			TotalCostUSD:          snap.TotalCostUSD,
+		}
+	})
 }
 
 // indexDriverStore implements dashboard.DriverStore on top of the local session
@@ -402,22 +458,23 @@ func (indexDriverStore) SaveDriver(id session.ID, spec session.AutopilotRequest)
 	if err != nil {
 		return
 	}
-	entry, err := idx.Load(string(id))
-	if err != nil {
-		entry = index.Entry{SandboxSessionID: string(id), SandboxName: string(id)}
-	}
-	entry.Driver = &index.DriverSpec{
-		Kind:          spec.Kind,
-		Prompt:        spec.Prompt,
-		Sentinel:      spec.Sentinel,
-		IntervalMs:    spec.IntervalMs,
-		Model:         spec.Overrides.Model,
-		Effort:        spec.Overrides.Effort,
-		Mode:          spec.Overrides.Mode,
-		MaxIterations: spec.MaxIterations,
-		TokenBudget:   spec.TokenBudget,
-	}
-	_ = idx.Save(string(id), entry)
+	// [V7] Partial entry + Save's locked merge — see SaveTitle. Driver is the only
+	// field this adapter owns; the merge fills the rest from disk.
+	_ = idx.Save(string(id), index.Entry{
+		SandboxSessionID: string(id),
+		SandboxName:      string(id),
+		Driver: &index.DriverSpec{
+			Kind:          spec.Kind,
+			Prompt:        spec.Prompt,
+			Sentinel:      spec.Sentinel,
+			IntervalMs:    spec.IntervalMs,
+			Model:         spec.Overrides.Model,
+			Effort:        spec.Overrides.Effort,
+			Mode:          spec.Overrides.Mode,
+			MaxIterations: spec.MaxIterations,
+			TokenBudget:   spec.TokenBudget,
+		},
+	})
 }
 
 // indexEventCache implements dashboard.EventCache on top of the local index's

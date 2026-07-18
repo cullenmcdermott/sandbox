@@ -13,6 +13,8 @@ package sync
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"path"
@@ -37,12 +39,24 @@ type Manager struct {
 	// label (MF3). nil (production) uses the process-cached ambient kubeconfig
 	// resolver; tests inject a stub to make the label deterministic.
 	kubeContext func() string
+
+	// namespace is the k8s namespace this Manager stamps onto new syncs via the
+	// sandbox-namespace label ([V28] — the GC live set is namespace-scoped, so a
+	// same-context sync in another namespace must be distinguishable). "" leaves
+	// syncs unlabeled (legacy / no-namespace callers), matching pre-[V28] syncs.
+	// Set by the client's syncManager() to the client's effective namespace.
+	namespace string
 }
 
 // New creates a sync Manager.
 func New(r Runner) *Manager {
 	return &Manager{r: r}
 }
+
+// SetNamespace records the k8s namespace this Manager stamps onto new syncs (the
+// sandbox-namespace label, [V28]). Sanitized into mutagen's label charset like
+// the context label. "" leaves new syncs unlabeled.
+func (m *Manager) SetNamespace(ns string) { m.namespace = ns }
 
 // kubeContextCache resolves the ambient kubeconfig current-context ONCE per
 // process: the value can't change within a run, and CreateAll issues up to 8
@@ -73,10 +87,20 @@ func loadKubeContext() string {
 }
 
 // CurrentContext returns the kube context this Manager stamps onto new syncs and
-// scopes GC to (MF3). "" when it can't be resolved (in-cluster / no kubeconfig),
-// in which case no sandbox-context label is stamped and GC falls back to the
-// legacy live-set check.
+// scopes GC to (MF3), SANITIZED into mutagen's label charset ([V3] — a raw
+// context like `kubernetes-admin@kubernetes` or an EKS ARN fails label
+// validation and would disable sync entirely). Sanitizing HERE — the single
+// value both the create path and the GC comparison read — keeps the stamped
+// label and the scope check identical. "" when the context can't be resolved
+// (in-cluster / no kubeconfig), in which case no sandbox-context label is stamped
+// and GC falls back to the legacy live-set check.
 func (m *Manager) CurrentContext() string {
+	return sanitizeLabelValue(m.rawContext())
+}
+
+// rawContext returns the unsanitized kube context name (the injected stub in
+// tests, else the process-cached ambient kubeconfig current-context).
+func (m *Manager) rawContext() string {
 	if m.kubeContext != nil {
 		return m.kubeContext()
 	}
@@ -94,6 +118,89 @@ func (m *Manager) contextLabelArgs() []string {
 		return nil
 	}
 	return []string{"--label", "sandbox-context=" + ctx}
+}
+
+// namespaceLabelArgs returns the `--label sandbox-namespace=<ns>` create flag
+// when a namespace is set ([V28]), sanitized into mutagen's label charset with
+// the same helper the context label uses. nil (unset namespace) leaves the sync
+// unlabeled, matching pre-[V28] syncs — GC then treats a label-less sync as it
+// always did (no cross-namespace skip).
+func (m *Manager) namespaceLabelArgs() []string {
+	ns := sanitizeLabelValue(m.namespace)
+	if ns == "" {
+		return nil
+	}
+	return []string{"--label", "sandbox-namespace=" + ns}
+}
+
+// labelRune reports whether r is allowed in a mutagen label value: an
+// alphanumeric or one of '-', '_', '.'.
+func labelRune(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+		(r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.'
+}
+
+func alnumRune(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+}
+
+// sanitizeLabelValue coerces s into a valid mutagen label value ([V3]): only
+// alphanumerics and '-', '_', '.', at most 63 chars, and an alphanumeric first
+// and last char. Invalid runes become '-'. When anything had to change OR the
+// input exceeded 63 chars, an 8-hex-char suffix of the original's sha256 is
+// appended (inside the 63-char cap) so two distinct originals that sanitize to
+// the same base still get distinct labels. A value that is already valid and
+// within length passes through UNCHANGED, preserving backward compatibility with
+// existing labels like "omni-prod". Empty in → empty out (callers read "" as "no
+// label").
+func sanitizeLabelValue(s string) string {
+	if s == "" {
+		return ""
+	}
+	changed := false
+	mapped := make([]rune, 0, len(s))
+	for _, r := range s {
+		if labelRune(r) {
+			mapped = append(mapped, r)
+			continue
+		}
+		mapped = append(mapped, '-')
+		changed = true
+	}
+	// Trim to an alphanumeric first/last char (mutagen requires it).
+	start, end := 0, len(mapped)
+	for start < end && !alnumRune(mapped[start]) {
+		start++
+		changed = true
+	}
+	for end > start && !alnumRune(mapped[end-1]) {
+		end--
+		changed = true
+	}
+	base := string(mapped[start:end])
+
+	if !changed && len(base) <= 63 {
+		return base // already valid and within length — pass through unchanged
+	}
+
+	sum := sha256.Sum256([]byte(s))
+	hash := hex.EncodeToString(sum[:])[:8] // hex → alphanumeric, safe as the last char
+	if base == "" {
+		return hash
+	}
+	const maxBase = 63 - 9 // 9 = len("-") + len(8-char hash)
+	if len(base) > maxBase {
+		base = base[:maxBase]
+		// Re-trim: the clamp may have cut mid-run, but the joining '-' + hash below
+		// restores an alphanumeric end regardless; only guard against a now-empty base.
+		for len(base) > 0 && !alnumRune(rune(base[len(base)-1])) {
+			base = base[:len(base)-1]
+		}
+		if base == "" {
+			return hash
+		}
+	}
+	return base + "-" + hash
 }
 
 // Spec describes the sync sessions to create for a remote session.
@@ -183,6 +290,7 @@ func (m *Manager) CreateInputs(ctx context.Context, spec Spec) error {
 			"--label", label,
 		}
 		args = append(args, m.contextLabelArgs()...)
+		args = append(args, m.namespaceLabelArgs()...)
 		args = append(args,
 			"--mode=one-way-safe",
 			localPath, spec.SSHHost+":"+remotePath,
@@ -205,6 +313,7 @@ func (m *Manager) CreateInputs(ctx context.Context, spec Spec) error {
 			"--label", label,
 		}
 		args = append(args, m.contextLabelArgs()...)
+		args = append(args, m.namespaceLabelArgs()...)
 		args = append(args,
 			"--mode=one-way-safe",
 			spec.SSHHost+":"+remotePath, localPath,
@@ -277,6 +386,7 @@ func (m *Manager) createProjectSync(ctx context.Context, spec Spec, label string
 		"--label", label,
 	}
 	args = append(args, m.contextLabelArgs()...)
+	args = append(args, m.namespaceLabelArgs()...)
 	args = append(args,
 		// two-way-safe is data-preserving (M27): when only one side changed a
 		// path, the change propagates; when BOTH sides changed the same path
@@ -391,18 +501,23 @@ func (m *Manager) TerminateAll(ctx context.Context, sessionID string) error {
 type SyncSession struct {
 	SessionID  string // sandbox session id (from the sandbox-session label)
 	Context    string // kube context that created it (sandbox-context label; "" for pre-MF3 syncs)
+	Namespace  string // k8s namespace that created it (sandbox-namespace label; "" for pre-[V28] syncs)
 	Identifier string // mutagen session identifier (sync_...)
 	Name       string // mutagen session name (sandbox-<id>-<kind>)
 	Status     string // mutagen status enum string (Watching, ConnectingBeta, Paused, …)
 }
 
 // syncListTemplate emits one line per session:
-// sessionID|context|identifier|name|status. It reads the sandbox-session label so
-// List can scope to THIS tool's k8s syncs (the lima-based system-config manager
-// shares the same host mutagen daemon but labels its syncs sandbox-vm-id, which
-// we must never touch), and the sandbox-context label so GC can scope to the
-// current cluster's syncs (MF3 — never reap a sync a different context created).
-const syncListTemplate = `{{range .}}{{index .Labels "sandbox-session"}}|{{index .Labels "sandbox-context"}}|{{.Identifier}}|{{.Name}}|{{.Status}}{{"\n"}}{{end}}`
+// sessionID|context|identifier|name|status|namespace. It reads the
+// sandbox-session label so List can scope to THIS tool's k8s syncs (the
+// lima-based system-config manager shares the same host mutagen daemon but labels
+// its syncs sandbox-vm-id, which we must never touch), the sandbox-context label
+// so GC can scope to the current cluster's syncs (MF3 — never reap a sync a
+// different context created), and the sandbox-namespace label so GC can also
+// scope to the current namespace ([V28] — never reap a sync a different namespace
+// in the same context created). The namespace is LAST so a pre-[V28] daemon
+// listing (5 fields) still parses, with an empty Namespace.
+const syncListTemplate = `{{range .}}{{index .Labels "sandbox-session"}}|{{index .Labels "sandbox-context"}}|{{.Identifier}}|{{.Name}}|{{.Status}}|{{index .Labels "sandbox-namespace"}}{{"\n"}}{{end}}`
 
 // List returns every mutagen sync session owned by THIS tool — those carrying a
 // non-empty sandbox-session label. Sessions from other users of the same host
@@ -426,9 +541,10 @@ func (m *Manager) List(ctx context.Context) ([]SyncSession, error) {
 // a skipped row: the GC selectors simply don't see it (conservative — an unseen
 // sync is never reaped) and the client's same-dir collision scan omits its
 // warning (its documented degrade-to-silence). A REAL daemon driven by
-// syncListTemplate always emits exactly 5 fields: a label-less pre-MF3 sync
-// renders `{{index .Labels "sandbox-context"}}` as an EMPTY second field, not a
-// missing one.
+// syncListTemplate always emits 6 fields since [V28]: a label-less sync renders
+// `{{index .Labels "sandbox-context"}}` / `sandbox-namespace` as an EMPTY field,
+// not a missing one. A 5-field row (a pre-[V28] daemon template shape) is still
+// accepted for backward compatibility, with an empty Namespace.
 func parseSyncList(out []byte) []SyncSession {
 	var sessions []SyncSession
 	for _, line := range strings.Split(string(out), "\n") {
@@ -436,9 +552,13 @@ func parseSyncList(out []byte) []SyncSession {
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "|", 5)
-		if len(parts) != 5 || parts[0] == "" {
-			continue // not ours (no sandbox-session label) or malformed
+		parts := strings.SplitN(line, "|", 6)
+		if len(parts) < 5 || parts[0] == "" {
+			continue // not ours (no sandbox-session label) or malformed (stale shape)
+		}
+		ns := ""
+		if len(parts) == 6 {
+			ns = parts[5]
 		}
 		sessions = append(sessions, SyncSession{
 			SessionID:  parts[0],
@@ -446,6 +566,7 @@ func parseSyncList(out []byte) []SyncSession {
 			Identifier: parts[2],
 			Name:       parts[3],
 			Status:     parts[4],
+			Namespace:  ns,
 		})
 	}
 	return sessions
@@ -463,6 +584,17 @@ func IsOrphanStatus(status string) bool {
 		return false
 	}
 	return strings.Contains(s, "connecting") || strings.Contains(s, "disconnected")
+}
+
+// IsPausedStatus reports whether a mutagen status is Paused — a suspend, an
+// explicit `sandbox sync --pause`, or an out-of-band pause. [V35] A paused sync
+// is healthy ONLY while its session still exists (it resumes on reattach); once
+// the session is gone (e.g. `kubectl delete sandbox`), the paused sync is
+// immortal to the IsOrphanStatus-only GC, so the GC treats a paused sync whose
+// session is absent from the live set as reapable. Split from IsOrphanStatus so
+// the transport-down signal stays orthogonal to the intentional-pause signal.
+func IsPausedStatus(status string) bool {
+	return strings.Contains(strings.ToLower(strings.TrimSpace(status)), "paused")
 }
 
 // TerminateByIdentifier terminates specific mutagen sync sessions by identifier —

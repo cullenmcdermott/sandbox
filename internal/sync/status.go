@@ -13,11 +13,24 @@ const (
 	SyncUnknown SyncState = iota // no sessions / could not determine
 	SyncSynced                   // watching for changes, no conflicts
 	SyncSyncing                  // scanning / staging / transitioning
-	SyncStalled                  // halted or errored (transport-level; may self-heal)
+	// SyncPaused: the sync is paused (a suspend, an explicit `sandbox sync
+	// --pause`, or a best-effort resume that failed to un-pause). [V14] Distinct
+	// from SyncSyncing so a frozen sync no longer masquerades as perpetual
+	// "syncing"; the prober treats a paused-while-running sync as heal-eligible
+	// (Reconcile's ResumeAll is mutagen's documented resume for a plain pause).
+	SyncPaused
+	SyncStalled // errored (transport-level; may self-heal via resume+flush)
+	// SyncSafetyHalted: mutagen halted the sync on a safety condition (root
+	// emptied / root deletion / root type change). [V2] Kept OUT of SyncStalled
+	// because resuming a safety halt is mutagen's documented CONFIRM-and-propagate
+	// action for a mass deletion — auto-healing it would wipe the other side. It
+	// needs explicit user review, so it is ranked as its own state (above a plain
+	// transport stall) and is never fed to the self-heal.
+	SyncSafetyHalted
 	// SyncConflicted: file conflicts need user resolution. Distinct from (and
-	// ranked above) SyncStalled — a transport stall can clear on reconnect, but a
-	// conflict is stuck until resolved, so it wins the worst-of reducer and gets
-	// its own glyph instead of masquerading as a transport error.
+	// ranked above) SyncStalled/SyncSafetyHalted — a transport stall can clear on
+	// reconnect, but a conflict is stuck until resolved, so it wins the worst-of
+	// reducer and gets its own glyph instead of masquerading as a transport error.
 	SyncConflicted
 )
 
@@ -27,8 +40,12 @@ func (s SyncState) String() string {
 		return "synced"
 	case SyncSyncing:
 		return "syncing"
+	case SyncPaused:
+		return "paused"
 	case SyncStalled:
 		return "stalled"
+	case SyncSafetyHalted:
+		return "halted (needs review)"
 	case SyncConflicted:
 		return "conflicted"
 	default:
@@ -149,7 +166,10 @@ func worstState(sessions []mutagenSession) SyncState {
 	worst := SyncSynced
 	for _, s := range sessions {
 		st := classify(s)
-		if st > worst { // ordering: Conflicted(4) > Stalled(3) > Syncing(2) > Synced(1)
+		// ordering (SyncState iota): Conflicted > SafetyHalted > Stalled > Paused >
+		// Syncing > Synced — the most-actionable/worst state across a session's
+		// syncs surfaces.
+		if st > worst {
 			worst = st
 		}
 	}
@@ -285,10 +305,18 @@ func classify(s mutagenSession) SyncState {
 	}
 	status := strings.ToLower(s.Status)
 	switch {
-	case strings.Contains(status, "halted"),
-		strings.Contains(status, "error"),
+	case strings.Contains(status, "halted"):
+		// [V2] A safety halt (root emptied/deleted/type change) — NOT a heal-eligible
+		// transport stall. Resuming it would confirm a mass deletion, so it gets its
+		// own state that the prober never auto-heals.
+		return SyncSafetyHalted
+	case strings.Contains(status, "error"),
 		strings.Contains(status, "problem"):
 		return SyncStalled
+	case strings.Contains(status, "paused"):
+		// [V14] A paused sync is frozen, not syncing. Surface it honestly instead of
+		// as perpetual "syncing"; the prober self-heals it while the session runs.
+		return SyncPaused
 	case strings.Contains(status, "watching"):
 		return SyncSynced
 	default:

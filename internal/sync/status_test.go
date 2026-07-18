@@ -35,12 +35,20 @@ func TestParseSyncState(t *testing.T) {
 		{"watching-clean", `[{"status":"Watching for changes"}]`, SyncSynced},
 		{"staging", `[{"status":"Staging files on beta"}]`, SyncSyncing},
 		{"scanning", `[{"status":"Scanning files"}]`, SyncSyncing},
-		{"halted", `[{"status":"Halted on root emptied"}]`, SyncStalled},
+		// [V2] A safety halt (root emptied/deleted/type change) is its OWN state,
+		// not the heal-eligible SyncStalled — auto-resuming it would confirm a mass
+		// deletion.
+		{"safety-halted", `[{"status":"Halted on root emptied"}]`, SyncSafetyHalted},
+		{"root-deletion-halt", `[{"status":"Halted on root deletion"}]`, SyncSafetyHalted},
+		// A transport error still stalls (heal-eligible).
+		{"error-stalls", `[{"status":"Error: connection reset"}]`, SyncStalled},
+		// [V14] A paused sync is its own honest state, not perpetual "syncing".
+		{"paused", `[{"status":"Paused"}]`, SyncPaused},
 		{"conflicts", `[{"status":"Watching for changes","conflicts":[{"root":"x"}]}]`, SyncConflicted},
 		{"empty", `[]`, SyncUnknown},
 		{"two-sessions-worst-wins", `[{"status":"Watching for changes"},{"status":"Staging files on beta"}]`, SyncSyncing},
-		// A conflict outranks a co-occurring transport stall so the actionable
-		// problem surfaces instead of being masked as a generic error.
+		// A conflict outranks a co-occurring safety halt so the actionable
+		// resolution surfaces (both need user action; conflict wins the reducer).
 		{"conflict-beats-halted", `[{"status":"Halted on root emptied"},{"status":"Watching for changes","conflicts":[{"root":"x"}]}]`, SyncConflicted},
 	}
 	for _, c := range cases {

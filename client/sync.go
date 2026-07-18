@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -23,7 +24,12 @@ func (c *Client) syncManager() *syncpkg.Manager {
 	if r == nil {
 		r = syncpkg.NewExecRunner("")
 	}
-	return syncpkg.New(r)
+	m := syncpkg.New(r)
+	// [V28] Stamp the client's effective namespace onto new syncs so the GC can
+	// scope to it (a same-context sync in another namespace belongs to a live
+	// session the namespace-scoped live set can't see).
+	m.SetNamespace(c.backend.Namespace())
+	return m
 }
 
 // StopSync terminates all Mutagen sync sessions for a session. Best-effort.
@@ -64,19 +70,37 @@ func (c *Client) SyncStatus(ctx context.Context, id ID) ([]byte, error) {
 // key directory, and index entry. Run after a confirmed cluster-side destroy.
 func (c *Client) RemoveLocalState(id ID) {
 	sid := string(id)
+	// [V12] Validate the id up front via sessionKeyDir: an empty, ".", or
+	// traversing id must delete NOTHING. A "" would otherwise resolve the per-
+	// session key dir AND the index dir to the state root itself and RemoveAll the
+	// entire tree (every session's keys, the index, the ssh include, worktrees).
+	// A rejected id simply has no per-session state to remove, so bail out.
+	dir, err := c.sessionKeyDir(sid)
+	if err != nil {
+		return
+	}
 	if cfg, err := c.sshConfig(); err == nil {
 		_ = cfg.Remove(sid)
 	}
-	if dir, err := c.sessionKeyDir(sid); err == nil {
-		_ = os.RemoveAll(dir)
-	}
+	_ = os.RemoveAll(dir)
 	_ = c.index.Delete(sid)
 }
 
+// sessionIDRe constrains a session id to the same [a-z0-9-]+ charset
+// internal/sync's validateSessionID enforces before ssh-config interpolation.
+// [V12] It is the first guard in sessionKeyDir: an empty or "." id would resolve
+// filepath.Rel(root, root) to "." — which the traversal check below alone lets
+// through — and RemoveLocalState would then os.RemoveAll the entire state root.
+var sessionIDRe = regexp.MustCompile(`^[a-z0-9-]+$`)
+
 // sessionKeyDir returns the local directory holding a session's SSH key. It
-// validates that the resolved path is still under the state root to prevent
-// path-traversal via a crafted session id.
+// validates the id charset AND that the resolved path is still strictly under
+// the state root, so a crafted (or empty / ".") session id can neither traverse
+// out of the root nor resolve to the root itself.
 func (c *Client) sessionKeyDir(id string) (string, error) {
+	if !sessionIDRe.MatchString(id) {
+		return "", fmt.Errorf("invalid session id %q: must match [a-z0-9-]+", id)
+	}
 	root := c.stateDir
 	dir := filepath.Join(root, id)
 	rootAbs, err := filepath.Abs(root)
@@ -88,7 +112,7 @@ func (c *Client) sessionKeyDir(id string) (string, error) {
 		return "", err
 	}
 	rel, err := filepath.Rel(rootAbs, dirAbs)
-	if err != nil || strings.HasPrefix(rel, "..") || rel == "" {
+	if err != nil || strings.HasPrefix(rel, "..") || rel == "" || rel == "." {
 		return "", fmt.Errorf("session id %q escapes session root: unsafe path %q", id, dirAbs)
 	}
 	return dir, nil
@@ -133,6 +157,17 @@ func (c *Client) ensureSSHKey(id string) (privPath, authorizedKey string, err er
 	return privPath, auth, nil
 }
 
+// SSHConfigPath returns the path of the per-session SSH alias include file for a
+// given state dir: <stateDir>/ssh/config — INSIDE the state dir alongside the
+// session index and worktrees, so a WithStateDir consumer keeps every sandbox
+// artifact under one root. Exported so local-only CLI helpers (which have no
+// connected Client but the same state dir) compute the identical path instead of
+// re-deriving it and drifting ([V13] — the CLI's `sandbox sync --terminate` once
+// pointed at the pre-migration sibling location and silently no-op'd removals).
+func SSHConfigPath(stateDir string) string {
+	return filepath.Join(stateDir, "ssh", "config")
+}
+
 // sshConfig returns the per-session SSH alias manager. The include file lives at
 // <stateDir>/ssh/config — INSIDE the state dir alongside the session index and
 // (future) worktrees, so a WithStateDir consumer keeps every sandbox artifact
@@ -143,7 +178,7 @@ func (c *Client) sshConfig() (*syncpkg.SSHConfig, error) {
 	if err != nil {
 		return nil, err
 	}
-	include := filepath.Join(c.stateDir, "ssh", "config")
+	include := SSHConfigPath(c.stateDir)
 	userCfg := filepath.Join(home, ".ssh", "config")
 	c.migrateSSHDir(include, userCfg)
 	return syncpkg.NewSSHConfig(include, userCfg), nil

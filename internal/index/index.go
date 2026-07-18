@@ -191,6 +191,43 @@ func (i *Index) Save(id string, entry Entry) error {
 		entry = mergeEntry(prev, entry)
 	}
 
+	return writeEntryFile(dir, path, entry)
+}
+
+// Update applies fn to the session's index entry as a locked read-modify-write:
+// it loads the current on-disk entry (or a minimal one seeded with the id when
+// none exists), passes a pointer to fn to mutate in place, and writes the result
+// — all inside the same per-path lock Save uses. [V7] It is for callers that must
+// OVERWRITE a field the zero-defer merge would otherwise preserve from a stale
+// in-memory copy — notably Snapshot / LastEventSeq, which a snapshot writer must
+// be able to advance without a concurrent title/driver Save reintroducing an
+// older value it loaded outside the lock. Save's partial-entry merge is the right
+// tool when a caller only OWNS a subset of fields; Update is the right tool when
+// a caller must set a field to a value that a merge cannot express (e.g. an
+// unconditional overwrite that also depends on the current on-disk value).
+func (i *Index) Update(id string, fn func(*Entry)) error {
+	if err := validateID(i.root, id); err != nil {
+		return err
+	}
+	dir := filepath.Join(i.root, id)
+	path := filepath.Join(dir, "session.json")
+
+	lock := lockForPath(path)
+	lock.Lock()
+	defer lock.Unlock()
+
+	entry, err := i.Load(id)
+	if err != nil {
+		entry = Entry{SandboxSessionID: id, SandboxName: id}
+	}
+	fn(&entry)
+	return writeEntryFile(dir, path, entry)
+}
+
+// writeEntryFile marshals entry and writes it to path via a temp+rename atomic
+// write (C3), creating dir as needed. Callers hold the per-path lock. Shared by
+// Save and Update so both use the identical crash-safe write.
+func writeEntryFile(dir, path string, entry Entry) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("index: mkdir %s: %w", dir, err)
 	}
