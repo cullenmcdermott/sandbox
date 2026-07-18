@@ -273,20 +273,6 @@ type Model struct {
 	// keys until esc/enter resolves it (see worktree.go).
 	convert *convertModal
 
-	// destroyHook, when non-nil, is called after a successful backend.Destroy
-	// to perform irreversible local cleanup (SSH alias removal, key deletion,
-	// index entry removal). Wired by the CLI via WithDestroyHook (C2: TUI destroy
-	// leaked local state).
-	destroyHook func(id session.ID)
-
-	// preDestroyHook, when non-nil, runs BEFORE backend.Destroy. It stops file
-	// sync for the session so we tear the pod down cleanly instead of racing the
-	// mutagen-over-SSH stream into "connection closed"/EOF errors. It is kept
-	// separate from destroyHook because it must run regardless of whether Destroy
-	// then succeeds, and unlike destroyHook it is recoverable (a re-attach
-	// re-establishes sync).
-	preDestroyHook func(id session.ID)
-
 	// titleStore, when non-nil, persists user-chosen session titles across
 	// restarts (T5). Renames write through it; seeded sessions read back from it.
 	// nil in unit tests (renames stay in-memory).
@@ -380,23 +366,6 @@ func (m *Model) WithSyncReaper(r SyncReaper) *Model { m.syncReaper = r; return m
 // WithIdleTimeout sets the reaper idle-timeout used to render the "suspends in"
 // hint. Zero disables the hint.
 func (m *Model) WithIdleTimeout(d time.Duration) *Model { m.idleTimeout = d; return m }
-
-// WithDestroyHook registers a callback that is called after a successful
-// backend.Destroy so the caller can perform local cleanup (sync teardown,
-// SSH alias removal, key deletion). The CLI uses this to match what the
-// `destroy` subcommand does (C2 fix).
-func (m *Model) WithDestroyHook(fn func(id session.ID)) *Model {
-	m.destroyHook = fn
-	return m
-}
-
-// WithPreDestroyHook registers a callback run before backend.Destroy so the
-// caller can stop file sync ahead of pod teardown, avoiding the mutagen-over-SSH
-// stream erroring as the pod disappears.
-func (m *Model) WithPreDestroyHook(fn func(id session.ID)) *Model {
-	m.preDestroyHook = fn
-	return m
-}
 
 // TitleStore persists user-chosen session titles so a rename survives a restart
 // or reattach (T5). The dashboard reads it when seeding the list and writes to it

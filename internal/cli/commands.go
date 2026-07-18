@@ -73,12 +73,12 @@ func newAttachCmd() *cobra.Command {
 			// detaches to it.
 			return afterTUI(func() error {
 				return dashboard.RunAttached(
-					backend,
+					newClientLifecycleBackend(c, backend),
 					newDashboardConnector(c, ""),
 					newDashboardCreator(c, "", ""),
 					dashboard.SessionFromState(st),
 					"",
-					dashboard.RunOptions{DestroyHook: newLocalDestroyHook(c), PreDestroyHook: newPreDestroySyncStop(c), TitleStore: indexTitleStore{}, SnapshotStore: indexSnapshotStore{}, EventCache: newIndexEventCache(), DriverStore: indexDriverStore{}, ObserverConnector: newDashboardObserverConnector(c, ""), SyncProber: dashboardSyncProber(), SyncReaper: dashboardSyncReaper(), IdleTimeout: defaultReaperIdleTimeout, AccountStore: newDashboardAccountStore(), WorktreeOps: newWorktreeOps(c)},
+					dashboard.RunOptions{TitleStore: indexTitleStore{}, SnapshotStore: indexSnapshotStore{}, EventCache: newIndexEventCache(), DriverStore: indexDriverStore{}, ObserverConnector: newDashboardObserverConnector(c, ""), SyncProber: dashboardSyncProber(), SyncReaper: dashboardSyncReaper(), IdleTimeout: defaultReaperIdleTimeout, AccountStore: newDashboardAccountStore(), WorktreeOps: newWorktreeOps(c)},
 				)
 			})
 		},

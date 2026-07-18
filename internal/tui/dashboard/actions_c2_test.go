@@ -7,14 +7,14 @@ import (
 	"github.com/cullenmcdermott/sandbox/internal/session"
 )
 
-// Regression for C2: TUI destroy must run the local-cleanup hook after a
-// successful backend.Destroy (the prior test only checked the confirm gate +
-// that Destroy dispatched, never that the hook fired — so the leak fix was
-// unexercised).
-func TestDestroyHookFiresOnSuccess(t *testing.T) {
+// destroyCmd dispatches Backend.Destroy for the acted-upon session and surfaces
+// the outcome as an actionResultMsg. The sync-teardown ordering and irreversible
+// local cleanup that a destroy entails now live behind Backend.Destroy (the
+// client SDK adapter, §1g), so the dashboard's contract is simply "dispatch the
+// destroy and report what happened".
+func TestDestroyDispatchesToBackend(t *testing.T) {
 	fb := &fakeBackend{}
-	var got session.ID
-	m := New(fb).WithDestroyHook(func(id session.ID) { got = id })
+	m := New(fb)
 
 	cmd := m.destroyCmd(session.Ref{ID: "doomed"})
 	if cmd == nil {
@@ -28,22 +28,18 @@ func TestDestroyHookFiresOnSuccess(t *testing.T) {
 	if res.err != nil {
 		t.Fatalf("destroy errored: %v", res.err)
 	}
-	if got != "doomed" {
-		t.Fatalf("destroy hook not called with the session id; got %q", got)
+	if len(fb.destroyed) != 1 || fb.destroyed[0] != "doomed" {
+		t.Fatalf("Destroy not dispatched once for doomed: %v", fb.destroyed)
 	}
 }
 
-// The hook must NOT fire when backend.Destroy fails — local state stays until the
-// cluster resource is actually gone.
-func TestDestroyHookSkippedOnError(t *testing.T) {
+// A backend Destroy failure propagates through the actionResultMsg so the detail
+// pane can surface it.
+func TestDestroyReportsBackendError(t *testing.T) {
 	fb := &fakeBackend{actionErr: errors.New("destroy failed")}
-	called := false
-	m := New(fb).WithDestroyHook(func(session.ID) { called = true })
+	m := New(fb)
 
 	if msg := m.destroyCmd(session.Ref{ID: "x"})(); msg.(actionResultMsg).err == nil {
-		t.Fatal("expected a destroy error")
-	}
-	if called {
-		t.Fatal("destroy hook must not fire when backend.Destroy errors")
+		t.Fatal("expected a destroy error to propagate")
 	}
 }

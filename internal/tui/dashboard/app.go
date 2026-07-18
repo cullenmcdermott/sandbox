@@ -13,7 +13,6 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/cullenmcdermott/sandbox/internal/k8s"
 	"github.com/cullenmcdermott/sandbox/internal/session"
 	"github.com/cullenmcdermott/sandbox/tui/kit"
 	"github.com/cullenmcdermott/sandbox/tui/terminal"
@@ -261,9 +260,9 @@ type App struct {
 	leaderGen int
 }
 
-// NewApp constructs the root App with a dashboard backed by the given k8s
-// Backend. connector may be nil (attach will be a no-op / for unit tests).
-func NewApp(backend *k8s.Backend, connector Connector, creator Creator) *App {
+// NewApp constructs the root App with a dashboard backed by the given Backend.
+// connector may be nil (attach will be a no-op / for unit tests).
+func NewApp(backend Backend, connector Connector, creator Creator) *App {
 	dash := New(backend)
 	if connector != nil {
 		dash.WithConnector(connector)
@@ -279,16 +278,6 @@ func NewApp(backend *k8s.Backend, connector Connector, creator Creator) *App {
 
 // RunOptions configures optional behavior for Run/RunAttached.
 type RunOptions struct {
-	// DestroyHook is called after a successful session destroy so the caller
-	// can perform irreversible local cleanup (SSH alias removal, key deletion,
-	// index removal). Corresponds to C2 fix.
-	DestroyHook func(id session.ID)
-
-	// PreDestroyHook is called before backend.Destroy so the caller can stop
-	// file sync ahead of pod teardown, avoiding mutagen-over-SSH EOF errors as
-	// the pod disappears.
-	PreDestroyHook func(id session.ID)
-
 	// TitleStore persists user-chosen session titles across restarts (T5).
 	TitleStore TitleStore
 
@@ -349,12 +338,6 @@ func (a *App) applyOpts(opts []RunOptions) {
 	if len(opts) == 0 {
 		return
 	}
-	if opts[0].DestroyHook != nil {
-		a.dashboard = a.dashboard.WithDestroyHook(opts[0].DestroyHook)
-	}
-	if opts[0].PreDestroyHook != nil {
-		a.dashboard = a.dashboard.WithPreDestroyHook(opts[0].PreDestroyHook)
-	}
 	if opts[0].TitleStore != nil {
 		a.dashboard = a.dashboard.WithTitleStore(opts[0].TitleStore)
 	}
@@ -392,7 +375,7 @@ func (a *App) applyOpts(opts []RunOptions) {
 
 // Run starts the Bubble Tea program with the root App model and returns when
 // the user quits. connector provides live runner connections for attach.
-func Run(backend *k8s.Backend, connector Connector, creator Creator, opts ...RunOptions) error {
+func Run(backend Backend, connector Connector, creator Creator, opts ...RunOptions) error {
 	app := NewApp(backend, connector, creator)
 	app.applyOpts(opts)
 	p := tea.NewProgram(app)
@@ -405,7 +388,7 @@ func Run(backend *k8s.Backend, connector Connector, creator Creator, opts ...Run
 // dashboard list still loads underneath, so pressing esc detaches to the full
 // session list rather than quitting. initialPrompt, if non-empty, is submitted
 // as the first turn once the transcript is live.
-func RunAttached(backend *k8s.Backend, connector Connector, creator Creator, sess Session, initialPrompt string, opts ...RunOptions) error {
+func RunAttached(backend Backend, connector Connector, creator Creator, sess Session, initialPrompt string, opts ...RunOptions) error {
 	app := NewApp(backend, connector, creator)
 	app.applyOpts(opts)
 	app.autoAttach = &sess

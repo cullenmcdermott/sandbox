@@ -531,27 +531,3 @@ func (c *indexEventCache) writer(id session.ID) (*index.CacheWriter, error) {
 	c.writers[id] = w
 	return w, nil
 }
-
-// newPreDestroySyncStop returns a callback that stops file sync for a session.
-// The TUI runs it BEFORE the cluster-side destroy so the mutagen-over-SSH stream
-// is torn down cleanly rather than racing the pod's disappearance into
-// "connection closed"/EOF errors. It is recoverable — a re-attach re-creates the
-// sync sessions — so unlike the local destroy hook it runs regardless of whether
-// the destroy then succeeds.
-func newPreDestroySyncStop(c *client.Client) func(id session.ID) {
-	return func(id session.ID) {
-		c.StopSync(context.Background(), id)
-	}
-}
-
-// newLocalDestroyHook returns a callback that performs the irreversible local
-// cleanup the CLI `destroy` command does: remove the SSH alias, delete the
-// per-session key directory, and drop the local index entry so the session
-// doesn't linger in `status --all`. Sync teardown is NOT here — it runs earlier
-// via newPreDestroySyncStop. The TUI invokes this only after the cluster-side
-// destroy is confirmed.
-func newLocalDestroyHook(c *client.Client) func(id session.ID) {
-	return func(id session.ID) {
-		c.RemoveLocalState(id)
-	}
-}

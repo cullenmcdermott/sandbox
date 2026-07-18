@@ -68,15 +68,13 @@ func NewRoot() *cobra.Command {
 			// destroyed/reaped/dev-reset pods now rather than waiting for the first
 			// in-TUI reconcile. Backgrounded so it never delays the dashboard.
 			startupSyncGC()
-			// The connectors/creator/hooks bridge the public client package into
-			// the dashboard.Connector/Creator types, so the dashboard imports
-			// neither cli nor client.
+			// The connectors/creator and the lifecycle-backend adapter bridge the
+			// public client package into the dashboard's interfaces, so the dashboard
+			// imports neither cli nor client.
 			connector := newDashboardConnector(c, "")
 			creator := newDashboardCreator(c, "", "")
 			return afterTUI(func() error {
-				return dashboard.Run(backend, connector, creator, dashboard.RunOptions{
-					DestroyHook:       newLocalDestroyHook(c),
-					PreDestroyHook:    newPreDestroySyncStop(c),
+				return dashboard.Run(newClientLifecycleBackend(c, backend), connector, creator, dashboard.RunOptions{
 					TitleStore:        indexTitleStore{},
 					SnapshotStore:     indexSnapshotStore{},
 					EventCache:        newIndexEventCache(),
@@ -146,10 +144,11 @@ func newBackend() (*k8s.Backend, error) {
 }
 
 // newClientAndBackend builds a client plus the *k8s.Backend it wraps, sharing the
-// single backend instance. The dashboard commands need the concrete *k8s.Backend
-// for dashboard.Run/RunAttached (the dashboard takes the concrete type); the
-// client drives everything else. Keeping the public client façade free of a raw
-// Backend() accessor is why the CLI builds and shares the backend explicitly.
+// single backend instance. The dashboard commands wrap both in a
+// clientLifecycleBackend (the backend seeds/watches the read-model; the client
+// drives suspend/resume/destroy); the client drives everything else. Keeping the
+// public client façade free of a raw Backend() accessor is why the CLI builds and
+// shares the backend explicitly.
 func newClientAndBackend(opts ...client.Option) (*client.Client, *k8s.Backend, error) {
 	b, err := newBackend()
 	if err != nil {

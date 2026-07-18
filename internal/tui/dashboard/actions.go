@@ -90,31 +90,21 @@ func (m *Model) resumeCmd(ref session.Ref) tea.Cmd {
 }
 
 // destroyCmd deletes the session's Sandbox and PVC. Irreversible; gated behind
-// a confirm dialog at the call site. On success the destroyHook is called for
-// local cleanup (C2: sync teardown, SSH alias removal, key deletion).
+// a confirm dialog at the call site. Destroy routes through the client SDK
+// adapter (internal/cli), which stops file sync BEFORE the cluster delete — so
+// the mutagen-over-SSH stream is torn down while the pod is still up rather than
+// racing its disappearance into "connection closed"/EOF errors — then captures
+// the per-session worktree's WIP and removes local state. The dashboard only
+// observes the outcome; the ordering guarantees live behind Backend.Destroy.
 func (m *Model) destroyCmd(ref session.Ref) tea.Cmd {
 	backend := m.backend
 	if backend == nil {
 		return nil
 	}
-	hook := m.destroyHook
-	preHook := m.preDestroyHook
 	return func() tea.Msg {
-		// Stop file sync before tearing the pod down so the mutagen-over-SSH
-		// stream doesn't race the pod's disappearance into "connection
-		// closed"/EOF errors. Runs regardless of Destroy's outcome — it's
-		// recoverable (a re-attach re-establishes sync).
-		if preHook != nil {
-			preHook(ref.ID)
-		}
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 		err := backend.Destroy(ctx, ref)
-		if err == nil && hook != nil {
-			// Best-effort irreversible local cleanup (C2): run outside the context
-			// (which may have been cancelled by the 60s timeout in a slow cluster).
-			hook(ref.ID)
-		}
 		return actionResultMsg{action: "destroy", id: ref.ID, err: err}
 	}
 }
