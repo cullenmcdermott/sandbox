@@ -17,6 +17,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { orphanedTurnBootEvents } from '../src/session.js';
+import { appendEvent, __setEventLogForTest } from '../src/events.js';
+import type { EventType } from '../src/types.js';
 import type { SessionState } from '../src/types.js';
 import { Database, sqliteSkip as skip } from './sqlite-probe.js';
 
@@ -58,6 +60,46 @@ test('error boot appends nothing extra (a failure must not be masked)', () => {
 
 test('missing/undefined status appends nothing extra', () => {
   assert.deepEqual(orphanedTurnBootEvents(undefined, state({ last_turn_id: 'turn-3' })), []);
+});
+
+// [V18 follow-up] A busy-status boot whose log ALREADY carries a terminal for
+// the orphaned turn (the SIGTERM shutdown appended turn.interrupted, then the
+// abort hung past the grace window so 'busy' was never flipped back) must NOT
+// append a second terminal — only the status flip. Uses the real events.ts log
+// via __setEventLogForTest so hasTurnTerminal sees the rows.
+test('busy boot with a shutdown-appended terminal skips the duplicate interrupt', { skip }, () => {
+  const Db = Database!;
+  const dir = mkdtempSync(join(tmpdir(), 'boot-dup-terminal-'));
+  const db = new Db(join(dir, 'events.db'));
+  try {
+    db.pragma('journal_mode = WAL');
+    db.exec(CREATE_SQL);
+    __setEventLogForTest(db);
+
+    const T = (t: string): EventType => t as EventType;
+    appendEvent('sess-A', 'turn-3', T('turn.started'), { prompt: 'hi' });
+    // The V18 shutdown path already terminalized the turn before the kill.
+    appendEvent('sess-A', 'turn-3', T('turn.interrupted'), { reason: 'pod terminating (SIGTERM)' });
+
+    const events = orphanedTurnBootEvents('busy', state({ last_turn_id: 'turn-3' }));
+    assert.deepEqual(events, [{ type: 'session.status_changed', payload: { status: 'idle' } }]);
+
+    // A turn with NO terminal in the same open log still gets the interrupt.
+    appendEvent('sess-A', 'turn-4', T('turn.started'), { prompt: 'again' });
+    const events2 = orphanedTurnBootEvents('busy', state({ last_turn_id: 'turn-4' }));
+    assert.deepEqual(events2, [
+      { turnId: 'turn-4', type: 'turn.interrupted', payload: { reason: 'runner restart' } },
+      { type: 'session.status_changed', payload: { status: 'idle' } },
+    ]);
+  } finally {
+    __setEventLogForTest(null);
+    try {
+      db.close();
+    } catch {
+      /* may already be closed */
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // The exact schema + statements src/events.ts uses (mirrors events.test.ts).

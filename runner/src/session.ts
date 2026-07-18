@@ -10,7 +10,7 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync } from '
 import { dirname } from 'node:path';
 import type { AutopilotSpec, EventType, IdleStatus, SessionState, StatusResponse } from './types.js';
 import { PROTOCOL_VERSION, SESSION_JSON_PATH } from './types.js';
-import { appendEvent, sseClientCount, setClientsChangedHandler } from './events.js';
+import { appendEvent, sseClientCount, setClientsChangedHandler, maxTurnNumber, hasTurnTerminal } from './events.js';
 
 let externalActivityProbe: (() => boolean) | null = null;
 
@@ -133,7 +133,13 @@ export function orphanedTurnBootEvents(
   if (persistedStatus !== 'busy') return [];
   const events: BootEvent[] = [];
   const turnId = state.last_turn_id;
-  if (turnId) {
+  // [V18 follow-up] A persisted 'busy' does not always mean the log lacks a
+  // terminal: the SIGTERM shutdown path appends turn.interrupted for active
+  // turns, but if the abort then hangs past the grace window the status is
+  // never flipped back to idle before the kill. Emitting here again would
+  // double-terminal the turn on replay — skip the interrupt (but still flip
+  // the status) when the log already carries a terminal for this turn.
+  if (turnId && !hasTurnTerminal(state.sandbox_session_id, turnId)) {
     events.push({ turnId, type: 'turn.interrupted', payload: { reason: 'runner restart' } });
   }
   events.push({ type: 'session.status_changed', payload: { status: 'idle' } });
@@ -235,6 +241,13 @@ export function loadSessionState(cfg: RunnerConfig, path: string = SESSION_JSON_
   }
   // Absent or corrupt (moved aside): seed a fresh empty session; no boot events.
   const state = emptyState(cfg);
+  // [V41] session.json is gone/corrupt but events.db persists across the reseed.
+  // Continue the turn counter past the log's highest turn-N so new turns don't
+  // reuse ids already carried by rows in the log (duplicate turn_ids break
+  // audit/trace/readTurnOutcome correlation). No-op (maxN 0) on a genuinely
+  // fresh pod or when no event log is open.
+  const maxN = maxTurnNumber(state.sandbox_session_id);
+  if (maxN > 0) state.last_turn_id = `turn-${maxN}`;
   saveSessionStateTo(state, path);
   return { state, bootEvents: [] };
 }

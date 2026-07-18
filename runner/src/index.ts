@@ -9,6 +9,7 @@ import { openEventLog, appendEvent, closeEventLog } from './events.js';
 import { loadConfig, loadSessionState, initRegistry, getRegistry, backendHasAutopilot } from './session.js';
 import { startServer } from './server.js';
 import { selectAgent } from './agent.js';
+import { shutdownInterruptedEvents } from './turns.js';
 import { createAutopilot, type Autopilot } from './autopilot.js';
 import { resolveWorkspaceDir } from './exec.js';
 import { startOpencodeSupervisor, type OpencodeSupervisor } from './opencode.js';
@@ -63,9 +64,18 @@ function shutdown(signal: string): void {
   let turnsAborted = 0;
   try {
     const reg = getRegistry();
+    const activeTurnIds = [...reg.activeTurns.keys()];
     for (const turn of reg.activeTurns.values()) {
       turn.abort.abort();
       turnsAborted++;
+    }
+    // [V18] Append turn.interrupted for each aborted turn BEFORE
+    // session.terminating. This shutdown is the interrupt initiator, and both
+    // agents' runTurn emit nothing terminal on abort (R3), so without this a
+    // mid-turn graceful suspend leaves the turn with no terminal event and
+    // replay-after-resume spins its tool cards forever. See shutdownInterruptedEvents.
+    for (const ev of shutdownInterruptedEvents(activeTurnIds, signal)) {
+      appendEvent(reg.state.sandbox_session_id, ev.turnId, 'turn.interrupted', ev.payload);
     }
     appendEvent(reg.state.sandbox_session_id, undefined, 'session.terminating', {
       reason: `pod terminating (${signal})`,
@@ -103,7 +113,7 @@ function main(): void {
   // up. On resume this is a fresh event after the persisted history; replay via
   // after=0 still yields the full original sequence.
   //
-  // This must conform to SessionStartedPayload (model, cwd, [claudeSessionId]) —
+  // This must conform to SessionStartedPayload (model, cwd, [agentSessionId]) —
   // the same shape the SDK init path emits — so the Go TUI's status line reads a
   // consistent payload (transcript.go reads Model + Cwd). The off-schema
   // backend/projectPath/status fields the reboot emit used to carry are dropped:

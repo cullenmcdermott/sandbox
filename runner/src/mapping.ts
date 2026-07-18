@@ -208,7 +208,13 @@ export function mapMessage(msg: SDKMessage, emit: EmitFn, streamTools?: StreamTo
           cwd: msg.cwd,
           tools: msg.tools,
           permissionMode: msg.permissionMode,
-          claudeSessionId: msg.session_id,
+          // [V4] The wire key is agentSessionId (schema/events.json,
+          // SessionStartedPayload). The pre-v2 name `claudeSessionId` here left
+          // the Go consumer's AgentSessionID empty on every live session.started,
+          // silently disabling laptop resume until a pod restart re-emitted the
+          // boot session.started (index.ts) with the correct key. MapResult keeps
+          // its own internal claudeSessionId observation name below.
+          agentSessionId: msg.session_id,
         });
         return { model: msg.model, claudeSessionId: msg.session_id, isInit: true };
       }
@@ -229,7 +235,15 @@ export function mapMessage(msg: SDKMessage, emit: EmitFn, streamTools?: StreamTo
     }
     case 'assistant': {
       handleAssistantMessage(msg, emit, streamTools);
-      emitUsage(msg.message.usage, emit);
+      // [V16] Only the MAIN thread's assistant usage drives the ctx% gauge.
+      // A parented (subagent) assistant message reflects the subagent's own
+      // small context; UsagePayload carries no parent attribution, so emitting
+      // it as an ordinary usage.updated would clobber the main thread's gauge
+      // mid Task fan-out. Subagent tokens still reach the budget/totals via the
+      // terminal result row (emitResultUsage), which is the SDK's turn total.
+      const parentToolUseId =
+        (msg as { parent_tool_use_id?: string | null }).parent_tool_use_id ?? undefined;
+      if (parentToolUseId === undefined) emitUsage(msg.message.usage, emit);
       return {};
     }
     case 'user': {
@@ -604,7 +618,10 @@ function handleStreamEvent(
             // D8: ToolPayload.tool is schema-required; recover it from the id.
             tool: toolNameFor(streamTools, toolUseId),
             partialJson: delta.partial_json,
-            delta: true,
+            // [V38] No `delta: true` here — `delta` is a MessagePayload field
+            // (message.delta/reasoning.delta), NOT a ToolPayload field. The
+            // event type already identifies this as a delta; the stray key was
+            // undeclared wire surface the schema/gen gate can't catch.
             toolUseId,
             parentToolUseId,
           });

@@ -42,6 +42,30 @@ export function turnRejectReason(
   return null;
 }
 
+/**
+ * [V18] The turn.interrupted events a graceful shutdown (SIGTERM) must append —
+ * one per active turn — BEFORE session.terminating. Both agents' runTurn
+ * deliberately emit nothing terminal on abort (R3: the interrupt INITIATOR owns
+ * turn.interrupted). The /interrupt route is one initiator; a SIGTERM-driven
+ * shutdown is the other. Without this, a mid-turn suspend that aborts cleanly
+ * within the grace window leaves the log ending with turn.started + deltas and
+ * NO turn terminal, so replay after resume shows tool cards spinning forever.
+ *
+ * Pure + exported so the ordering/payload contract is unit-testable (index.ts's
+ * shutdown() isn't importable — it runs main() at module load). Each descriptor
+ * carries the turnId for the event envelope and the payload shape server.ts:405
+ * emits, with a SIGTERM-specific reason.
+ */
+export function shutdownInterruptedEvents(
+  activeTurnIds: string[],
+  signal: string,
+): Array<{ turnId: string; payload: { reason: string } }> {
+  return activeTurnIds.map((turnId) => ({
+    turnId,
+    payload: { reason: `pod terminating (${signal})` },
+  }));
+}
+
 /** Per-turn overrides carried on a start. Mirrors the TurnRequestBody fields the
  * agent's runTurn accepts (resume + mode/model/effort + allowedTools). */
 export interface StartTurnOptions {
@@ -88,26 +112,43 @@ export function startTurn(
   if (rejectReason) return { rejected: rejectReason };
   const turnId = reg.nextTurnId();
   reg.setLastTurn(turnId);
-  const turn = reg.registerTurn(turnId, prompt);
-  // Fire and forget: the turn runs in the background, streaming events to SSE
-  // clients. Callers get the turnId immediately.
-  agent
-    .runTurn(cfg, turnId, prompt, opts.resume, opts.allowedTools, opts.mode, opts.model, opts.effort, turn.abort)
-    .catch((err) => {
-      const message = err instanceof Error ? err.message : String(err);
-      appendEvent(cfg.sessionId, turnId, 'error', { message });
+  try {
+    const turn = reg.registerTurn(turnId, prompt);
+    // Fire and forget: the turn runs in the background, streaming events to SSE
+    // clients. Callers get the turnId immediately.
+    agent
+      .runTurn(cfg, turnId, prompt, opts.resume, opts.allowedTools, opts.mode, opts.model, opts.effort, turn.abort)
+      .catch((err) => {
+        const message = err instanceof Error ? err.message : String(err);
+        appendEvent(cfg.sessionId, turnId, 'error', { message });
+        reg.finishTurn(turnId);
+      })
+      .finally(() => {
+        // The turn has fully settled (runTurn's finally already ran finishTurn).
+        // Notify the autopilot driver so it can increment iterations / scan the
+        // sentinel / schedule the next tick (or retry). Best-effort: a throwing
+        // handler must not become an unhandled rejection.
+        try {
+          turnSettledHandler?.(turnId);
+        } catch (err) {
+          console.error('turnSettledHandler threw (non-fatal):', err);
+        }
+      });
+  } catch (err) {
+    // [V42] registerTurn does activeTurns.set THEN setStatus('busy'), which
+    // persists session.json — an unguarded write that can throw (ENOSPC/EROFS
+    // on the PVC) AFTER the slot is reserved but BEFORE runTurn fires. Nothing
+    // else deregisters that entry, so the single turn slot wedges: every later
+    // POST /turns 409s and the idle reaper can't suspend the pod until restart.
+    // Free the slot and re-throw so the route replies 500 with the slot open.
+    // A secondary persistence throw from finishTurn is swallowed — the
+    // activeTurns.delete inside it already ran, so the slot is freed regardless.
+    try {
       reg.finishTurn(turnId);
-    })
-    .finally(() => {
-      // The turn has fully settled (runTurn's finally already ran finishTurn).
-      // Notify the autopilot driver so it can increment iterations / scan the
-      // sentinel / schedule the next tick (or retry). Best-effort: a throwing
-      // handler must not become an unhandled rejection.
-      try {
-        turnSettledHandler?.(turnId);
-      } catch (err) {
-        console.error('turnSettledHandler threw (non-fatal):', err);
-      }
-    });
+    } catch {
+      /* best-effort slot release; the map entry was already deleted */
+    }
+    throw err;
+  }
   return { turnId };
 }

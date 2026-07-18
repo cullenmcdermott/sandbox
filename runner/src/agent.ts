@@ -19,9 +19,17 @@ export interface Agent {
   // runTurn runs a single user-prompted turn to completion: it streams the
   // backend's output as normalized events (via appendEvent), drives the
   // permission flow through the session registry, and calls finishTurn when
-  // done. It must honor `abort` (client interrupt) and never throw for an
-  // aborted turn — emit `turn.interrupted` instead. Resolves when the turn
-  // fully settles; the caller has already registered the turn.
+  // done. Resolves when the turn fully settles; the caller has already
+  // registered the turn.
+  //
+  // [V40] Abort ownership: runTurn must honor `abort` and never throw for an
+  // aborted turn, and it must NOT emit any terminal (turn.interrupted/completed/
+  // failed) for an aborted turn — it settles SILENTLY. The interrupt INITIATOR
+  // owns the terminal: the server.ts /interrupt route emits turn.interrupted,
+  // and the SIGTERM shutdown path does so too (index.ts, via
+  // shutdownInterruptedEvents). Both shipping agents follow this (claude.ts R3,
+  // opencode-turn.ts). A backend that emits turn.interrupted itself on abort
+  // would double-emit the terminal on every route-driven interrupt.
   //
   // `mode` is the tool-approval policy (Go: TurnInput.ApprovalPolicy — 'default'
   // | 'acceptEdits' | 'plan' | 'bypassPermissions'). It is mapped PER-BACKEND: the

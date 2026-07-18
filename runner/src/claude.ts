@@ -56,7 +56,12 @@ const DEFAULT_ALLOWED_TOOLS = [
   'Bash',
   'WebFetch',
   'WebSearch',
-  'AskUserQuestion',
+  // [V15] 'AskUserQuestion' intentionally omitted: no question-answer flow
+  // exists in ANY permission mode. In bypass (yolo) mode canUseTool is not
+  // wired at all, so the SDK can't deliver the question; in prompting modes it
+  // degrades to a generic allow/deny that returns no answers. Re-add once the
+  // permission payload carries a question kind and returns selections via
+  // canUseTool updatedInput.
 ];
 
 const DEFAULT_DISALLOWED_TOOLS = [

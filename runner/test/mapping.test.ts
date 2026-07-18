@@ -45,8 +45,11 @@ test('system/init → session.started + init observation', () => {
     cwd: '/session/workspace/proj',
     tools: ['Read', 'Bash'],
     permissionMode: 'acceptEdits',
-    claudeSessionId: 'claude-abc',
+    // [V4] the wire key is agentSessionId (schema SessionStartedPayload); the
+    // pre-v2 claudeSessionId key here was the resume-history drift this pins.
+    agentSessionId: 'claude-abc',
   });
+  // MapResult keeps its own internal claudeSessionId observation name.
   assert.deepEqual(res, { model: 'opus-4.8', claudeSessionId: 'claude-abc', isInit: true });
 });
 
@@ -531,6 +534,47 @@ test('parented assistant message → message.* / reasoning.* carry parentToolUse
     assert.equal(payload(t).parentToolUseId, 'task_9', `${t} must carry the Task id`);
   }
   assert.equal(payload('message.completed').content, 'sub reply');
+});
+
+// ORACLE (V16): a parented (subagent) assistant message must NOT emit
+// usage.updated — its usage reflects the subagent's small context and would
+// clobber the main thread's ctx% gauge mid Task fan-out. An unparented
+// (main-thread) assistant message still emits usage.updated as before.
+test('parented assistant message emits NO usage.updated; unparented still does', () => {
+  const parented = collector();
+  mapMessage(
+    asMsg({
+      type: 'assistant',
+      parent_tool_use_id: 'task_9',
+      message: {
+        content: [{ type: 'text', text: 'sub reply' }],
+        usage: { input_tokens: 10, output_tokens: 5 },
+      },
+    }),
+    parented.emit,
+  );
+  assert.equal(
+    parented.events.some((e) => e.type === 'usage.updated'),
+    false,
+    'subagent usage must not reach the ctx% gauge',
+  );
+
+  const main = collector();
+  mapMessage(
+    asMsg({
+      type: 'assistant',
+      message: {
+        content: [{ type: 'text', text: 'main reply' }],
+        usage: { input_tokens: 100, output_tokens: 20 },
+      },
+    }),
+    main.emit,
+  );
+  assert.equal(
+    main.events.filter((e) => e.type === 'usage.updated').length,
+    1,
+    'main-thread usage still emits exactly one usage.updated',
+  );
 });
 
 test('parented stream text/thinking deltas carry parentToolUseId; main-thread ones do not', () => {

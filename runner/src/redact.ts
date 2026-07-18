@@ -9,7 +9,21 @@
 // original in hand.
 
 // Field names whose value is a secret regardless of content.
-const SECRET_KEY_RE = /(^|[_-])(key|token|secret|password|passwd|credentials?|authorization|api[_-]?key)$/i;
+//
+// Two boundaries are recognized so structured secrets don't slip through:
+//  - snake_case / kebab-case / bare (case-insensitive): key, token, api_key,
+//    my-secret, authorization — the secret word at start or after a '_' / '-'.
+//  - [V17] camelCase (case-SENSITIVE): a lowercase letter or digit immediately
+//    followed by a Capitalized secret word at end — authToken, accessToken,
+//    clientSecret, sessionToken, myApiKey. Case-sensitivity is deliberate: it
+//    matches the Capital-initial camelCase hump while a fully-lowercase run
+//    ('stoken', 'broken', 'monotonic') is NOT a false positive.
+const SECRET_KEY_SNAKE_RE = /(^|[_-])(key|token|secret|password|passwd|credentials?|authorization|api[_-]?key)$/i;
+const SECRET_KEY_CAMEL_RE = /[a-z0-9](Key|Token|Secret|Password|Passwd|Credentials?|Authorization|ApiKey)$/;
+
+function isSecretKey(k: string): boolean {
+  return SECRET_KEY_SNAKE_RE.test(k) || SECRET_KEY_CAMEL_RE.test(k);
+}
 
 // The runner's own secret env values, masked if they appear verbatim in a logged
 // string (e.g. an `echo $RUNNER_TOKEN`-expanded command).
@@ -39,7 +53,7 @@ export function redactSecrets(value: unknown): unknown {
   if (value && typeof value === 'object') {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      out[k] = SECRET_KEY_RE.test(k) ? '[redacted]' : redactSecrets(v);
+      out[k] = isSecretKey(k) ? '[redacted]' : redactSecrets(v);
     }
     return out;
   }

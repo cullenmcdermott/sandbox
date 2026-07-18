@@ -47,3 +47,28 @@ test('redactSecrets masks secret-named fields and known tokens (M13)', () => {
   assert.equal(r.nested.password, '[redacted]');
   assert.equal(r.nested.safe, 'keep-me');
 });
+
+// [V17] camelCase secret keys must be masked too — a structured tool input like
+// {authToken: "ghp_..."} previously slipped past the snake/kebab-only key rule
+// and reached the event log + SSE verbatim.
+test('redactSecrets masks camelCase secret keys (V17)', () => {
+  const r = redactSecrets({
+    authToken: 'ghp_abcdefghijklmnop',
+    accessToken: 'ya29.secretvalue',
+    clientSecret: 'cs_supersecret',
+    sessionToken: 'AKIAIOSFODNN7EXAMPLE',
+    myApiKey: 'key-abc123',
+    // False-positive guards: fully-lowercase runs are NOT secret-keyed.
+    stoken: 'not-a-secret',
+    broken: 'still-fine',
+    monotonic: 'clock',
+  }) as Record<string, string>;
+  assert.equal(r.authToken, '[redacted]', 'authToken masked');
+  assert.equal(r.accessToken, '[redacted]', 'accessToken masked');
+  assert.equal(r.clientSecret, '[redacted]', 'clientSecret masked');
+  assert.equal(r.sessionToken, '[redacted]', 'sessionToken masked');
+  assert.equal(r.myApiKey, '[redacted]', 'myApiKey masked');
+  assert.equal(r.stoken, 'not-a-secret', 'lowercase "stoken" is not a false positive');
+  assert.equal(r.broken, 'still-fine', 'lowercase "broken" is not a false positive');
+  assert.equal(r.monotonic, 'clock', 'lowercase "monotonic" is not a false positive');
+});

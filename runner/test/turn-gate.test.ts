@@ -5,6 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { turnRejectReason } from '../src/server.js';
+import { shutdownInterruptedEvents } from '../src/turns.js';
 
 test('R4: a registered active turn is rejected for any backend', () => {
   assert.match(
@@ -38,4 +39,21 @@ test('B2: opencode-server busy (no registered turn) is rejected', () => {
 // spuriously block it on status alone.
 test('claude-sdk status:busy with no active turn is NOT blocked by the opencode gate', () => {
   assert.equal(turnRejectReason('claude-sdk', 0, 'busy'), null);
+});
+
+// [V18] A SIGTERM shutdown must append one turn.interrupted per active turn (so
+// a mid-turn graceful suspend leaves a terminal in the log instead of spinning
+// forever on replay). The initiator owns the terminal — the agents emit nothing
+// on abort (R3) — so this list is what index.ts's shutdown() appends BEFORE
+// session.terminating.
+test('V18: shutdownInterruptedEvents yields one turn.interrupted per active turn', () => {
+  const evs = shutdownInterruptedEvents(['turn-3', 'turn-4'], 'SIGTERM');
+  assert.deepEqual(evs, [
+    { turnId: 'turn-3', payload: { reason: 'pod terminating (SIGTERM)' } },
+    { turnId: 'turn-4', payload: { reason: 'pod terminating (SIGTERM)' } },
+  ]);
+});
+
+test('V18: no active turns → no interrupted events', () => {
+  assert.deepEqual(shutdownInterruptedEvents([], 'SIGTERM'), []);
 });

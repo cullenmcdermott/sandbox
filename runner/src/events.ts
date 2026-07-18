@@ -469,15 +469,29 @@ export function readTurnOutcome(
   return { status: 'interrupted', resultText: '' };
 }
 
-/** Sum input+output tokens across every usage.updated event for a session. Backs
- * the autopilot token_budget guard (a hard token ceiling). Log-derived so it is
+/** Sum input+output tokens across a session's usage.updated events. Backs the
+ * autopilot token_budget guard (a hard token ceiling). Log-derived so it is
  * correct across a runner restart; called once per turn completion (low
- * frequency), so the full-scan cost is acceptable. */
+ * frequency), so the scan cost is acceptable.
+ *
+ * [V39] Count ONLY the terminal (result) usage row of each turn, not the
+ * per-assistant-message rows. Every turn emits one usage.updated per assistant
+ * message (mapping.ts emitUsage) AND a final aggregate row (emitResultUsage) —
+ * the SDK's cumulative turn total. Summing all of them double-counts (roughly
+ * 2×), tripping the budget at ~half its intended ceiling. The result row is the
+ * LAST usage.updated within a turn (emitted at the terminal 'result' message,
+ * after every per-message row), so the max-seq usage.updated per turn_id is
+ * exactly that aggregate. (totalCostUsd presence can't discriminate here — the
+ * per-message rows also carry the schema-required totalCostUsd, stamped 0.) */
 export function sumTokens(sessionId: string): number {
   const d = getDb();
   const rows = prepared(
     d,
-    "SELECT payload FROM events WHERE session_id = ? AND type = 'usage.updated'",
+    "SELECT payload FROM events WHERE seq IN (" +
+      "  SELECT MAX(seq) FROM events" +
+      "  WHERE session_id = ? AND type = 'usage.updated'" +
+      '  GROUP BY turn_id' +
+      ')',
   ).all(sessionId) as { payload: string }[];
   let total = 0;
   for (const r of rows) {
@@ -485,6 +499,48 @@ export function sumTokens(sessionId: string): number {
     total += (p.inputTokens ?? 0) + (p.outputTokens ?? 0);
   }
   return total;
+}
+
+/** True when the event log already carries a terminal event (turn.completed/
+ * failed/interrupted) for this turn. Backs the D2 boot recovery's double-emit
+ * guard ([V18] follow-up): a SIGTERM shutdown appends turn.interrupted itself,
+ * but if the abort then hangs past the grace window the persisted status stays
+ * 'busy' — a busy-status boot must not append a second terminal. Like
+ * maxTurnNumber below, never opens the DB (false when closed) so off-pod
+ * callers/tests without an event log don't fault. */
+export function hasTurnTerminal(sessionId: string, turnId: string): boolean {
+  if (!db) return false;
+  const row = prepared(
+    db,
+    'SELECT 1 AS one FROM events WHERE session_id = ? AND turn_id = ? AND ' +
+      "type IN ('turn.completed','turn.failed','turn.interrupted') LIMIT 1",
+  ).get(sessionId, turnId) as { one: number } | undefined;
+  return row !== undefined;
+}
+
+/** [V41] Highest turn number N across the `turn-N` ids in a session's event log
+ * (0 when none, or when the log isn't open). On a session.json reseed (B7
+ * corrupt move-aside) the persisted turn counter is lost while events.db
+ * survives, so a fresh emptyState would restart at turn-1 and collide with ids
+ * already in the log — breaking turn-id-keyed correlation (audit.jsonl, `sandbox
+ * trace`, readTurnOutcome). Seeding nextTurnId from this keeps ids monotonic and
+ * unique. Never opens the DB (returns 0 when `db` is null) so off-pod callers /
+ * tests without an injected event log don't fault on the read-only /session path. */
+export function maxTurnNumber(sessionId: string): number {
+  if (!db) return 0;
+  const rows = prepared(
+    db,
+    "SELECT turn_id FROM events WHERE session_id = ? AND turn_id LIKE 'turn-%'",
+  ).all(sessionId) as { turn_id: string }[];
+  let max = 0;
+  for (const r of rows) {
+    const m = /^turn-(\d+)$/.exec(r.turn_id);
+    if (m) {
+      const n = parseInt(m[1], 10);
+      if (n > max) max = n;
+    }
+  }
+  return max;
 }
 
 /** Highest seq seen for a session (0 if none). */
