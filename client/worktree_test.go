@@ -753,6 +753,105 @@ func TestReapSkipsNonWorktreeJunk(t *testing.T) {
 	}
 }
 
+// setEntryNamespace loads a session's index entry, stamps its Namespace, and
+// saves it back (mirroring what Create records at client.go:529).
+func setEntryNamespace(t *testing.T, c *Client, id, ns string) {
+	t.Helper()
+	entry, err := c.index.Load(id)
+	if err != nil {
+		t.Fatalf("load entry %s: %v", id, err)
+	}
+	entry.Namespace = ns
+	if err := c.index.Save(id, entry); err != nil {
+		t.Fatalf("save entry %s: %v", id, err)
+	}
+}
+
+// TestReapSkipsForeignNamespace pins the V1 fix: a worktree whose index entry
+// records a DIFFERENT namespace than the current backend (a live session on
+// another cluster/namespace sharing the global state dir) is skipped, never
+// reaped — its dir and index entry survive intact even though the session is
+// absent from this namespace's List.
+func TestReapSkipsForeignNamespace(t *testing.T) {
+	requireGit(t)
+	ctx := context.Background()
+	repo := initRepo(t)
+	be := newFakeBackend() // List returns nil ⇒ absent from THIS namespace
+	c, _ := worktreeClientWithBackend(t, be)
+	setupWorktreeSession(t, c, repo, "claude-sdk-foreign")
+	// The fake backend's namespace is "agent-sessions"; stamp the entry as owned
+	// by a different namespace.
+	setEntryNamespace(t, c, "claude-sdk-foreign", "other-ns")
+
+	reaped, err := c.ReapWorktrees(ctx, ReapOptions{})
+	if err != nil {
+		t.Fatalf("ReapWorktrees: %v", err)
+	}
+	if rec := reapByID(reaped)["claude-sdk-foreign"]; rec.Action != reapSkipped {
+		t.Fatalf("foreign-namespace action = %q, want skipped", rec.Action)
+	}
+	// Dir intact and index entry NOT deleted — a live session elsewhere still owns them.
+	if _, err := os.Stat(filepath.Join(c.stateDir, "worktrees", "claude-sdk-foreign")); err != nil {
+		t.Errorf("foreign-namespace worktree must not be removed: %v", err)
+	}
+	if _, err := c.index.Load("claude-sdk-foreign"); err != nil {
+		t.Errorf("foreign-namespace index entry must not be dropped: %v", err)
+	}
+}
+
+// TestReapSkipsIndexLessWorktree pins that an index-less dir — even a genuine,
+// resolvable git worktree — is skipped rather than reaped-by-git-discovery:
+// without an index entry we cannot establish namespace ownership (V1).
+func TestReapSkipsIndexLessWorktree(t *testing.T) {
+	requireGit(t)
+	ctx := context.Background()
+	repo := initRepo(t)
+	be := newFakeBackend()
+	c, _ := worktreeClientWithBackend(t, be)
+	// Create a real worktree dir but do NOT seed its index entry.
+	if _, err := c.createWorktree(ctx, WorktreeOn, repo, "claude-sdk-noidx"); err != nil {
+		t.Fatalf("createWorktree: %v", err)
+	}
+
+	reaped, err := c.ReapWorktrees(ctx, ReapOptions{})
+	if err != nil {
+		t.Fatalf("ReapWorktrees: %v", err)
+	}
+	if rec := reapByID(reaped)["claude-sdk-noidx"]; rec.Action != reapSkipped {
+		t.Fatalf("index-less worktree action = %q, want skipped", rec.Action)
+	}
+	if _, err := os.Stat(filepath.Join(c.stateDir, "worktrees", "claude-sdk-noidx")); err != nil {
+		t.Errorf("index-less worktree must be left in place: %v", err)
+	}
+}
+
+// TestReapSameNamespaceOrphanRemoved pins that the ownership gate does NOT
+// over-protect: a worktree whose entry records the CURRENT namespace and whose
+// session is absent from List still reaps as an orphan (the pre-V1 behavior).
+func TestReapSameNamespaceOrphanRemoved(t *testing.T) {
+	requireGit(t)
+	ctx := context.Background()
+	repo := initRepo(t)
+	be := newFakeBackend()
+	c, _ := worktreeClientWithBackend(t, be)
+	setupWorktreeSession(t, c, repo, "claude-sdk-samens")
+	setEntryNamespace(t, c, "claude-sdk-samens", be.Namespace())
+
+	reaped, err := c.ReapWorktrees(ctx, ReapOptions{})
+	if err != nil {
+		t.Fatalf("ReapWorktrees: %v", err)
+	}
+	if rec := reapByID(reaped)["claude-sdk-samens"]; rec.Action != reapRemoved {
+		t.Fatalf("same-namespace orphan action = %q, want removed", rec.Action)
+	}
+	if _, err := os.Stat(filepath.Join(c.stateDir, "worktrees", "claude-sdk-samens")); !os.IsNotExist(err) {
+		t.Errorf("same-namespace orphan dir not removed: %v", err)
+	}
+	if _, err := c.index.Load("claude-sdk-samens"); err == nil {
+		t.Error("same-namespace orphan index entry not dropped")
+	}
+}
+
 // reapByID indexes a reap report by session id for assertions.
 func reapByID(reaped []ReapedWorktree) map[string]ReapedWorktree {
 	m := make(map[string]ReapedWorktree, len(reaped))

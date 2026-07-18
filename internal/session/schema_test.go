@@ -135,12 +135,25 @@ type fieldInfo struct {
 
 // structFields extracts the json-tagged fields of a struct as a map keyed by
 // json name, recording the coarse type category and whether ,omitempty is set.
-func structFields(t reflect.Type) (map[string]fieldInfo, error) {
+// An exported field with NO json tag is flagged (V37): encoding/json still
+// marshals it under its Go field name, so it is real wire surface the drift gate
+// must compare against the schema — silently skipping it (as an explicit
+// json:"-" exclusion) would let untagged fields drift undetected.
+func structFields(t *testing.T, rt reflect.Type) (map[string]fieldInfo, error) {
 	out := map[string]fieldInfo{}
-	for i := 0; i < t.NumField(); i++ {
-		f := t.Field(i)
+	for i := 0; i < rt.NumField(); i++ {
+		f := rt.Field(i)
 		tag := f.Tag.Get("json")
-		if tag == "" || tag == "-" {
+		if tag == "-" {
+			continue
+		}
+		if tag == "" {
+			// Unexported fields are genuinely invisible to encoding/json; skip
+			// them. An exported untagged field is a real (and unintended) wire
+			// field — fail so it gets tagged or excluded with json:"-".
+			if f.IsExported() {
+				t.Errorf("field %s has no json tag — tag it explicitly or exclude with json:%q", f.Name, "-")
+			}
 			continue
 		}
 		parts := strings.Split(tag, ",")
@@ -241,7 +254,7 @@ func compareSet(t *testing.T, kind, registryName string, defs map[string]schemaP
 // for field (type category, omitempty, and the items element for objectArrays).
 func compareStruct(t *testing.T, name string, sp schemaPayload, rt reflect.Type) {
 	t.Helper()
-	fields, err := structFields(rt)
+	fields, err := structFields(t, rt)
 	if err != nil {
 		t.Errorf("%s: %v", name, err)
 		return

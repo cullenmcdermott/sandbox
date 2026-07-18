@@ -120,6 +120,14 @@ type Session struct {
 	mu      sync.Mutex
 	handles []session.ForwardHandle
 	runner  *runner.Client
+	// gen is the connection generation, bumped by every closeHandles (Close, a
+	// failed reconnect, or the top of a fresh Connect). Connect captures the
+	// generation its own opening closeHandles established and re-checks it under
+	// mu before each state publish (handles/runner/background sync); a mismatch
+	// means a concurrent Close or a newer Connect superseded this one, so it
+	// aborts instead of resurrecting a torn-down connection or orphaning its
+	// background goroutine (V9).
+	gen uint64
 
 	// fresh/freshBackend/sshPrivPath are shortcuts stamped by Client.Create for a
 	// just-created session so its first Connect can skip the redundant cluster
@@ -237,7 +245,11 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 	if err := validateImagePullPolicy(opt.ReaperImagePullPolicy); err != nil {
 		return nil, err
 	}
-	s.closeHandles()
+	// Capture the generation this Connect's opening teardown establishes. Every
+	// subsequent state publish re-checks it under mu; a bump by a racing Close or
+	// a newer Connect makes this one abort rather than resurrect a dead connection
+	// or orphan a background goroutine (V9).
+	myGen := s.closeHandlesGen()
 	// §10 observability: time the whole connect flow (and each phase below) under
 	// one correlation id. tr is nil unless SANDBOX_TRACE is set, so this costs
 	// ~nothing when off; the total span fires on every return path (incl. errors).
@@ -361,7 +373,12 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 	if err != nil {
 		return nil, fmt.Errorf("port-forward: %w", err)
 	}
-	s.setHandles(handles)
+	if !s.setHandlesGen(myGen, handles) {
+		// A concurrent Close/Connect superseded us between port-forward and now:
+		// close the forwards we just opened and abort rather than publishing them.
+		closeForwards(handles)
+		return nil, errConnectSuperseded()
+	}
 
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", handles[0].LocalPort())
 	token, err := s.c.backend.RunnerToken(ctx, s.ref)
@@ -378,7 +395,10 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 	// requests (X-Sandbox-Trace-Id) so the pod bridges it to each turn id
 	// (trace: <id> turn.link turn=…). No-op ("" → no header) when tracing is off.
 	rc.SetTraceID(tr.traceID())
-	s.setRunner(rc)
+	if !s.setRunnerGen(myGen, rc) {
+		closeForwards(handles)
+		return nil, errConnectSuperseded()
+	}
 	stage(StageRunner)
 	healthSpan := tr.start("connect.runner_health")
 	err = waitHealthy(ctx, rc)
@@ -439,15 +459,16 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 		if !worktreeMissing && privPath == "" {
 			privPath, _, kerr = s.c.ensureSSHKey(string(s.ref.ID))
 		}
+		bgOK := true
 		switch {
 		case worktreeMissing:
 			syncWarning = appendWarning(syncWarning, fmt.Sprintf(
 				"file sync skipped: this session's worktree (%s) is missing — sync is bound to the worktree/machine that created the session; recreate the worktree manually or destroy the session", workspacePath))
-			s.startBackgroundSync(tr, syncpkg.Spec{}, false, false, reaperImage, reaperPullPolicy, idleTimeout)
+			bgOK = s.startBackgroundSync(tr, myGen, syncpkg.Spec{}, false, false, reaperImage, reaperPullPolicy, idleTimeout)
 		case kerr != nil:
 			// No usable SSH key → no file sync at all, but the reaper must still run.
 			syncWarning = appendWarning(syncWarning, fmt.Sprintf("file sync unavailable (ssh key): %v", kerr))
-			s.startBackgroundSync(tr, syncpkg.Spec{}, false, false, reaperImage, reaperPullPolicy, idleTimeout)
+			bgOK = s.startBackgroundSync(tr, myGen, syncpkg.Spec{}, false, false, reaperImage, reaperPullPolicy, idleTimeout)
 		default:
 			// Non-git same-path collision warning (design §4.5/§1d): a non-worktree
 			// session syncs the repo root itself, so if another live session already
@@ -462,10 +483,17 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 			syncSpan.end()
 			if serr != nil {
 				syncWarning = appendWarning(syncWarning, fmt.Sprintf("file sync unavailable: %v", serr))
-				s.startBackgroundSync(tr, syncpkg.Spec{}, false, false, reaperImage, reaperPullPolicy, idleTimeout)
+				bgOK = s.startBackgroundSync(tr, myGen, syncpkg.Spec{}, false, false, reaperImage, reaperPullPolicy, idleTimeout)
 			} else {
-				s.startBackgroundSync(tr, spec, created, true, reaperImage, reaperPullPolicy, idleTimeout)
+				bgOK = s.startBackgroundSync(tr, myGen, spec, created, true, reaperImage, reaperPullPolicy, idleTimeout)
 			}
+		}
+		if !bgOK {
+			// A concurrent Close/Connect superseded us while we were setting up
+			// background sync: startBackgroundSync refused to publish and cancelled
+			// its own context. Tear our forwards down and abort.
+			closeForwards(handles)
+			return nil, errConnectSuperseded()
 		}
 	}
 
@@ -588,7 +616,14 @@ func protocolVersionWarning(rc *runner.Client) string {
 // can't outlive the session. When doSync is false (SSH key or project sync failed
 // upstream) only the reaper is ensured; created marks this session's first-ever
 // sync (gate the flush) versus a reconnect (detached flush).
-func (s *Session) startBackgroundSync(tr *tracer, spec syncpkg.Spec, created, doSync bool, reaperImage, reaperPullPolicy string, idleTimeout time.Duration) {
+// startBackgroundSync publishes its bgCancel/syncTask and launches the goroutine
+// only if the session generation still matches gen. It returns false (without
+// launching anything, and after cancelling the context it built) when a
+// concurrent Close/Connect superseded this Connect — otherwise a late-arriving
+// background goroutine would arm mutagen flushes and reaper retries against a
+// port-forward Close already tore down, and its cancel func would be one Close
+// already missed (V9).
+func (s *Session) startBackgroundSync(tr *tracer, gen uint64, spec syncpkg.Spec, created, doSync bool, reaperImage, reaperPullPolicy string, idleTimeout time.Duration) bool {
 	// C6: the whole background phase gets one generous overall deadline. The
 	// first flush is bounded (12s below) but CreateInputs (7 mutagen execs) and
 	// the reaper retry loop were not — a wedged mutagen daemon would hang this
@@ -598,6 +633,11 @@ func (s *Session) startBackgroundSync(tr *tracer, spec syncpkg.Spec, created, do
 	bgCtx, cancel := context.WithTimeoutCause(context.Background(), bgSyncOverallTimeout, errBgSyncTimeout)
 	task := &syncTask{done: make(chan struct{})}
 	s.mu.Lock()
+	if s.gen != gen {
+		s.mu.Unlock()
+		cancel() // don't leak the context we just built
+		return false
+	}
 	s.bgCancel = cancel
 	s.syncTask = task
 	s.mu.Unlock()
@@ -668,6 +708,7 @@ func (s *Session) startBackgroundSync(tr *tracer, spec syncpkg.Spec, created, do
 		}
 		task.finish(warn)
 	}()
+	return true
 }
 
 // bgSyncOverallTimeout bounds Connect's whole background phase (C6): generous
@@ -708,19 +749,65 @@ func (s *Session) Close() error {
 	return nil
 }
 
-func (s *Session) setHandles(h []session.ForwardHandle) {
+// closeForwards closes a set of port-forward handles the caller still owns (an
+// aborted Connect that never published them, or published-then-superseded ones).
+// Handle Close is idempotent, so a double close against a racing closeHandles is
+// safe.
+func closeForwards(handles []session.ForwardHandle) {
+	for _, h := range handles {
+		h.Close()
+	}
+}
+
+// errConnectSuperseded reports a Connect that a concurrent Close or a newer
+// Connect superseded mid-flight (V9). It wraps ErrNotConnected so a caller that
+// only cares "is this session usable?" can branch on errors.Is(err,
+// ErrNotConnected) — the session is indeed not connected for this caller.
+func errConnectSuperseded() error {
+	return fmt.Errorf("sandbox: connect superseded by a concurrent Close/Connect: %w", ErrNotConnected)
+}
+
+// currentGen reads the current connection generation under mu.
+func (s *Session) currentGen() uint64 {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.gen
+}
+
+// setHandlesGen publishes the port-forward handles only if the session
+// generation still matches gen (no concurrent Close/Connect has superseded this
+// Connect). It returns false when stale, in which case the caller must close its
+// own handles and abort — the superseding op already tore down whatever it found.
+func (s *Session) setHandlesGen(gen uint64, h []session.ForwardHandle) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.gen != gen {
+		return false
+	}
 	s.handles = h
-	s.mu.Unlock()
+	return true
 }
 
-func (s *Session) setRunner(rc *runner.Client) {
+// setRunnerGen publishes the runner client under the same generation guard as
+// setHandlesGen.
+func (s *Session) setRunnerGen(gen uint64, rc *runner.Client) bool {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.gen != gen {
+		return false
+	}
 	s.runner = rc
-	s.mu.Unlock()
+	return true
 }
 
-func (s *Session) closeHandles() {
+// closeHandles tears down the forwards and background work and bumps the
+// generation so any Connect still in flight for the prior generation aborts.
+func (s *Session) closeHandles() { _ = s.closeHandlesGen() }
+
+// closeHandlesGen is closeHandles that returns the NEW generation it established.
+// Connect adopts that value as its own generation so it can detect a later
+// closeHandles (Close or a newer Connect) superseding it.
+func (s *Session) closeHandlesGen() uint64 {
 	s.mu.Lock()
 	handles := s.handles
 	s.handles = nil
@@ -728,6 +815,10 @@ func (s *Session) closeHandles() {
 	// ErrNotConnected after Close (or a failed reconnect) instead of handing back
 	// a client whose port-forward is gone.
 	s.runner = nil
+	// Bump the generation: a Connect that captured the prior generation now sees a
+	// mismatch at its next publish and aborts (V9).
+	s.gen++
+	gen := s.gen
 	// Cancel any in-flight background sync/reaper work so it can't outlive the
 	// session (or leak past a reconnect, which re-runs it). A caller that already
 	// captured the prior syncTask via AwaitSync still observes its completion —
@@ -742,6 +833,7 @@ func (s *Session) closeHandles() {
 	for _, h := range handles {
 		h.Close()
 	}
+	return gen
 }
 
 // --- Turn / stream convenience methods (delegating to the connected runner) ---

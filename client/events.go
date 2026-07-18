@@ -25,12 +25,14 @@ const (
 	EventReasoningCompleted   = session.EventReasoningCompleted
 	EventToolStarted          = session.EventToolStarted
 	EventToolDelta            = session.EventToolDelta
+	EventToolProgress         = session.EventToolProgress
 	EventToolCompleted        = session.EventToolCompleted
 	EventToolFailed           = session.EventToolFailed
 	EventPermissionRequested  = session.EventPermissionRequested
 	EventPermissionResolved   = session.EventPermissionResolved
 	EventTodoUpdated          = session.EventTodoUpdated
 	EventUsageUpdated         = session.EventUsageUpdated
+	EventContextCompacted     = session.EventContextCompacted
 	EventRateLimitUpdated     = session.EventRateLimitUpdated
 	EventWorkspaceStatus      = session.EventWorkspaceStatus
 	EventSessionTitle         = session.EventSessionTitle
@@ -51,20 +53,26 @@ var AllEventTypes = session.AllEventTypes
 // Payload struct aliases. Decode Event.Payload into the one matching Event.Type
 // (e.g. EventMessageCompleted → MessagePayload, EventToolCompleted → ToolPayload).
 type (
-	MessagePayload         = session.MessagePayload
-	ToolPayload            = session.ToolPayload
-	PermissionPayload      = session.PermissionPayload
-	UsagePayload           = session.UsagePayload
-	RateLimitPayload       = session.RateLimitPayload
-	ErrorPayload           = session.ErrorPayload
-	SessionStartedPayload  = session.SessionStartedPayload
-	SessionStatusPayload   = session.SessionStatusPayload
-	WorkspaceStatusPayload = session.WorkspaceStatusPayload
-	SessionTitlePayload    = session.SessionTitlePayload
-	ModelInfo              = session.ModelInfo
-	ModelsAvailablePayload = session.ModelsAvailablePayload
-	TodoItem               = session.TodoItem
-	TodoUpdatedPayload     = session.TodoUpdatedPayload
-	TerminatingPayload     = session.TerminatingPayload
-	AutopilotStatePayload  = session.AutopilotStatePayload
+	MessagePayload          = session.MessagePayload
+	Citation                = session.Citation
+	ToolPayload             = session.ToolPayload
+	PermissionPayload       = session.PermissionPayload
+	UsagePayload            = session.UsagePayload
+	ContextCompactedPayload = session.ContextCompactedPayload
+	RateLimitPayload        = session.RateLimitPayload
+	ErrorPayload            = session.ErrorPayload
+	SessionStartedPayload   = session.SessionStartedPayload
+	SessionStatusPayload    = session.SessionStatusPayload
+	WorkspaceStatusPayload  = session.WorkspaceStatusPayload
+	SessionTitlePayload     = session.SessionTitlePayload
+	ModelInfo               = session.ModelInfo
+	ModelsAvailablePayload  = session.ModelsAvailablePayload
+	TodoItem                = session.TodoItem
+	TodoUpdatedPayload      = session.TodoUpdatedPayload
+	TurnStartedPayload      = session.TurnStartedPayload
+	TurnCompletedPayload    = session.TurnCompletedPayload
+	TurnFailedPayload       = session.TurnFailedPayload
+	TurnInterruptedPayload  = session.TurnInterruptedPayload
+	TerminatingPayload      = session.TerminatingPayload
+	AutopilotStatePayload   = session.AutopilotStatePayload
 )

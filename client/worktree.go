@@ -484,18 +484,24 @@ const (
 //     first (reusing the wave-2 worktreeCommitAll), then removed
 //     ("committed-then-removed", CommitSHA set). A failed WIP commit leaves the
 //     worktree untouched and is reported "skipped".
-//   - a directory that is not a resolvable git worktree (junk) → "skipped", left
-//     in place.
+//
+// Ownership gate [V1]: the state dir is global (~/.local/share/sandbox) and
+// SHARED across clusters/namespaces, but backend.List only reports sessions in
+// the CURRENT namespace on the CURRENT kubeconfig context — a live session in
+// another namespace/cluster is absent from that listing. So a dir is reaped only
+// when its local index entry proves ownership by the current namespace: a dir
+// whose entry records a DIFFERENT namespace (owned elsewhere, likely still live)
+// and a dir with NO index entry at all (ownership cannot be established — no
+// reap-by-git-discovery, no junk removal) are both "skipped", left in place.
 //
 // After removals it runs `git worktree prune` once per distinct repo root
-// (silently — no fabricated "pruned" entries). RepoRoot comes from the index entry
-// when present, else it is discovered from the dir via `git rev-parse
-// --git-common-dir`; a dir with no resolvable repo is skipped. DryRun classifies
-// and reports the would-be action without mutating anything.
+// (silently — no fabricated "pruned" entries). RepoRoot and branch come from the
+// owning index entry. DryRun classifies and reports the would-be action without
+// mutating anything.
 //
-// Reporting choice: EVERY enumerated dir is reported (including live-session and
-// junk dirs as "skipped"), so a caller (e.g. `sandbox worktree gc`) sees the full
-// classification rather than a silent subset.
+// Reporting choice: EVERY enumerated dir is reported (including live-session,
+// foreign-namespace, and index-less dirs as "skipped"), so a caller (e.g.
+// `sandbox worktree gc`) sees the full classification rather than a silent subset.
 func (c *Client) ReapWorktrees(ctx context.Context, opt ReapOptions) ([]ReapedWorktree, error) {
 	root := c.worktreesRoot()
 	dirents, err := os.ReadDir(root)
@@ -539,12 +545,30 @@ func (c *Client) ReapWorktrees(ctx context.Context, opt ReapOptions) ([]ReapedWo
 			continue
 		}
 
-		// Resolve the repo root (for `worktree remove`/`prune`) and branch. Prefer
-		// the index entry; fall back to git discovery for an index-less dir.
-		repoRoot, branch := c.reapRepoRoot(ctx, git, id, dir)
+		// [V1] Ownership gate: only reap a dir whose index entry proves it belongs
+		// to THIS namespace. An index-less dir (ownership can't be established) and
+		// a dir owned by another namespace (likely a live session on a different
+		// cluster sharing the global state dir) are both skipped — reaping either
+		// could WIP-commit + os.RemoveAll a live session's worktree, destroying
+		// gitignored files `git add -A` never captures.
+		entry, entryErr := c.index.Load(id)
+		if entryErr != nil || entry.WorktreePath == "" {
+			rec.Action = reapSkipped
+			reaped = append(reaped, rec)
+			continue
+		}
+		if ns := entry.Namespace; ns != "" && ns != c.backend.Namespace() {
+			rec.Branch = entry.WorktreeBranch
+			rec.Action = reapSkipped
+			reaped = append(reaped, rec)
+			continue
+		}
+
+		// Repo root (for `worktree remove`/`prune`) and branch come from the owning
+		// index entry. A dir with no recorded repo root is left in place.
+		repoRoot, branch := entry.RepoRoot, entry.WorktreeBranch
 		rec.Branch = branch
 		if repoRoot == "" {
-			// Not a resolvable git worktree (junk, or a removed repo): leave it.
 			rec.Action = reapSkipped
 			reaped = append(reaped, rec)
 			continue
@@ -604,34 +628,6 @@ func (c *Client) ReapWorktrees(ctx context.Context, opt ReapOptions) ([]ReapedWo
 		}
 	}
 	return reaped, nil
-}
-
-// reapRepoRoot resolves the main repo root and branch for a worktree dir during a
-// reap. It prefers the recorded index entry; for an index-less dir it discovers
-// the repo via `git rev-parse --git-common-dir` (the parent of the common .git dir
-// is the main repo root) and reads the branch live. It returns ("", "") when the
-// dir is not a resolvable git worktree (junk) — the caller then skips it.
-func (c *Client) reapRepoRoot(ctx context.Context, git gitRunner, id, dir string) (repoRoot, branch string) {
-	if entry, err := c.index.Load(id); err == nil && entry.WorktreePath != "" && entry.RepoRoot != "" {
-		return entry.RepoRoot, entry.WorktreeBranch
-	}
-	// Index-less: discover from the dir itself. A non-worktree dir fails here.
-	commonOut, cerr := git(ctx, dir, "rev-parse", "--git-common-dir")
-	if cerr != nil {
-		return "", ""
-	}
-	common := strings.TrimSpace(string(commonOut))
-	if common == "" {
-		return "", ""
-	}
-	if !filepath.IsAbs(common) {
-		common = filepath.Join(dir, common)
-	}
-	repoRoot = filepath.Dir(filepath.Clean(common))
-	if branchOut, berr := git(ctx, dir, "rev-parse", "--abbrev-ref", "HEAD"); berr == nil {
-		branch = strings.TrimSpace(string(branchOut))
-	}
-	return repoRoot, branch
 }
 
 // reapBranchHint returns the recorded branch for a live-session worktree, best

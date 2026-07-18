@@ -417,8 +417,17 @@ type CreateOptions struct {
 	StorageClass string
 	// StorageGiB is the PVC size in GiB (0 uses the backend default, 50).
 	StorageGiB int
-	// ID optionally pins the session id (for idempotent create — re-creating with
-	// the same ID is a no-op at the cluster layer). Empty mints a fresh unique id.
+	// ID optionally pins the session id. Empty mints a fresh unique id.
+	//
+	// Idempotency caveat: re-creating with the same ID is a no-op only at the
+	// cluster layer. Create runs the per-session worktree step FIRST, and the
+	// default WorktreeAuto on a git ProjectPath adds a worktree at
+	// <stateDir>/worktrees/<id> on branch sandbox/<id> — so a second Create with
+	// the same ID fails with ErrWorktreeExists (the residue from the first
+	// create) before any cluster call. A crash-safe retry loop must therefore
+	// Destroy the session (which reaps the worktree) before retrying, or use
+	// WorktreeOff / a non-git ProjectPath, for which the re-create is a genuine
+	// cluster-layer no-op.
 	ID ID
 	// Worktree selects per-session git worktree behavior (default WorktreeAuto):
 	// a git ProjectPath gets an isolated worktree at <stateDir>/worktrees/<id> on

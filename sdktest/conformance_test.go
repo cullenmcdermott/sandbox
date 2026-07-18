@@ -44,6 +44,112 @@ func TestEventWireContract(t *testing.T) {
 	}
 }
 
+// TestEventConstantsCoverAllTypes pins that the public client surface
+// re-exports a typed constant for EVERY persisted event type. client.AllEventTypes
+// is generated from schema/events.json (via internal/session), so when a new
+// event type lands there `just gen` grows AllEventTypes and this test fails
+// until the constant is added to client/events.go AND to the map below — closing
+// the drift that let tool.progress / context.compacted ship in the schema with
+// no client constant (V8). Referencing each constant by name also makes this a
+// compile-time pin: a removed/renamed constant fails to build.
+func TestEventConstantsCoverAllTypes(t *testing.T) {
+	// The full set of re-exported client event-type constants, keyed by value.
+	// Maintained by hand alongside client/events.go's const block.
+	constants := map[client.EventType]bool{
+		client.EventSessionStarted:       true,
+		client.EventSessionStatusChanged: true,
+		client.EventSessionTerminating:   true,
+		client.EventTurnStarted:          true,
+		client.EventTurnCompleted:        true,
+		client.EventTurnFailed:           true,
+		client.EventTurnInterrupted:      true,
+		client.EventMessageStarted:       true,
+		client.EventMessageDelta:         true,
+		client.EventMessageCompleted:     true,
+		client.EventReasoningStarted:     true,
+		client.EventReasoningDelta:       true,
+		client.EventReasoningCompleted:   true,
+		client.EventToolStarted:          true,
+		client.EventToolDelta:            true,
+		client.EventToolProgress:         true,
+		client.EventToolCompleted:        true,
+		client.EventToolFailed:           true,
+		client.EventPermissionRequested:  true,
+		client.EventPermissionResolved:   true,
+		client.EventTodoUpdated:          true,
+		client.EventUsageUpdated:         true,
+		client.EventContextCompacted:     true,
+		client.EventRateLimitUpdated:     true,
+		client.EventWorkspaceStatus:      true,
+		client.EventSessionTitle:         true,
+		client.EventModelsAvailable:      true,
+		client.EventAutopilotState:       true,
+		client.EventError:                true,
+	}
+	// Every persisted type must have a re-exported constant.
+	for _, et := range client.AllEventTypes {
+		if !constants[et] {
+			t.Errorf("no client constant for event type %q — add it to client/events.go and this test", et)
+		}
+	}
+	// And no stray constant that is not a real persisted type (guards a typo or a
+	// removed schema type).
+	allowed := map[client.EventType]bool{}
+	for _, et := range client.AllEventTypes {
+		allowed[et] = true
+	}
+	for et := range constants {
+		if !allowed[et] {
+			t.Errorf("client constant %q is not in AllEventTypes (schema drift?)", et)
+		}
+	}
+}
+
+// TestEventPayloadAliasesDecode pins the payload type aliases a consumer decodes
+// Event.Payload into — including the ones V8 added (context.compacted, the four
+// turn.* payloads, and Citation). A removed or retyped alias fails to compile;
+// the unmarshals pin the wire shape.
+func TestEventPayloadAliasesDecode(t *testing.T) {
+	var cc client.ContextCompactedPayload
+	if err := json.Unmarshal([]byte(`{"trigger":"auto","preTokens":180000,"postTokens":42000}`), &cc); err != nil {
+		t.Fatalf("ContextCompactedPayload unmarshal: %v", err)
+	}
+	if cc.Trigger != "auto" || cc.PreTokens != 180000 || cc.PostTokens != 42000 {
+		t.Errorf("ContextCompactedPayload fields: got %+v", cc)
+	}
+
+	var ts client.TurnStartedPayload
+	if err := json.Unmarshal([]byte(`{"prompt":"hi"}`), &ts); err != nil || ts.Prompt != "hi" {
+		t.Errorf("TurnStartedPayload: got %+v err=%v", ts, err)
+	}
+	var tc client.TurnCompletedPayload
+	if err := json.Unmarshal([]byte(`{"result":"done","stopReason":"end_turn"}`), &tc); err != nil ||
+		tc.Result != "done" || tc.StopReason != "end_turn" {
+		t.Errorf("TurnCompletedPayload: got %+v err=%v", tc, err)
+	}
+	var tf client.TurnFailedPayload
+	if err := json.Unmarshal([]byte(`{"message":"boom"}`), &tf); err != nil || tf.Message != "boom" {
+		t.Errorf("TurnFailedPayload: got %+v err=%v", tf, err)
+	}
+	var ti client.TurnInterruptedPayload
+	if err := json.Unmarshal([]byte(`{"reason":"client interrupt"}`), &ti); err != nil ||
+		ti.Reason != "client interrupt" {
+		t.Errorf("TurnInterruptedPayload: got %+v err=%v", ti, err)
+	}
+
+	// Citation is nested in MessagePayload.Citations (message.completed): a
+	// consumer building a footnote renderer must be able to name and decode it.
+	var m client.MessagePayload
+	if err := json.Unmarshal([]byte(`{"role":"assistant","content":"x","citations":[{"url":"https://e.x","title":"E"}]}`), &m); err != nil {
+		t.Fatalf("MessagePayload with citations: %v", err)
+	}
+	if len(m.Citations) != 1 || m.Citations[0].Title != "E" || m.Citations[0].URL != "https://e.x" {
+		t.Errorf("MessagePayload.Citations: got %+v", m.Citations)
+	}
+	var c client.Citation = m.Citations[0]
+	_ = c
+}
+
 // TestCredStoreRoundTrip exercises the full documented Store lifecycle on the
 // portable file backend: add → list → secret → default → remove.
 func TestCredStoreRoundTrip(t *testing.T) {

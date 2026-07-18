@@ -108,6 +108,53 @@ func (h *fakeForwardHandle) LocalPort() int        { return h.port }
 func (h *fakeForwardHandle) Close() error          { h.closed = true; return nil }
 func (h *fakeForwardHandle) Done() <-chan struct{} { return h.done }
 
+// TestConnectCloseRaceDoesNotResurrect pins the V9 fix: Close racing an in-flight
+// Connect must NOT leave a live connection or an orphaned background goroutine.
+// We stall Connect inside PortForward, call Close (which bumps the generation),
+// then release the forward. Connect's generation guard at setHandlesGen must fire:
+// it closes its own forwards and aborts instead of publishing a runner over a
+// port-forward Close already tore down. Run under `go test -race`.
+func TestConnectCloseRaceDoesNotResurrect(t *testing.T) {
+	be := newFakeBackend()
+	be.statusState = State{ID: "claude-sdk-x", Status: session.StatusRunning, ProjectPath: "/w"}
+	handle := newFakeForwardHandle(12345)
+	be.handles = []session.ForwardHandle{handle}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	be.portForwardHook = func() {
+		close(entered)
+		<-release
+	}
+	c, _, _ := fakeClient(t, be)
+	sess := c.Open("claude-sdk-x")
+
+	errCh := make(chan error, 1)
+	go func() {
+		// Observer mode: read-only connect that still port-forwards and publishes
+		// handles/runner, so it exercises the generation guard without the full
+		// sync/opencode setup.
+		_, err := sess.Connect(context.Background(), ConnectOptions{Observer: true})
+		errCh <- err
+	}()
+
+	<-entered        // Connect is stalled inside PortForward.
+	_ = sess.Close() // Supersede it (bumps the generation, tears down handles).
+	close(release)   // Let PortForward return so Connect resumes and hits the guard.
+
+	err := <-errCh
+	if !errors.Is(err, ErrNotConnected) {
+		t.Fatalf("superseded Connect = %v, want an error wrapping ErrNotConnected", err)
+	}
+	// The connection must not be resurrected: no live runner, forwards closed.
+	if sess.Runner() != nil {
+		t.Error("Runner() is non-nil after Close raced Connect — resurrected connection")
+	}
+	if !handle.closed {
+		t.Error("port-forward handle not closed after the superseded Connect (leak)")
+	}
+}
+
 func TestConnectStatusError(t *testing.T) {
 	be := newFakeBackend()
 	be.statusErr = errors.New("api server down")

@@ -39,8 +39,11 @@ type fakeBackend struct {
 	destroyErr  error
 	handles     []session.ForwardHandle
 	portErr     error
-	token       string
-	tokenErr    error
+	// portForwardHook, if set, runs at the start of PortForward — a test seam to
+	// stall Connect mid-flight (e.g. to race Close against it).
+	portForwardHook func()
+	token           string
+	tokenErr        error
 
 	// captured inputs
 	gotSpec  Spec
@@ -101,6 +104,9 @@ func (f *fakeBackend) StartWithProgress(_ context.Context, ref Ref, _ func(strin
 }
 
 func (f *fakeBackend) PortForward(_ context.Context, ref Ref, ports []session.PortSpec) ([]session.ForwardHandle, error) {
+	if f.portForwardHook != nil {
+		f.portForwardHook()
+	}
 	f.gotSpecs = ports
 	f.record("portforward", ref)
 	return f.handles, f.portErr
