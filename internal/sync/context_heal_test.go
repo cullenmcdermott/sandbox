@@ -19,7 +19,7 @@ func withContext(r Runner, ctx string) *Manager {
 // per-session label so GC can scope to the context that created the sync.
 func TestCreateProjectStampsContextLabel(t *testing.T) {
 	r := &fakeRunner{}
-	m := withContext(r, "omni-prod")
+	m := withContext(r, "my-cluster")
 	spec := Spec{
 		SessionID:    "s1",
 		ProjectPath:  t.TempDir(),
@@ -32,7 +32,7 @@ func TestCreateProjectStampsContextLabel(t *testing.T) {
 		t.Fatalf("CreateProject: %v", err)
 	}
 	got := strings.Join(r.calls[0], " ")
-	if !strings.Contains(got, "--label sandbox-context=omni-prod") {
+	if !strings.Contains(got, "--label sandbox-context=my-cluster") {
 		t.Errorf("project sync missing context label: %s", got)
 	}
 	// The session label must still be present (context is additive, not a swap).
@@ -49,7 +49,7 @@ func TestCreateProjectStampsContextLabel(t *testing.T) {
 // MF3: CreateInputs stamps the context label on every one of its 7 syncs.
 func TestCreateInputsStampsContextLabel(t *testing.T) {
 	r := &fakeRunner{}
-	m := withContext(r, "omni-prod")
+	m := withContext(r, "my-cluster")
 	spec := Spec{
 		SessionID:    "s1",
 		ProjectPath:  t.TempDir(),
@@ -61,7 +61,7 @@ func TestCreateInputsStampsContextLabel(t *testing.T) {
 		t.Fatalf("CreateInputs: %v", err)
 	}
 	for i, call := range r.calls {
-		if !strings.Contains(strings.Join(call, " "), "--label sandbox-context=omni-prod") {
+		if !strings.Contains(strings.Join(call, " "), "--label sandbox-context=my-cluster") {
 			t.Errorf("input sync %d missing context label: %s", i, strings.Join(call, " "))
 		}
 	}

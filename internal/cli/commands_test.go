@@ -129,7 +129,7 @@ func TestCancelActiveTurnPropagatesStateError(t *testing.T) {
 // transport-down syncs, only sessions absent from the current context's live
 // set, and — the fix — never a sync a DIFFERENT context created.
 func TestSelectOrphanSyncs(t *testing.T) {
-	const currentCtx = "omni-prod"
+	const currentCtx = "my-cluster"
 	const currentNs = "agent-sessions"
 	syncs := []syncpkg.SyncSession{
 		// current ctx+ns, gone session, orphaned → reap

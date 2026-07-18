@@ -9,7 +9,7 @@ import (
 // [V3] sanitizeLabelValue must coerce any kube-context name into a valid mutagen
 // label value: alphanumerics + '-'/'_'/'.', <=63 chars, alphanumeric first/last.
 // A value that is already valid and within length passes through UNCHANGED
-// (backward compat with existing labels like "omni-prod").
+// (backward compat with existing labels like "my-cluster").
 func TestSanitizeLabelValue(t *testing.T) {
 	longClean := strings.Repeat("a", 80) // valid chars but > 63
 
@@ -18,7 +18,7 @@ func TestSanitizeLabelValue(t *testing.T) {
 		in   string
 	}{
 		{"empty", ""},
-		{"clean-unchanged", "omni-prod"},
+		{"clean-unchanged", "my-cluster"},
 		{"kubeadm-default", "kubernetes-admin@kubernetes"},
 		{"eks-arn", "arn:aws:eks:us-east-1:123456789012:cluster/prod"},
 		{"over-63-clean", longClean},
@@ -35,8 +35,8 @@ func TestSanitizeLabelValue(t *testing.T) {
 				}
 				return
 			}
-			// "omni-prod" is already valid → unchanged.
-			if c.in == "omni-prod" && got != "omni-prod" {
+			// "my-cluster" is already valid → unchanged.
+			if c.in == "my-cluster" && got != "my-cluster" {
 				t.Fatalf("a valid label must pass through unchanged, got %q", got)
 			}
 			// Never longer than mutagen's 63-char cap.
@@ -78,7 +78,7 @@ func TestSanitizeLabelValue(t *testing.T) {
 // when it is unset (legacy / no-namespace callers).
 func TestCreateProjectStampsNamespaceLabel(t *testing.T) {
 	r := &fakeRunner{}
-	m := withContext(r, "omni-prod")
+	m := withContext(r, "my-cluster")
 	m.SetNamespace("team-b")
 	spec := Spec{
 		SessionID:    "s1",
@@ -98,7 +98,7 @@ func TestCreateProjectStampsNamespaceLabel(t *testing.T) {
 
 	// No namespace set → no namespace label (backward compat with pre-[V28] syncs).
 	r2 := &fakeRunner{}
-	m2 := withContext(r2, "omni-prod") // namespace unset
+	m2 := withContext(r2, "my-cluster") // namespace unset
 	if _, err := m2.CreateProject(context.Background(), spec); err != nil {
 		t.Fatalf("CreateProject: %v", err)
 	}
@@ -112,8 +112,8 @@ func TestCreateProjectStampsNamespaceLabel(t *testing.T) {
 // template shape keeps parsing.
 func TestParseSyncListNamespaceField(t *testing.T) {
 	out := strings.Join([]string{
-		"sess-a|omni-prod|sync_1|sandbox-sess-a-project|Watching|team-b", // 6 fields
-		"sess-b|omni-prod|sync_2|sandbox-sess-b-project|Paused",          // 5 fields (legacy)
+		"sess-a|my-cluster|sync_1|sandbox-sess-a-project|Watching|team-b", // 6 fields
+		"sess-b|my-cluster|sync_2|sandbox-sess-b-project|Paused",          // 5 fields (legacy)
 	}, "\n")
 	got := parseSyncList([]byte(out))
 	if len(got) != 2 {

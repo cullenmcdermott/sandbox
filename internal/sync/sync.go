@@ -151,7 +151,7 @@ func alnumRune(r rune) bool {
 // appended (inside the 63-char cap) so two distinct originals that sanitize to
 // the same base still get distinct labels. A value that is already valid and
 // within length passes through UNCHANGED, preserving backward compatibility with
-// existing labels like "omni-prod". Empty in → empty out (callers read "" as "no
+// existing labels like "my-cluster". Empty in → empty out (callers read "" as "no
 // label").
 func sanitizeLabelValue(s string) string {
 	if s == "" {

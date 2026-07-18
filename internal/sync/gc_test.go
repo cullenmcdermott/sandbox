@@ -26,9 +26,9 @@ func (s *stubRunner) Output(_ context.Context, _ io.Reader, args ...string) ([]b
 // rows.
 func TestList_FiltersToSandboxSessionLabel(t *testing.T) {
 	out := strings.Join([]string{
-		"claude-sdk-abc|omni-prod|sync_111|sandbox-claude-sdk-abc-project|Watching",
-		"claude-sdk-abc|omni-prod|sync_222|sandbox-claude-sdk-abc-config-skills|ConnectingBeta",
-		"|omni-prod|sync_lima|sandbox-vm-orch-project|Watching",                    // lima sync: no sandbox-session label → drop
+		"claude-sdk-abc|my-cluster|sync_111|sandbox-claude-sdk-abc-project|Watching",
+		"claude-sdk-abc|my-cluster|sync_222|sandbox-claude-sdk-abc-config-skills|ConnectingBeta",
+		"|my-cluster|sync_lima|sandbox-vm-orch-project|Watching",                   // lima sync: no sandbox-session label → drop
 		"opencode-server-xyz||sync_333|sandbox-opencode-server-xyz-project|Paused", // legacy: no sandbox-context label
 		"short|sync_999|sandbox-short-project|Watching",                            // wrong field count (stale 4-field shape) → skip, no crash
 		"", // trailing blank
@@ -53,7 +53,7 @@ func TestList_FiltersToSandboxSessionLabel(t *testing.T) {
 		t.Errorf("List must not use a label selector (key-only returns nothing): %q", got)
 	}
 	// Fields parsed in order sessionID|context|identifier|name|status.
-	if sessions[0] != (SyncSession{SessionID: "claude-sdk-abc", Context: "omni-prod", Identifier: "sync_111", Name: "sandbox-claude-sdk-abc-project", Status: "Watching"}) {
+	if sessions[0] != (SyncSession{SessionID: "claude-sdk-abc", Context: "my-cluster", Identifier: "sync_111", Name: "sandbox-claude-sdk-abc-project", Status: "Watching"}) {
 		t.Errorf("row 0 mis-parsed: %+v", sessions[0])
 	}
 	// A legacy sync (no sandbox-context label) parses with an empty Context.

@@ -468,7 +468,7 @@ test('a delta for a foreign session or non-text field is ignored', () => {
 // --- Reasoning: emitted once as reasoning.* only (no trailing message.completed) -
 
 test('reasoning + text in one assistant message: reasoning is not re-emitted as a trailing message.completed', () => {
-  // Reproduces the live capture (omni-prod, big-pickle reasoning model, seq 41 vs
+  // Reproduces the live capture (my-cluster, big-pickle reasoning model, seq 41 vs
   // 38): opencode streams a ReasoningPart's content via message.part.delta with
   // field:'text' (a ReasoningPart stores its content in `.text`, exactly like a
   // TextPart), then the real answer streams, then session.idle. The mapper must NOT
