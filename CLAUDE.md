@@ -70,7 +70,7 @@ Run `just check` — it is what CI runs, so a green `just check` means a green C
 See `docs/verification-protocol.md` for the verification philosophy
 (hard-to-fake gates: correctness oracle + behavioral counter). Notes:
 
-- **In-sandbox caveat:** `client`, `internal/runner`, `models`, and
+- **In-sandbox caveat:** `client`, `client/models`, `internal/runner`, and
   `internal/k8s` bind httptest/local ports the command-sandbox blocks; run
   `just test` / `just verify` (and `just check`) with the sandbox disabled.
   Other packages test fine in-sandbox, with one exception:
@@ -109,7 +109,7 @@ Module: `github.com/cullenmcdermott/sandbox`
 | `internal/session` | Core types: `Spec`, `State`, `Event` (the event types enumerated in `schema/events.json`), `Backend` and `RunnerClient` interfaces |
 | `internal/k8s` | `Backend` impl using agent-sandbox v1alpha1 clientset: Sandbox/PVC create, suspend (replicas→0), resume, port-forward via client-go SPDY; reaper Job spec |
 | `internal/runner` | HTTP client implementing `RunnerClient`: health, start/interrupt turn, resolve permission, SSE event streaming with `after=<seq>` replay |
-| `models` (public) | Resolves a model's context-window limit + per-million-token pricing; drives the TUI ctx% indicator (`models.Limit(model)`) |
+| `client/models` (public) | Resolves a model's context-window limit + per-million-token pricing; drives the TUI ctx% indicator (`models.Limit(model)`) and is importable by external SDK consumers |
 | `internal/cli` | Cobra command tree: `claude`, `opencode`, `attach`, `status`, `suspend`, `resume`, `cancel`, `destroy`, `shell`, `sync`, `trace`, `rename` |
 | `internal/authstatus` | Offline per-agent auth status report (Claude/Codex/OpenCode providers) behind `sandbox auth status` — deliberately internal presentation machinery, not SDK surface |
 | `internal/tui/dashboard` | Bubble Tea v2 command-center: session list, attention routing, transcript, tool cards, permission modal, external (opencode) PTY pane, detach/interrupt keys. App-specific styles/glyphs read `tui/theme` tokens and re-skin via `theme.OnChange` |

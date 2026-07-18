@@ -1,9 +1,3 @@
-// Package models resolves a model's context-window limit and per-million-token
-// USD prices. It consults a cached copy of the models.dev table (fetched and
-// cached on first use with a TTL) and falls back to a static offline table.
-//
-// It is exported at a public import path so external consumers of model
-// metadata can reuse this resolution logic.
 package models
 
 import (

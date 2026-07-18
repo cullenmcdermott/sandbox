@@ -24,6 +24,7 @@ import (
 
 	"github.com/cullenmcdermott/sandbox/client"
 	"github.com/cullenmcdermott/sandbox/client/cred"
+	"github.com/cullenmcdermott/sandbox/client/models"
 )
 
 // --- client: constructor + options -----------------------------------------
@@ -294,6 +295,20 @@ var _ = cred.Account{
 	Type:      cred.AccountConsole,
 	CreatedAt: time.Time{},
 }
+
+// --- models: context-window + pricing resolver --------------------------------
+
+// Limit resolves a model id to its context limit + per-Mtok prices; the struct
+// literal pins every Info field. Retyping either breaks a consumer here.
+var (
+	_ func(string) models.Info = models.Limit
+
+	_ = models.Info{
+		ContextLimit: 200000,
+		InputPrice:   0,
+		OutputPrice:  0,
+	}
+)
 
 var (
 	_ cred.AccountType = cred.AccountSubscription
