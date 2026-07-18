@@ -79,6 +79,28 @@ directives (CC-style `/model` picker with Fable in the fallback; composer
 pickers) are fully closed — done log. Residuals from §1c live below; the §1b
 row-model consolidation moved to §2a where it belongs.
 
+### 1g. Dashboard lifecycle actions bypass client (2026-07-18 SDK-example review)
+
+The dashboard's suspend/resume/destroy keystrokes call the raw
+`dashboard.Backend` instead of `client.Suspend/Resume/Destroy`, so they miss
+the extra steps the client methods perform:
+
+- [ ] **TUI destroy skips the worktree WIP capture** — destroy path is
+  PreDestroyHook (StopSync) → `backend.Destroy` → DestroyHook
+  (`RemoveLocalState`) (`internal/tui/dashboard/actions.go:93`,
+  `internal/cli/sync_support.go:541`), never `client.teardownWorktree`
+  (`client/client.go:616`, `client/worktree.go:174`). Destroying a worktree
+  session from the dashboard silently discards dirty WIP (violates the §9 I2
+  "never silently discarded" invariant) and orphans the worktree dir right
+  after `RemoveLocalState` drops the index entry that records where it lives.
+  Fix direction: route the dashboard destroy through `client.Destroy` (or an
+  exported destroy seam) instead of raw backend + hook trio.
+- [ ] **TUI suspend/resume don't pause/resume file sync** —
+  `internal/tui/dashboard/actions.go:63-89` vs `client.Suspend/Resume`
+  (`client/client.go:578-596`), which pause/resume Mutagen around the pod
+  scale. Suspending from the dashboard leaves sync thrashing a dead
+  transport. Same fix direction as above.
+
 ### 1c. Rendering / layout residuals (2026-07-04 audit; parents fixed — done log)
 
 - [x] **`statusline.go` row-1 overflow — closed 2026-07-12** with the §2c
@@ -791,7 +813,7 @@ side effect of `cd`.
 - [ ] Verify detach (Ctrl+]) + surrounding chrome behave identically for every
   backend's external pane.
 - [~] **Live-session verify sweep — opencode (2026-07-06 headless pass on
-  omni-prod, zen provider, free big-pickle):** (a) **busy/idle status:
+  my-cluster, zen provider, free big-pickle):** (a) **busy/idle status:
   CONFIRMED live** — `session.status_changed busy→idle` streams at turn
   boundaries. **Title: NOT verifiable headless** — the turn adapter creates
   opencode sessions with an explicit placeholder title
@@ -812,7 +834,7 @@ side effect of `cd`.
   orderings pinned). Live re-verify at next natural occurrence.
 - [ ] **Diagnose live: opencode looks stuck after disconnect/reconnect
   (maintainer report 2026-07-04; recipe below). 2026-07-06 live probes
-  (omni-prod) EXONERATED the event layer:** (i) SSE dropped mid-flight
+  (my-cluster) EXONERATED the event layer:** (i) SSE dropped mid-flight
   during a 45s bash tool → the turn ran to completion server-side and
   reconnect with `after=<seq>` replayed contiguously incl. `tool.completed`,
   `turn.completed`, and the `idle` status flip
@@ -908,6 +930,36 @@ naming-break, and Shell items each stand alone.
   `client/client.go` (CreateOptions/validate), `internal/k8s/backend.go`
   (Secret + buildEnv), runner boot materialize step; sdktest pins in the
   same change.
+
+**2026-07-18 SDK-example review additions** (from auditing
+`client/example_test.go` against the full surface):
+
+- [ ] **`OpencodeProvider*` constants not aliased into `client`** — the
+  `CreateOptions.OpencodeProvider` doc (`client/client.go:387-396`) tells
+  callers to pass `session.OpencodeProviderAnthropic/OpenAI/Zen`, but those
+  constants live in `internal/session` and are not re-exported (unlike the
+  `Backend*` aliases at `client/client.go:129`), so external consumers must
+  hard-code raw strings the validator then checks them against. Fix: alias
+  the three constants + sdktest pin.
+- [ ] **`Example()` shows a hello-world, not the chat loop** —
+  `client/example_test.go:22` covers create→connect→one turn→2 event types.
+  Missing: permission flow (`EventPermissionRequested` →
+  `ResolvePermission`), streaming deltas, tool events, turn
+  failure/interrupt handling, reattach (`Open` + `Events(afterSeq)` +
+  `EventStreamLive`), account selection (`SelectAnthropicAccount`), and it
+  `Close()`s but never `Destroy`s (teaches leaking pods/PVCs). Fix
+  direction: add a second `Example_chat` (or `examples/` walkthrough)
+  exercising the full chat loop; keep compile-only.
+- [ ] **SDK capability gaps for an external chat/dashboard consumer**
+  (overlaps `docs/public-api-importability-plan.md`, which is TUI/auth
+  focused — these are client-level): no cluster watch (`k8s.Backend.Watch` →
+  `StateEvent`, `internal/tui/dashboard/actions.go:20` — SDK has only
+  `List`); no model context-window/pricing resolver (`internal/models.Limit`,
+  `internal/tui/dashboard/readmodel.go:29` — consumers can't build the ctx%
+  gauge); session titles/rename are `internal/index`-only
+  (`internal/cli/rename.go:24`); `Client.SyncStatus` returns raw bytes with
+  the conflict/orphan classification stuck in `internal/sync`
+  (`internal/cli/sync_support.go:90`).
 
 ## 9) Unbuilt features
 
