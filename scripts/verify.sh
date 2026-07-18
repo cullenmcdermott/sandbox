@@ -55,7 +55,7 @@ grn "1/2 anti-cheat scan clean"
 # Twice catches global-state leakage (run 2 sees state left by run 1) and
 # nondeterministic output. Whole module: no hardcoded package list.
 #
-# In-sandbox caveat: client, internal/runner, internal/models, and internal/k8s
+# In-sandbox caveat: client, internal/runner, models, and internal/k8s
 # bind httptest/local ports, which the agent command-sandbox blocks. Run this
 # with the sandbox disabled (it is unrestricted in CI and normal local dev).
 #

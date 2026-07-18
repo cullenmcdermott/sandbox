@@ -13,7 +13,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/cullenmcdermott/sandbox/internal/session"
-	"github.com/cullenmcdermott/sandbox/internal/tui/dashboard/chat"
+	"github.com/cullenmcdermott/sandbox/tui/chat"
 	"github.com/cullenmcdermott/sandbox/tui/list"
 	"github.com/cullenmcdermott/sandbox/tui/terminal"
 	"github.com/cullenmcdermott/sandbox/tui/theme"

@@ -9,7 +9,7 @@
 #     normal Nix/macOS dev shell use their own defaults):
 #         GOPATH=/tmp/gopath GOMODCACHE=/tmp/gomodcache GOFLAGS=-mod=mod \
 #         GOCACHE=$TMPDIR/go-build-cache
-#   - In-sandbox httptest caveat: `client`, `internal/runner`, `internal/models`,
+#   - In-sandbox httptest caveat: `client`, `internal/runner`, `models`,
 #     and `internal/k8s` bind localhost ports the agent command-sandbox blocks
 #     (and `sdk-conformance` may need the network for `go mod tidy -diff`). Run
 #     `just test` / `just verify` / `just check` with the sandbox disabled

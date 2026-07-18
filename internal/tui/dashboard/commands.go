@@ -16,8 +16,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	"github.com/cullenmcdermott/sandbox/internal/models"
 	"github.com/cullenmcdermott/sandbox/internal/session"
+	"github.com/cullenmcdermott/sandbox/models"
 	"github.com/cullenmcdermott/sandbox/tui/kit"
 	"github.com/cullenmcdermott/sandbox/tui/theme"
 )

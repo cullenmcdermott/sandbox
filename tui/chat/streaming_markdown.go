@@ -1,4 +1,7 @@
 // Package chat implements streaming markdown rendering with stable-prefix caching.
+//
+// It is exported at a public import path so external TUI consumers can reuse
+// these chat-transcript rendering primitives.
 package chat
 
 import (

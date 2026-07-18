@@ -3,8 +3,8 @@ package dashboard
 import (
 	"encoding/json"
 
-	"github.com/cullenmcdermott/sandbox/internal/models"
 	"github.com/cullenmcdermott/sandbox/internal/session"
+	"github.com/cullenmcdermott/sandbox/models"
 )
 
 // sessionReadModel is the single derived read-model state that BOTH the dashboard

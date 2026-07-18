@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cullenmcdermott/sandbox/internal/tui/dashboard/chat"
+	"github.com/cullenmcdermott/sandbox/tui/chat"
 	"github.com/cullenmcdermott/sandbox/tui/theme"
 )
 

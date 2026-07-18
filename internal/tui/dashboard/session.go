@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cullenmcdermott/sandbox/internal/models"
 	"github.com/cullenmcdermott/sandbox/internal/session"
+	"github.com/cullenmcdermott/sandbox/models"
 	"github.com/cullenmcdermott/sandbox/tui/theme"
 )
 

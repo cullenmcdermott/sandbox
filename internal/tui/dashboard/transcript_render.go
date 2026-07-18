@@ -12,8 +12,8 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/cullenmcdermott/sandbox/internal/session"
-	"github.com/cullenmcdermott/sandbox/internal/tui/dashboard/chat"
 	"github.com/cullenmcdermott/sandbox/tui/anim"
+	"github.com/cullenmcdermott/sandbox/tui/chat"
 	"github.com/cullenmcdermott/sandbox/tui/kit"
 	"github.com/cullenmcdermott/sandbox/tui/theme"
 )
