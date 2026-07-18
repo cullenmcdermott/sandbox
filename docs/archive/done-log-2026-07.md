@@ -1805,3 +1805,59 @@ actionable wording pinned by test). Post-commit `just check` fully green
   pinned by test (TestCitationsSurviveDroppedPartialReplay).
 - 16 new runner mapping tests + 7 Go TUI/render tests; runner-api.md
   documents the citations array + server-tool mapping contract.
+
+## 2026-07-18 — audit burndown wave 1: 27 findings fixed across five batches (3e67728, d77905f, d47d3b7, ceb573d, 43a15e2)
+
+Provenance: [`docs/audit-2026-07-18.md`](../audit-2026-07-18.md) (per-finding
+verdicts stamped there; every fix carries a `[Vn]` comment at the site).
+Five builder batches, every diff orchestrator-reviewed, full Go suite +
+342-test runner suite green per batch.
+
+- **runner claude/core (3e67728):** [V4] agentSessionId emit-key drift (live
+  laptop-resume was silently dead), [V15] AskUserQuestion de-listed,
+  [V16] subagent usage no longer clobbers ctx%, [V17] camelCase secret
+  redaction, [V18] SIGTERM shutdown emits turn.interrupted + boot
+  hasTurnTerminal double-emit guard, [V38] undeclared delta:true dropped,
+  [V39] token budget counts terminal usage rows only (was ~2× counting),
+  [V40] agent.ts abort-ownership contract, [V41] turn-counter reseed from
+  the log, [V42] registerTurn-throw slot wedge.
+- **runner opencode (d77905f):** [V19] no turn.failed after
+  turn.interrupted, [V20] verify-exhaustion fails the turn instead of
+  abandoning the persisted session, [V21] warmup/first-turn create
+  coalesced (shared in-flight promise), [V43] phantom-cycle guard
+  (runner-consumed message ids), [V44] sessionID-less session.error strict
+  match, [V45] model latch is per-value (in-TUI model switch propagates).
+- **tui-state (d47d3b7):** [V5] detach carries the transcript read-model to
+  the row (lost-permission/stuck-Busy class), [V22] /clear todo re-pin,
+  [V23] replay-gated queued-prompt flush + boundary release, [V46] applySeed
+  attachedID guard, [V47] catchingUp release on watch-fail + cap-decline.
+- **go-client (ceb573d):** [V1] worktree reap ownership gate (cross-
+  namespace/cluster live sessions safe; index-less dirs skipped),
+  [V8] public event vocabulary completed + sdktest completeness pin,
+  [V9] Connect/Close generation guard (-race pinned), [V31]/[V36] doc
+  corrections, [V37] schema gate fails on untagged exported fields.
+- **go-sync (43a15e2):** [V2] safety-halt auto-heal (data-loss class)
+  split out of the MF5 heal, [V3] kube-context label sanitization (sync was
+  entirely broken for kubeadm/EKS context names), [V7] index adapter
+  lost-update fix (partial saves + locked Index.Update), [V12]
+  RemoveLocalState("") state-root wipe guard, [V13] sync --terminate SSH
+  alias path drift, [V14] honest Paused classification + heal, [V28]
+  namespace-scoped sync GC, [V35] paused-orphan reap (CLI half; dashboard
+  half deferred — TODO §5).
+
+## 2026-07-18 — audit burndown wave 2: k8s/cli batch (442b04b) — audit fully burned down
+
+- **k8s/cli (442b04b):** [V10] reaper RBAC docs corrected (get,update
+  sandboxes / list pods / get secrets) + executable `k8s/reaper-rbac.yaml`,
+  [V11] sandboxToState workspace/project split (watch-inserted worktree
+  sessions no longer mis-titled / mis-synced) + mergeClusterState carry,
+  [V26] claude/opencode join positionals, [V27] destroy confirm reads a
+  line (bare Enter denies), [V30] read-side validateID (Load/
+  LoadCachedEvents/DeleteEventCache), [V32] README image-default drift
+  (ghcr.io), [V33] same-shape account-swap rotation warning + logout
+  caveat, [V34] port-forward backoff resets after an established attempt.
+- **Audit disposition:** all 47 findings resolved same-day (46 fixed, V35
+  dashboard half + V15 answer flow as TODO residuals, 0 refuted); verdicts
+  stamped per-finding in `docs/audit-2026-07-18.md`. Uncovered: the 6
+  spend-limit-killed auditor subsystems (tui-public, security, docs,
+  tests-ci, tui-render, tui-input) — re-run is a maintainer call.

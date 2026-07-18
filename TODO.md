@@ -30,6 +30,15 @@
 > [B1-B4] · [C1] [H1] [H2/H3] · [E1] [E2] [E3] [E5] [E6] · [A2] [B5-B9]
 > [D3] [D5] [E4] · [H4-H7] [D6] [C3-C11] — all in the done log.)*
 >
+> **2026-07-18 audit:** a 16-subsystem audit produced 47 verified findings
+> ([`docs/audit-2026-07-18.md`](docs/audit-2026-07-18.md), ids `[V1]`-`[V47]`)
+> — ALL burned down same day across seven commits (per-finding verdicts in the
+> doc; detail in the done log). Residuals promoted into sections: §2b
+> AskUserQuestion answer flow ([V15]), §5 dashboard paused-orphan reap
+> ([V35]). STILL UNCOVERED: 6 auditors (tui-public, security, docs, tests-ci,
+> tui-render, tui-input) died on a spend limit — re-running them is a
+> maintainer call.
+>
 > **Opus-ready map:** §1c–§1d residuals, §2a–§2d, §4, §7a and the §5 GC
 > follow-ups carry pointers + fix direction — pick a cluster and go. Drafted,
 > awaiting maintainer sign-off: §1e server-side-loop ADR, §7b package-manager
@@ -297,6 +306,14 @@ changes go through `schema/events.json` + `just gen` (never hand-edit `*.gen.*`)
   reopened (settings-defined hooks inherit the stripped agent env —
   SECURITY.md updated). Live in-pod verify (a synced `.claude/` command
   actually firing) still wanted.
+- [ ] **AskUserQuestion answer flow (2026-07-18 audit [V15] residual).** The
+  tool was in `DEFAULT_ALLOWED_TOOLS` with no answer path in ANY mode (yolo
+  omits `canUseTool` entirely; prompting modes degraded to a useless generic
+  allow) — removed 2026-07-18 (done log). To re-enable: wire `canUseTool`
+  unconditionally, map AskUserQuestion's questions/options into
+  `permission.requested` as a distinct question kind, return selections via
+  `updatedInput`, and render a picker in the TUI (`runner/src/claude.ts`,
+  the §2c permPrompt component).
 - [ ] **9. Single-slot client-local prompt queue.** `queuedPrompt` is one
   string (`transcript.go:332-334`) — second message overwrites; invisible
   cross-client. Claude Code has a multi-message editable queue.
@@ -589,7 +606,15 @@ done log.)
   `Init` fires `reconcileListCmd`; create commands run `startupSyncGC`).
   Unverified live: real-daemon heal of a genuinely wedged transport;
   `kind-down`-after-gc leaves orphans if sessions were live at teardown
-  (pre-existing, noted).
+  (pre-existing, noted). **2026-07-18 audit follow-ups landed** (done log):
+  safety-halt vs stall split ([V2]), label sanitization ([V3]), Paused
+  classification + heal ([V14]), namespace GC scoping ([V28]), paused-orphan
+  reap CLI-side ([V35]). STILL OPEN ([V35] residual): the DASHBOARD reaper
+  deliberately does not list paused syncs — its grace logic
+  (`internal/tui/dashboard/model_sse.go` `reapOrphans`/`gcRunningSet`)
+  protects only Running/Creating, so it can't yet distinguish a suspended
+  session's paused syncs from a kubectl-deleted one's; teach it
+  suspended-vs-gone before extending the reap.
 
 ## 6) Codex backend + credential manager
 
