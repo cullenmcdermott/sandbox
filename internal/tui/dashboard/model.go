@@ -9,7 +9,6 @@ import (
 	"charm.land/bubbles/v2/help"
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/cullenmcdermott/sandbox/internal/k8s"
 	"github.com/cullenmcdermott/sandbox/internal/session"
 	"github.com/cullenmcdermott/sandbox/tui/anim"
 	"github.com/cullenmcdermott/sandbox/tui/terminal"
@@ -119,7 +118,7 @@ type Model struct {
 	// handler can re-issue watchNextCmd after each event — the self-perpetuating
 	// reader idiom (mirrors liveSSEChannels). Without re-issuing, the watch would
 	// deliver exactly one event for the model's whole lifetime and then go deaf.
-	watchCh <-chan k8s.StateEvent
+	watchCh <-chan session.StateEvent
 
 	// liveSSECancels holds the cancel function for each session's live-status
 	// SSE stream. Keyed by session.ID. Cancelled on quit or when the session

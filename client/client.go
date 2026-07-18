@@ -27,6 +27,7 @@ type (
 	Ref                = session.Ref
 	Spec               = session.Spec
 	State              = session.State
+	StateEvent         = session.StateEvent
 	Status             = session.Status
 	Activity           = session.Activity
 	ApprovalPolicy     = session.ApprovalPolicy
@@ -106,6 +107,10 @@ type Backend interface {
 	// Status / List report observed session state.
 	Status(ctx context.Context, ref Ref) (State, error)
 	List(ctx context.Context) ([]State, error)
+	// Watch streams StateEvents (snapshot-or-tombstone per session) for a live
+	// session-list read-model; the caller seeds with List first. The channel is
+	// closed when ctx is cancelled.
+	Watch(ctx context.Context) (<-chan StateEvent, error)
 	// Suspend / Resume / Destroy drive the pod lifecycle.
 	Suspend(ctx context.Context, ref Ref) error
 	Resume(ctx context.Context, ref Ref) error
@@ -608,6 +613,14 @@ func (c *Client) Status(ctx context.Context, id ID) (State, error) {
 
 // List returns the observed state of all sessions in the namespace.
 func (c *Client) List(ctx context.Context) ([]State, error) { return c.backend.List(ctx) }
+
+// Watch returns a channel of StateEvents (a snapshot-or-tombstone per session)
+// so a consumer can drive a live session-list dashboard. Seed the read-model
+// with List first — the backend watch's initial list is asynchronous — then
+// apply each StateEvent. The channel is closed when ctx is cancelled.
+func (c *Client) Watch(ctx context.Context) (<-chan StateEvent, error) {
+	return c.backend.Watch(ctx)
+}
 
 // Suspend suspends a session (terminate pod, keep PVC) and pauses its file sync.
 func (c *Client) Suspend(ctx context.Context, id ID) error {

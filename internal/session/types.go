@@ -289,6 +289,16 @@ type State struct {
 	Capabilities Capabilities `json:"capabilities,omitempty"`
 }
 
+// StateEvent is a single snapshot-or-tombstone from a backend watch stream: the
+// latest observed State for a session, or (Deleted=true) a tombstone marking
+// that the session is gone. It is the unit delivered on the channel returned by
+// Backend.Watch, so a consumer can maintain a live latest-state-per-session
+// read-model for a session-list dashboard.
+type StateEvent struct {
+	State   State
+	Deleted bool
+}
+
 // Capabilities is the backend capability map from GET /status (mirrors the
 // StatusResponse.capabilities object in runner/src/types.ts). Autopilot is true
 // when this backend has a runner-side autopilot driver (the server-side

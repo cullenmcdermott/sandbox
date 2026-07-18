@@ -6,7 +6,6 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/cullenmcdermott/sandbox/internal/k8s"
 	"github.com/cullenmcdermott/sandbox/internal/session"
 )
 
@@ -17,7 +16,7 @@ import (
 // PodEventMsg carries a single cluster-watch delta for one session. The
 // dashboard's Update handler patches exactly that one session in the read-model.
 type PodEventMsg struct {
-	Event k8s.StateEvent
+	Event session.StateEvent
 }
 
 // seedMsg carries the initial session list from Backend.List.
@@ -467,13 +466,13 @@ func (m *Model) startWatchCmd() tea.Cmd {
 
 // watchReadyMsg is returned by startWatchCmd with the open channel.
 type watchReadyMsg struct {
-	ch     <-chan k8s.StateEvent
+	ch     <-chan session.StateEvent
 	cancel context.CancelFunc
 }
 
 // watchNextCmd blocks on one read from the watch channel and returns a
 // PodEventMsg, then the Update loop re-issues itself for the next event.
-func watchNextCmd(ch <-chan k8s.StateEvent) tea.Cmd {
+func watchNextCmd(ch <-chan session.StateEvent) tea.Cmd {
 	return func() tea.Msg {
 		ev, ok := <-ch
 		if !ok {

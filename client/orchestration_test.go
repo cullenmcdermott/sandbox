@@ -34,6 +34,8 @@ type fakeBackend struct {
 	statusErr   error
 	listStates  []State
 	listErr     error
+	watchCh     <-chan StateEvent
+	watchErr    error
 	suspendErr  error
 	resumeErr   error
 	destroyErr  error
@@ -81,6 +83,13 @@ func (f *fakeBackend) List(context.Context) ([]State, error) {
 		*f.order = append(*f.order, "list")
 	}
 	return f.listStates, f.listErr
+}
+
+func (f *fakeBackend) Watch(context.Context) (<-chan StateEvent, error) {
+	if f.order != nil {
+		*f.order = append(*f.order, "watch")
+	}
+	return f.watchCh, f.watchErr
 }
 
 func (f *fakeBackend) Suspend(_ context.Context, ref Ref) error {

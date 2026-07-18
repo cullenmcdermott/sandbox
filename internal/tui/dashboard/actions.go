@@ -6,7 +6,6 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/cullenmcdermott/sandbox/internal/k8s"
 	"github.com/cullenmcdermott/sandbox/internal/session"
 )
 
@@ -17,7 +16,7 @@ import (
 // keystroke dispatches the right cluster call. *k8s.Backend satisfies it.
 type Backend interface {
 	List(ctx context.Context) ([]session.State, error)
-	Watch(ctx context.Context) (<-chan k8s.StateEvent, error)
+	Watch(ctx context.Context) (<-chan session.StateEvent, error)
 	Suspend(ctx context.Context, ref session.Ref) error
 	Resume(ctx context.Context, ref session.Ref) error
 	Destroy(ctx context.Context, ref session.Ref) error

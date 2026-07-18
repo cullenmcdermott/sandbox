@@ -45,6 +45,13 @@ var (
 	// from the old *internal/k8s.Backend). Retyping it — or widening client.Backend
 	// so the k8s backend no longer satisfies it — breaks this pin.
 	_ func(client.Backend) client.Option = client.WithBackend
+
+	// Backend.Watch is part of the cluster-side seam: a method expression on the
+	// interface pins that Watch stays on client.Backend with this signature, so
+	// dropping or retyping it fails to compile HERE. (The interface isn't
+	// implementable outside the module — see the header note — so this is the
+	// way to pin the method rather than a consumer implementation.)
+	_ func(client.Backend, context.Context) (<-chan client.StateEvent, error) = client.Backend.Watch
 )
 
 // --- client: Client method set ----------------------------------------------
@@ -53,6 +60,7 @@ var (
 	_ func(*client.Client, context.Context, client.CreateOptions) (*client.Session, error) = (*client.Client).Create
 	_ func(*client.Client, client.ID) *client.Session                                      = (*client.Client).Open
 	_ func(*client.Client, context.Context) ([]client.State, error)                        = (*client.Client).List
+	_ func(*client.Client, context.Context) (<-chan client.StateEvent, error)              = (*client.Client).Watch
 	_ func(*client.Client, context.Context, client.ID) (client.State, error)               = (*client.Client).Status
 	_ func(*client.Client, context.Context, client.ID) error                               = (*client.Client).Suspend
 	_ func(*client.Client, context.Context, client.ID) error                               = (*client.Client).Resume
@@ -217,6 +225,14 @@ var _ = client.Spec{
 var _ = client.State{
 	ProjectPath:   "/work/repo",
 	WorkspacePath: "/work/repo",
+}
+
+// StateEvent is the cluster-watch delivery unit (Client.Watch): a snapshot-or-
+// tombstone per session. Removing or retyping either field breaks a consumer's
+// watch read-model here first.
+var _ = client.StateEvent{
+	State:   client.State{},
+	Deleted: true,
 }
 
 var _ = client.Connection{

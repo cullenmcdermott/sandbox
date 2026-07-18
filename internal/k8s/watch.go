@@ -14,11 +14,10 @@ import (
 	"github.com/cullenmcdermott/sandbox/internal/session"
 )
 
-// StateEvent wraps a session.State with a deletion flag for the cluster watch.
-type StateEvent struct {
-	State   session.State
-	Deleted bool
-}
+// StateEvent is the cluster-watch delivery unit. It aliases session.StateEvent
+// (a snapshot-or-tombstone) so this package's watch code and callers share the
+// exact same type the public SDK re-exports.
+type StateEvent = session.StateEvent
 
 // coalescingBuffer holds the latest StateEvent per session id with a wake
 // signal. The informer's event handler MUST NOT block — client-go delivers to a

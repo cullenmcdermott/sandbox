@@ -4,7 +4,6 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/cullenmcdermott/sandbox/internal/k8s"
 	"github.com/cullenmcdermott/sandbox/internal/session"
 )
 
@@ -505,7 +504,7 @@ func mergeClusterState(existing, incoming session.State) session.State {
 
 // applyPodEvent patches the read-model for one cluster-watch event and returns
 // any Cmd needed to start/stop a live SSE stream for the affected session.
-func (m *Model) applyPodEvent(ev k8s.StateEvent) tea.Cmd {
+func (m *Model) applyPodEvent(ev session.StateEvent) tea.Cmd {
 	id := ev.State.ID
 	if ev.Deleted || ev.State.Status == session.StatusGone {
 		// Remove from the list and cancel its SSE stream.
