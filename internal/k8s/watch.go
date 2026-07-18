@@ -201,17 +201,27 @@ func (b *Backend) Watch(ctx context.Context) (<-chan StateEvent, error) {
 // container's env (write-once, see buildEnv). This lets the cluster watch emit
 // fully-formed RUNNING transitions in realtime — no per-event pod Get.
 func sandboxToState(sb *agentv1alpha1.Sandbox) session.State {
+	// Recover the identity fields the pod was created with so a session that
+	// first appears via the watch (created in another terminal while the
+	// dashboard is open) carries its real paths (needed to open the SSE stream /
+	// Mutagen sync) and Backend (claude vs opencode). Pure functions of sb — no
+	// API call. Mirrors statusFromSandbox: PROJECT_PATH is the pod cwd / bind
+	// mount = the WORKSPACE path (the local Mutagen alpha); SANDBOX_PROJECT_ROOT
+	// is the repo-root ProjectPath used for display/grouping. Pre-worktree-split
+	// pods carry only PROJECT_PATH, so fall back to it (workspace == repo root
+	// there anyway).
+	workspace := sandboxEnv(sb, "PROJECT_PATH")
+	projectRoot := sandboxEnv(sb, "SANDBOX_PROJECT_ROOT")
+	if projectRoot == "" {
+		projectRoot = workspace
+	}
 	st := session.State{
-		ID:          session.ID(sb.Name),
-		SandboxName: sb.Name,
-		CreatedAt:   sb.CreationTimestamp.Time,
-		// Recover the identity fields the pod was created with so a session that
-		// first appears via the watch (created in another terminal while the
-		// dashboard is open) carries its real ProjectPath (needed to open the SSE
-		// stream / Mutagen sync) and Backend (claude vs opencode). Pure functions
-		// of sb — no API call. Mirrors statusFromSandbox.
-		ProjectPath: sandboxEnv(sb, "PROJECT_PATH"),
-		Backend:     sandboxEnv(sb, "SANDBOX_BACKEND"),
+		ID:            session.ID(sb.Name),
+		SandboxName:   sb.Name,
+		CreatedAt:     sb.CreationTimestamp.Time,
+		ProjectPath:   projectRoot,
+		WorkspacePath: workspace,
+		Backend:       sandboxEnv(sb, "SANDBOX_BACKEND"),
 	}
 
 	replicas := int32(1)

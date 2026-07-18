@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"k8s.io/client-go/kubernetes/fake"
@@ -141,6 +142,60 @@ func TestSandboxToState(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSandboxToStateWorkspaceProjectSplit pins the [V11] fix: sandboxToState
+// must recover WorkspacePath (pod cwd / Mutagen alpha) from PROJECT_PATH and
+// ProjectPath (repo root, for display/grouping) from SANDBOX_PROJECT_ROOT —
+// mirroring statusFromSandbox — so a watch-inserted worktree session doesn't
+// carry the worktree dir as its ProjectPath. A legacy pod without
+// SANDBOX_PROJECT_ROOT falls both back to PROJECT_PATH.
+func TestSandboxToStateWorkspaceProjectSplit(t *testing.T) {
+	sbWithEnv := func(name string, env map[string]string) *agentv1alpha1.Sandbox {
+		one := int32(1)
+		vars := make([]corev1.EnvVar, 0, len(env))
+		for k, v := range env {
+			vars = append(vars, corev1.EnvVar{Name: k, Value: v})
+		}
+		return &agentv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Spec: agentv1alpha1.SandboxSpec{
+				Replicas: &one,
+				PodTemplate: agentv1alpha1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "runner", Env: vars}},
+					},
+				},
+			},
+		}
+	}
+
+	t.Run("worktree pod splits workspace from repo root", func(t *testing.T) {
+		sb := sbWithEnv("wt", map[string]string{
+			"PROJECT_PATH":         "/state/worktrees/wt-abc",
+			"SANDBOX_PROJECT_ROOT": "/home/me/repo",
+		})
+		st := sandboxToState(sb)
+		if st.WorkspacePath != "/state/worktrees/wt-abc" {
+			t.Errorf("WorkspacePath: got %q, want the worktree dir (PROJECT_PATH)", st.WorkspacePath)
+		}
+		if st.ProjectPath != "/home/me/repo" {
+			t.Errorf("ProjectPath: got %q, want the repo root (SANDBOX_PROJECT_ROOT)", st.ProjectPath)
+		}
+	})
+
+	t.Run("legacy pod without SANDBOX_PROJECT_ROOT falls both back to PROJECT_PATH", func(t *testing.T) {
+		sb := sbWithEnv("legacy", map[string]string{
+			"PROJECT_PATH": "/home/me/repo",
+		})
+		st := sandboxToState(sb)
+		if st.WorkspacePath != "/home/me/repo" {
+			t.Errorf("WorkspacePath: got %q, want /home/me/repo", st.WorkspacePath)
+		}
+		if st.ProjectPath != "/home/me/repo" {
+			t.Errorf("ProjectPath: got %q, want /home/me/repo (PROJECT_PATH fallback)", st.ProjectPath)
+		}
+	})
 }
 
 // TestWatchDoesNotDropEventWhenChannelFull verifies that Watch blocks the

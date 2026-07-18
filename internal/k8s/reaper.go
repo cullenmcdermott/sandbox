@@ -22,8 +22,11 @@ const (
 	// agent-sessions: that namespace's egress NetworkPolicy blocks the k8s API,
 	// so a reaper there could not issue the suspend. See docs/session-lifecycle.md.
 	ReaperNamespace = "agent-reaper"
-	// ReaperServiceAccount is bound (via homelab RBAC) to get/patch sandboxes and
-	// get pods/secrets in agent-sessions.
+	// ReaperServiceAccount is bound (via homelab RBAC) to the verbs the reaper
+	// actually issues in agent-sessions: get,update on sandboxes (suspend goes
+	// through sandboxes.Update via setReplicas, not Patch), list on pods (Status
+	// resolves the pod IP with a label-selector Pods().List), and get on secrets
+	// (the runner bearer token). See docs/session-lifecycle.md and k8s/README.md.
 	ReaperServiceAccount = "sandbox-reaper"
 	// DefaultReaperImage is the image running the `sandbox reap` subcommand.
 	// Public GHCR package built by Depot CI. Its pull policy is resolved from the

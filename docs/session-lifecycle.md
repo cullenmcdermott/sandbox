@@ -158,6 +158,7 @@ Images:
 
 Cluster (GitOps — example manifests under `k8s/`):
 - [ ] `agent-reaper` namespace + ServiceAccount
-- [ ] Role in agent-sessions (get/patch sandboxes, get pods, get secrets) +
-      RoleBinding to the reaper SA
+- [ ] Role in agent-sessions (`sandboxes: get,update` — suspend is
+      `sandboxes.Update`, not patch — plus `pods: list` and `secrets: get`) +
+      RoleBinding to the reaper SA (example: `k8s/reaper-rbac.yaml`)
 - [ ] NetworkPolicy ingress exception on agent-sessions pods for the reaper

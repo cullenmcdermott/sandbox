@@ -640,12 +640,29 @@ func anthropicEnvShape(sb *agentv1alpha1.Sandbox) (envName, secretName string) {
 func (b *Backend) syncSessionCredential(ctx context.Context, spec session.Spec) error {
 	name := sessionSecretName(string(spec.ID))
 	secrets := b.core.CoreV1().Secrets(spec.Namespace)
+	// [V33] Track whether this re-create rotates a DIFFERENT non-empty credential
+	// onto an existing session Secret (a same-shape account swap). The pod
+	// resolved its credential env from the Secret ONCE at start (SecretKeyRef),
+	// so the running pod keeps authenticating as the OLD account until a pod
+	// restart — mirroring warnIfOpencodeCredsRotated on the opencode path. We
+	// warn whenever the bytes change on an existing credential rather than gating
+	// on live pod state: determining pod-running here would need an extra API
+	// call this path doesn't otherwise make, and slightly over-warning (e.g. on a
+	// currently-suspended session, whose next resume adopts the new creds anyway)
+	// is acceptable versus silently swapping the account under a live pod.
+	credRotated := false
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		credRotated = false // recompute per attempt; the last attempt's value wins
 		secret, getErr := secrets.Get(ctx, name, metav1.GetOptions{})
 		if getErr != nil {
 			return getErr
 		}
 		changed := false
+		if len(spec.AnthropicCredential) > 0 &&
+			len(secret.Data[secretKeyAnthropicCredential]) > 0 &&
+			string(secret.Data[secretKeyAnthropicCredential]) != string(spec.AnthropicCredential) {
+			credRotated = true // an existing non-empty credential is being replaced
+		}
 		changed = reconcileSecretCredential(secret, secretKeyAnthropicCredential, labelAnthropicAccount, spec.AnthropicCredential, spec.AnthropicAccountID) || changed
 		changed = reconcileSecretCredential(secret, secretKeyCodexAuthJSON, labelCodexAccount, spec.CodexAuthJSON, spec.CodexAccountID) || changed
 		if !changed {
@@ -656,6 +673,15 @@ func (b *Backend) syncSessionCredential(ctx context.Context, spec session.Spec) 
 	})
 	if err != nil {
 		return fmt.Errorf("k8s: sync account credential on Secret %s: %w", name, err)
+	}
+	if credRotated {
+		fmt.Fprintf(os.Stderr,
+			"warning: session %s was re-created with a different Anthropic account (Secret updated to %q). "+
+				"The running pod still authenticates with the OLD account — the credential is resolved from the "+
+				"Secret only at pod start. Restart the pod to adopt the new account: "+
+				"`sandbox suspend %s && sandbox resume %s` (or destroy + recreate). Until then `sandbox auth logout` "+
+				"for the old account will not list this session.\n",
+			spec.ID, spec.AnthropicAccountID, spec.ID, spec.ID)
 	}
 	return nil
 }
@@ -799,6 +825,13 @@ func OpencodeUsername() string { return opencodeServerUsername }
 // not scrub those per-session copies (running pods hold the env var regardless)
 // nor revoke the credential at Anthropic. Read-only; returns an empty slice
 // when nothing matches.
+//
+// [V33] Swap-window caveat: this enumerates by the Secret's CURRENT
+// labelAnthropicAccount, so a session whose Secret was just re-created onto a
+// different account (a same-shape swap) is reported under the NEW account even
+// though its running pod still authenticates with the OLD one until a pod
+// restart. syncSessionCredential prints a rotation warning at swap time; this
+// report intentionally does not do pod-start-time comparison.
 func (b *Backend) SessionsForAccount(ctx context.Context, accountID string) ([]string, error) {
 	selector := fmt.Sprintf("%s=%s", labelAnthropicAccount, accountID)
 	list, err := b.core.CoreV1().Secrets(b.namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})

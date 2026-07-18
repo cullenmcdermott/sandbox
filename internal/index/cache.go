@@ -143,6 +143,9 @@ func compactCacheTail(path string, keepBytes int64) error {
 // rather than failing the whole replay, so one bad/partial write can't wedge the
 // attach — the delta stream backfills anything missing.
 func (i *Index) LoadCachedEvents(id string) ([]session.Event, error) {
+	if err := validateID(i.root, id); err != nil { // [V30] uniform C5 traversal guard
+		return nil, err
+	}
 	f, err := os.Open(i.EventCachePath(id))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -186,6 +189,9 @@ func (i *Index) LoadCachedEvents(id string) ([]session.Event, error) {
 // DeleteEventCache removes a session's transcript cache (used when an entry is
 // deleted). A missing file is not an error.
 func (i *Index) DeleteEventCache(id string) error {
+	if err := validateID(i.root, id); err != nil { // [V30] uniform C5 traversal guard
+		return err
+	}
 	if err := os.Remove(i.EventCachePath(id)); err != nil && !os.IsNotExist(err) {
 		return err
 	}

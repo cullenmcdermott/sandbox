@@ -177,6 +177,22 @@ func nextForwardBackoff(current, max time.Duration) time.Duration {
 	return current
 }
 
+// forwardWaitBackoff returns the delay to wait before the next reconnect,
+// given the current backoff and whether the attempt that just finished had
+// established (carried traffic). [V34] An established attempt resets the
+// progression to the initial delay — its drop is the FIRST failure of a
+// previously-healthy forward, so the reconnect should be prompt rather than
+// stuck at whatever cap earlier consecutive failures ratcheted to. A failed
+// attempt keeps the current backoff, which runForward then advances with
+// nextForwardBackoff so consecutive failures climb the capped-exponential
+// sequence. Pure so the reset is table-testable.
+func forwardWaitBackoff(current time.Duration, established bool) time.Duration {
+	if established {
+		return forwardReconnectBackoffInitial
+	}
+	return current
+}
+
 // runForward establishes and maintains a port-forward for the lifetime of ctx.
 // forwardOnce (client-go's pf.ForwardPorts()) blocks until the forward dies; if
 // it exits while ctx is still live (pod rescheduled, SPDY stream dropped, a
@@ -249,6 +265,17 @@ func (b *Backend) runForward(ctx context.Context, pod *corev1.Pod, localPort, re
 		err := b.forwardOnceFn(ctx, pod, localPort, remotePort, iterReady)
 		close(iterDone)
 
+		// Did this attempt actually establish? client-go closes iterReady on the
+		// first successful listen, so a non-blocking receive reports whether the
+		// forward carried traffic before it dropped. Safe: a closed channel is
+		// always readable, and the watcher goroutine above only reads it too.
+		established := false
+		select {
+		case <-iterReady:
+			established = true
+		default:
+		}
+
 		// A cancelled context is an intentional teardown (Close()), not a failure.
 		if ctx.Err() != nil {
 			h.err = ctx.Err()
@@ -263,6 +290,11 @@ func (b *Backend) runForward(ctx context.Context, pod *corev1.Pod, localPort, re
 		}
 
 		first = false
+		// [V34] Reset the backoff after an attempt that established: reconnect a
+		// dropped-but-previously-healthy forward promptly instead of at the
+		// ratcheted cap. Consecutive failures keep climbing (nextForwardBackoff
+		// below).
+		backoff = forwardWaitBackoff(backoff, established)
 		// Wait out the backoff, but bail immediately if the caller cancels.
 		select {
 		case <-ctx.Done():

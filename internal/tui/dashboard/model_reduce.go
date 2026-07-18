@@ -490,6 +490,13 @@ func mergeClusterState(existing, incoming session.State) session.State {
 	if merged.ProjectPath == "" {
 		merged.ProjectPath = incoming.ProjectPath
 	}
+	if merged.WorkspacePath == "" {
+		// [V11] The watch now recovers WorkspacePath (pod cwd / Mutagen alpha)
+		// alongside ProjectPath, so carry it through: a session that first
+		// appeared without it (seeded before the watch, or a legacy pod) gets
+		// filled by a later watch event rather than staying blank.
+		merged.WorkspacePath = incoming.WorkspacePath
+	}
 	if merged.Backend == "" {
 		merged.Backend = incoming.Backend
 	}

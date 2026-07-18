@@ -1,0 +1,61 @@
+# Example RBAC for the idle reaper.
+#
+# This is a STARTING POINT — review and adapt before applying. The reaper runs
+# in a SEPARATE namespace (`agent-reaper`, see internal/k8s/reaper.go) because
+# the session namespace's egress NetworkPolicy blocks the Kubernetes API, so a
+# reaper there could not issue the suspend. It authenticates as the
+# `sandbox-reaper` ServiceAccount and needs a Role in `agent-sessions` (the
+# session namespace) bound to that SA cross-namespace.
+#
+# The verb set matches exactly what the `sandbox reap` subcommand issues:
+#   - sandboxes: get,update — suspend flips replicas via `sandboxes.Update`
+#     (setReplicas), NOT patch; Status also Gets the Sandbox.
+#   - pods:      list       — Status resolves the runner pod IP with a
+#     label-selector `Pods().List`.
+#   - secrets:   get        — reads the per-session runner bearer token to poll
+#     the runner's /idle endpoint.
+# Keep this in sync with ReaperServiceAccount's doc in internal/k8s/reaper.go.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sandbox-reaper
+  namespace: agent-reaper
+  labels:
+    app.kubernetes.io/part-of: sandbox
+    app.kubernetes.io/name: sandbox-reaper
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sandbox-reaper
+  namespace: agent-sessions
+  labels:
+    app.kubernetes.io/part-of: sandbox
+    app.kubernetes.io/name: sandbox-reaper
+rules:
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes"]
+    verbs: ["get", "update"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sandbox-reaper
+  namespace: agent-sessions
+  labels:
+    app.kubernetes.io/part-of: sandbox
+    app.kubernetes.io/name: sandbox-reaper
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sandbox-reaper
+subjects:
+  - kind: ServiceAccount
+    name: sandbox-reaper
+    namespace: agent-reaper

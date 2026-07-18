@@ -28,6 +28,13 @@ func TestConfirmDestroyGate(t *testing.T) {
 		{"unrelated answer", "maybe\n", false},
 		{"lowercase yes", "y\n", true},
 		{"capital yes", "Y\n", true},
+		// [V27] A bare Enter (empty line, not EOF) must deny per the [y/N]
+		// default — the old fmt.Fscan hung here instead of reading the newline.
+		{"bare enter denies", "\n", false},
+		{"leading blank line then real answer reads the blank line as deny", "\ny\n", false},
+		{"yes word", "yes\n", true},
+		{"capital yes word", "YES\n", true},
+		{"surrounding whitespace is trimmed", "  y  \n", true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

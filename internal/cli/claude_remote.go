@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -28,10 +29,10 @@ func newClaudeRemoteCmd() *cobra.Command {
 		Use:   "claude [prompt]",
 		Short: "Start a new remote Claude SDK session and open the local TUI (resume with `attach`)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			prompt := ""
-			if len(args) > 0 {
-				prompt = args[0]
-			}
+			// [V26] Join all positionals so an unquoted `sandbox claude fix the
+			// build` sends the whole prompt, not just "fix" (extra args were
+			// silently dropped before).
+			prompt := strings.Join(args, " ")
 			// claude has no opencode provider step, so the provider selector is empty.
 			return runStartSession(cmd, session.BackendClaudeSDK, prompt, runnerImage, reaperImage, nameFlag, modelFlag, accountFlag, worktreeFlag, "")
 		},
@@ -68,10 +69,9 @@ func newOpencodeCmd() *cobra.Command {
 		Use:   "opencode [prompt]",
 		Short: "Start a remote opencode-server session and open the local opencode TUI",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			prompt := ""
-			if len(args) > 0 {
-				prompt = args[0]
-			}
+			// [V26] Join all positionals so an unquoted multi-word prompt is sent
+			// whole rather than dropping everything after the first word.
+			prompt := strings.Join(args, " ")
 			return runStartSession(cmd, session.BackendOpenCode, prompt, runnerImage, reaperImage, nameFlag, modelFlag, "", worktreeFlag, providerFlag)
 		},
 	}

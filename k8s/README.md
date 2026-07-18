@@ -19,11 +19,17 @@ They do **not** install the controller, RBAC, storage, or the reaper — see
   enforce NetworkPolicy, the security boundary described below does not exist.**
 - A `StorageClass` for the per-session PVCs.
 
-## You must build and push your own images
+## Container images
 
-The CLI's **default** runner and reaper images point at the maintainer's private
-registry (`registry.cullen.rocks/...`) and are **not pullable** by anyone else.
-Build and push your own, then pass them explicitly:
+The CLI's **default** runner and reaper images are **public GHCR packages** built
+by Depot CI:
+
+- `ghcr.io/cullenmcdermott/sandbox-claude-runner:latest`
+- `ghcr.io/cullenmcdermott/sandbox-reaper:latest`
+
+They pull without extra setup as long as your cluster can reach `ghcr.io`. Build
+and push your own only for a private fork or an air-gapped cluster, then pass them
+explicitly:
 
 ```bash
 # Build & push the runner image (see runner/Dockerfile)
@@ -82,7 +88,10 @@ your cluster or live in the maintainer's private repo:
 - **The `agent-reaper` namespace + RBAC.** The idle reaper runs in a *separate*
   namespace (`agent-reaper`) because the session namespace's egress policy blocks
   the Kubernetes API; the reaper needs API egress plus a `Role` in `agent-sessions`
-  to read the session Secret and patch the Sandbox. See
+  granting `sandboxes: get,update` (suspend is `sandboxes.Update`, not patch),
+  `pods: list` (to resolve the runner pod IP), and `secrets: get` (the runner
+  bearer token). An example `Role` + `RoleBinding` is in
+  [`reaper-rbac.yaml`](reaper-rbac.yaml); see also
   [`../docs/session-lifecycle.md`](../docs/session-lifecycle.md).
 - **A NetworkPolicy ingress exception** so the reaper (in `agent-reaper`) can reach
   the session pod on `:8787` cross-namespace.

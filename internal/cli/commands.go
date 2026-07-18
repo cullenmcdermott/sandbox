@@ -1,9 +1,11 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -175,18 +177,25 @@ func newCancelCmd() *cobra.Command {
 }
 
 // confirmDestroy implements the destroy command's confirmation gate: it prompts
-// on out, reads a single token from in, and reports whether the user explicitly
-// approved (only "y"/"Y" proceeds; any other answer, or empty input / EOF,
-// denies). Split out so the gate is unit-testable without a cluster.
+// on out, reads one LINE from in, and reports whether the user explicitly
+// approved. Only "y"/"yes" (case-insensitive) proceeds; any other answer — a
+// bare Enter (empty line), or EOF — denies. Split out so the gate is
+// unit-testable without a cluster.
+//
+// [V27] Reading a whole line (not a token via fmt.Fscan, which skips newlines
+// and blocks until it sees a non-whitespace token) is what makes a bare Enter
+// at an interactive terminal deny per the advertised [y/N] default instead of
+// hanging forever.
 func confirmDestroy(in io.Reader, out io.Writer, id string) bool {
 	fmt.Fprintf(out, "This will permanently destroy session %q and its PVC. This cannot be undone.\nContinue? [y/N]: ", id)
-	var answer string
-	_, _ = fmt.Fscan(in, &answer)
-	if answer != "y" && answer != "Y" {
+	line, _ := bufio.NewReader(in).ReadString('\n')
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "y", "yes":
+		return true
+	default:
 		fmt.Fprintln(out, "Cancelled.")
 		return false
 	}
-	return true
 }
 
 func newDestroyCmd() *cobra.Command {

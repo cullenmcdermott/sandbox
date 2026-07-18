@@ -123,6 +123,65 @@ func TestNextForwardBackoff(t *testing.T) {
 	}
 }
 
+// [V34] forwardWaitBackoff resets the progression after an attempt that
+// established (carried traffic) and leaves it untouched after a failure, so a
+// long-lived session that drops after hours healthy reconnects promptly instead
+// of at the 10s cap earlier failures ratcheted to.
+func TestForwardWaitBackoffResetsAfterEstablished(t *testing.T) {
+	cases := []struct {
+		name        string
+		current     time.Duration
+		established bool
+		want        time.Duration
+	}{
+		{"established at the cap resets to initial", 10 * time.Second, true, forwardReconnectBackoffInitial},
+		{"established mid-climb resets to initial", 2 * time.Second, true, forwardReconnectBackoffInitial},
+		{"established already at initial stays initial", forwardReconnectBackoffInitial, true, forwardReconnectBackoffInitial},
+		{"failed at the cap keeps the cap", 10 * time.Second, false, 10 * time.Second},
+		{"failed mid-climb keeps the current", 2 * time.Second, false, 2 * time.Second},
+		{"failed at initial keeps initial", forwardReconnectBackoffInitial, false, forwardReconnectBackoffInitial},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := forwardWaitBackoff(tc.current, tc.established); got != tc.want {
+				t.Fatalf("forwardWaitBackoff(%s, %v) = %s, want %s", tc.current, tc.established, got, tc.want)
+			}
+		})
+	}
+}
+
+// [V34] The full ratchet-then-reset sequence the loop produces: climb to the
+// cap across consecutive failures, then a healthy establishment's drop resets
+// the very next wait to the initial delay before the progression resumes.
+func TestForwardBackoffResetSequence(t *testing.T) {
+	max := forwardReconnectBackoffMax
+	backoff := forwardReconnectBackoffInitial
+
+	// Five consecutive failures climb 500ms→1s→2s→4s→8s→10s (the wait used each
+	// iteration is forwardWaitBackoff(backoff, false) == backoff, then advance).
+	wantClimb := []time.Duration{
+		1 * time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, max, max,
+	}
+	for i, w := range wantClimb {
+		backoff = forwardWaitBackoff(backoff, false)
+		backoff = nextForwardBackoff(backoff, max)
+		if backoff != w {
+			t.Fatalf("climb step %d: backoff = %s, want %s", i, backoff, w)
+		}
+	}
+	// Now the forward has been healthy at the 10s cap; it establishes and then
+	// drops. The next wait must be the initial delay, not 10s.
+	wait := forwardWaitBackoff(backoff, true)
+	if wait != forwardReconnectBackoffInitial {
+		t.Fatalf("wait after established drop = %s, want %s (prompt reconnect)", wait, forwardReconnectBackoffInitial)
+	}
+	// And the progression resumes from there for the next consecutive failure.
+	backoff = nextForwardBackoff(wait, max)
+	if backoff != 1*time.Second {
+		t.Fatalf("post-reset advance = %s, want 1s", backoff)
+	}
+}
+
 // The full backoff progression the loop produces, driven through the pure func,
 // must match the documented 500ms→1s→2s→4s→8s→10s→10s… ceiling.
 func TestForwardBackoffProgression(t *testing.T) {

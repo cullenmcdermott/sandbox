@@ -209,9 +209,14 @@ per-session Secret (`<session-id>-runner`); you do not manage it manually.
   `$SANDBOX_NAMESPACE`).
 
 - **Container images reachable from the cluster.** The default runner image
-  (`registry.cullen.rocks/sandbox-claude-runner:latest`) and reaper image
-  (`registry.cullen.rocks/sandbox-reaper:latest`) point at the maintainer's
-  private registry, so **external users must build their own**:
+  (`ghcr.io/cullenmcdermott/sandbox-claude-runner:latest`) and reaper image
+  (`ghcr.io/cullenmcdermott/sandbox-reaper:latest`) are **public GHCR packages**
+  built by Depot CI (`.depot/workflows/build-runner-image.yml`,
+  `.depot/workflows/build-reaper-image.yml`), so the shipped defaults pull
+  without any extra setup as long as your cluster can reach `ghcr.io`.
+
+  Build and push your own only if you fork the runner/reaper or your cluster is
+  air-gapped from GHCR:
 
   ```bash
   # Runner (the per-session pod that runs the Claude Agent SDK):
@@ -223,9 +228,7 @@ per-session Secret (`<session-id>-runner`); you do not manage it manually.
   Push both to a registry your cluster can pull from, then point sessions at
   them with `--runner-image <ref>` and `--reaper-image <ref>`. (A wrong or
   unreachable image leaves the pod in `ImagePullBackOff`, which `sandbox claude`
-  reports instead of hanging.) The runner image is also built in CI via
-  `.depot/workflows/build-runner-image.yml` if you prefer to wire up your own
-  registry there.
+  reports instead of hanging.)
 
 ## Install
 
