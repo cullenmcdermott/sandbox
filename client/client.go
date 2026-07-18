@@ -130,6 +130,12 @@ const (
 	BackendOpenCode  = session.BackendOpenCode
 	BackendCodex     = session.BackendCodex
 
+	// OpencodeProvider vocabulary (accepted values for CreateOptions.OpencodeProvider;
+	// selects which single model-provider credential an opencode-server session receives).
+	OpencodeProviderAnthropic = session.OpencodeProviderAnthropic
+	OpencodeProviderOpenAI    = session.OpencodeProviderOpenAI
+	OpencodeProviderZen       = session.OpencodeProviderZen
+
 	StatusUnknown   = session.StatusUnknown
 	StatusCreating  = session.StatusCreating
 	StatusRunning   = session.StatusRunning
@@ -388,8 +394,8 @@ type CreateOptions struct {
 	// OpencodeProvider selects which SINGLE model-provider API key an
 	// opencode-server session's pod receives from the shared opencode-credentials
 	// Secret (fail-closed — the pod refuses to start if the selected provider's
-	// key is absent). One of session.OpencodeProviderAnthropic,
-	// session.OpencodeProviderOpenAI, session.OpencodeProviderZen. Empty keeps
+	// key is absent). One of OpencodeProviderAnthropic,
+	// OpencodeProviderOpenAI, OpencodeProviderZen. Empty keeps
 	// the documented default (Anthropic); any OTHER value is rejected with
 	// ErrInvalidOpencodeProvider rather than silently defaulting (a typo must
 	// not select a different provider's credential). Ignored by non-opencode

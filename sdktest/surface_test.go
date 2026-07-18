@@ -164,10 +164,20 @@ var _ = client.CreateOptions{
 	AnthropicCredential: []byte("secret"),
 	CodexAccountID:      "acct-chatgpt",
 	CodexAuthJSON:       []byte("auth-json"),
+	OpencodeProvider:    client.OpencodeProviderAnthropic,
 	StorageClass:        "fast",
 	StorageGiB:          10,
 	Worktree:            client.WorktreeAuto,
 }
+
+// OpencodeProvider vocabulary: re-exported so consumers pass a named constant
+// as CreateOptions.OpencodeProvider instead of a raw string. Removing or
+// renaming any of the three breaks the build here.
+var (
+	_ = client.OpencodeProviderAnthropic
+	_ = client.OpencodeProviderOpenAI
+	_ = client.OpencodeProviderZen
+)
 
 var _ = client.ConnectOptions{
 	ProjectPath:           "/work/repo",
