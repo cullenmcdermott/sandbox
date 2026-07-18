@@ -12,6 +12,7 @@ import (
 	agentsfake "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned/fake"
 
 	"github.com/cullenmcdermott/sandbox/client"
+	"github.com/cullenmcdermott/sandbox/client/cred"
 	"github.com/cullenmcdermott/sandbox/internal/k8s"
 )
 
@@ -63,6 +64,164 @@ func Example() {
 		case client.EventTurnCompleted:
 			return
 		}
+	}
+}
+
+// Example_chat demonstrates the FULL chat loop an external consumer drives — the
+// steps the minimal Example above omits: account selection, a connect-progress
+// callback, streaming deltas, tool + permission + usage events, interrupt-based
+// steering, reattach with replay, and the detach-vs-destroy teardown split. Like
+// Example it has no Output directive, so it is compiled (proving every step is
+// reachable from outside the module) but not executed (it needs a live cluster).
+func Example_chat() {
+	ctx := context.Background()
+
+	c, err := client.New(client.WithNamespace("agent-sessions"))
+	if err != nil {
+		return
+	}
+
+	// 1. Account selection. DefaultStore is the multi-account Anthropic credential
+	// store; SelectAnthropicAccount resolves that account's credential bytes into
+	// the CreateOptions. It is fail-closed: a named-but-unresolvable account is a
+	// hard error, never a silent fall-back to the shared cluster Secret. The ""
+	// selector picks the stored default (or the sole stored account, or — with no
+	// accounts stored — leaves the options on the legacy shared-Secret path).
+	opts := client.CreateOptions{ProjectPath: "/work/repo"}
+	if store, serr := cred.DefaultStore(); serr == nil {
+		if err := opts.SelectAnthropicAccount(store, ""); err != nil {
+			return
+		}
+	}
+
+	sess, err := c.Create(ctx, opts)
+	if err != nil {
+		return
+	}
+	// Close only detaches (tears the port-forward down) — the pod keeps running.
+	// Deferred as the safety net for every early return; the irreversible Destroy
+	// is at the end.
+	defer sess.Close()
+
+	// 2. Connect. OnPhase reports coarse progress (cold-pod resume, image pull,
+	// file-sync setup) so a splash can show live status; Connection.Warning is a
+	// non-fatal advisory (e.g. file sync degraded) to surface rather than discard.
+	conn, err := sess.Connect(ctx, client.ConnectOptions{
+		OnPhase: func(st client.Stage, detail string) {
+			fmt.Printf("connect: %s %s\n", st, detail)
+		},
+	})
+	if err != nil {
+		if errors.Is(err, client.ErrSessionGone) {
+			return
+		}
+		return
+	}
+	if conn.Warning != "" {
+		fmt.Println("warning:", conn.Warning)
+	}
+
+	// 3. Start a turn and stream its events. Track lastSeq across the loop: it is
+	// the replay cursor a later reattach resumes from (step 5).
+	turn, err := sess.StartTurn(ctx, client.TurnInput{Prompt: "fix the build"})
+	if err != nil {
+		return
+	}
+
+	var lastSeq uint64
+	steer := false // flip to exercise interrupt-based steering mid-turn (step 4)
+	events, err := sess.Events(ctx, lastSeq)
+	if err != nil {
+		return
+	}
+streamLoop:
+	for ev := range events {
+		lastSeq = ev.Seq // advance the replay cursor on every persisted event
+		switch ev.Type {
+		case client.EventMessageDelta:
+			// Streaming assistant text: append each delta to the live transcript.
+			var m client.MessagePayload
+			if json.Unmarshal(ev.Payload, &m) == nil {
+				fmt.Print(m.Content)
+			}
+		case client.EventMessageCompleted:
+			// The finalized message block (role + full content).
+			var m client.MessagePayload
+			if json.Unmarshal(ev.Payload, &m) == nil {
+				fmt.Println(m.Role, m.Content)
+			}
+		case client.EventToolStarted, client.EventToolCompleted, client.EventToolFailed:
+			// Tool lifecycle → a tool card. Output is set on completion, Error on
+			// failure; ExitCode is the Bash exit status when the tool reports one.
+			var t client.ToolPayload
+			if json.Unmarshal(ev.Payload, &t) == nil {
+				fmt.Println(t.Tool, t.Output, t.Error)
+			}
+		case client.EventPermissionRequested:
+			// The agent is blocked awaiting approval. Decode the request, then
+			// answer it — PermissionDecision.Permission MUST echo the payload's
+			// PermissionID so the runner links the decision to the pending request.
+			var p client.PermissionPayload
+			if json.Unmarshal(ev.Payload, &p) != nil {
+				continue
+			}
+			_ = sess.ResolvePermission(ctx, client.PermissionDecision{
+				Session:    sess.ID(),
+				Permission: p.PermissionID,
+				Allow:      true,
+				Scope:      "once", // "session" persists the grant for the rest of the session
+			})
+		case client.EventUsageUpdated:
+			// Token counts for a ctx% indicator / running cost readout.
+			var u client.UsagePayload
+			if json.Unmarshal(ev.Payload, &u) == nil {
+				fmt.Println(u.InputTokens, u.OutputTokens, u.TotalCostUSD)
+			}
+		case client.EventTurnCompleted:
+			// Normal terminal state — stop reading this turn's stream.
+			break streamLoop
+		case client.EventTurnFailed, client.EventTurnInterrupted, client.EventError:
+			// The other exit conditions: a failed or interrupted turn, or a stream
+			// error. All end the loop; a real UI would surface the reason from the
+			// matching payload (TurnFailedPayload / TurnInterruptedPayload / ErrorPayload).
+			break streamLoop
+		}
+		// 4. Steering: interrupt the in-flight turn (e.g. the user hit Esc). The
+		// runner tears the turn down and emits turn.interrupted, which the case
+		// above then uses to end the loop. Gated on a bool so the example compiles
+		// and, when run, does not interrupt itself.
+		if steer {
+			_ = sess.Interrupt(ctx, turn)
+		}
+	}
+
+	// 5. Reattach. A fresh handle for the same id (Open does no I/O) reconnects and
+	// resumes the stream from the saved seq: the runner replays the backlog after
+	// lastSeq, then emits the client-internal EventStreamLive marker once caught up
+	// to live. That marker is a boundary signal, not data — a UI flips out of its
+	// "replaying…" state on it rather than rendering it.
+	resumed := c.Open(sess.ID())
+	defer resumed.Close()
+	if _, err := resumed.Connect(ctx, client.ConnectOptions{}); err != nil {
+		return
+	}
+	replay, err := resumed.Events(ctx, lastSeq)
+	if err != nil {
+		return
+	}
+	for ev := range replay {
+		if ev.Type == client.EventStreamLive {
+			break // caught up to live; the replay backlog is drained
+		}
+		lastSeq = ev.Seq
+	}
+
+	// 6. Teardown. Close() (deferred above) only detaches — the pod keeps running
+	// and can be reattached later. Destroy is the irreversible teardown: it stops
+	// file sync, deletes the Sandbox + PVC, and removes local state. There is no
+	// undo, so it is the deliberate end of the session's life, not a detach.
+	if err := c.Destroy(ctx, sess.ID()); err != nil {
+		return
 	}
 }
 
