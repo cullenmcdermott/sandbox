@@ -926,16 +926,20 @@ naming-break, and Shell items each stand alone.
 - [x] **`Example_chat` full chat-loop example — done 2026-07-18** (done
   log): compile-only example covering permissions, deltas, tools,
   steering, reattach/replay, account selection, detach-vs-destroy.
-- [ ] **SDK capability gaps for an external chat/dashboard consumer**
-  (overlaps `docs/public-api-importability-plan.md`, which is TUI/auth
-  focused — these are client-level): no cluster watch (`k8s.Backend.Watch` →
-  `StateEvent`, `internal/tui/dashboard/actions.go:20` — SDK has only
-  `List`); no model context-window/pricing resolver (`internal/models.Limit`,
-  `internal/tui/dashboard/readmodel.go:29` — consumers can't build the ctx%
-  gauge); session titles/rename are `internal/index`-only
+- [x] **Cluster watch in the SDK — done 2026-07-18** (done log):
+  `Client.Watch` + public `StateEvent` (type moved to `internal/session`);
+  dashboard consumes `session.StateEvent`, dropping four `internal/k8s`
+  imports.
+- [x] **Model limits/pricing public — done 2026-07-18** (done log):
+  `internal/models` → `client/models` (git mv + doc.go + sdktest pins).
+- [ ] **Remaining client-level capability gaps** (overlaps
+  `docs/public-api-importability-plan.md`, which is TUI/auth focused):
+  session titles/rename are `internal/index`-only
   (`internal/cli/rename.go:24`); `Client.SyncStatus` returns raw bytes with
   the conflict/orphan classification stuck in `internal/sync`
-  (`internal/cli/sync_support.go:90`).
+  (`internal/cli/sync_support.go:90`). Both need API design (index
+  promotion vs a title field on the runner; a typed SyncStatus) before
+  dispatch.
 
 ## 9) Unbuilt features
 

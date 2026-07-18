@@ -1887,3 +1887,18 @@ Five builder batches, every diff orchestrator-reviewed, full Go suite +
 - **Infra-name scrub (4ada2b1):** private cluster name replaced with
   "my-cluster" across 7 files; 8 historical commits still carry it in
   diffs — history rewrite is a maintainer call (pre-OSS).
+
+## 2026-07-18 — SDK capability-gap wave 2 (watch + models)
+
+- **Cluster watch (b97d205):** `StateEvent{State, Deleted}` moved to
+  `internal/session` (k8s keeps a type alias); public `client.StateEvent`
+  alias + `Watch` on the `client.Backend` interface + delegating
+  `Client.Watch`. Dashboard switched to `session.StateEvent`, dropping
+  the `internal/k8s` import from four files. sdktest pins the Client
+  method, the interface method (method-expression pin), and the field
+  shape.
+- **client/models (74f12e6):** `internal/models` → `client/models`
+  (history-preserving mv; surface unchanged: `Limit(modelID) Info`,
+  `Info{ContextLimit, InputPrice, OutputPrice}`), new doc.go in the
+  client/cred voice, dashboard import swaps, sdktest pins. CLAUDE.md +
+  docs/architecture.md package tables updated in the same commit.
