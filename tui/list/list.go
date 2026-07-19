@@ -328,6 +328,21 @@ func (l *List) Invalidate(it Item) {
 	delete(l.cache, it)
 }
 
+// InvalidateAll drops every cached item render so the next Render re-renders each
+// item from scratch. The list keys its cache on (item, width, version), which is
+// deliberately blind to anything an item folds into its OWN output but not its
+// version — most importantly the active theme. A theme swap bumps no item's
+// version, so without this the list would re-serve stale-palette renders until an
+// unrelated change. Wire it to the theme so a swap re-skins the whole list:
+//
+//	theme.OnChange(func() { l.InvalidateAll() })
+//
+// It is O(items) and allocates nothing beyond a fresh map; call it on the swap,
+// not per frame.
+func (l *List) InvalidateAll() {
+	l.cache = make(map[Item]*entry)
+}
+
 // renderItemEntry returns the cached or freshly rendered entry for items[idx].
 func (l *List) renderItemEntry(idx int) *entry {
 	raw := l.items[idx]

@@ -1,6 +1,21 @@
 # Public API & importability plan
 
-Status: **draft** (2026-07-18) — awaiting maintainer sign-off on sequencing.
+Status: **TUI-importability track implemented** (2026-07-18); auth/device-code +
+full-dashboard tracks still draft, awaiting maintainer sign-off on sequencing.
+
+> **Update (2026-07-18):** the reusable **chat/transcript TUI** track is DONE and
+> verified by `docs/public-tui-importability-goals.md` (its Convergence Gate is
+> green — `just check` passes, no `tui/` package imports `internal/`, and an
+> external consumer builds + drives the transcript from public `client.Event`
+> values via `TestTranscriptFromPublicEvents`). The public packages now cover the
+> whole chat experience: `tui/chat` (transcript items incl. the turn-footer),
+> `tui/transcript` (the event→transcript reducer), `tui/composer` (input +
+> steering + escape cascade), `tui/picker` (model/backend/account selection),
+> and `tui/chrome` (status line, context gauge, working indicator, calm notices)
+> — alongside the pre-existing `tui/kit`/`tui/theme`/`tui/list`/`tui/anim`/
+> `tui/terminal`. `cmd/chatdemo` drives them from a scripted event stream, and
+> `sdktest` pins every surface. What remains from the sections below is the
+> **auth (device-code)** track and any deeper **full-dashboard** importability.
 
 ## Goal
 

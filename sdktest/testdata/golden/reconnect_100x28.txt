@@ -1,0 +1,3 @@
+✳ Reconnecting
+⏺ partial reply so far
+⚠ pod terminating (SIGTERM) — saving state, will reconnect

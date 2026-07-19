@@ -11,6 +11,8 @@ runner/dist/
 /dist/
 /mockup
 /tuikit-demo
+# `go build ./cmd/chatdemo` output (the public-TUI example; run via `go run`).
+/chatdemo
 # `go build ./cmd/gen-eventschema` output (the generator is run via `go run` in
 # `just gen`; a built binary must never be committed).
 /gen-eventschema

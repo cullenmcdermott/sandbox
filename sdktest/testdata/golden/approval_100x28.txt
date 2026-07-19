@@ -1,0 +1,7 @@
+⏺ Edit(x.go)
+  ⎿  running…  (ctrl+o to expand)
+
+◆ Edit(x.go)
+  −a := 1
+  +a := 2
+  [a] approve · [d] deny

@@ -36,11 +36,30 @@ func TestSubagentItemImplementsItem(t *testing.T) {
 	var _ list.Item = (*SubagentItem)(nil)
 }
 
-// COUNTER: ToolItem caches its render and does not recompute when unchanged.
+// COUNTER: ToolItem caches its render and does not recompute (nor bump its
+// version) when unchanged; a mutation bumps the version so the list re-renders.
 func TestToolItemCache(t *testing.T) {
-	renders := 0
-	ti := &ToolItem{Versioned: list.NewVersioned()}
-	// IMPL: wire a counting render if your ToolItem supports injection.
-	_ = renders
-	_ = ti
+	ti := NewToolItem(&ToolCall{ID: "t", Name: "Bash", Arg: "ls", Status: ToolOK, Summary: "3 lines"})
+	l := list.New(ti)
+	l.SetSize(60, 10)
+
+	v0 := ti.Version()
+	first := l.Render()
+	// A stable item re-renders to the exact same frame and never bumps its version
+	// (so the list stays a cache hit).
+	if l.Render() != first {
+		t.Fatal("stable ToolItem produced a different frame on re-render")
+	}
+	if ti.Version() != v0 {
+		t.Fatalf("stable ToolItem bumped its version: %d -> %d", v0, ti.Version())
+	}
+
+	// A real mutation bumps the version and changes the frame.
+	ti.SetStatus(ToolError, "boom")
+	if ti.Version() == v0 {
+		t.Fatal("SetStatus did not bump the version")
+	}
+	if l.Render() == first {
+		t.Fatal("mutated ToolItem produced an unchanged frame")
+	}
 }

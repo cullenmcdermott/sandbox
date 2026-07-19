@@ -1,0 +1,9 @@
+✳ Writing · 12s · ↓120 tokens
+> stream the fix
+
+∴ Thought: Reading the reconnect path.
+
+⏺ Bash(go test ./...)
+  ⎿  running…
+
+⏺ Working on it — 

@@ -932,11 +932,33 @@ naming-break, and Shell items each stand alone.
   imports.
 - [x] **Model limits/pricing public — done 2026-07-18** (done log):
   `internal/models` → `client/models` (git mv + doc.go + sdktest pins).
-- [ ] **tui/chat sdktest pin missing** — the `git mv
-  internal/tui/dashboard/chat → tui/chat` landed (dea650d) without the
-  sdktest surface pin the importability plan calls for
-  (`docs/public-api-importability-plan.md` §1); add pins for the exported
-  renderer vocabulary so a break fails `just sdk-conformance` first.
+- [x] **tui/chat completed + sdktest pin added — done 2026-07-18**: the public
+  transcript-item vocabulary is now production-complete — the empty renderers
+  (tool/user/notice/shell/subagent) were replaced with the derived-from-dashboard
+  cards, and `ReasoningItem`, `TodosItem`, `PermissionItem`, `Citation`, the
+  `Bullet`/`Quote` chrome, and `ToolArg`/`ToolSummary` helpers were added. Each
+  item is width/ANSI/grapheme-safe, focus-aware, expansion/collapse-aware,
+  version-cached with theme-epoch invalidation, and free of `internal/` types.
+  `sdktest/chat_surface_test.go` pins the exported vocabulary + a
+  compile-and-render conformance test (80x24/100x30/140x40, scroll/follow/expand/
+  resize/theme-swap); golden frames live in `tui/chat/testdata/golden/`;
+  `cmd/chatdemo` is the public-package-only runnable example. The higher-level
+  interactive layer is now DONE too — see the next item.
+- [x] **Public TUI importability goal COMPLETE — done 2026-07-18**: drove
+  `docs/public-tui-importability-goals.md` (T1–T8) to green. Added the
+  `tui/chat` turn-footer item (`FooterItem`/`TurnFooter`) + item-level goldens
+  (streaming/fatal/empty) + list scenario tests (resize/append-while-scrolled),
+  then the higher-level public packages: `tui/transcript` (the `Apply(client.Event)`
+  event→transcript reducer — tool pairing, subagent routing, streaming
+  coalescing, todos, permissions, replay dedup, unknown-event degradation, follow/
+  focus/expansion, host callbacks for submit/approve/deny/interrupt/steer/detach),
+  `tui/composer` (multi-line input, queue-while-busy steering, escape cascade,
+  grace-gated permission answering), `tui/picker` (model/backend/account selection),
+  and `tui/chrome` (status line, context/token gauge, working indicator honoring
+  `anim.ReduceMotion`, calm notices). `cmd/chatdemo` now drives the transcript +
+  composer from a scripted `[]client.Event` (no hand-assembled items); `sdktest`
+  pins every surface + `TestTranscriptFromPublicEvents` (event-sourced conformance,
+  six goldens). No `tui/` package imports `internal/`; `just check` green.
 - [ ] **Remaining client-level capability gaps** (overlaps
   `docs/public-api-importability-plan.md`, which is TUI/auth focused):
   session titles/rename are `internal/index`-only
