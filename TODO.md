@@ -932,6 +932,11 @@ naming-break, and Shell items each stand alone.
   imports.
 - [x] **Model limits/pricing public — done 2026-07-18** (done log):
   `internal/models` → `client/models` (git mv + doc.go + sdktest pins).
+- [ ] **tui/chat sdktest pin missing** — the `git mv
+  internal/tui/dashboard/chat → tui/chat` landed (dea650d) without the
+  sdktest surface pin the importability plan calls for
+  (`docs/public-api-importability-plan.md` §1); add pins for the exported
+  renderer vocabulary so a break fails `just sdk-conformance` first.
 - [ ] **Remaining client-level capability gaps** (overlaps
   `docs/public-api-importability-plan.md`, which is TUI/auth focused):
   session titles/rename are `internal/index`-only

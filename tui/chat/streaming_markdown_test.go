@@ -1,4 +1,4 @@
-// CANONICAL TEST — do not weaken. internal/tui/dashboard/chat/streaming_markdown_test.go
+// CANONICAL TEST — do not weaken. tui/chat/streaming_markdown_test.go
 package chat
 
 import (

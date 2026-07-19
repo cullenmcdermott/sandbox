@@ -30,6 +30,9 @@ is decoupling the widget from that model, not writing it from scratch.
 ## Component-by-component (the pieces the maintainer named)
 
 ### 1. Chat construction (render layer) — EASY, do first
+> **Update (2026-07-18):** the `git mv` to `tui/chat` landed on main
+> (dea650d); the sdktest pin from the plan below is still pending.
+
 `internal/tui/dashboard/chat/` is **already decoupled**: verified zero internal
 deps; its only first-party imports are `tui/list` + `tui/theme`, both
 self-contained public packages. It is the assistant / user / tool / subagent /

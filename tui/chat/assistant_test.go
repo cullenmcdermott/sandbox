@@ -1,4 +1,4 @@
-// CANONICAL TEST — do not weaken. internal/tui/dashboard/chat/assistant_test.go
+// CANONICAL TEST — do not weaken. tui/chat/assistant_test.go
 package chat
 
 import (
