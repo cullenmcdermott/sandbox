@@ -115,9 +115,6 @@ func newDashboardConnector(c *client.Client, reaperImage string) dashboard.Conne
 			OpencodeCreds: mapOpencode(conn.External),
 			PaneDial:      mapPaneDial(sess, conn.Backend),
 			Warning:       conn.Warning,
-			// §5: sync/reaper advisories settle in the background now; the
-			// dashboard polls this seam so they surface instead of vanishing.
-			AwaitWarning: sess.AwaitSync,
 			// §1d C1: forwards outlive the connect ctx by design; this is the only
 			// handle that actually releases them. sess is per-connector-call, so
 			// closing here can't touch another connect's forwards.
@@ -240,7 +237,6 @@ func newDashboardCreator(c *client.Client, runnerImage, reaperImage string) dash
 			OpencodeCreds: mapOpencode(conn.External),
 			PaneDial:      mapPaneDial(sess, conn.Backend),
 			Warning:       conn.Warning,
-			AwaitWarning:  sess.AwaitSync,
 			Close:         func() { _ = sess.Close() },
 		}, nil
 	}

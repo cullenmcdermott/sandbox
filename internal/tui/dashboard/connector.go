@@ -61,11 +61,6 @@ type ConnectResult struct {
 	// Warning is a non-fatal advisory surfaced to the user (e.g. sync failed).
 	// The dashboard renders it inline rather than dropping it to hidden stderr.
 	Warning string
-	// AwaitWarning, when non-nil, blocks until the connect's background
-	// sync/reaper work settles (§5 — Connect itself no longer waits for it) and
-	// returns the late advisory, empty on clean success. The App polls it once
-	// per attach and surfaces the result exactly like Warning.
-	AwaitWarning func(context.Context) (string, error)
 	// Close, when non-nil, tears down the connection's transport — the SPDY
 	// port-forward(s) and their reconnect loops (§1d C1). The context handed to
 	// the Connector governs only establishment; an established forward lives
@@ -150,8 +145,6 @@ type CreateResult struct {
 	// common path, and where the initial sync is most likely to hiccup — silently
 	// dropped the warning the connector computed (RV23).
 	Warning string
-	// AwaitWarning mirrors ConnectResult.AwaitWarning for the create path.
-	AwaitWarning func(context.Context) (string, error)
 	// Close mirrors ConnectResult.Close for the create path (§1d C1).
 	Close func()
 }

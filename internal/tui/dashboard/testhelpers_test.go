@@ -14,9 +14,6 @@ import (
 // on its visible text.
 func stripANSI(s string) string { return ansi.Strip(s) }
 
-// stripANSICodes is an alias kept for the tests that reference it by that name.
-func stripANSICodes(s string) string { return ansi.Strip(s) }
-
 // mustJSON marshals v to json.RawMessage, panicking on error (test-only).
 func mustJSON(v interface{}) json.RawMessage {
 	b, err := json.Marshal(v)

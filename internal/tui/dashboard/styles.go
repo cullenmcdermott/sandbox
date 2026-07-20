@@ -28,25 +28,6 @@ var (
 	styleDivider      lipgloss.Style
 	styleHelp         lipgloss.Style
 	styleEmpty        lipgloss.Style
-
-	// Transcript styles (declared in transcript.go usage; assigned here so
-	// they pick up the active theme).
-	styleTUser      lipgloss.Style
-	styleTAssistant lipgloss.Style
-	styleTTool      lipgloss.Style
-	styleTError     lipgloss.Style
-	styleTInfo      lipgloss.Style
-
-	// Status-line styles. renderStatusLine and workingLine run on every
-	// keystroke plus each 150ms work-tick, so their fixed styles are memoized
-	// here rather than rebuilt per frame.
-	styleSLMuted  lipgloss.Style
-	styleSLBody   lipgloss.Style
-	styleSLBright lipgloss.Style
-	styleSLBranch lipgloss.Style
-	styleSLWarn   lipgloss.Style
-	styleSLCost   lipgloss.Style
-	styleSLBusy   lipgloss.Style
 )
 
 // init wires the app's style rebuild to the shared theme so a theme swap
@@ -71,22 +52,6 @@ func rebuildStyles() {
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(theme.BorderMedium)
 	styleEmpty = lipgloss.NewStyle().Foreground(theme.TextDim)
-
-	// §2c: the user's own words are the quietest element in the transcript, not
-	// the loudest — a muted foreground behind a dim "> " quote, no Bold/Guac.
-	styleTUser = lipgloss.NewStyle().Foreground(theme.TextMuted)
-	styleTAssistant = lipgloss.NewStyle().Foreground(theme.TextBody)
-	styleTTool = lipgloss.NewStyle().Foreground(theme.Malibu)
-	styleTError = lipgloss.NewStyle().Foreground(theme.Coral)
-	styleTInfo = lipgloss.NewStyle().Foreground(theme.TextMuted)
-
-	styleSLMuted = lipgloss.NewStyle().Foreground(theme.TextMuted)
-	styleSLBody = lipgloss.NewStyle().Foreground(theme.TextBody)
-	styleSLBright = lipgloss.NewStyle().Foreground(theme.TextBright).Bold(true)
-	styleSLBranch = lipgloss.NewStyle().Foreground(theme.Peach)
-	styleSLWarn = lipgloss.NewStyle().Foreground(theme.Coral).Bold(true)
-	styleSLCost = lipgloss.NewStyle().Foreground(theme.Guac)
-	styleSLBusy = lipgloss.NewStyle().Foreground(theme.Busy)
 }
 
 // --- Per-status glyph styles (from the Status system in the handoff) -----

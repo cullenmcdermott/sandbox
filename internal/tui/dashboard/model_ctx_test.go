@@ -4,8 +4,6 @@ import (
 	"errors"
 	"testing"
 
-	"charm.land/bubbles/v2/key"
-
 	"github.com/cullenmcdermott/sandbox/internal/session"
 )
 
@@ -80,16 +78,6 @@ func TestListTablePrecedence(t *testing.T) {
 			t.Fatalf("list table order = %v, want %v", got, want)
 		}
 	}
-}
-
-// footerHasDesc reports whether the footer bindings advertise the given help desc.
-func footerHasDesc(bindings []key.Binding, desc string) bool {
-	for _, b := range bindings {
-		if b.Help().Desc == desc {
-			return true
-		}
-	}
-	return false
 }
 
 // TestSeedErrRetryPrecedesResume pins that the seedErr retry entry claims r ahead

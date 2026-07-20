@@ -68,22 +68,11 @@ type attachReadyMsg struct {
 	// warning is a non-fatal advisory (e.g. sync failure) to surface in the
 	// transcript as an info block so it is visible in the alt-screen TUI (C9).
 	warning string
-	// awaitWarning, when non-nil, blocks until the connect's background
-	// sync/reaper work settles and returns its late advisory (§5). The App
-	// polls it once via a Cmd and surfaces the result as a syncAdvisoryMsg.
-	awaitWarning func(context.Context) (string, error)
 	// close tears down the connection's transport (ConnectResult.Close — the
 	// SPDY forwards, §1d C1). The handler hands it to the owning pane
 	// (TranscriptModel.transportClose / ExternalPane.transportClose); a dropped
 	// stale-generation ready must invoke it instead.
 	close func()
-}
-
-// syncAdvisoryMsg carries a late background-sync/reaper advisory (see
-// attachReadyMsg.awaitWarning) to the session's transcript.
-type syncAdvisoryMsg struct {
-	id      session.ID
-	warning string
 }
 
 // attachFailedMsg is returned when the connector fails. The App stays on (or
@@ -446,13 +435,6 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case attachReadyMsg:
 		return a.handleAttachReady(msg)
-
-	case syncAdvisoryMsg:
-		// Late background-sync/reaper advisory. The interactive pane owns the
-		// screen and the read-only feed takes no notices from this path, so the
-		// advisory is dropped rather than shown — the sync indicator on the list
-		// row already surfaces a stalled sync.
-		return a, nil
 
 	case attachFailedMsg:
 		return a.handleAttachFailed(msg)
@@ -1144,7 +1126,6 @@ func (a *App) connectCmd(sess Session) tea.Cmd {
 				opencodeCreds: res.OpencodeCreds,
 				paneDial:      res.PaneDial,
 				warning:       res.Warning,
-				awaitWarning:  res.AwaitWarning,
 				close:         res.Close,
 			}
 			ch <- connectUpdateMsg{gen: gen, ready: &ready}
@@ -1205,7 +1186,6 @@ func (a *App) createCmd(params CreateParams) tea.Cmd {
 				opencodeCreds: res.OpencodeCreds,
 				paneDial:      res.PaneDial,
 				warning:       res.Warning, // RV23: surface new-session sync warnings
-				awaitWarning:  res.AwaitWarning,
 				close:         res.Close,
 			}
 			ch <- connectUpdateMsg{gen: gen, ready: &ready}
