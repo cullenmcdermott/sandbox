@@ -234,11 +234,23 @@ func ClientLabel(backend string) string {
 	switch backend {
 	case session.BackendOpenCode:
 		return "opencode"
-	case session.BackendClaudeSDK:
+	case session.BackendClaudeSDK, session.BackendClaudePane:
 		return "claude"
 	default:
 		return backend
 	}
+}
+
+// externalPaneBackend reports whether a backend renders through an external
+// pane — the real agent TUI over a PaneTransport — rather than the Go
+// transcript: opencode's local attach client and the in-pod claude-pane TUI.
+// (Codex joins when its interactive pane lands.)
+func externalPaneBackend(backend string) bool {
+	switch backend {
+	case session.BackendOpenCode, session.BackendClaudePane:
+		return true
+	}
+	return false
 }
 
 // BackendMark returns the one-cell brand glyph for a backend, pre-colored in its
@@ -248,7 +260,7 @@ func BackendMark(backend string) string {
 	switch backend {
 	case session.BackendOpenCode:
 		return theme.MarkOpenCodeStyled()
-	case session.BackendClaudeSDK:
+	case session.BackendClaudeSDK, session.BackendClaudePane:
 		return theme.MarkClaudeStyled()
 	default:
 		return ""
@@ -262,7 +274,7 @@ func BackendGlyph(backend string) string {
 	switch backend {
 	case session.BackendOpenCode:
 		return theme.MarkOpenCode
-	case session.BackendClaudeSDK:
+	case session.BackendClaudeSDK, session.BackendClaudePane:
 		return theme.MarkClaude
 	default:
 		return ""
@@ -275,7 +287,7 @@ func BackendColor(backend string) (color.Color, bool) {
 	switch backend {
 	case session.BackendOpenCode:
 		return theme.BrandOpenCode(), true
-	case session.BackendClaudeSDK:
+	case session.BackendClaudeSDK, session.BackendClaudePane:
 		return theme.BrandClaude(), true
 	default:
 		return nil, false

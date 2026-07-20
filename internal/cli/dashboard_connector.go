@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/cullenmcdermott/sandbox/client"
 	"github.com/cullenmcdermott/sandbox/internal/session"
@@ -57,6 +58,30 @@ func mapOpencode(oc *client.ExternalCreds) *dashboard.OpencodeCreds {
 	return &dashboard.OpencodeCreds{Username: oc.Username, Password: oc.Password, URL: oc.URL}
 }
 
+// paneDialTimeout bounds a pane WebSocket dial. The dial rides an
+// already-established localhost port-forward, so it is normally instant; the
+// budget only has to cover the runner lazily spawning the interactive child on
+// a first-ever attach.
+const paneDialTimeout = 30 * time.Second
+
+// mapPaneDial adapts Session.AttachPane to the dashboard's PaneDial seam for a
+// claude-pane session (nil for every other backend, which keeps the dashboard's
+// pane routing off). client.PaneStream satisfies dashboard.PaneTransport
+// structurally, so the stream crosses the seam without an adapter — this
+// function exists so the dashboard never imports client.
+func mapPaneDial(sess *client.Session, backend string) dashboard.PaneDial {
+	if backend != client.BackendClaudePane {
+		return nil
+	}
+	return func(cols, rows int) (dashboard.PaneTransport, error) {
+		// The context governs only the dial/handshake; the established stream
+		// lives until Close (same ownership rule as the port-forwards).
+		ctx, cancel := context.WithTimeout(context.Background(), paneDialTimeout)
+		defer cancel()
+		return sess.AttachPane(ctx, cols, rows)
+	}
+}
+
 // newDashboardConnector returns a dashboard.Connector that drives a client.Session
 // connect (resume-if-suspended + wait-ready + port-forward + health + file sync +
 // idle reaper) and adapts the result into dashboard types. Each call scopes a
@@ -88,6 +113,7 @@ func newDashboardConnector(c *client.Client, reaperImage string) dashboard.Conne
 			Reconnect:     reconnect,
 			Endpoint:      conn.Endpoint,
 			OpencodeCreds: mapOpencode(conn.External),
+			PaneDial:      mapPaneDial(sess, conn.Backend),
 			Warning:       conn.Warning,
 			// §5: sync/reaper advisories settle in the background now; the
 			// dashboard polls this seam so they surface instead of vanishing.
@@ -200,6 +226,7 @@ func newDashboardCreator(c *client.Client, runnerImage, reaperImage string) dash
 			Reconnect:     reconnect,
 			Endpoint:      conn.Endpoint,
 			OpencodeCreds: mapOpencode(conn.External),
+			PaneDial:      mapPaneDial(sess, conn.Backend),
 			Warning:       conn.Warning,
 			AwaitWarning:  sess.AwaitSync,
 			Close:         func() { _ = sess.Close() },

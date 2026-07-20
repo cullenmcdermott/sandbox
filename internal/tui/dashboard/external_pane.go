@@ -1,71 +1,75 @@
 package dashboard
 
 import (
+	"errors"
 	"fmt"
 	"io"
-	"os"
-	"os/exec"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
-	"github.com/creack/pty"
 	"github.com/cullenmcdermott/sandbox/tui/kit"
 	"github.com/cullenmcdermott/sandbox/tui/theme"
 	"github.com/rivo/uniseg"
 )
 
-// ExternalPane embeds the real `opencode attach` client as a Tier-2 PTY pane:
-// the runner supervises `opencode serve` in the pod, and a local `opencode`
-// process — reached over a localhost port-forward — is the interactive TUI. We
-// do NOT hand the whole terminal to it (that would lose the reserved status row
-// and an instant minimize); instead the child runs in an OS PTY whose output is
-// fed into a VT emulator that we render as a full Bubble Tea frame each tick,
-// reserving the last row for a status line.
+// ExternalPane embeds a real external agent TUI as a Tier-2 pane: the byte
+// stream of a terminal client whose engine lives elsewhere. For opencode that
+// client is a local `opencode attach` child in an OS PTY (the runner
+// supervises `opencode serve` in the pod); for claude-pane it is the
+// interactive claude child running IN the pod under a runner-owned PTY,
+// streamed over the pane WebSocket. Either way we do NOT hand the whole
+// terminal to it (that would lose the reserved status row and an instant
+// minimize); the transport's output is fed into a VT emulator that we render
+// as a full Bubble Tea frame each tick, reserving the last row for a status
+// line.
 //
 // Data flow:
 //
-//	opencode attach (OS PTY) ──stdout──▶ reader goroutine ──chan──▶ emulator.Write
-//	                                                                     │ Render()
-//	user keys ──KeyPressMsg──▶ encodeKey ──▶ PTY master (stdin)          ▼
-//	                                                             View (rows + status)
+//	PaneTransport ──Read──▶ reader goroutine ──chan──▶ emulator.Write
+//	                                                        │ Render()
+//	user keys ──KeyPressMsg──▶ encodeKey ──▶ transport.Write ▼
+//	                                                View (rows + status)
 //
-// The reader goroutine drains the PTY into a buffered channel unconditionally,
-// so the child never blocks on a full PTY buffer even while the pane is
-// minimized (screen back on the dashboard) — which is what makes re-opening the
-// pane instant rather than a reconnect.
+// The reader goroutine drains the transport into a buffered channel
+// unconditionally, so the remote end never blocks on a full buffer even while
+// the pane is minimized (screen back on the dashboard) — which is what makes
+// re-opening the pane instant rather than a reconnect.
 type ExternalPane struct {
-	sess  Session
-	creds OpencodeCreds
+	sess Session
+	// label names the embedded client in the status row ("opencode", "claude").
+	label string
+	// dial establishes the transport once, in Init, at the emulator geometry.
+	dial PaneDial
 
 	// liveSession, when set, returns the current dashboard read-model Session for
 	// this pane's id — refreshed by the background passive SSE stream that the
-	// runner's opencode observer feeds (Phase 4). The status row reads it so live
+	// runner's observer feeds (Phase 4). The status row reads it so live
 	// title/status/ctx%/cost track the in-pane turn, instead of the static snapshot
 	// captured at construction. nil in tests/standalone → falls back to p.sess.
 	liveSession func() Session
 
-	// transportClose tears down the attach connection's transport (the HTTP/SSH/
-	// opencode SPDY forwards — ConnectResult.Close, §1d C1). The `opencode attach`
-	// child talks through the opencode forward, so this must run only when the
-	// pane is torn down for real (close()), never on minimize. nil in tests.
+	// transportClose tears down the attach connection's forwards (the HTTP/SSH/
+	// opencode SPDY forwards — ConnectResult.Close, §1d C1). The pane's byte
+	// stream rides those forwards (opencode's local child dials through one; the
+	// claude WS is one), so this must run only when the pane is torn down for
+	// real (close()), never on minimize. nil in tests.
 	transportClose func()
 
-	emu  *vt.Emulator
-	ptmx *os.File
-	cmd  *exec.Cmd
-	out  chan ptyChunk
+	emu       *vt.Emulator
+	transport PaneTransport
+	out       chan ptyChunk
 
 	// carry holds a trailing non-ASCII grapheme withheld from the emulator until
-	// the next chunk, so a cluster split across PTY reads isn't rendered as two
-	// cells (O7). At most one grapheme cluster (a few bytes).
+	// the next chunk, so a cluster split across transport reads isn't rendered as
+	// two cells (O7). At most one grapheme cluster (a few bytes).
 	carry []byte
 
 	// activeModes tracks DEC modes the child has enabled via the emulator's
 	// callbacks, so we know whether to forward PasteMsg (bracketed paste) and
-	// MouseMsg (mouse reporting) to the child PTY.
+	// MouseMsg (mouse reporting) to the child.
 	activeModes map[ansi.DECMode]bool
 
 	w, h   int
@@ -76,22 +80,35 @@ type ExternalPane struct {
 // minSize keeps the emulator non-degenerate before the first WindowSizeMsg.
 const extDefaultW, extDefaultH = 80, 24
 
-// ptyChunk is one read from the child PTY; ok=false marks EOF (child exited).
+// ptyChunk is one read from the pane transport; ok=false marks end of stream.
 type ptyChunk struct {
 	data []byte
 	ok   bool
+	// err is the stream-end reason when ok is false: nil for a clean EOF (a
+	// deliberate quit / detach), else the transport's description (child exit
+	// status, pane preemption, network drop).
+	err error
 }
 
-// ptyOutputMsg carries a PTY read back into the Bubble Tea loop. It is handled
-// by the App at the top level (not gated on the active screen) so the emulator
-// stays current — and the reader keeps draining — even while minimized.
+// ptyOutputMsg carries a transport read back into the Bubble Tea loop. It is
+// handled by the App at the top level (not gated on the active screen) so the
+// emulator stays current — and the reader keeps draining — even while minimized.
 type ptyOutputMsg struct {
 	pane  *ExternalPane
 	chunk ptyChunk
 }
 
+// NewExternalPane builds the opencode pane: a local `opencode attach` child in
+// an OS PTY, dialed with the connector's creds.
 func NewExternalPane(sess Session, creds OpencodeCreds, liveSession func() Session) *ExternalPane {
-	return &ExternalPane{sess: sess, creds: creds, liveSession: liveSession, w: extDefaultW, h: extDefaultH, activeModes: make(map[ansi.DECMode]bool)}
+	return NewExternalPaneTransport(sess, "opencode", dialOpencodePane(creds), liveSession)
+}
+
+// NewExternalPaneTransport builds a pane over an arbitrary transport dialer —
+// the seam the claude-pane WebSocket stream plugs into (ConnectResult.PaneDial)
+// and a future codex pane will reuse. label names the client in the status row.
+func NewExternalPaneTransport(sess Session, label string, dial PaneDial, liveSession func() Session) *ExternalPane {
+	return &ExternalPane{sess: sess, label: label, dial: dial, liveSession: liveSession, w: extDefaultW, h: extDefaultH, activeModes: make(map[ansi.DECMode]bool)}
 }
 
 // session returns the live read-model Session when a liveSession accessor is set
@@ -117,19 +134,10 @@ func (p *ExternalPane) emuSize() (cols, rows int) {
 	return cols, rows
 }
 
-// Init spawns `opencode attach` in a PTY and starts draining it. It returns the
-// first read Cmd; on spawn failure it returns a finished message carrying the
-// error so the App can fall back to the dashboard.
+// Init dials the transport and starts draining it. It returns the first read
+// Cmd; on dial failure it returns a finished message carrying the error so the
+// App can fall back to the dashboard.
 func (p *ExternalPane) Init() tea.Cmd {
-	// Pre-flight: the local `opencode` client must be installed (and version-
-	// matched to the pod's `opencode serve`). Without it the spawn would fail
-	// with a bare ENOENT; surface an actionable message instead.
-	if _, err := exec.LookPath("opencode"); err != nil {
-		p.exited = true
-		p.err = fmt.Errorf("opencode CLI not found on PATH — install it locally (Nix) to attach to opencode sessions")
-		return func() tea.Msg { return externalPaneFinishedMsg{err: p.err} }
-	}
-
 	cols, rows := p.emuSize()
 	p.emu = vt.NewEmulator(cols, rows)
 	// Track DEC modes set by the child so we know whether to forward PasteMsg
@@ -147,46 +155,38 @@ func (p *ExternalPane) Init() tea.Cmd {
 		},
 	})
 
-	// Auth: the server URL is positional; basic-auth user via -u and the
-	// password via OPENCODE_SERVER_PASSWORD in the env (never argv, so it stays
-	// out of the host process list).
-	//
-	// --continue resumes the prior conversation. The opencode session lives on the
-	// server (XDG_DATA_HOME on the pod's PVC, durable across suspend/resume), but
-	// the attach client must be told to continue it or it opens an empty session —
-	// so without this flag every (re)attach loses history. One session per pod
-	// means "the last session" is unambiguously the user's previous conversation;
-	// on the first-ever attach (none yet) opencode falls back to a new session.
-	cmd := exec.Command("opencode", "attach", p.creds.URL, "-u", p.creds.Username, "--continue")
-	cmd.Env = append(os.Environ(), "OPENCODE_SERVER_PASSWORD="+p.creds.Password, "TERM=xterm-256color")
-
-	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)})
+	tr, err := p.dial(cols, rows)
 	if err != nil {
-		p.exited, p.err = true, fmt.Errorf("opencode attach: %w", err)
+		p.exited, p.err = true, err
 		return func() tea.Msg { return externalPaneFinishedMsg{err: p.err} }
 	}
-	p.cmd = cmd
-	p.ptmx = ptmx
+	p.transport = tr
 	p.out = make(chan ptyChunk, 256)
 
 	go func() {
 		buf := make([]byte, 32*1024)
 		for {
-			n, rerr := ptmx.Read(buf)
+			n, rerr := tr.Read(buf)
 			if n > 0 {
 				cp := make([]byte, n)
 				copy(cp, buf[:n])
 				p.out <- ptyChunk{data: cp, ok: true}
 			}
 			if rerr != nil {
-				p.out <- ptyChunk{ok: false}
+				// io.EOF is the clean end of stream; anything else is the reason
+				// it died (child exit status, pane preemption, network drop).
+				var reason error
+				if !errors.Is(rerr, io.EOF) {
+					reason = rerr
+				}
+				p.out <- ptyChunk{ok: false, err: reason}
 				close(p.out)
 				return
 			}
 		}
 	}()
 
-	// Drain the emulator's reply buffer back to the child PTY. The vt emulator
+	// Drain the emulator's reply buffer back to the transport. The vt emulator
 	// answers terminal capability queries (DA, DSR/cursor-position, DECRQM, OSC
 	// 10/11 color) by writing to an internal io.Pipe exposed only via Read();
 	// opencode's opentui renderer measures cell/Unicode width on startup with OSC
@@ -201,7 +201,7 @@ func (p *ExternalPane) Init() tea.Cmd {
 		for {
 			n, rerr := p.emu.Read(buf)
 			if n > 0 {
-				_, _ = ptmx.Write(buf[:n])
+				_, _ = tr.Write(buf[:n])
 			}
 			if rerr != nil {
 				return
@@ -212,8 +212,8 @@ func (p *ExternalPane) Init() tea.Cmd {
 	return p.readCmd()
 }
 
-// readCmd blocks on the next PTY chunk and wraps it as a ptyOutputMsg. The App
-// re-issues it (via apply) after each chunk so the drain continues.
+// readCmd blocks on the next transport chunk and wraps it as a ptyOutputMsg.
+// The App re-issues it (via apply) after each chunk so the drain continues.
 func (p *ExternalPane) readCmd() tea.Cmd {
 	out := p.out
 	return func() tea.Msg {
@@ -225,8 +225,8 @@ func (p *ExternalPane) readCmd() tea.Cmd {
 	}
 }
 
-// apply feeds a PTY chunk into the emulator and returns the next read Cmd, or a
-// finished message when the child has exited. Returns (cmd, finished).
+// apply feeds a transport chunk into the emulator and returns the next read
+// Cmd, or a finished message when the stream has ended. Returns (cmd, finished).
 func (p *ExternalPane) apply(chunk ptyChunk) (tea.Cmd, bool) {
 	if !chunk.ok {
 		p.exited = true
@@ -235,11 +235,10 @@ func (p *ExternalPane) apply(chunk ptyChunk) (tea.Cmd, bool) {
 			_, _ = p.emu.Write(p.carry)
 			p.carry = nil
 		}
-		// Capture a non-zero exit so a child that dies on startup (e.g. attach
-		// hitting a not-yet-ready server, or an auth/version mismatch) reports a
-		// reason instead of silently bouncing back to the dashboard.
-		if werr := p.cmd.Wait(); werr != nil {
-			p.err = fmt.Errorf("opencode attach exited: %w", werr)
+		// The transport's stream-end reason (child exit status, preemption) —
+		// nil for a clean EOF, so a deliberate quit doesn't report an error.
+		if chunk.err != nil {
+			p.err = chunk.err
 		}
 		return nil, true
 	}
@@ -249,9 +248,9 @@ func (p *ExternalPane) apply(chunk ptyChunk) (tea.Cmd, bool) {
 	return p.readCmd(), false
 }
 
-// feed writes PTY bytes to the emulator without splitting a grapheme cluster
-// across a write boundary (O7): the embedded vt emulator flushes its pending
-// grapheme at the end of every Write, so a cluster straddling two PTY reads
+// feed writes transport bytes to the emulator without splitting a grapheme
+// cluster across a write boundary (O7): the embedded vt emulator flushes its
+// pending grapheme at the end of every Write, so a cluster straddling two reads
 // would render as two cells. feed prepends any previously-held tail, writes up
 // to the last safe boundary, and keeps the trailing (possibly-extendable)
 // grapheme for the next chunk.
@@ -293,26 +292,25 @@ func safeWriteBoundary(b []byte) int {
 }
 
 // handleKey encodes a key press to terminal input bytes and writes them to the
-// PTY master. The universal escape is intercepted by the App before reaching
+// transport. The universal escape is intercepted by the App before reaching
 // here, so every key delivered to the pane is meant for the child.
 func (p *ExternalPane) handleKey(msg tea.KeyPressMsg) {
-	if p.ptmx == nil {
+	if p.transport == nil {
 		return
 	}
 	if b := encodeKey(msg); len(b) > 0 {
-		_, _ = p.ptmx.Write(b)
+		_, _ = p.transport.Write(b)
 	}
 }
 
-// handlePaste forwards pasted text to the child PTY wrapped in bracketed-paste
-// sequences when the child has enabled the mode (O6).
+// handlePaste forwards pasted text to the child wrapped in bracketed-paste
+// sequences when the child has enabled the mode (O6). One Write so the paste
+// travels as a single unit (one frame on a network transport).
 func (p *ExternalPane) handlePaste(msg tea.PasteMsg) {
-	if p.ptmx == nil || !p.activeModes[ansi.ModeBracketedPaste] {
+	if p.transport == nil || !p.activeModes[ansi.ModeBracketedPaste] {
 		return
 	}
-	_, _ = p.ptmx.WriteString(ansi.BracketedPasteStart)
-	_, _ = p.ptmx.WriteString(msg.Content)
-	_, _ = p.ptmx.WriteString(ansi.BracketedPasteEnd)
+	_, _ = p.transport.Write([]byte(ansi.BracketedPasteStart + msg.Content + ansi.BracketedPasteEnd))
 }
 
 // mouseEnabled returns true if the child has enabled any mouse tracking mode.
@@ -331,10 +329,10 @@ func (p *ExternalPane) mouseEnabled() bool {
 	return false
 }
 
-// handleMouse forwards a mouse event to the child PTY encoded as xterm SGR
-// mouse when the child has enabled mouse reporting (O6).
+// handleMouse forwards a mouse event to the child encoded as xterm SGR mouse
+// when the child has enabled mouse reporting (O6).
 func (p *ExternalPane) handleMouse(msg tea.MouseMsg) {
-	if p.ptmx == nil || !p.mouseEnabled() {
+	if p.transport == nil || !p.mouseEnabled() {
 		return
 	}
 
@@ -354,34 +352,36 @@ func (p *ExternalPane) handleMouse(msg tea.MouseMsg) {
 		m.Mod.Contains(tea.ModCtrl))
 
 	if p.activeModes[ansi.ModeMouseExtSgr] {
-		_, _ = p.ptmx.WriteString(ansi.MouseSgr(b, m.X, m.Y, isRelease))
+		_, _ = p.transport.Write([]byte(ansi.MouseSgr(b, m.X, m.Y, isRelease)))
 	} else {
-		_, _ = p.ptmx.WriteString(ansi.MouseX10(b, m.X, m.Y))
+		_, _ = p.transport.Write([]byte(ansi.MouseX10(b, m.X, m.Y)))
 	}
 }
 
-// resize updates the pane size and propagates it to the emulator and the PTY
-// (which sends SIGWINCH to the child so it repaints at the new size).
+// resize updates the pane size and propagates it to the emulator and the
+// transport (a PTY SIGWINCH locally, a resize control frame over the wire).
 func (p *ExternalPane) resize(w, h int) {
 	p.w, p.h = w, h
 	cols, rows := p.emuSize()
 	if p.emu != nil {
 		p.emu.Resize(cols, rows)
 	}
-	if p.ptmx != nil {
-		_ = pty.Setsize(p.ptmx, &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)})
+	if p.transport != nil {
+		_ = p.transport.Resize(cols, rows)
 	}
 }
 
-// close kills the child, reaps it, and releases the PTY. Called when the pane is
-// torn down for real (child exited, or replaced by a different session) — NOT on
-// minimize.
+// close tears the pane down for real (stream ended, or replaced by a different
+// session) — NOT on minimize.
 func (p *ExternalPane) close() {
-	// Close the master first so the reader goroutine's blocked ptmx.Read returns
-	// an error and the goroutine exits.
-	if p.ptmx != nil {
-		_ = p.ptmx.Close()
-		p.ptmx = nil
+	// Close the transport first so the reader goroutine's blocked Read returns
+	// and the goroutine exits; the child-process transport also kills + reaps
+	// its child here (O1), and the WS transport performs the closing handshake
+	// (a clean detach — the remote child keeps running).
+	if p.transport != nil {
+		_ = p.transport.Close()
+		p.transport = nil
+		p.exited = true
 	}
 	// Stop the reply-pump goroutine by closing the emulator's reply pipe (its
 	// InputPipe writer) directly rather than calling emu.Close(). emu.Read (pump
@@ -399,17 +399,8 @@ func (p *ExternalPane) close() {
 			_ = p.emu.Close()
 		}
 	}
-	if p.cmd != nil && p.cmd.Process != nil && !p.exited {
-		_ = p.cmd.Process.Kill()
-		// Reap the killed child (O1). Without Wait() it lingers as a <defunct>
-		// zombie until program exit: a replaced pane never reaches apply()'s EOF
-		// Wait() because app.go's stale-pane guard drops its ptyOutputMsg. SIGKILL
-		// is uncatchable so Wait() returns promptly — same call the EOF path makes.
-		_ = p.cmd.Wait()
-		p.exited = true
-	}
-	// Release the attach connection's forwards last, after the child that used
-	// them is dead (§1d C1).
+	// Release the attach connection's forwards last, after the stream that used
+	// them is down (§1d C1).
 	if p.transportClose != nil {
 		p.transportClose()
 		p.transportClose = nil
@@ -428,11 +419,12 @@ func (p *ExternalPane) View() tea.View {
 	return v
 }
 
-// statusRow is the reserved last line: title · opencode · model · live status ·
+// statusRow is the reserved last line: title · client · model · live status ·
 // ctx% · cost, with a detach hint on the right. The live status/ctx%/cost come
-// from the runner's passive opencode observer (Phase 4) via the dashboard
-// read-model, reaching parity with the claude statusline's surfaced metrics.
-// (^] / ctrl+] only — esc is forwarded to opencode so its own overlays can use it.)
+// from the runner's passive observer stream (opencode observer / claude-pane
+// hook+statusline observer) via the dashboard read-model, so every external
+// pane reaches metric parity regardless of engine. (^] / ctrl+] only — esc is
+// forwarded to the child so its own overlays can use it.)
 func (p *ExternalPane) statusRow() string {
 	s := p.session()
 	model := s.Model
@@ -442,11 +434,11 @@ func (p *ExternalPane) statusRow() string {
 		model = model[i+1:]
 	}
 	if model == "" {
-		model = "opencode"
+		model = p.label
 	}
 	muted := lipgloss.NewStyle().Foreground(theme.TextMuted)
 	left := lipgloss.NewStyle().Foreground(theme.Charple).Bold(true).Render(s.DisplayTitle()) +
-		muted.Render(" · opencode · "+model)
+		muted.Render(" · "+p.label+" · "+model)
 
 	// Live metrics, surfaced only once the observer has reported them (a fresh
 	// pane with no turn yet shows just title/model, no empty "idle · ctx 0%").

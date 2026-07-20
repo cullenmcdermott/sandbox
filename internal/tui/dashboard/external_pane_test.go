@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -15,10 +16,55 @@ import (
 	"github.com/creack/pty"
 )
 
+// fakePaneTransport is a PaneTransport over any ReadWriteCloser (an os.Pipe end
+// in these tests), recording resizes. It stands in for both real transports so
+// input-forwarding behavior is tested at the seam, not against a PTY.
+type fakePaneTransport struct {
+	io.ReadWriteCloser
+	resizes [][2]int
+}
+
+func (f *fakePaneTransport) Resize(cols, rows int) error {
+	f.resizes = append(f.resizes, [2]int{cols, rows})
+	return nil
+}
+
+// TestOpencodeAttachCmd pins the argv/env contract of the local opencode
+// client spawn: server URL positional, -u user, --continue (history), and the
+// password via env — NEVER argv, so it stays out of the host process list.
+func TestOpencodeAttachCmd(t *testing.T) {
+	creds := OpencodeCreds{Username: "opencode", Password: "secret", URL: "http://127.0.0.1:5000"}
+	cmd := opencodeAttachCmd(creds)
+	wantArgs := []string{"opencode", "attach", "http://127.0.0.1:5000", "-u", "opencode", "--continue"}
+	if len(cmd.Args) != len(wantArgs) {
+		t.Fatalf("args = %v, want %v", cmd.Args, wantArgs)
+	}
+	for i, a := range wantArgs {
+		if cmd.Args[i] != a {
+			t.Fatalf("args[%d] = %q, want %q (full: %v)", i, cmd.Args[i], a, cmd.Args)
+		}
+	}
+	var foundPass bool
+	for _, e := range cmd.Env {
+		if e == "OPENCODE_SERVER_PASSWORD=secret" {
+			foundPass = true
+		}
+	}
+	if !foundPass {
+		t.Error("password not passed via OPENCODE_SERVER_PASSWORD env")
+	}
+	for _, a := range cmd.Args {
+		if strings.Contains(a, "secret") {
+			t.Errorf("password leaked into argv: %v", cmd.Args)
+		}
+	}
+}
+
 // TestExternalPaneCloseReapsChild is the O1 regression guard: close() must reap
-// the killed child (Wait) so it does not linger as a <defunct> zombie. close()
-// calls Wait() synchronously, so once it returns the child is reaped and
-// cmd.ProcessState is set (read here only after close() returns — race-free).
+// the killed child (Wait) so it does not linger as a <defunct> zombie. The
+// child-process transport's Close waits synchronously, so once close() returns
+// the child is reaped and cmd.ProcessState is set (read here only after close()
+// returns — race-free).
 func TestExternalPaneCloseReapsChild(t *testing.T) {
 	cmd := exec.Command("sleep", "60")
 	ptmx, err := pty.Start(cmd)
@@ -31,7 +77,7 @@ func TestExternalPaneCloseReapsChild(t *testing.T) {
 		}
 		t.Fatalf("pty.Start: %v", err)
 	}
-	p := &ExternalPane{cmd: cmd, ptmx: ptmx}
+	p := &ExternalPane{transport: &childProcTransport{name: "test child", ptmx: ptmx, cmd: cmd}}
 
 	p.close()
 
@@ -43,6 +89,144 @@ func TestExternalPaneCloseReapsChild(t *testing.T) {
 	}
 	if !p.exited {
 		t.Error("close() should mark the pane exited")
+	}
+}
+
+// TestChildProcTransportReadReportsExit: a Read that fails because the child
+// exited must reap it and surface the exit status as the stream-end error (the
+// reason shown when a pane child dies on startup), and a subsequent Close must
+// not double-Wait.
+func TestChildProcTransportReadReportsExit(t *testing.T) {
+	cmd := exec.Command("sh", "-c", "exit 3")
+	ptmx, err := pty.Start(cmd)
+	if err != nil {
+		if errors.Is(err, syscall.EPERM) || strings.Contains(err.Error(), "operation not permitted") {
+			t.Skipf("PTY allocation not permitted in this environment: %v", err) // gate-ok: conditional on EPERM, a real env limit not a dodged test
+		}
+		t.Fatalf("pty.Start: %v", err)
+	}
+	tr := &childProcTransport{name: "test child", ptmx: ptmx, cmd: cmd}
+
+	// Drain until the master read fails (child exit → EIO).
+	buf := make([]byte, 1024)
+	var rerr error
+	for {
+		_, rerr = tr.Read(buf)
+		if rerr != nil {
+			break
+		}
+	}
+	if rerr == nil || !strings.Contains(rerr.Error(), "test child exited") {
+		t.Fatalf("Read after child exit = %v, want a 'test child exited' error", rerr)
+	}
+	if cmd.ProcessState == nil || cmd.ProcessState.ExitCode() != 3 {
+		t.Fatalf("child not reaped with its real status: %v", cmd.ProcessState)
+	}
+	// Close after the exit-path Wait must be safe (waitOnce).
+	if err := tr.Close(); err != nil {
+		t.Fatalf("Close after exit: %v", err)
+	}
+}
+
+// TestExternalPaneInitDialFailure: a failed dial marks the pane exited with the
+// dial error and emits the finished message so the App falls back to the
+// dashboard (the opencode-not-installed / pane-attach-refused path).
+func TestExternalPaneInitDialFailure(t *testing.T) {
+	wantErr := errors.New("dial refused")
+	p := NewExternalPaneTransport(Session{}, "claude", func(cols, rows int) (PaneTransport, error) {
+		return nil, wantErr
+	}, nil)
+	cmd := p.Init()
+	if !p.exited || !errors.Is(p.err, wantErr) {
+		t.Fatalf("after failed dial: exited=%v err=%v, want exited with the dial error", p.exited, p.err)
+	}
+	msg := cmd()
+	fin, ok := msg.(externalPaneFinishedMsg)
+	if !ok || !errors.Is(fin.err, wantErr) {
+		t.Fatalf("Init cmd = %#v, want externalPaneFinishedMsg carrying the dial error", msg)
+	}
+}
+
+// TestExternalPaneTransportRoundTrip drives Init + the reader goroutine over a
+// fake transport (the WS-shaped path): dialed at emulator geometry, transport
+// output reaches the emulator via apply, keys write back to the transport, and
+// the stream-end error surfaces on the pane.
+func TestExternalPaneTransportRoundTrip(t *testing.T) {
+	// fromPane receives what the pane writes; toPane feeds the pane's reader.
+	toPaneR, toPaneW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	fromPaneR, fromPaneW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer fromPaneR.Close()
+	defer toPaneW.Close()
+
+	tr := &fakePaneTransport{ReadWriteCloser: struct {
+		io.Reader
+		io.Writer
+		io.Closer
+	}{toPaneR, fromPaneW, toPaneR}}
+
+	var dialedCols, dialedRows int
+	p := NewExternalPaneTransport(Session{}, "claude", func(cols, rows int) (PaneTransport, error) {
+		dialedCols, dialedRows = cols, rows
+		return tr, nil
+	}, nil)
+	p.w, p.h = 40, 10
+	readCmd := p.Init()
+	if p.err != nil {
+		t.Fatalf("Init: %v", p.err)
+	}
+	if dialedCols != 40 || dialedRows != 9 {
+		t.Fatalf("dialed at %dx%d, want 40x9 (width × height-1 status row)", dialedCols, dialedRows)
+	}
+
+	// Transport output → reader goroutine → chunk → apply → emulator.
+	if _, err := toPaneW.WriteString("hello"); err != nil {
+		t.Fatalf("feed transport: %v", err)
+	}
+	msg := readCmd()
+	out, ok := msg.(ptyOutputMsg)
+	if !ok || !out.chunk.ok {
+		t.Fatalf("readCmd = %#v, want a live ptyOutputMsg", msg)
+	}
+	next, finished := p.apply(out.chunk)
+	if finished || next == nil {
+		t.Fatal("apply(live chunk) should continue the drain")
+	}
+	if !strings.Contains(p.emu.Render(), "hello") {
+		t.Errorf("emulator missing transport output: %q", p.emu.Render())
+	}
+
+	// Key press → transport write.
+	p.handleKey(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	buf := make([]byte, 8)
+	n, err := fromPaneR.Read(buf)
+	if err != nil || string(buf[:n]) != "x" {
+		t.Fatalf("transport received %q (%v), want %q", buf[:n], err, "x")
+	}
+
+	// resize → emulator + transport.
+	p.resize(50, 12)
+	if len(tr.resizes) == 0 || tr.resizes[len(tr.resizes)-1] != [2]int{50, 11} {
+		t.Fatalf("transport resizes = %v, want trailing 50x11", tr.resizes)
+	}
+
+	// Stream end with a reason → pane exited with that error.
+	toPaneW.Close()
+	msg = next()
+	out, ok = msg.(ptyOutputMsg)
+	if !ok {
+		t.Fatalf("readCmd after close = %#v", msg)
+	}
+	if _, finished := p.apply(out.chunk); !finished {
+		t.Fatal("apply(end chunk) should finish the pane")
+	}
+	if p.err != nil {
+		t.Fatalf("clean EOF should not set an error, got %v", p.err)
 	}
 }
 
@@ -139,7 +323,7 @@ func TestExternalPaneHandlePasteWhenEnabled(t *testing.T) {
 	defer r.Close()
 	defer w.Close()
 
-	p := &ExternalPane{ptmx: w, activeModes: map[ansi.DECMode]bool{ansi.ModeBracketedPaste: true}}
+	p := &ExternalPane{transport: &fakePaneTransport{ReadWriteCloser: w}, activeModes: map[ansi.DECMode]bool{ansi.ModeBracketedPaste: true}}
 	p.handlePaste(tea.PasteMsg{Content: "hello world"})
 
 	buf := make([]byte, 256)
@@ -160,7 +344,7 @@ func TestExternalPaneHandlePasteIgnoredWhenDisabled(t *testing.T) {
 	defer r.Close()
 	defer w.Close()
 
-	p := &ExternalPane{ptmx: w, activeModes: make(map[ansi.DECMode]bool)}
+	p := &ExternalPane{transport: &fakePaneTransport{ReadWriteCloser: w}, activeModes: make(map[ansi.DECMode]bool)}
 	p.handlePaste(tea.PasteMsg{Content: "hello world"})
 
 	buf := make([]byte, 256)
@@ -181,7 +365,7 @@ func TestExternalPaneHandleMouseSgrWhenEnabled(t *testing.T) {
 	defer r.Close()
 	defer w.Close()
 
-	p := &ExternalPane{ptmx: w, activeModes: map[ansi.DECMode]bool{
+	p := &ExternalPane{transport: &fakePaneTransport{ReadWriteCloser: w}, activeModes: map[ansi.DECMode]bool{
 		ansi.ModeMouseNormal: true,
 		ansi.ModeMouseExtSgr: true,
 	}}
@@ -206,7 +390,7 @@ func TestExternalPaneHandleMouseIgnoredWhenDisabled(t *testing.T) {
 	defer r.Close()
 	defer w.Close()
 
-	p := &ExternalPane{ptmx: w, activeModes: make(map[ansi.DECMode]bool)}
+	p := &ExternalPane{transport: &fakePaneTransport{ReadWriteCloser: w}, activeModes: make(map[ansi.DECMode]bool)}
 	p.handleMouse(tea.MouseClickMsg{X: 5, Y: 10, Button: tea.MouseLeft})
 
 	buf := make([]byte, 256)

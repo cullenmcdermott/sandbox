@@ -59,6 +59,11 @@ type ConnectResult struct {
 	Reconnect     ReconnectFunc
 	Endpoint      string         // runner HTTP base URL (claude transcript / SSE)
 	OpencodeCreds *OpencodeCreds // nil for claude-sdk sessions
+	// PaneDial, when non-nil, establishes the session's remote pane transport
+	// (the claude-pane WebSocket over the runner forward). Set only for
+	// backends whose interactive TUI runs in the pod; the App routes the attach
+	// to an ExternalPane over this transport instead of a Go transcript.
+	PaneDial PaneDial
 	// Warning is a non-fatal advisory surfaced to the user (e.g. sync failed).
 	// The dashboard renders it inline rather than dropping it to hidden stderr.
 	Warning string
@@ -144,6 +149,8 @@ type CreateResult struct {
 	Reconnect     ReconnectFunc
 	Endpoint      string         // runner HTTP base URL
 	OpencodeCreds *OpencodeCreds // nil for claude-sdk sessions
+	// PaneDial mirrors ConnectResult.PaneDial for the create path.
+	PaneDial PaneDial
 	// Warning is a non-fatal advisory surfaced to the user (e.g. sync failed on
 	// the freshly created session). Without this, the new-session path — the most
 	// common path, and where the initial sync is most likely to hiccup — silently

@@ -54,6 +54,10 @@ type attachReadyMsg struct {
 	reconnect     ReconnectFunc
 	endpoint      string
 	opencodeCreds *OpencodeCreds
+	// paneDial, when non-nil, establishes the remote pane transport for a
+	// backend whose interactive TUI runs in the pod (claude-pane): the attach
+	// routes to an ExternalPane over it instead of a Go transcript.
+	paneDial PaneDial
 	// warning is a non-fatal advisory (e.g. sync failure) to surface in the
 	// transcript as an info block so it is visible in the alt-screen TUI (C9).
 	warning string
@@ -643,9 +647,11 @@ func (a *App) handleAttach(msg attachMsg) (tea.Model, tea.Cmd) {
 	a.screen = ScreenConnecting
 	// Fix A: build a read-only preview of the conversation from warm history or
 	// the host-side cache so it paints immediately during the resume wait,
-	// instead of a blank splash. opencode sessions have no Go transcript.
+	// instead of a blank splash. External-pane sessions (opencode, claude-pane)
+	// have no Go transcript to preview — the real TUI repaints from the pane
+	// stream itself.
 	a.connectingPreview = nil
-	if !a.connectingOpencode {
+	if !externalPaneBackend(msg.sess.State.Backend) {
 		a.connectingPreview = a.buildConnectingPreview(msg.sess)
 	}
 	return a, a.connectCmd(msg.sess)
@@ -661,26 +667,34 @@ func (a *App) handleAttachReady(msg attachReadyMsg) (tea.Model, tea.Cmd) {
 	a.connectingFor = nil
 	a.connectErr = nil
 	a.connectStartedAt = time.Time{}
-	// opencode-server sessions don't have a Go transcript; the local
-	// `opencode attach` client owns the UI, embedded as a Tier-2 PTY pane.
-	if msg.opencodeCreds != nil {
-		// O1: if a different opencode session's pane is already live, close
-		// it first to prevent goroutine/process leaks.
+	// External-pane sessions don't have a Go transcript; the real agent TUI
+	// owns the UI, embedded as a Tier-2 pane — a local `opencode attach` child
+	// (opencodeCreds) or the in-pod claude child over the pane WebSocket
+	// (paneDial).
+	if msg.opencodeCreds != nil || msg.paneDial != nil {
+		// O1: if a different session's pane is already live, close it first to
+		// prevent goroutine/process leaks.
 		if a.external != nil && a.external.sess.ID() != msg.sess.ID() {
 			a.external.close()
 			a.external = nil
 		}
 		// Phase 4: do NOT cancel the background passive SSE here (unlike the
 		// transcript path below). The external pane is not a runner SSE client —
-		// `opencode attach` is a separate connection to `opencode serve` — so the
-		// passive stream is the ONLY thing feeding the runner observer's live
+		// its byte stream is a separate connection — so the passive stream is
+		// the ONLY thing feeding the runner observer's live
 		// status/title/ctx%/cost into the read-model the pane's status row reads.
 		// It's a passive stream, so it doesn't hold the idle reaper open.
 		id := msg.sess.ID()
-		pane := NewExternalPane(msg.sess, *msg.opencodeCreds, func() Session { return a.dashboard.sessionByID(id) })
+		live := func() Session { return a.dashboard.sessionByID(id) }
+		var pane *ExternalPane
+		if msg.paneDial != nil {
+			pane = NewExternalPaneTransport(msg.sess, ClientLabel(msg.sess.State.Backend), msg.paneDial, live)
+		} else {
+			pane = NewExternalPane(msg.sess, *msg.opencodeCreds, live)
+		}
 		pane.w, pane.h = a.width, a.height
 		// The pane owns the attach connection's forwards from here; its close()
-		// releases them once the child is dead (§1d C1).
+		// releases them once the stream is down (§1d C1).
 		pane.transportClose = msg.close
 		a.external = pane
 		a.screen = ScreenExternal
@@ -1491,6 +1505,7 @@ func (a *App) connectCmd(sess Session) tea.Cmd {
 				reconnect:     res.Reconnect,
 				endpoint:      res.Endpoint,
 				opencodeCreds: res.OpencodeCreds,
+				paneDial:      res.PaneDial,
 				warning:       res.Warning,
 				awaitWarning:  res.AwaitWarning,
 				close:         res.Close,
@@ -1551,6 +1566,7 @@ func (a *App) createCmd(params CreateParams) tea.Cmd {
 				reconnect:     res.Reconnect,
 				endpoint:      res.Endpoint,
 				opencodeCreds: res.OpencodeCreds,
+				paneDial:      res.PaneDial,
 				warning:       res.Warning, // RV23: surface new-session sync warnings
 				awaitWarning:  res.AwaitWarning,
 				close:         res.Close,

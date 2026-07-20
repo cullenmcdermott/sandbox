@@ -22,7 +22,7 @@ func TestExternalPaneForwardsWheelAsSgr(t *testing.T) {
 	defer r.Close()
 	defer w.Close()
 
-	p := &ExternalPane{ptmx: w, activeModes: map[ansi.DECMode]bool{
+	p := &ExternalPane{transport: &fakePaneTransport{ReadWriteCloser: w}, activeModes: map[ansi.DECMode]bool{
 		ansi.ModeMouseNormal: true,
 		ansi.ModeMouseExtSgr: true,
 	}}

@@ -3,6 +3,8 @@ package dashboard
 import (
 	"context"
 	"errors"
+	"io"
+	"os"
 	"os/exec"
 	"testing"
 	"time"
@@ -438,8 +440,8 @@ func TestAppAttachOpencodeExternalPane(t *testing.T) {
 	if cmd == nil {
 		t.Error("attach returned no command (the external client would never launch)")
 	}
-	if app.external.creds.URL != creds.URL || app.external.creds.Password != creds.Password {
-		t.Errorf("external pane got wrong creds: %+v", app.external.creds)
+	if app.external.label != "opencode" || app.external.dial == nil {
+		t.Errorf("external pane not built as an opencode dial pane: label=%q, dial set=%v", app.external.label, app.external.dial != nil)
 	}
 	if app.external.w != 100 || app.external.h != 40 {
 		t.Errorf("external pane not sized: %dx%d", app.external.w, app.external.h)
@@ -452,6 +454,57 @@ func TestAppAttachOpencodeExternalPane(t *testing.T) {
 	}
 	if app.external != nil {
 		t.Error("external pane not released after exit")
+	}
+}
+
+// TestAppAttachClaudePaneExternalPane: a claude-pane attach (attachReadyMsg
+// carrying paneDial, no opencode creds) must route to the external pane over
+// the provided transport dial — NOT build a Go transcript — and label the pane
+// "claude".
+func TestAppAttachClaudePaneExternalPane(t *testing.T) {
+	app := NewApp(nil, nil, nil)
+	app.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+
+	sess := Session{
+		State: session.State{ID: "cp1", ProjectPath: "/x/proj", Backend: session.BackendClaudePane},
+		Title: "proj",
+	}
+	dialed := 0
+	dial := PaneDial(func(cols, rows int) (PaneTransport, error) {
+		dialed++
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatalf("pipe: %v", err)
+		}
+		t.Cleanup(func() { r.Close(); w.Close() })
+		return &fakePaneTransport{ReadWriteCloser: struct {
+			io.Reader
+			io.Writer
+			io.Closer
+		}{r, w, r}}, nil
+	})
+
+	_, cmd := app.Update(attachReadyMsg{sess: sess, client: &fakeRunnerClient{}, paneDial: dial})
+	if app.screen != ScreenExternal {
+		t.Fatalf("screen = %v, want ScreenExternal", app.screen)
+	}
+	if app.external == nil {
+		t.Fatal("external pane nil after claude-pane attach")
+	}
+	if app.transcript != nil {
+		t.Error("transcript should not be built for a claude-pane session")
+	}
+	if dialed != 1 {
+		t.Errorf("pane dial invoked %d times, want 1 (Init must dial the transport)", dialed)
+	}
+	if app.external.label != "claude" {
+		t.Errorf("pane label = %q, want %q", app.external.label, "claude")
+	}
+	if cmd == nil {
+		t.Error("attach returned no command (the pane drain would never start)")
+	}
+	if app.external.w != 100 || app.external.h != 40 {
+		t.Errorf("external pane not sized: %dx%d", app.external.w, app.external.h)
 	}
 }
 
