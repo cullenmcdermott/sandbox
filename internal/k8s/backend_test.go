@@ -704,6 +704,110 @@ func TestCreateSessionNoAnthropicCredential(t *testing.T) {
 	}
 }
 
+// TestCreateSessionClaudePane: a claude-pane session's per-session Secret carries
+// the FULL Claude Code OAuth credential + oauthAccount identity under the two
+// claude-pane keys (labeled with the account id), the runner env references them
+// via fail-closed SecretKeyRefs, and the pod is given NEITHER the inference-scoped
+// CLAUDE_CODE_OAUTH_TOKEN NOR ANTHROPIC_API_KEY.
+func TestCreateSessionClaudePane(t *testing.T) {
+	ctx := context.Background()
+	b := newTestBackend(t)
+
+	const (
+		credsJSON = `{"claudeAiOauth":{"accessToken":"sk-ant-oat-PANE-CREDENTIAL"}}`
+		acctJSON  = `{"oauthAccount":{"accountId":"acct-pane","label":"claude.ai"}}`
+	)
+	spec := session.Spec{
+		ID:                     "claude-pane-x",
+		ProjectPath:            "/tmp",
+		Backend:                session.BackendClaudePane,
+		RunnerImage:            "test:latest",
+		SSHPublicKey:           "ssh-ed25519 AAAAKEY user@host",
+		AnthropicAccountID:     "acct-pane",
+		ClaudeCredentialsJSON:  []byte(credsJSON),
+		ClaudeOAuthAccountJSON: []byte(acctJSON),
+	}
+	if _, err := b.CreateSession(ctx, spec); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	secret, err := b.core.CoreV1().Secrets("agent-sessions").Get(ctx, sessionSecretName("claude-pane-x"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get secret: %v", err)
+	}
+	if string(secret.Data[secretKeyClaudeCredentialsJSON]) != credsJSON {
+		t.Errorf("claude-credentials-json: got %q, want %q", secret.Data[secretKeyClaudeCredentialsJSON], credsJSON)
+	}
+	if string(secret.Data[secretKeyClaudeOAuthAccountJSON]) != acctJSON {
+		t.Errorf("claude-oauth-account-json: got %q, want %q", secret.Data[secretKeyClaudeOAuthAccountJSON], acctJSON)
+	}
+	if secret.Labels[labelAnthropicAccount] != "acct-pane" {
+		t.Errorf("account label: got %q, want acct-pane", secret.Labels[labelAnthropicAccount])
+	}
+	// The legacy inference-scoped claude-sdk credential key must be absent.
+	if _, ok := secret.Data[secretKeyAnthropicCredential]; ok {
+		t.Error("anthropic-credential key must NOT be present for a claude-pane session")
+	}
+	// Other keys still present.
+	if len(secret.Data[secretKeyRunnerToken]) == 0 {
+		t.Error("runner token should still be set alongside the claude-pane material")
+	}
+
+	sb, err := b.agents.AgentsV1alpha1().Sandboxes("agent-sessions").Get(ctx, "claude-pane-x", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get sandbox: %v", err)
+	}
+	// Anti-regression: credential bytes never inline into the Sandbox object.
+	raw, err := json.Marshal(sb)
+	if err != nil {
+		t.Fatalf("marshal sandbox: %v", err)
+	}
+	if strings.Contains(string(raw), "PANE-CREDENTIAL") {
+		t.Fatal("credential bytes leaked into the Sandbox object (must be SecretKeyRef only)")
+	}
+	env := sb.Spec.PodTemplate.Spec.Containers[0].Env
+
+	if got := envValue(env, "SANDBOX_BACKEND"); got != session.BackendClaudePane {
+		t.Errorf("SANDBOX_BACKEND: got %q, want %q", got, session.BackendClaudePane)
+	}
+	// A claude-pane pod must NOT carry the inference-scoped token envs.
+	if envVar(env, "CLAUDE_CODE_OAUTH_TOKEN") != nil {
+		t.Error("CLAUDE_CODE_OAUTH_TOKEN must be absent for a claude-pane session")
+	}
+	if envVar(env, "ANTHROPIC_API_KEY") != nil {
+		t.Error("ANTHROPIC_API_KEY must be absent for a claude-pane session")
+	}
+
+	// Both credential envs reference the per-session Secret's claude-pane keys,
+	// fail-closed (not Optional), never an inline Value.
+	for _, tc := range []struct {
+		envName   string
+		secretKey string
+	}{
+		{"CLAUDE_CREDENTIALS_JSON", secretKeyClaudeCredentialsJSON},
+		{"CLAUDE_OAUTH_ACCOUNT_JSON", secretKeyClaudeOAuthAccountJSON},
+	} {
+		e := envVar(env, tc.envName)
+		if e == nil || e.ValueFrom == nil || e.ValueFrom.SecretKeyRef == nil {
+			t.Errorf("%s must be a SecretKeyRef", tc.envName)
+			continue
+		}
+		ref := e.ValueFrom.SecretKeyRef
+		if ref.Name != sessionSecretName("claude-pane-x") {
+			t.Errorf("%s secret name: got %q, want per-session %q", tc.envName, ref.Name, sessionSecretName("claude-pane-x"))
+		}
+		if ref.Key != tc.secretKey {
+			t.Errorf("%s secret key: got %q, want %q", tc.envName, ref.Key, tc.secretKey)
+		}
+		if e.Value != "" {
+			t.Errorf("%s must be a SecretKeyRef, never an inline Value (got %q)", tc.envName, e.Value)
+		}
+		if ref.Optional != nil && *ref.Optional {
+			t.Errorf("%s must NOT be Optional (we wrote the key)", tc.envName)
+		}
+	}
+}
+
 // TestCreateSessionPatchesCredentialOnExists guards the AlreadyExists gap:
 // re-creating a session id with a DIFFERENT account must patch the credential +
 // label onto the existing Secret without clobbering runner-token,

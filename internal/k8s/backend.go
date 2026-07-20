@@ -139,6 +139,18 @@ const (
 	// OPENAI_API_KEY fallback path.
 	secretKeyCodexAuthJSON = "codex-auth-json"
 
+	// secretKeyClaudeCredentialsJSON / secretKeyClaudeOAuthAccountJSON are the keys
+	// in the per-session Secret holding a claude-pane session's FULL Claude Code
+	// OAuth credential ({"claudeAiOauth": {...}}, the .credentials.json shape) and
+	// its oauthAccount identity ({"oauthAccount": {...}}). Written only when
+	// spec.ClaudeCredentialsJSON is non-empty; the claude-pane buildEnv branch
+	// references them (not Optional — we wrote them) via CLAUDE_CREDENTIALS_JSON /
+	// CLAUDE_OAUTH_ACCOUNT_JSON. A claude-pane pod is NEVER given the
+	// inference-scoped CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY that claude-sdk
+	// uses.
+	secretKeyClaudeCredentialsJSON  = "claude-credentials-json"
+	secretKeyClaudeOAuthAccountJSON = "claude-oauth-account-json"
+
 	// sshAuthorizedKeyMountPath is where the per-session Secret's SSH public
 	// key is projected into the pod; the entrypoint installs it as the sync
 	// user's authorized_keys.
@@ -376,6 +388,17 @@ func (b *Backend) CreateSession(ctx context.Context, spec session.Spec) (_ sessi
 	if len(spec.CodexAuthJSON) > 0 {
 		secret.Data[secretKeyCodexAuthJSON] = spec.CodexAuthJSON
 		secret.Labels[labelCodexAccount] = spec.CodexAccountID
+	}
+	// Account-backed claude-pane sessions carry the FULL Claude Code OAuth
+	// credential (.credentials.json shape) and the oauthAccount identity in the
+	// per-session Secret; the interactive pane reads them, never the inference-
+	// scoped CLAUDE_CODE_OAUTH_TOKEN. The account id also labels the Secret
+	// (reusing labelAnthropicAccount — claude-pane runs on an Anthropic account) so
+	// logout/rotation can enumerate every session holding a copy.
+	if len(spec.ClaudeCredentialsJSON) > 0 {
+		secret.Data[secretKeyClaudeCredentialsJSON] = spec.ClaudeCredentialsJSON
+		secret.Data[secretKeyClaudeOAuthAccountJSON] = spec.ClaudeOAuthAccountJSON
+		secret.Labels[labelAnthropicAccount] = spec.AnthropicAccountID
 	}
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1686,6 +1709,10 @@ func buildEnv(spec session.Spec, name string) []corev1.EnvVar {
 		return append(env, codexEnv(spec, name)...)
 	}
 
+	if spec.Backend == session.BackendClaudePane {
+		return append(env, claudePaneEnv(name)...)
+	}
+
 	// Default (claude-sdk): exactly ONE Anthropic credential env is populated per
 	// pod. The env var (the credential TYPE) is always selected by
 	// spec.AnthropicAuth — "api-key" → ANTHROPIC_API_KEY, ""/"oauth" →
@@ -1945,6 +1972,40 @@ func codexEnv(spec session.Spec, name string) []corev1.EnvVar {
 			},
 		},
 	})
+}
+
+// claudePaneEnv builds the env for a claude-pane pod: the FULL Claude Code OAuth
+// credential and the oauthAccount identity, each from the per-session Secret as a
+// fail-closed SecretKeyRef (NOT Optional — CreateSession wrote the keys when the
+// account material is present, so a missing key means a provisioning bug that
+// should stall the pod in CreateContainerConfigError rather than start it
+// unauthenticated). It deliberately sets NEITHER CLAUDE_CODE_OAUTH_TOKEN NOR
+// ANTHROPIC_API_KEY: the interactive pane authenticates from the full credential
+// (materialized as ~/.claude/.credentials.json), not the inference-scoped token
+// the claude-sdk backend uses.
+func claudePaneEnv(name string) []corev1.EnvVar {
+	return []corev1.EnvVar{
+		{
+			Name: "CLAUDE_CREDENTIALS_JSON",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: sessionSecretName(name)},
+					Key:                  secretKeyClaudeCredentialsJSON,
+					// NOT Optional: CreateSession wrote the key.
+				},
+			},
+		},
+		{
+			Name: "CLAUDE_OAUTH_ACCOUNT_JSON",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: sessionSecretName(name)},
+					Key:                  secretKeyClaudeOAuthAccountJSON,
+					// NOT Optional: CreateSession wrote the key.
+				},
+			},
+		},
+	}
 }
 
 func strPtr(s string) *string { return &s }

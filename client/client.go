@@ -131,9 +131,10 @@ var _ Backend = (*k8s.Backend)(nil)
 
 // Backend identifiers and lifecycle statuses, re-exported for convenience.
 const (
-	BackendClaudeSDK = session.BackendClaudeSDK
-	BackendOpenCode  = session.BackendOpenCode
-	BackendCodex     = session.BackendCodex
+	BackendClaudeSDK  = session.BackendClaudeSDK
+	BackendOpenCode   = session.BackendOpenCode
+	BackendCodex      = session.BackendCodex
+	BackendClaudePane = session.BackendClaudePane
 
 	// OpencodeProvider vocabulary (accepted values for CreateOptions.OpencodeProvider;
 	// selects which single model-provider credential an opencode-server session receives).

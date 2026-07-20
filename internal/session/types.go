@@ -30,6 +30,13 @@ const (
 	// over a port-forward, not through the runner. Phase 1 ships the supervisor +
 	// observer + credential contract; the interactive pane lands in a later wave.
 	BackendCodex = "codex-app-server"
+	// BackendClaudePane is the interactive Claude pane backend — programmatic
+	// turns unsupported. Unlike claude-sdk (which drives turns through the runner
+	// with an inference-scoped CLAUDE_CODE_OAUTH_TOKEN), a claude-pane session runs
+	// the interactive `claude` client against the account's FULL Claude Code OAuth
+	// credential (ClaudeCredentialsJSON / ClaudeOAuthAccountJSON), never the legacy
+	// token env.
+	BackendClaudePane = "claude-pane"
 )
 
 // OpenCode provider identifiers selecting which SINGLE model-provider API key an
@@ -173,6 +180,28 @@ type Spec struct {
 	// CLI/TUI resolves account → bytes; the client layer just carries and writes
 	// them. Ignored by non-codex backends.
 	CodexAuthJSON []byte `json:"-"`
+
+	// ClaudeCredentialsJSON is the FULL Claude Code OAuth credential document
+	// ({"claudeAiOauth": {...}}, the shape of ~/.claude/.credentials.json) for a
+	// claude-pane session's selected Anthropic account, written into the
+	// per-session Secret at CreateSession and surfaced to the runner as
+	// CLAUDE_CREDENTIALS_JSON. The interactive pane needs the full credential to
+	// materialize .credentials.json — a claude-pane pod is NEVER given the
+	// inference-scoped CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY that claude-sdk
+	// uses. It is NEVER serialized (json:"-") — like AnthropicCredential and
+	// CodexAuthJSON it is create-time-only material that must not land in the local
+	// session index or any wire payload; the pod receives it only as a SecretKeyRef
+	// env var. The CLI/TUI resolves account → bytes (see client/cred
+	// ProvisionMaterial); the client layer just carries and writes them. Ignored by
+	// non-claude-pane backends.
+	ClaudeCredentialsJSON []byte `json:"-"`
+
+	// ClaudeOAuthAccountJSON is the oauthAccount identity document
+	// ({"oauthAccount": {...}}) for the same account, written into the per-session
+	// Secret alongside ClaudeCredentialsJSON and surfaced as
+	// CLAUDE_OAUTH_ACCOUNT_JSON. It is NEVER serialized (json:"-"). Ignored by
+	// non-claude-pane backends.
+	ClaudeOAuthAccountJSON []byte `json:"-"`
 
 	// Namespace is the Kubernetes namespace for the Sandbox/PVC. Defaults to
 	// "agent-sessions".
