@@ -4,6 +4,8 @@ package dashboard
 import (
 	"context"
 	"errors"
+	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -416,12 +418,22 @@ func TestNoMatchCopyWiredWhenFiltered(t *testing.T) {
 func TestConnectStageProgressAndAttach(t *testing.T) {
 	t.Setenv("SANDBOX_REDUCE_MOTION", "1")
 
-	// Fake connector that emits all stages then returns a result.
+	// Fake connector that emits all stages then returns a result carrying a
+	// pane transport (every session is an external pane now).
 	connector := func(ctx context.Context, ref session.Ref, projectPath string, onStage func(ConnectStage, string)) (ConnectResult, error) {
 		for _, s := range []ConnectStage{StageCheck, StageForward, StageRunner, StageSync, StageAttach} {
 			onStage(s, "")
 		}
-		return ConnectResult{Client: &fakeRunnerClient{}}, nil
+		dial := PaneDial(func(cols, rows int) (PaneTransport, error) {
+			r, w, _ := os.Pipe()
+			t.Cleanup(func() { r.Close(); w.Close() })
+			return &fakePaneTransport{ReadWriteCloser: struct {
+				io.Reader
+				io.Writer
+				io.Closer
+			}{r, w, r}}, nil
+		})
+		return ConnectResult{Client: &fakeRunnerClient{}, PaneDial: dial}, nil
 	}
 
 	app := NewApp(nil, connector, nil)
@@ -440,7 +452,7 @@ func TestConnectStageProgressAndAttach(t *testing.T) {
 	// Drain connect messages: unwrap BatchMsg from tea.Batch to get sub-cmds,
 	// run connectNextCmd sub-cmd to read from the channel, feed messages into app.
 	// We do up to 20 rounds to avoid an infinite loop.
-	for round := 0; round < 20 && app.screen != ScreenTranscript; round++ {
+	for round := 0; round < 20 && app.screen != ScreenExternal; round++ {
 		if cmd == nil {
 			break
 		}
@@ -467,8 +479,8 @@ func TestConnectStageProgressAndAttach(t *testing.T) {
 		_, cmd = app.Update(msg)
 	}
 
-	if app.screen != ScreenTranscript {
-		t.Errorf("expected ScreenTranscript, got %v", app.screen)
+	if app.screen != ScreenExternal {
+		t.Errorf("expected ScreenExternal, got %v", app.screen)
 	}
 }
 

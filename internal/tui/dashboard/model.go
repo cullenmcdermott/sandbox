@@ -93,9 +93,6 @@ type Model struct {
 	// ⌃K fuzzy quick-switcher overlay.
 	switcher switcherModel
 
-	// Pending-permission queue view.
-	permQueue permQueueModel
-
 	// Group-by-repo and rename state.
 	groupView groupViewState
 	renaming  bool
@@ -173,10 +170,13 @@ type Model struct {
 	// throttles the burst without limiting the number of open streams.
 	connectSem chan struct{}
 
-	// retained holds a live TranscriptModel for each warm (running-pod) session,
-	// fed in the background by handleRunnerEvent. A warm session's model is never
-	// destroyed while its pod runs, so showing it is an O(1) swap (see warm.go).
-	retained map[session.ID]*TranscriptModel
+	// warmSet tracks the "warm" sessions — those with a live background observer
+	// stream feeding the read-model. It replaces the retained-transcript map
+	// (claude-pane-first removed the Go transcript): the set drives sync-probe
+	// targets, the warm-count footer, and observer-cap accounting. Membership is
+	// added when a stream registers and pruned when the pod suspends/exits or the
+	// stream is evicted. See warm.go.
+	warmSet map[session.ID]struct{}
 
 	// maxObserverStreams caps the number of concurrently-established background
 	// observer forwards (§1d). Zero uses defaultMaxObserverStreams. Set via
@@ -320,7 +320,7 @@ func New(backend Backend) *Model {
 		liveSSEConnecting: make(map[session.ID]bool),
 		liveSSEStreamGen:  make(map[session.ID]uint64),
 		syncProbedAt:      make(map[session.ID]time.Time),
-		retained:          make(map[session.ID]*TranscriptModel),
+		warmSet:           make(map[session.ID]struct{}),
 		connectSem:        make(chan struct{}, maxConcurrentBackgroundConnects),
 		observerActiveAt:  make(map[session.ID]time.Time),
 		attachGate:        newAttachGate(),
@@ -588,8 +588,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.syncProbedAt == nil {
 			m.syncProbedAt = make(map[session.ID]time.Time)
 		}
-		warm := make([]session.ID, 0, len(m.retained))
-		for id := range m.retained { // warm sessions only
+		warm := make([]session.ID, 0, len(m.warmSet))
+		for id := range m.warmSet { // warm sessions only
 			warm = append(warm, id)
 		}
 		for _, id := range selectSyncProbeTargets(nowFunc(), warm, m.syncFocusSet(), m.syncProbedAt, unfocusedSyncPollInterval) {
@@ -600,7 +600,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Idle probes reuse the session's already-open SSE client (no subprocess),
 		// so they stay on every warm session each tick to keep the idle-reaper clock
 		// responsive.
-		for id := range m.retained {
+		for id := range m.warmSet {
 			if c := m.probeIdleCmd(id); c != nil {
 				cmds = append(cmds, c)
 			}
@@ -684,14 +684,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 		}
-		// Build (or reuse) the warm transcript for this session so the background
-		// stream keeps a full, live chat in memory — making a later show an O(1)
-		// swap instead of a rebuild+replay. Skip opencode sessions (no Go
-		// transcript).
-		if sess.State.Backend != session.BackendOpenCode {
-			m.ensureRetained(sess, msg.client)
-			m.maybeWarnWarm()
-		}
+		// Mark the session warm: it now has a live background observer stream
+		// feeding the read-model (the source of the list row's live status and,
+		// while viewing, the activity feed). claude-pane-first removed the
+		// retained Go transcript — the warm set is just membership now.
+		m.markWarm(sess.ID())
 		return m, liveSSEBatchCmd(msg.id, msg.ch, msg.gen)
 
 	case liveSSEReconnectMsg:

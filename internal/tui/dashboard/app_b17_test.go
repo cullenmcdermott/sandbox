@@ -75,10 +75,10 @@ func TestRunnerEventDelegatedOnceOnDashboard(t *testing.T) {
 }
 
 // TestNonKeyStillReachesDashboardBehindModal guards the OTHER half of the B17
-// fix: when a transcript modal is open (ScreenTranscript), a background
-// (non-key) message must STILL reach the dashboard exactly once so its live
-// state and toasts stay current — the single-delegation refactor must not drop
-// that path.
+// fix: when a session screen is open (the read-only activity feed here), a
+// background (non-key) message must STILL reach the dashboard exactly once so
+// its live state and toasts stay current — the single-delegation refactor must
+// not drop that path.
 func TestNonKeyStillReachesDashboardBehindModal(t *testing.T) {
 	app := NewApp(nil, nil, nil)
 	app.dashboard.seeded = true
@@ -87,8 +87,8 @@ func TestNonKeyStillReachesDashboardBehindModal(t *testing.T) {
 			State:            session.State{ID: "s1", Status: session.StatusRunning},
 			sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
 		}}
-	app.screen = ScreenTranscript
-	app.transcript = NewTranscript(&fakeRunnerClient{}, app.dashboard.sessions[0], nil)
+	app.screen = ScreenFeed
+	app.feed = newFeedModel(session.Ref{ID: "s1"}, "s1", "claude")
 
 	ch := make(chan session.Event)
 	close(ch)

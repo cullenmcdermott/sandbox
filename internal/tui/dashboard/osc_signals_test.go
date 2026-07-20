@@ -78,28 +78,6 @@ func nudge(t *testing.T, a *App) string {
 	return rawString(t, cmd)
 }
 
-// Tab progress rides tea.Raw (the v2 cell renderer drops escapes spliced into
-// View content), so View must NEVER prepend an OSC 9;4 progress string. A non-nil
-// transcript is set so withTerminalSignals runs its full body (past the nil-guard,
-// down the Kitty path) — pinning the invariant on the live splice path rather than
-// vacuously short-circuiting. With no pending Kitty image the content is also
-// byte-identical to the plain screen view on every terminal.
-func TestAppViewNeverPrependsProgress(t *testing.T) {
-	for _, ghostty := range []bool{true, false} {
-		a := &App{screen: ScreenDashboard, dashboard: New(nil), transcript: &TranscriptModel{}}
-		a.dashboard.caps = terminal.Caps{IsGhostty: ghostty}
-		a.dashboard.width, a.dashboard.height = 80, 24
-		a.dashboard.sessions = busySessions()
-
-		content := a.View().Content
-		if strings.Contains(content, "\x1b]9;4") {
-			t.Fatalf("ghostty=%v: View must not splice an OSC 9;4 progress escape into content", ghostty)
-		}
-		if content != a.screenView().Content {
-			t.Fatalf("ghostty=%v: with no pending Kitty image, View must equal the plain screen view", ghostty)
-		}
-	}
-}
 
 // On Ghostty, every aggregate-state transition must emit the matching OSC
 // progress via tea.Raw from App.Update, and only on the edge. The walk covers all

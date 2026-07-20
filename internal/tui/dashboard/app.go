@@ -14,7 +14,6 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/cullenmcdermott/sandbox/internal/session"
-	"github.com/cullenmcdermott/sandbox/tui/kit"
 	"github.com/cullenmcdermott/sandbox/tui/terminal"
 	"github.com/cullenmcdermott/sandbox/tui/theme"
 )
@@ -143,11 +142,10 @@ func leaderTimeoutCmd(gen int) tea.Cmd {
 // the screen enum, both child models, and the Connector used for attaching to
 // sessions. All Update and View calls are delegated to the active screen.
 type App struct {
-	screen     Screen
-	dashboard  *Model
-	transcript *TranscriptModel // nil until first attach
-	external   *ExternalPane    // nil unless attached to an external-pane session
-	feed       *feedModel       // nil unless viewing an external-pane session's activity feed
+	screen    Screen
+	dashboard *Model
+	external  *ExternalPane // nil unless attached to an external-pane session
+	feed      *feedModel    // nil unless viewing an external-pane session's activity feed
 
 	// lastProgress is the OSC 9;4 tab-progress state last emitted to the terminal.
 	// App.Update compares the live session aggregate against it and emits a tea.Raw
@@ -180,28 +178,6 @@ type App struct {
 	// connectingFor is the session being connected to (shown in the
 	// ScreenConnecting placeholder).
 	connectingFor *Session
-
-	// connectingPreview is a read-only transcript built from warm history or the
-	// host-side cache at attach time, rendered behind the connect banner so the
-	// user sees their conversation immediately during a (possibly slow cold-pod)
-	// resume instead of a blank splash (Fix A). nil when there's nothing cached to
-	// show, or for opencode sessions (no Go transcript). On a successful attach it
-	// is promoted to the live foreground transcript.
-	connectingPreview *TranscriptModel
-
-	// modalBackdrop caches the dimmed dashboard backdrop composited behind the
-	// transcript modal. A transcript keystroke is never delegated to the dashboard
-	// (see the delegation guard in Update), so the dashboard's render is unchanged
-	// between keystrokes — caching the dimmed backdrop skips a full dashboard
-	// re-render + per-line dim pass on every keystroke (Fix E). Invalidated
-	// whenever the dashboard is actually delegated a message, or the size changes.
-	modalBackdrop      string
-	modalBackdropW     int
-	modalBackdropH     int
-	modalBackdropValid bool
-	// bdBuilds counts backdrop (re)builds — a behavioral counter the Fix E test
-	// asserts on to prove the backdrop is reused across keystrokes.
-	bdBuilds int
 
 	// connectStage is the latest ConnectStage reported by the connector (U1).
 	connectStage ConnectStage
@@ -242,24 +218,14 @@ type App struct {
 	// connectErr holds the last connector error, shown in the detail pane.
 	connectErr error
 
-	// autoAttach, when non-nil, makes the App open straight into a session's
-	// transcript on launch (used by `sandbox claude` / `sandbox attach`), with
-	// the dashboard list loading underneath so esc still returns to it.
+	// autoAttach, when non-nil, makes the App open straight into a session's pane
+	// on launch (used by `sandbox claude` / `sandbox attach`), with the dashboard
+	// list loading underneath so esc still returns to it.
 	autoAttach *Session
-
-	// initialPrompt is submitted automatically once the auto-attached transcript
-	// is live (the prompt passed to `sandbox claude "…"`). Consumed once.
-	initialPrompt string
 
 	// Terminal size is propagated to child models via WindowSizeMsg.
 	width  int
 	height int
-
-	// parkedTranscripts holds the lightweight view/input state saved when the user
-	// detaches from a session (B3). On re-attach to the same session, the state is
-	// restored into the new TranscriptModel so compose buffers, queued prompts, and
-	// search queries survive a detach→reattach cycle.
-	parkedTranscripts map[session.ID]ParkedTranscriptState
 
 	// leaderArmed marks that the external (PTY) pane's ctrl+] leader chord is
 	// waiting for its next key. ctrl+] was already the reserved detach key there;
@@ -285,11 +251,10 @@ func NewApp(backend Backend, connector Connector, creator Creator) *App {
 		dash.WithConnector(connector)
 	}
 	return &App{
-		screen:            ScreenDashboard,
-		dashboard:         dash,
-		connector:         connector,
-		creator:           creator,
-		parkedTranscripts: make(map[session.ID]ParkedTranscriptState),
+		screen:    ScreenDashboard,
+		dashboard: dash,
+		connector: connector,
+		creator:   creator,
 	}
 }
 
@@ -400,16 +365,17 @@ func Run(backend Backend, connector Connector, creator Creator, opts ...RunOptio
 	return err
 }
 
-// RunAttached starts the command center already attached to one session's
-// transcript — the entry point for `sandbox claude` and `sandbox attach`. The
-// dashboard list still loads underneath, so pressing esc detaches to the full
-// session list rather than quitting. initialPrompt, if non-empty, is submitted
-// as the first turn once the transcript is live.
+// RunAttached starts the command center already attached to one session — the
+// entry point for `sandbox claude` and `sandbox attach`. The dashboard list
+// still loads underneath, so pressing esc/detach returns to the full session
+// list rather than quitting. initialPrompt is accepted for signature
+// compatibility but ignored: external-pane sessions own their own input loop
+// (there is no headless first-turn path), so a seed prompt has nowhere to go.
 func RunAttached(backend Backend, connector Connector, creator Creator, sess Session, initialPrompt string, opts ...RunOptions) error {
+	_ = initialPrompt
 	app := NewApp(backend, connector, creator)
 	app.applyOpts(opts)
 	app.autoAttach = &sess
-	app.initialPrompt = initialPrompt
 	p := tea.NewProgram(app)
 	_, err := p.Run()
 	return err
@@ -497,26 +463,14 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a.handleAttachReady(msg)
 
 	case syncAdvisoryMsg:
-		// Late background-sync/reaper advisory: append to the session's
-		// transcript wherever it lives now (attached or retained-warm). A
-		// session with no transcript (opencode external pane) drops it, matching
-		// how attachReadyMsg.warning behaves on that path.
-		if msg.warning != "" {
-			if m, ok := a.dashboard.retainedTranscript(msg.id); ok {
-				m.appendBlock(blockInfo, "⚠ "+msg.warning)
-			}
-		}
+		// Late background-sync/reaper advisory. The interactive pane owns the
+		// screen and the read-only feed takes no notices from this path, so the
+		// advisory is dropped rather than shown — the sync indicator on the list
+		// row already surfaces a stalled sync.
 		return a, nil
 
 	case attachFailedMsg:
 		return a.handleAttachFailed(msg)
-
-	case detachMsg:
-		// User detached from the transcript. Return to the dashboard, restart
-		// the background SSE for the session we were attached to (B2), and
-		// save the transcript's view/input state for the next re-attach (B3).
-		a.screen = ScreenDashboard
-		return a, a.detachTranscript()
 
 	case externalPaneFinishedMsg:
 		return a.handleExternalPaneFinished(msg)
@@ -531,15 +485,6 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		a.connectFrame++
 		return a, connectTickCmd()
-
-	case autopilotTickMsg:
-		// A /loop tick, routed to its owning model whether foreground or a
-		// detached (warm) background model — this is what keeps a loop firing
-		// after a detach. Returning the model's Cmd here (rather than delegating)
-		// ensures the POST + reschedule survive; a warm model fed only via
-		// ingest() would otherwise have its Cmds discarded. Handled early so it
-		// never double-dispatches through the per-screen delegation below.
-		return a, a.autopilotTick(msg)
 
 	case leaderTimeoutMsg:
 		return a.handleLeaderTimeout(msg)
@@ -570,14 +515,6 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		dashCmd = tea.Batch(dashCmd, tea.Raw(terminal.OSCProgress(p)))
 	}
 
-	// Mirror the dashboard's freshly-polled mutagen sync health into the attached
-	// transcript so its status line can surface a stalled sync. The dashboard
-	// already probes warm sessions (the foreground session is one of them), so
-	// this is a read of shared Session state after delegation — no new probe.
-	if a.screen == ScreenTranscript && a.transcript != nil {
-		a.transcript.syncStatus = a.dashboard.sessionByID(a.transcript.ref.ID).SyncStatus
-	}
-
 	// Tap the same runner events the dashboard just reduced into the open
 	// activity feed (claude-pane-first): the feed is a read-only monitor with no
 	// stream of its own — it rides the background passive stream's events for
@@ -587,8 +524,6 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	switch a.screen {
-	case ScreenTranscript:
-		return a.updateTranscriptScreen(msg, dashCmd)
 	case ScreenExternal:
 		return a.updateExternalScreen(msg, dashCmd)
 	case ScreenFeed:
@@ -642,7 +577,6 @@ func (a *App) handleGlobalKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 		// Anything still in flight from the cancelled goroutine is stale now.
 		a.connectGen++
 		a.connectingFor = nil
-		a.connectingPreview = nil
 		a.connectStartedAt = time.Time{}
 		a.screen = ScreenDashboard
 		return nil, true
@@ -667,19 +601,12 @@ func (a *App) handleAttach(msg attachMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 	// Start the connector in a Cmd; transition to the "connecting" placeholder.
+	// Every session is an external pane now — the real agent TUI repaints from
+	// the pane stream itself, so there is no Go transcript preview to build.
 	a.connectingFor = &msg.sess
 	a.connectingOpencode = msg.sess.State.Backend == session.BackendOpenCode
 	a.connectErr = nil
 	a.screen = ScreenConnecting
-	// Fix A: build a read-only preview of the conversation from warm history or
-	// the host-side cache so it paints immediately during the resume wait,
-	// instead of a blank splash. External-pane sessions (opencode, claude-pane)
-	// have no Go transcript to preview — the real TUI repaints from the pane
-	// stream itself.
-	a.connectingPreview = nil
-	if !externalPaneBackend(msg.sess.State.Backend) {
-		a.connectingPreview = a.buildConnectingPreview(msg.sess)
-	}
 	return a, a.connectCmd(msg.sess)
 }
 
@@ -790,150 +717,66 @@ func (a *App) updateFeedScreen(msg tea.Msg, dashCmd tea.Cmd) (tea.Model, tea.Cmd
 	return a, dashCmd
 }
 
-// handleAttachReady builds (or reuses) the transcript / external pane once the
-// connector reports a live connection. It is called directly from the
-// attachReadyMsg case arm and from handleConnectUpdate's ready branch.
+// handleAttachReady embeds the external agent pane once the connector reports a
+// live connection. Every session is an external pane now (claude-pane / opencode)
+// — a local `opencode attach` child (opencodeCreds) or the in-pod claude child
+// over the pane WebSocket (paneDial). It is called from the attachReadyMsg case
+// arm and from handleConnectUpdate's ready branch.
 func (a *App) handleAttachReady(msg attachReadyMsg) (tea.Model, tea.Cmd) {
-	// Connection established: build the transcript screen. msg.client and
-	// msg.reconnect are already dashboard.RunnerClient-typed, so they pass
-	// straight through — no adapter needed.
 	a.connectingFor = nil
 	a.connectErr = nil
 	a.connectStartedAt = time.Time{}
-	// External-pane sessions don't have a Go transcript; the real agent TUI
-	// owns the UI, embedded as a Tier-2 pane — a local `opencode attach` child
-	// (opencodeCreds) or the in-pod claude child over the pane WebSocket
-	// (paneDial).
-	if msg.opencodeCreds != nil || msg.paneDial != nil {
-		// O1: if a different session's pane is already live, close it first to
-		// prevent goroutine/process leaks.
-		if a.external != nil && a.external.sess.ID() != msg.sess.ID() {
-			a.external.close()
-			a.external = nil
+	// A connection with neither pane transport is a provisioning bug (an unknown
+	// backend reached the attach path). Surface it inline rather than opening a
+	// blank pane; release the connection's forwards so they don't leak.
+	if msg.opencodeCreds == nil && msg.paneDial == nil {
+		if msg.close != nil {
+			msg.close()
 		}
-		// Phase 4: do NOT cancel the background passive SSE here (unlike the
-		// transcript path below). The external pane is not a runner SSE client —
-		// its byte stream is a separate connection — so the passive stream is
-		// the ONLY thing feeding the runner observer's live
-		// status/title/ctx%/cost into the read-model the pane's status row reads.
-		// It's a passive stream, so it doesn't hold the idle reaper open.
-		id := msg.sess.ID()
-		live := func() Session { return a.dashboard.sessionByID(id) }
-		var pane *ExternalPane
-		if msg.paneDial != nil {
-			pane = NewExternalPaneTransport(msg.sess, ClientLabel(msg.sess.State.Backend), msg.paneDial, live)
-		} else {
-			pane = NewExternalPane(msg.sess, *msg.opencodeCreds, live)
-		}
-		pane.w, pane.h = a.width, a.height
-		// The pane owns the attach connection's forwards from here; its close()
-		// releases them once the stream is down (§1d C1).
-		pane.transportClose = msg.close
-		a.external = pane
-		a.screen = ScreenExternal
-		return a, pane.Init()
+		a.connectErr = fmt.Errorf("session %s: no interactive pane transport for backend %q", msg.sess.ID(), msg.sess.State.Backend)
+		a.dashboard.connectErr = a.connectErr
+		a.screen = ScreenDashboard
+		return a, nil
 	}
-	// Cancel the dashboard's background SSE for this (claude) session so we
-	// don't run two concurrent SSE clients to the same runner: the transcript
-	// installs its own active client below (B2).
-	a.dashboard.cancelLiveSSE(msg.sess.ID())
-	// Reuse, in priority order: the preview already built (and cache-loaded)
-	// for this connect (Fix A); the warm model retained from a background
-	// stream; otherwise a fresh cold model. In every case we install the live
-	// client + reconnect and register it as warm so future hide/show are O(1).
-	var m *TranscriptModel
-	preview := a.connectingPreview
-	a.connectingPreview = nil
-	if existing, ok := a.dashboard.retainedTranscript(msg.sess.ID()); ok {
-		m = existing
-	} else if preview != nil && preview.ref.ID == msg.sess.ID() {
-		m = preview
+	// O1: if a different session's pane is already live, close it first to
+	// prevent goroutine/process leaks.
+	if a.external != nil && a.external.sess.ID() != msg.sess.ID() {
+		a.external.close()
+		a.external = nil
 	}
-	if m != nil {
-		m.client = msg.client         // install the live (active) client
-		m.reconnect = msg.reconnect   // and its reconnect callback
-		m.seedSize(a.width, a.height) // a background/preview model never got a WindowSizeMsg
+	// Do NOT cancel the background passive SSE here: the external pane is not a
+	// runner SSE client — its byte stream is a separate connection — so the
+	// passive stream is the ONLY thing feeding the runner observer's live
+	// status/title/ctx%/cost into the read-model the pane's status row reads.
+	// It's a passive stream, so it doesn't hold the idle reaper open.
+	id := msg.sess.ID()
+	live := func() Session { return a.dashboard.sessionByID(id) }
+	var pane *ExternalPane
+	if msg.paneDial != nil {
+		pane = NewExternalPaneTransport(msg.sess, ClientLabel(msg.sess.State.Backend), msg.paneDial, live)
 	} else {
-		m = NewTranscript(msg.client, msg.sess, msg.reconnect)
+		pane = NewExternalPane(msg.sess, *msg.opencodeCreds, live)
 	}
-	// The transcript owns the attach connection's transport until detach
-	// (parkTranscript invokes it — §1d C1).
-	m.transportClose = msg.close
-	a.dashboard.putRetained(msg.sess.ID(), m)
-	// Thread detected terminal capabilities into the transcript so its
-	// status-line effects (ctx-gauge sweep, etc.) light up only on a capable
-	// terminal; the dashboard Model detected them once at startup.
-	m.caps = a.dashboard.caps
-	// Workstream C: give the transcript the host-side event cache so it loads
-	// history instantly on a cold open and mirrors streamed events for next time.
-	m.cache = a.dashboard.eventCache
-	// Reaper idle timeout so a /loop can warn when its interval risks a
-	// mid-loop suspend (§1e item 4).
-	m.idleTimeout = a.dashboard.idleTimeout
-	// §1e re-arm: give the transcript the driver-spec store and restore the last
-	// recorded spec so a bare /loop or /goal re-arms it after a re-attach (unless
-	// a warm model already carries a live in-memory one).
-	m.driverStore = a.dashboard.driverStore
-	if m.driverStore != nil && m.lastDriverSpec == nil {
-		if spec, ok := m.driverStore.LoadDriver(msg.sess.ID()); ok {
-			s := spec
-			m.lastDriverSpec = &s
-		}
-	}
-	// Hand off a one-shot initial prompt (from `sandbox claude "…"`) so the
-	// transcript submits it as the first turn once its stream is live.
-	m.initialPrompt = a.initialPrompt
-	a.initialPrompt = ""
-	// Restore parked view/input state (compose buffer, queued prompt, search,
-	// permMode) if the user previously detached from this same session (B3).
-	if ps, ok := a.parkedTranscripts[msg.sess.ID()]; ok {
-		m.RestoreParkedState(ps)
-		delete(a.parkedTranscripts, msg.sess.ID())
-	}
-	// C9: surface non-fatal connector warnings (e.g. sync failure) in the
-	// transcript so they are visible in the alt-screen TUI rather than
-	// discarded to a hidden stderr.
-	if msg.warning != "" {
-		m.appendBlock(blockInfo, "⚠ "+msg.warning)
-	}
-	// §5: connect's sync/reaper work now settles in the background; poll its
-	// late advisory once and surface it like msg.warning. The Cmd blocks in
-	// its own goroutine, and the background task always finishes (even on
-	// cancellation), so this cannot leak.
-	var advisoryCmd tea.Cmd
-	if msg.awaitWarning != nil {
-		aw, id := msg.awaitWarning, msg.sess.ID()
-		advisoryCmd = func() tea.Msg {
-			w, err := aw(context.Background())
-			if err != nil || w == "" {
-				return nil
-			}
-			return syncAdvisoryMsg{id: id, warning: w}
-		}
-	}
+	pane.w, pane.h = a.width, a.height
+	// The pane owns the attach connection's forwards from here; its close()
+	// releases them once the stream is down (§1d C1).
+	pane.transportClose = msg.close
+	a.external = pane
+	a.screen = ScreenExternal
 	// Mark everything seen for the session we're now viewing so its unread
 	// badge clears the moment it comes to the foreground.
 	for i := range a.dashboard.sessions {
-		if a.dashboard.sessions[i].ID() == msg.sess.ID() {
+		if a.dashboard.sessions[i].ID() == id {
 			a.dashboard.sessions[i].seenSeq = a.dashboard.sessions[i].lastSeq
 			break
 		}
 	}
-	a.transcript = m
-	a.screen = ScreenTranscript
-	// Bubble Tea only emits WindowSizeMsg at startup and on resize, so a
-	// child built mid-run never learns the size on its own. Seed it with
-	// the size the App already knows so the transcript paints immediately
-	// instead of rendering blank until the next resize.
-	return a, tea.Batch(m.Init(), advisoryCmd, func() tea.Msg {
-		return tea.WindowSizeMsg{Width: a.width, Height: a.height}
-	})
+	return a, pane.Init()
 }
 
 // handleAttachFailed stays on the dashboard and shows the connector error inline.
 func (a *App) handleAttachFailed(msg attachFailedMsg) (tea.Model, tea.Cmd) {
 	a.connectingFor = nil
-	a.connectingPreview = nil
 	a.connectStartedAt = time.Time{}
 	a.connectErr = msg.err
 	a.dashboard.connectErr = msg.err
@@ -993,7 +836,6 @@ func (a *App) handleConnectUpdate(msg connectUpdateMsg) (tea.Model, tea.Cmd) {
 		if errors.Is(msg.failed.err, context.Canceled) {
 			// A cancellation is user intent, not a failure — stay quiet.
 			a.connectingFor = nil
-			a.connectingPreview = nil
 			a.connectStartedAt = time.Time{}
 			if a.screen == ScreenConnecting {
 				a.screen = ScreenDashboard
@@ -1021,27 +863,12 @@ func (a *App) handleLeaderTimeout(msg leaderTimeoutMsg) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
-// detachTranscript parks the attached transcript's view/input state for the
-// next re-attach (B3), restarts the background SSE for its session (B2), and
-// releases the model — parkTranscript closes the attach transport (§1d C1).
-// Callers own the screen flip and any follow-up Cmd. No-op when no transcript
-// is attached.
-func (a *App) detachTranscript() tea.Cmd {
-	if a.transcript == nil {
-		return nil
-	}
-	a.parkTranscript(a.transcript)
-	restore := a.dashboard.startLiveSSECmd(a.dashboard.sessionByID(a.transcript.ref.ID))
-	a.transcript = nil
-	return restore
-}
-
 // delegateDashboard is the ONLY a.dashboard.Update call site (B17): the
 // dashboard sees every non-key message plus keys on its own screen, exactly
 // once per App.Update pass. Never call a.dashboard.Update anywhere else.
 func (a *App) delegateDashboard(msg tea.Msg) tea.Cmd {
 	// On the dashboard screen it owns all input, so every message goes to it
-	// here. Behind a modal (transcript / external / connecting) it still
+	// here. Behind a screen (external pane / feed / connecting) it still
 	// processes background (non-key) messages so its live state and toast
 	// notifications stay current — but key presses there belong to the active
 	// screen, not the dashboard.
@@ -1052,85 +879,8 @@ func (a *App) delegateDashboard(msg tea.Msg) tea.Cmd {
 			a.dashboard = dm
 		}
 		dashCmd = cmd
-		// The dashboard may have changed, so the cached modal backdrop (Fix E) is
-		// stale. A pure transcript keystroke never reaches here, so it keeps the
-		// cache warm.
-		a.modalBackdropValid = false
 	}
 	return dashCmd
-}
-
-// updateTranscriptScreen routes a message on the transcript screen: it intercepts
-// detach / attention-nav keys and otherwise forwards to the transcript model. It
-// reuses the already-computed dashCmd (B17 — it must NOT delegate to the dashboard
-// again).
-func (a *App) updateTranscriptScreen(msg tea.Msg, dashCmd tea.Cmd) (tea.Model, tea.Cmd) {
-	if a.transcript == nil {
-		// Transcript went away unexpectedly; revert to the dashboard. The
-		// dashboard already saw this message iff it was non-key (delegated
-		// above), so just return dashCmd — do not re-delegate (B17).
-		a.screen = ScreenDashboard
-		return a, dashCmd
-	}
-	// Intercept detach keys → back to the dashboard; everything else goes
-	// to the transcript model. ctrl+] / ctrl+4 quit the *standalone* TUI
-	// (sandbox claude), but under the command center they must detach to
-	// the dashboard, not tear down the whole program.
-	if kp, ok := msg.(tea.KeyPressMsg); ok {
-		ks := kp.String()
-		// esc detaches only when the transcript has no local use for it (not in
-		// INSERT mode, no overlay open) — otherwise it returns to NORMAL or
-		// closes the overlay inside the transcript. ctrl+] / ctrl+4 always
-		// detach (they quit the standalone TUI; under the command center they
-		// detach to the dashboard rather than tearing down the program).
-		detach := ks == "ctrl+]" || ks == "ctrl+4" || (ks == "esc" && !a.transcript.escapeConsumes())
-		if detach {
-			// With a queued prompt, the escape steers (interrupt + inject)
-			// instead of detaching.
-			if a.transcript.queuedPrompt != "" {
-				next, cmd := a.transcript.Update(msg)
-				if tm, ok := next.(*TranscriptModel); ok {
-					a.transcript = tm
-				}
-				return a, tea.Batch(cmd, dashCmd)
-			}
-			// Park the transcript view/input state so it survives the
-			// detach→reattach cycle (B3).
-			restoreCmd := a.detachTranscript()
-			a.screen = ScreenDashboard
-			return a, tea.Batch(dashCmd, restoreCmd)
-		}
-		switch ks {
-		case "ctrl+g":
-			// Jump to the next session needing attention and close the modal.
-			if s := a.dashboard.jumpToNextNeedingAttention(); s != nil {
-				restoreCmd := a.detachTranscript()
-				return a, tea.Batch(dashCmd, restoreCmd, func() tea.Msg { return attachMsg{sess: *s} })
-			}
-			return a, dashCmd
-		case "ctrl+k":
-			// Quick-switch from inside the chat modal: park the transcript and
-			// return to the dashboard with the switcher overlay open. The
-			// switcher only renders (and receives keys) on the dashboard
-			// screen, so opening it while staying on ScreenTranscript used to
-			// leave an invisible open switcher stealing dashboard keys later.
-			restoreCmd := a.detachTranscript()
-			a.screen = ScreenDashboard
-			a.dashboard.openSwitcher()
-			return a, tea.Batch(dashCmd, restoreCmd)
-		}
-	}
-	// Left-button press/drag on the modal's scrollbar column drives the scroll
-	// position; wheel and everything else fall through to the transcript's own
-	// Update (which handles the wheel).
-	if a.handleScrollbarMouse(msg) {
-		return a, dashCmd
-	}
-	next, cmd := a.transcript.Update(msg)
-	if tm, ok := next.(*TranscriptModel); ok {
-		a.transcript = tm
-	}
-	return a, tea.Batch(cmd, dashCmd)
 }
 
 // updateExternalScreen routes a message on the external (opencode PTY) screen:
@@ -1215,100 +965,24 @@ func (a *App) leaderJump(dashCmd tea.Cmd, target *Session) tea.Cmd {
 	return tea.Batch(dashCmd, func() tea.Msg { return attachMsg{sess: sess} })
 }
 
-// attachedSessionID returns the id of the session the user is currently attached
-// to (transcript or external pane), or "" when on the dashboard. It is the
+// attachedSessionID returns the id of the session the user is currently viewing
+// (external pane or activity feed), or "" when on the bare dashboard. It is the
 // exclusion key for background-attention toasts.
 func (a *App) attachedSessionID() session.ID {
 	switch {
-	case a.screen == ScreenTranscript && a.transcript != nil:
-		return a.transcript.ref.ID
 	case a.screen == ScreenExternal && a.external != nil:
 		return a.external.sess.ID()
+	case a.screen == ScreenFeed && a.feed != nil:
+		return a.feed.ref.ID
 	}
 	return ""
 }
 
-// parkTranscript saves the transcript's view/input state keyed by session ID
-// so it can be restored on the next re-attach to the same session (B3).
-func (a *App) parkTranscript(m *TranscriptModel) {
-	if m == nil {
-		return
-	}
-	if a.parkedTranscripts == nil {
-		a.parkedTranscripts = make(map[session.ID]ParkedTranscriptState)
-	}
-	a.parkedTranscripts[m.ref.ID] = m.ParkState()
-	// Sync the dashboard's resume cursor forward to where the transcript got to
-	// (§1a review): the Session.lastSeq is frozen while attached, so without this
-	// the background stream restarted on detach replays the just-watched events
-	// and inflates the unread badge. This is the single detach hook, so it covers
-	// every detach path.
-	a.dashboard.syncCursorFromTranscript(m.ref.ID, m.lastSeq)
-	// Carry the transcript's derived read-model (DashStatus, pending permission,
-	// usage/model/branch) back onto the dashboard row before the cursor advance
-	// above makes those events unreplayable — otherwise a permission requested or a
-	// turn that completed during attach is silently lost on detach (§V5: row stuck
-	// Busy with no pending permission, no attention float, no toast). Force-saves
-	// the snapshot so a relaunch reflects it too.
-	a.dashboard.parkReadModelFromTranscript(m.ref.ID, m.sessionReadModel)
-	// Tear down the transcript's own live SSE stream so we don't leave a second
-	// SSE client open after detach (NEW-5). Every detach path parks the
-	// transcript immediately before releasing it, so this is the single hook.
-	m.cancelStream()
-	// Release the foreground connection's forwards too (§1d C1): the detached
-	// session is served by the background observer stream from here (its own
-	// forward), and autopilotTick already reroutes POSTs through that live
-	// client — the parked forward would only poll the API server for nothing.
-	if m.transportClose != nil {
-		m.transportClose()
-		m.transportClose = nil
-	}
-}
-
-// autopilotTick advances a /loop for its session by dispatching the tick to the
-// owning model. When that model is detached (a warm background model), its POSTs
-// are rerouted through the dashboard's live background client, since the parked
-// foreground client's port-forward may already be torn down. Returns nil (the
-// loop lapses) when the session is gone or has no live client while detached.
-func (a *App) autopilotTick(msg autopilotTickMsg) tea.Cmd {
-	// Foreground: the model owns a live client and event stream — dispatch as-is.
-	if a.transcript != nil && a.transcript.ref.ID == msg.sess {
-		return a.transcript.autopilotTick(msg)
-	}
-	// Detached: drive the retained warm model, POSTing through the dashboard's
-	// live background client.
-	t, ok := a.dashboard.retainedTranscript(msg.sess)
-	if !ok {
-		// The warm model is gone — dropRetained fires when the pod suspends, is
-		// deleted, or the session is terminally gone (a laptop sleep that outlives
-		// the SSE stream lands here too; observer-cap eviction deliberately does
-		// NOT drop the model, §1d H2). The loop lapses; surface it as a toast + OS
-		// notification instead of dying silently (§1e item 3). A model this tick
-		// can no longer read carries no gen to re-check, but a lapse this deep is a
-		// genuine loss of the running loop, not a benign stale tick. The wording
-		// stays cause-agnostic: this path can't tell suspended from deleted from
-		// unreachable (§1d H3's false "suspended" toast).
-		return a.dashboard.autopilotToast(msg.sess, "⟳ loop ended — session suspended or unreachable")
-	}
-	client, ok := a.dashboard.liveClient(msg.sess)
-	if !ok {
-		// No live client this cycle (transient stream blip / pod resuming):
-		// skip the POST but keep the loop alive by rescheduling, as long as this
-		// tick still matches the running loop (guards a stopped/replaced loop).
-		if msg.gen == t.autopilot.gen {
-			return t.scheduleAutopilotTick()
-		}
-		return nil
-	}
-	t.client = client
-	return t.autopilotTick(msg)
-}
-
-// View renders the active screen. When a transcript is open it is composited
-// as a near-fullscreen modal over the live dashboard (slice 5b) so the frame
-// badge/toasts stay visible around the edges.
+// View renders the active screen (dashboard list, connecting splash, external
+// pane, or the read-only activity feed), floating the cross-session attention
+// toast over it.
 func (a *App) View() tea.View {
-	v := a.withTerminalSignals(a.withToast(a.screenView()))
+	v := a.withToast(a.screenView())
 	// Cell-motion mouse capture on EVERY screen, the external opencode PTY
 	// included. The embedded opencode TUI enables mouse tracking itself (verified
 	// live: it sets DECSET 1000/1002/1003 + SGR 1006), but those requests reach
@@ -1343,10 +1017,6 @@ func (a *App) View() tea.View {
 // emits the OSC title sequence whenever this string changes between frames.
 func (a *App) windowTitle() string {
 	switch a.screen {
-	case ScreenTranscript:
-		if a.transcript != nil && a.transcript.title != "" {
-			return a.transcript.title
-		}
 	case ScreenExternal:
 		if a.external != nil {
 			if t := a.external.session().DisplayTitle(); t != "" {
@@ -1419,141 +1089,9 @@ func (a *App) screenView() tea.View {
 			return a.dashboard.View()
 		}
 		return tea.NewView(a.feed.View())
-	case ScreenTranscript:
-		if a.transcript == nil {
-			return a.dashboard.View()
-		}
-		return a.modalView()
 	default:
 		return a.dashboard.View()
 	}
-}
-
-// withTerminalSignals prepends the one-shot Kitty image transmission (queued by
-// the transcript's ctx gauge on the frame its value changed) to the composed
-// frame. Tab-progress (OSC 9;4) and the desktop notification do NOT ride here:
-// Bubble Tea v2's cell renderer drops control strings spliced into View content,
-// so both go out-of-band via tea.Raw — the progress signal from App.Update on the
-// session-aggregate transition, the notification from the toastMsg handler. The
-// Kitty image is the lone sanctioned in-View write because its placeholder cells
-// must reference an image that already exists in the same frame. The external
-// (opencode) PTY screen is left untouched — it owns the terminal.
-func (a *App) withTerminalSignals(v tea.View) tea.View {
-	if a.dashboard == nil || a.screen == ScreenExternal || a.transcript == nil {
-		return v
-	}
-	// Stage 3: one-shot Kitty image transmission queued by the transcript's ctx
-	// gauge when its value changed this frame (rides the changing frame, not every
-	// frame). Prepended so the image exists before the placeholder cells reference it.
-	kitty := a.transcript.takePendingKitty()
-	if kitty == "" {
-		return v
-	}
-	v.Content = kitty + v.Content
-	return v
-}
-
-// modalRect returns the chat modal's outer rectangle (top-left mx,my and size
-// mw,mh) on the current screen. It is the single source of truth shared by
-// modalView (compositing) and the scrollbar mouse hit-test, so the two can never
-// drift apart.
-func (a *App) modalRect() (mx, my, mw, mh int) {
-	w, h := a.width, a.height
-	mw = w - 6
-	mh = h - 4
-	if mw < 20 {
-		mw = 20
-	}
-	if mh < 6 {
-		mh = 6
-	}
-	mx = (w - mw) / 2
-	my = (h - mh) / 2
-	return mx, my, mw, mh
-}
-
-// handleScrollbarMouse routes a left-button press/drag onto the chat modal's
-// scrollbar column, translating absolute screen coordinates into the
-// transcript's content space via modalRect (inner origin = modal top-left + the
-// rounded border). It returns true only when the event is a left press/drag on
-// the scrollbar; wheel events and clicks elsewhere return false and fall through
-// to the transcript's own handler.
-func (a *App) handleScrollbarMouse(msg tea.Msg) bool {
-	if a.transcript == nil {
-		return false
-	}
-	var mouse tea.Mouse
-	switch m := msg.(type) {
-	case tea.MouseClickMsg:
-		mouse = m.Mouse()
-	case tea.MouseMotionMsg:
-		mouse = m.Mouse()
-	default:
-		return false
-	}
-	if mouse.Button != tea.MouseLeft {
-		return false
-	}
-	mx, my, _, _ := a.modalRect()
-	return a.transcript.scrollbarDragTo(mouse.X-(mx+1), mouse.Y-(my+1))
-}
-
-// modalView composites the dashboard background with the transcript as a
-// floating modal. z-order: dashboard < shadow < modal.
-func (a *App) modalView() tea.View {
-	w, h := a.width, a.height
-	if w == 0 || h == 0 {
-		v := tea.NewView(a.dashboard.View().Content)
-		v.AltScreen = true
-		return v
-	}
-
-	mx, my, mw, mh := a.modalRect()
-
-	// Frame the transcript as a bordered popup. The content is sized two cells
-	// smaller in each axis to leave room for the rounded border, so the framed
-	// card is exactly mw×mh and lines up with the drop shadow.
-	inner := a.transcript.modalContent(mw-2, mh-2)
-	modal := kit.Card(kit.CardOpts{
-		Content:     inner,
-		Width:       mw,
-		BorderColor: theme.Charple,
-		Background:  theme.Surface,
-	})
-	shadow := solidBlock(mw, mh, theme.Shadow)
-
-	layers := []*lipgloss.Layer{
-		// A fully opaque page-colored fill behind the popup: the dashboard is
-		// hidden entirely (no dimmed ghost bleeding through) so the modal reads as
-		// a focused sheet. Reused across keystrokes via the backdrop cache (Fix E).
-		lipgloss.NewLayer(a.opaqueBackdrop(w, h)).X(0).Y(0).Z(0),
-		lipgloss.NewLayer(shadow).X(mx + 2).Y(my + 1).Z(1),
-		lipgloss.NewLayer(modal).X(mx).Y(my).Z(2),
-	}
-
-	canvas := lipgloss.NewCanvas(w, h)
-	canvas.Compose(lipgloss.NewCompositor(layers...))
-	v := tea.NewView(canvas.Render())
-	v.AltScreen = true
-	return v
-}
-
-// opaqueBackdrop returns a fully opaque page-colored fill drawn behind the
-// transcript modal, served from a size-keyed cache so every keystroke's View
-// reuses it instead of re-filling (Fix E). It is a SOLID fill, not a dimmed
-// ghost of the dashboard: nothing behind the modal shows through, so the modal
-// reads as a focused sheet rather than a translucent overlay. The cache is
-// invalidated on a dashboard delegation or a size change; for a solid fill the
-// dashboard-change rebuild is a harmless no-op (the block is size-only).
-func (a *App) opaqueBackdrop(w, h int) string {
-	if a.modalBackdropValid && a.modalBackdropW == w && a.modalBackdropH == h {
-		return a.modalBackdrop
-	}
-	a.bdBuilds++
-	d := solidBlock(w, h, theme.Page)
-	a.modalBackdrop, a.modalBackdropW, a.modalBackdropH = d, w, h
-	a.modalBackdropValid = true
-	return d
 }
 
 // dimBackdrop ghosts content behind a modal: it strips each line's colors and
@@ -1745,46 +1283,13 @@ func connectTickCmd() tea.Cmd {
 // conversation can paint during the connect/resume wait (Fix A). It returns nil
 // when there is nothing to show (no warm model and an empty/absent cache), so a
 // brand-new or uncached session keeps the centered "connecting…" splash.
-func (a *App) buildConnectingPreview(sess Session) *TranscriptModel {
-	// A warm background model already holds history — reuse it directly.
-	if m, ok := a.dashboard.retainedTranscript(sess.ID()); ok {
-		m.seedSize(a.width, a.height)
-		if len(m.blocks) == 0 {
-			return nil
-		}
-		return m
-	}
-	if a.dashboard.eventCache == nil {
-		return nil
-	}
-	m := NewTranscript(nil, sess, nil)
-	m.caps = a.dashboard.caps
-	m.cache = a.dashboard.eventCache
-	m.loadCachedTranscript() // O(N) bulk replay; needs no live client
-	if len(m.blocks) == 0 {
-		return nil // nothing cached → keep the centered splash
-	}
-	m.seedSize(a.width, a.height)
-	return m
-}
-
-// connectingView renders the animated connect/reconnect screen: a block-pixel
-// mascot, the title (text ramp, not bold brand color), an animated stepper, and
-// a cancel hint, centered on screen. When a warm/cached preview exists (Fix A)
-// the conversation is dimmed as a backdrop and the stepper floats over it as a
-// "Reconnecting…" modal from frame one — so a resume reads as progress over your
-// real chat instead of a blank splash, and the stepper is visible immediately
-// (T4) rather than buried in a thin one-line banner.
+// connectingView renders the animated connect screen: a block-pixel mascot, the
+// title (text ramp, not bold brand color), an animated stepper, and a cancel
+// hint, centered on screen.
 func (a *App) connectingView() tea.View {
-	reconnecting := a.connectingPreview != nil && len(a.connectingPreview.blocks) > 0
-
-	verb := "Connecting"
-	if reconnecting {
-		verb = "Reconnecting"
-	}
-	title := verb + "…"
+	title := "Connecting…"
 	if a.connectingFor != nil {
-		title = fmt.Sprintf("%s to %s…", verb, a.connectingFor.Title)
+		title = fmt.Sprintf("Connecting to %s…", a.connectingFor.Title)
 	}
 	// Append a live elapsed timer (≥1s) so a slow cold-pod resume reads as
 	// progress, not a freeze — mirrors the transcript reconnect header.
@@ -1829,43 +1334,6 @@ func (a *App) connectingView() tea.View {
 	// and come out sheared.)
 	panel := lipgloss.JoinVertical(lipgloss.Left, titleLine, "", stepper, "", hint)
 	body := lipgloss.JoinVertical(lipgloss.Center, logo, "", panel)
-
-	if reconnecting {
-		// Dim the cached conversation as a backdrop and float the stepper over it
-		// as a modal from frame one. Unlike the transcript modal (whose backdrop is
-		// a solid opaque fill), the reconnect splash intentionally keeps the dimmed
-		// conversation visible so the user sees *which* session is reconnecting
-		// (TestConnectingPreviewShowsCachedHistory). The card is fully opaqued
-		// (withBackground) so the dimmed chat can't bleed through the stepper's
-		// transparent gaps; it mirrors the chat modal's framing (border + shadow).
-		backdrop := dimBackdrop(a.connectingPreview.previewView(a.width, a.height, ""), a.width, a.height)
-		cardW := lipgloss.Width(body) + 2 // + rounded border
-		card := withBackground(kit.Card(kit.CardOpts{
-			Content:     body,
-			Width:       cardW,
-			BorderColor: theme.Charple,
-			Background:  theme.Surface,
-		}), theme.Surface)
-		cardH := lipgloss.Height(card)
-		mx := (a.width - cardW) / 2
-		my := (a.height - cardH) / 2
-		if mx < 0 {
-			mx = 0
-		}
-		if my < 0 {
-			my = 0
-		}
-		shadow := solidBlock(cardW, cardH, theme.Shadow)
-		canvas := lipgloss.NewCanvas(a.width, a.height)
-		canvas.Compose(lipgloss.NewCompositor(
-			lipgloss.NewLayer(backdrop).X(0).Y(0).Z(0),
-			lipgloss.NewLayer(shadow).X(mx+2).Y(my+1).Z(1),
-			lipgloss.NewLayer(card).X(mx).Y(my).Z(2),
-		))
-		v := tea.NewView(canvas.Render())
-		v.AltScreen = true
-		return v
-	}
 
 	centered := lipgloss.Place(a.width, a.height, lipgloss.Center, lipgloss.Center, body, pageWhitespace())
 	v := tea.NewView(centered)

@@ -35,22 +35,16 @@ func (m *Model) observerCap() int {
 }
 
 // observerProtected reports whether a session's observer stream must never be
-// evicted: the attached session (its transcript owns the live stream), a
-// detached-but-armed session (running /loop driver or queued prompt — evicting
-// it would silence work the user set in motion, §1d H2), and rows the user must
-// be able to act on. Waiting (pending permission) and Failed are always
-// protected; NeedsInput only while it carries UNSEEN output (§1d H1) —
-// needs-input is the steady state of every session that ever completed a turn,
-// so protecting it unconditionally admitted the whole fleet past the cap and
-// made eviction a no-op (the 953ef87 cap protected everything it targeted).
-// Once the user has viewed the output (seenSeq caught up, incl. the
-// hydrate-from-snapshot path, which marks history seen), the row is evictable;
-// focus reconnects it on demand.
+// evicted: the attached/viewed session (its pane or feed rides the live stream)
+// and rows the user must be able to act on. Waiting (pending permission) and
+// Failed are always protected; NeedsInput only while it carries UNSEEN output
+// (§1d H1) — needs-input is the steady state of every session that ever
+// completed a turn, so protecting it unconditionally admitted the whole fleet
+// past the cap and made eviction a no-op. Once the user has viewed the output
+// (seenSeq caught up, incl. the hydrate-from-snapshot path, which marks history
+// seen), the row is evictable; focus reconnects it on demand.
 func (m *Model) observerProtected(id session.ID) bool {
 	if id != "" && id == m.attachedID {
-		return true
-	}
-	if t, ok := m.retained[id]; ok && (t.driverActive() || t.queuedPrompt != "") {
 		return true
 	}
 	s := m.sessionByID(id)
@@ -117,11 +111,10 @@ func (m *Model) coldestObserver(keepID session.ID) session.ID {
 
 // evictObserver tears down a session's observer stream + forward to reclaim its
 // cluster-side cost (SPDY forward + reconnect loop, SSE goroutine, idle-probe
-// timer). The retained warm model is deliberately KEPT (§1d H2): the cap exists
-// for API-server port-forward pressure, not laptop RAM, and the model may carry
-// an armed /loop driver or a queued prompt that dropRetained would silently
-// destroy while the pod is healthy — plus keeping it preserves the O(1) re-focus
-// swap. The row falls back to its watch-driven lifecycle status — the cluster
+// timer). The warm-set membership is deliberately KEPT: the cap exists for
+// API-server port-forward pressure, not laptop RAM, and the row still resolves
+// its status from the cluster watch. The row falls back to its watch-driven
+// lifecycle status — the cluster
 // watch keeps Running/Suspended/Failed/Gone fresh WITHOUT a forward; only
 // runner-derived attention goes stale until a later focus/attention transition
 // reconnects the stream on demand.
@@ -260,72 +253,40 @@ func (g *attachGate) wait() {
 	<-ch
 }
 
-// ensureRetained returns the retained TranscriptModel for sess, building a
-// background (headless) model fed via handleRunnerEvent if none exists yet. The
-// returned model has NOT started its own SSE stream; while warm it is fed by the
-// dashboard's passive background stream. client is the live runner client for
-// the session's pod. ensureRetained is idempotent.
-func (m *Model) ensureRetained(sess Session, client RunnerClient) *TranscriptModel {
-	if m.retained == nil {
-		m.retained = make(map[session.ID]*TranscriptModel)
+// markWarm records that a session has a live background observer stream (warm),
+// warning once when the set crosses the advisory soft limit. Idempotent.
+func (m *Model) markWarm(id session.ID) {
+	if id == "" {
+		return
 	}
-	id := sess.ID()
-	if t, ok := m.retained[id]; ok {
-		return t
+	if m.warmSet == nil {
+		m.warmSet = make(map[session.ID]struct{})
 	}
-	// reconnect is nil for background models: they never run their own stream, so
-	// they never reconnect. The foreground promotion path (Phase 2) installs the
-	// real client + reconnect before starting the active stream.
-	t := NewTranscript(client, sess, nil)
-	t.caps = m.caps
-	t.cache = m.eventCache
-	t.idleTimeout = m.idleTimeout
-	m.retained[id] = t
-	return t
-}
-
-// retainedTranscript returns the warm model for id, if any.
-func (m *Model) retainedTranscript(id session.ID) (*TranscriptModel, bool) {
-	t, ok := m.retained[id]
-	return t, ok
-}
-
-// liveClient returns the runner client feeding the session's background SSE
-// stream, if one is open. The App uses it to POST a detached /loop's turns via a
-// currently-valid client (the parked foreground client's port-forward may be
-// gone) so the loop keeps firing after the user detaches.
-func (m *Model) liveClient(id session.ID) (RunnerClient, bool) {
-	c, ok := m.liveSSEClients[id]
-	return c, ok
-}
-
-// putRetained stores an externally-built model (the foreground attach path uses
-// this so a cold-opened session joins the warm set).
-func (m *Model) putRetained(id session.ID, t *TranscriptModel) {
-	if m.retained == nil {
-		m.retained = make(map[session.ID]*TranscriptModel)
+	if _, ok := m.warmSet[id]; ok {
+		return
 	}
-	m.retained[id] = t
-}
-
-// dropRetained removes the warm model for id (warm→cold). Called when a pod
-// suspends, is deleted, or its stream is exhausted.
-func (m *Model) dropRetained(id session.ID) {
-	delete(m.retained, id)
-}
-
-// warmCount is the number of warm (retained) sessions. Surfaced in the footer
-// and logged; tracked, not enforced.
-func (m *Model) warmCount() int { return len(m.retained) }
-
-// maybeWarnWarm logs when the warm set exceeds the soft limit. v1 does not
-// evict; this is the observability hook for a future cap.
-func (m *Model) maybeWarnWarm() {
-	if len(m.retained) > warmSoftLimit {
+	m.warmSet[id] = struct{}{}
+	if len(m.warmSet) > warmSoftLimit {
 		slog.Warn("warm session set exceeds soft limit",
-			"warm", len(m.retained), "softLimit", warmSoftLimit)
+			"warm", len(m.warmSet), "softLimit", warmSoftLimit)
 	}
 }
+
+// isWarm reports whether a session is in the warm set (has a live observer).
+func (m *Model) isWarm(id session.ID) bool {
+	_, ok := m.warmSet[id]
+	return ok
+}
+
+// dropRetained removes a session from the warm set (warm→cold). Called when a
+// pod suspends, is deleted, or its observer stream is exhausted.
+func (m *Model) dropRetained(id session.ID) {
+	delete(m.warmSet, id)
+}
+
+// warmCount is the number of warm sessions. Surfaced in the footer and logged;
+// tracked, not enforced.
+func (m *Model) warmCount() int { return len(m.warmSet) }
 
 // idleRemaining returns how long until the reaper suspends a session that has
 // been idle for `idleFor`, clamped to [0, timeout]. Zero means "due now".

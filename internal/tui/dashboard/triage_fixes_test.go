@@ -157,24 +157,3 @@ func TestSeedRestoresPersistedTitle(t *testing.T) {
 	}
 }
 
-// T12: the chat header label is action-oriented and disambiguates "done/ready"
-// (StatusNeedsInput) from "needs you" (StatusWaiting).
-func TestChatStatusLabel(t *testing.T) {
-	cases := map[SessionStatus]string{
-		StatusBusy:       "working",
-		StatusWaiting:    "awaiting approval",
-		StatusNeedsInput: "ready for input",
-		StatusIdle:       "idle",
-		StatusSuspended:  "suspended",
-		StatusFailed:     "failed",
-	}
-	for st, want := range cases {
-		if got := chatStatusLabel(st); got != want {
-			t.Errorf("chatStatusLabel(%v) = %q, want %q", st, got, want)
-		}
-	}
-	// The "done" state must not be labeled like it's blocked on the user.
-	if chatStatusLabel(StatusNeedsInput) == chatStatusLabel(StatusWaiting) {
-		t.Error("ready-for-input and awaiting-approval must read differently")
-	}
-}

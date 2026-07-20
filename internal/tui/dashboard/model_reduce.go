@@ -176,18 +176,13 @@ func (m *Model) handleStreamEnded(id session.ID) tea.Cmd {
 }
 
 // applyRunnerEvent reduces a single non-StreamEnded SSE event into the read-model
-// and warm transcript, returning any autopilot Cmd it produced. It runs every
-// per-event side effect (seq dedup, touchObserver, ApplyRunnerEvent, warm ingest
-// + detached-autopilot drive, snapshot throttling, title/session-id persistence,
-// re-sort). The stale-generation guard is the CALLER's responsibility — one
-// channel is one generation, so the batch path checks it once for the whole burst
-// (§4 E5). This is the shared reduction body for both handleRunnerEvent and
-// handleRunnerEventBatch.
+// (status/usage/attention) for the list row and, while viewing, the activity
+// feed. It runs every per-event side effect (seq dedup, touchObserver,
+// ApplyRunnerEvent, snapshot throttling, title/session-id persistence, re-sort).
+// The stale-generation guard is the CALLER's responsibility — one channel is one
+// generation, so the batch path checks it once for the whole burst (§4 E5). This
+// is the shared reduction body for handleRunnerEvent and handleRunnerEventBatch.
 func (m *Model) applyRunnerEvent(id session.ID, event session.Event) tea.Cmd {
-	// autopilotCmd carries a detached driver's continuation POST or termination
-	// toast (see the ingest block below), returned to the caller.
-	var autopilotCmd tea.Cmd
-
 	// Patch the session's status from this event.
 	for i, s := range m.sessions {
 		if s.ID() == id {
@@ -234,40 +229,8 @@ func (m *Model) applyRunnerEvent(id session.ID, event session.Event) tea.Cmd {
 					m.sessions[i].seenSeq = m.sessions[i].lastSeq
 				}
 			}
-			// Feed the warm model so the retained chat stays live in the
-			// background (dedup is handled by the transcript's own lastSeq guard,
-			// so a replayed event here is harmless to the transcript).
-			if tr, ok := m.retained[id]; ok {
-				tr.ingest(event)
-				// Detached autopilot (§1e items 1–2): the foreground continuation
-				// path (handleEvent) discards a background model's Cmds, so a /goal
-				// stalls and a /loop can't self-terminate once the user detaches.
-				// Drive it HERE instead, where the reducer can return the Cmd.
-				// Only for a genuinely background model (its own stream is nil); the
-				// foreground session runs continuation through its own handleEvent.
-				// Gated on !dup so a REPLAYED turn.completed can't re-submit the
-				// next turn (double-drive the driver).
-				if !dup && event.Type == session.EventTurnCompleted &&
-					tr.events == nil && tr.autopilot.active() {
-					autopilotCmd = m.driveDetachedAutopilot(id, tr)
-				}
-			}
 			if !dup {
 				m.saveSnapshot(&m.sessions[i], changed)
-				// Runner-owned autopilot driver (ADR §3, render-from-events): a
-				// terminal `stopped` for a BACKGROUND session raises a toast + OS
-				// notification here, reusing the §1e autopilotToast plumbing (the
-				// foreground session shows its own scrollback line via the transcript,
-				// so it's excluded). Gated on the replay/live boundary — !dup (seq
-				// dedup) AND !catchingUp (a fresh attach's replay burst) — so a
-				// REPLAYED stopped never re-fires the OS notification; only a
-				// flip-to-live one does (the §1a suppression pattern).
-				if event.Type == session.EventAutopilotState &&
-					!m.sessions[i].catchingUp && id != m.attachedID {
-					if note := autopilotStoppedNoteFromEvent(event); note != "" {
-						autopilotCmd = m.autopilotToast(id, note)
-					}
-				}
 				// Persist a runner-generated auto title so it survives a re-seed
 				// (the cluster state carries no local label). RenamedTitle still
 				// wins at display time, so this is safe even for a renamed session.
@@ -275,8 +238,8 @@ func (m *Model) applyRunnerEvent(id session.ID, event session.Event) tea.Cmd {
 					m.titleStore != nil && m.sessions[i].AutoTitle != "" {
 					m.titleStore.SaveAutoTitle(id, m.sessions[i].AutoTitle)
 				}
-				// Persist the Claude SDK session id (session.started) so the CLI
-				// can make the session resumable from the laptop on shutdown.
+				// Persist the agent session id (session.started) so the CLI can make
+				// the session resumable from the laptop on shutdown.
 				if event.Type == session.EventSessionStarted &&
 					m.titleStore != nil && m.sessions[i].AgentSessionID != "" {
 					m.titleStore.SaveAgentSessionID(id, m.sessions[i].AgentSessionID)
@@ -289,28 +252,7 @@ func (m *Model) applyRunnerEvent(id session.ID, event session.Event) tea.Cmd {
 			break
 		}
 	}
-	return autopilotCmd
-}
-
-// driveDetachedAutopilot continues (goal) or terminates (goal/loop) a warm
-// session's autopilot driver after a background turn completes. It points the
-// warm model at the live background SSE client before it POSTs — the parked
-// foreground client's port-forward may be gone, so this mirrors the reroute
-// App.autopilotTick does for loop ticks. A termination is surfaced as a toast +
-// OS notification so a driver that finishes while the user is on the dashboard is
-// never silent (§1e items 1–2). Returns nil when no live client is available this
-// cycle (a transient blip); the driver stays armed for a later event.
-func (m *Model) driveDetachedAutopilot(id session.ID, tr *TranscriptModel) tea.Cmd {
-	client, ok := m.liveClient(id)
-	if !ok {
-		return nil
-	}
-	tr.client = client
-	cont, ended := tr.autopilotAfterTurn()
-	if ended != "" {
-		return m.autopilotToast(id, ended)
-	}
-	return cont
+	return nil
 }
 
 // --------------------------------------------------------------------------

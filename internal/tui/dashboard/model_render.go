@@ -119,7 +119,7 @@ func (m *Model) render() string {
 	}
 
 	zoned := m.renderZoned(m.width, m.height)
-	if !m.switcher.open && !m.permQueue.open && !m.renaming {
+	if !m.switcher.open && !m.renaming {
 		return zoned
 	}
 
@@ -144,25 +144,6 @@ func (m *Model) render() string {
 		canvas.Compose(lipgloss.NewCompositor(
 			lipgloss.NewLayer(shadow).X(sx+2).Y(sy+1).Z(8),
 			lipgloss.NewLayer(sw).X(sx).Y(sy).Z(9),
-		))
-	}
-
-	if m.permQueue.open {
-		pq := m.renderPermQueue(m.width)
-		pqW := lipgloss.Width(firstLineOf(pq))
-		pqH := strings.Count(pq, "\n") + 1
-		if pqW > m.width {
-			pqW = m.width
-		}
-		if pqH > m.height {
-			pqH = m.height
-		}
-		px := (m.width - pqW) / 2
-		py := (m.height - pqH) / 2
-		shadow := solidBlock(pqW, pqH, theme.Shadow)
-		canvas.Compose(lipgloss.NewCompositor(
-			lipgloss.NewLayer(shadow).X(px+2).Y(py+1).Z(8),
-			lipgloss.NewLayer(pq).X(px).Y(py).Z(9),
 		))
 	}
 
@@ -557,15 +538,6 @@ func (m *Model) renderDetailLines(width, height int) []string {
 	if m.actionErr != nil {
 		lines = append(lines, "")
 		lines = append(lines, strings.Split(kit.ErrorBlock(m.actionErr.Error(), "", ""), "\n")...)
-	}
-
-	// ─ preview ─ : tail of the warm transcript for this session, so moving
-	// between rows shows each session's latest output without opening it.
-	if tr, ok := m.retainedTranscript(s.ID()); ok {
-		if tail := tr.tailLines(5, width); len(tail) > 0 {
-			lines = append(lines, detailRule("preview", width))
-			lines = append(lines, tail...)
-		}
 	}
 
 	// Pad/truncate lines to width.

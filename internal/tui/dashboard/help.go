@@ -143,39 +143,3 @@ func keymapCategories(km KeyMap) []helpCategory {
 	return cats
 }
 
-// commandCategories builds help categories from the slash-command registry.
-func commandCategories() []helpCategory {
-	var cats []helpCategory
-	for _, g := range commandGroups(nil) {
-		var entries []helpEntry
-		for _, c := range g.cmds {
-			entries = append(entries, helpEntry{key: c.name, desc: c.desc})
-		}
-		cats = append(cats, helpCategory{name: g.name, entries: entries})
-	}
-	return cats
-}
-
-// chatHelpCategories is the chat's help surface: the slash commands plus the
-// chat key chords (so `?`/`/help` document both).
-func chatHelpCategories() []helpCategory {
-	cats := commandCategories()
-	cats = append(cats, helpCategory{name: "Keys", entries: []helpEntry{
-		{"enter", "send message (queues it while a turn runs)"},
-		{"shift+enter", "insert a newline"},
-		{"/", "open the command palette"},
-		{"!cmd", "run a one-shot shell command"},
-		{"shift+tab", "cycle permission mode"},
-		{"ctrl+f", "search the transcript"},
-		{"ctrl+o", "expand/collapse the latest tool card"},
-		{"ctrl+e", "compose the prompt in $EDITOR"},
-		{"space", "collapse/expand subagent cards (on an empty prompt)"},
-		{"ctrl+g", "jump to the next session needing attention"},
-		{"?", "toggle this help"},
-		{"↑/↓ pgup/pgdn", "scroll the transcript"},
-		{"esc", "interrupt the turn / close an overlay (detaches when idle)"},
-		{"ctrl+]", "detach to the command center"},
-		{"ctrl+k", "quick-switch to another session"},
-	}})
-	return cats
-}

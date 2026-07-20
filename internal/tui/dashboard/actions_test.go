@@ -371,49 +371,8 @@ func TestActionResultMsgClearsPendingAction(t *testing.T) {
 }
 
 // --------------------------------------------------------------------------
-// App screen-switch: attach -> size -> detach
+// App screen-switch: attach -> external pane
 // --------------------------------------------------------------------------
-
-func TestAppAttachSizeDetach(t *testing.T) {
-	app := NewApp(nil, nil, nil)
-
-	// Initial terminal size lands on the dashboard.
-	app.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
-
-	sess := Session{
-		State:            session.State{ID: "s1", ProjectPath: "/x/proj", Backend: "claude-sdk"},
-		Title:            "proj",
-		sessionReadModel: sessionReadModel{DashStatus: StatusNeedsInput},
-	}
-	// attachReadyMsg drives the transition without a real connector.
-	_, cmd := app.Update(attachReadyMsg{sess: sess, client: &fakeRunnerClient{}})
-	if app.screen != ScreenTranscript {
-		t.Fatalf("screen = %v, want ScreenTranscript", app.screen)
-	}
-	if app.transcript == nil {
-		t.Fatal("transcript model nil after attach")
-	}
-	// The attach must return a command (it batches Init with the size-seeding
-	// WindowSizeMsg) — not nil.
-	if cmd == nil {
-		t.Error("attach returned no command (transcript would never paint or stream)")
-	}
-
-	// Sizing the App propagates to the transcript so it paints at real size.
-	app.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
-	if app.transcript.width != 100 || app.transcript.height != 40 {
-		t.Errorf("transcript not sized: %dx%d", app.transcript.width, app.transcript.height)
-	}
-
-	// esc detaches back to the dashboard, releasing the transcript.
-	app.Update(keyMsg("esc"))
-	if app.screen != ScreenDashboard {
-		t.Errorf("esc did not detach: screen = %v", app.screen)
-	}
-	if app.transcript != nil {
-		t.Error("transcript not released on detach")
-	}
-}
 
 func TestAppAttachOpencodeExternalPane(t *testing.T) {
 	app := NewApp(nil, nil, nil)
@@ -433,9 +392,6 @@ func TestAppAttachOpencodeExternalPane(t *testing.T) {
 	}
 	if app.external == nil {
 		t.Fatal("external pane nil after opencode attach")
-	}
-	if app.transcript != nil {
-		t.Error("transcript should not be built for an opencode-server session")
 	}
 	if cmd == nil {
 		t.Error("attach returned no command (the external client would never launch)")
@@ -490,9 +446,6 @@ func TestAppAttachClaudePaneExternalPane(t *testing.T) {
 	}
 	if app.external == nil {
 		t.Fatal("external pane nil after claude-pane attach")
-	}
-	if app.transcript != nil {
-		t.Error("transcript should not be built for a claude-pane session")
 	}
 	if dialed != 1 {
 		t.Errorf("pane dial invoked %d times, want 1 (Init must dial the transport)", dialed)

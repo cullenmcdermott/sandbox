@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/cullenmcdermott/sandbox/internal/session"
@@ -137,6 +138,17 @@ func TestUsageEventsThrottleSnapshotSaves(t *testing.T) {
 	if m.sessions[0].lastSeq != 2 {
 		t.Errorf("lastSeq = %d, want 2", m.sessions[0].lastSeq)
 	}
+}
+
+// mkEvent builds a session.Event of the given type with a JSON-encoded payload
+// (seq 0). Shared test helper (relocated here from the deleted transcript test
+// suite).
+func mkEvent(typ session.EventType, payload interface{}) session.Event {
+	var raw json.RawMessage
+	if payload != nil {
+		raw, _ = json.Marshal(payload)
+	}
+	return session.Event{Type: typ, Payload: raw}
 }
 
 // mkEventSeq builds a session.Event carrying a seq and JSON-encoded payload.

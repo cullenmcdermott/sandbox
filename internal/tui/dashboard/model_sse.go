@@ -694,9 +694,13 @@ func liveSSENextCmd(id session.ID, ch <-chan session.Event, gen uint64) tea.Cmd 
 	}
 }
 
+// eventBatchMax bounds one coalesced background-stream drain (§4 E5): a burst of
+// buffered events collapses into a single RunnerEventBatchMsg up to this many.
+const eventBatchMax = 512
+
 // liveSSEBatchCmd is the batching passive-stream reader (§4 E5). It blocks for
 // the first event, then non-blockingly drains any already-buffered events (up to
-// eventBatchMax, shared with the foreground transcript's waitForEvent) into ONE
+// eventBatchMax) into ONE
 // RunnerEventBatchMsg — so a delta burst collapses to a single Update+View
 // instead of one full render pipeline per event. This mirrors waitForEvent's
 // coalescing for the dashboard's background observer streams.

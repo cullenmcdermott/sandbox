@@ -18,14 +18,13 @@ import (
 type dctx int
 
 const (
-	dctxConfirm   dctx = iota // m.confirm != nil
-	dctxHelp                  // m.showHelp
-	dctxSwitcher              // m.switcher.open
-	dctxPermQueue             // m.permQueue.open
-	dctxFilter                // m.filtering
-	dctxRename                // m.renaming
-	dctxConvert               // m.convert != nil
-	dctxList                  // default: the session list's binding table
+	dctxConfirm  dctx = iota // m.confirm != nil
+	dctxHelp                 // m.showHelp
+	dctxSwitcher             // m.switcher.open
+	dctxFilter               // m.filtering
+	dctxRename               // m.renaming
+	dctxConvert              // m.convert != nil
+	dctxList                 // default: the session list's binding table
 )
 
 // activeContext resolves the current dashboard input context. Order is
@@ -39,8 +38,6 @@ func (m *Model) activeContext() dctx {
 		return dctxHelp
 	case m.switcher.open:
 		return dctxSwitcher
-	case m.permQueue.open:
-		return dctxPermQueue
 	case m.filtering:
 		return dctxFilter
 	case m.renaming:
@@ -65,9 +62,6 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.helpKey(ks)
 	case dctxSwitcher:
 		cmd, _ := m.switcherKey(msg)
-		return m, cmd
-	case dctxPermQueue:
-		cmd, _ := m.permQueueKey(msg)
 		return m, cmd
 	case dctxFilter:
 		return m.handleFilterKey(ks)
@@ -157,14 +151,6 @@ func (m *Model) dashListTable() []boundAction[*Model] {
 				return nil, true
 			},
 		},
-		// q opens the pending-permission queue when sessions are waiting. With an
-		// empty queue this entry's when fails and q falls through to Quit below.
-		{
-			binding:    key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "perm queue")),
-			when:       func(m *Model) bool { return len(m.permQueueItems()) > 0 },
-			run:        func(m *Model, _ tea.KeyPressMsg) (tea.Cmd, bool) { m.openPermQueue(); return nil, true },
-			footerRank: 7,
-		},
 		// Rename selected session.
 		{
 			binding: m.keys.Rename,
@@ -203,14 +189,10 @@ func (m *Model) dashListTable() []boundAction[*Model] {
 			binding: m.keys.Switcher,
 			run:     func(m *Model, _ tea.KeyPressMsg) (tea.Cmd, bool) { m.openSwitcher(); return nil, true },
 		},
-		// Quit. The complementary when-gate (empty queue) keeps the footer symmetric
-		// with the q perm-queue entry above — exactly one of the two is ever a
-		// rank-7 footer entry. Dispatch still relies on table order: with a non-empty
-		// queue, q matches the perm-queue entry first; ctrl+c never reaches the Model
-		// (the App intercepts it as a global quit).
+		// Quit (q / ctrl+c). ctrl+c never reaches the Model — the App intercepts it
+		// as a global quit — so this entry serves the bare `q`.
 		{
 			binding:    m.keys.Quit,
-			when:       func(m *Model) bool { return len(m.permQueueItems()) == 0 },
 			run:        func(m *Model, _ tea.KeyPressMsg) (tea.Cmd, bool) { m.Cancel(); return tea.Quit, true },
 			footerRank: 7,
 		},

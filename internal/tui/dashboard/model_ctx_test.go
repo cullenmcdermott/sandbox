@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"charm.land/bubbles/v2/key"
-	tea "charm.land/bubbletea/v2"
 
 	"github.com/cullenmcdermott/sandbox/internal/session"
 )
@@ -36,10 +35,6 @@ func TestDashContextResolution(t *testing.T) {
 			m.switcher.open = true
 			m.renaming = true
 		}, dctxSwitcher},
-		{"permqueue-beats-filtering", func(m *Model) {
-			m.permQueue.open = true
-			m.filtering = true
-		}, dctxPermQueue},
 		{"filtering-beats-renaming", func(m *Model) {
 			m.filtering = true
 			m.renaming = true
@@ -73,7 +68,7 @@ func TestListTablePrecedence(t *testing.T) {
 		got = append(got, e.binding.Keys()[0])
 	}
 	want := []string{
-		"r", "esc", "q", "R", "b", "space", "ctrl+g", "ctrl+k", "q", "?",
+		"r", "esc", "R", "b", "space", "ctrl+g", "ctrl+k", "q", "?",
 		"g", "G", "k", "j", "/", "s", "S", "\\", "enter", "v", "a", "d", "n",
 		"x", "r", "!",
 	}
@@ -97,54 +92,6 @@ func footerHasDesc(bindings []key.Binding, desc string) bool {
 	return false
 }
 
-// TestQTruthful is the §2d fix: with a session waiting on a permission, q opens
-// the queue and the footer advertises "perm queue"; with nothing waiting, q quits
-// and the footer advertises "quit". The footer renders from the SAME table that
-// dispatches, so it can never lie about what q does.
-func TestQTruthful(t *testing.T) {
-	// Waiting: q opens the queue and the footer says "perm queue".
-	m := New(nil)
-	m.sessions = []Session{{
-		State:            session.State{ID: "w", Status: session.StatusRunning},
-		sessionReadModel: sessionReadModel{DashStatus: StatusWaiting, PendingPermissionID: "perm1"},
-	}}
-	if len(m.permQueueItems()) == 0 {
-		t.Fatal("test setup: expected a non-empty permission queue")
-	}
-	m.handleKey(keyMsg("q"))
-	if !m.permQueue.open {
-		t.Fatal("q did not open the permission queue while a session was waiting")
-	}
-	if !footerHasDesc(m.shortHelp(), "perm queue") {
-		t.Fatal("footer did not advertise 'perm queue' while a session was waiting")
-	}
-	if footerHasDesc(m.shortHelp(), "quit") {
-		t.Fatal("footer advertised 'quit' while a session was waiting (both q slots visible)")
-	}
-
-	// Empty queue: q quits and the footer says "quit".
-	m2 := New(nil)
-	m2.sessions = []Session{{
-		State:            session.State{ID: "idle", Status: session.StatusRunning},
-		sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
-	}}
-	if len(m2.permQueueItems()) != 0 {
-		t.Fatal("test setup: expected an empty permission queue")
-	}
-	_, cmd := m2.handleKey(keyMsg("q"))
-	if cmd == nil {
-		t.Fatal("q with an empty queue produced no command (expected quit)")
-	}
-	if _, ok := cmd().(tea.QuitMsg); !ok {
-		t.Fatal("q with an empty queue did not produce tea.Quit")
-	}
-	if !footerHasDesc(m2.shortHelp(), "quit") {
-		t.Fatal("footer did not advertise 'quit' with an empty queue")
-	}
-	if footerHasDesc(m2.shortHelp(), "perm queue") {
-		t.Fatal("footer advertised 'perm queue' with an empty queue")
-	}
-}
 
 // TestSeedErrRetryPrecedesResume pins that the seedErr retry entry claims r ahead
 // of the resume binding: with the initial seed failed, r re-issues the seed (and
