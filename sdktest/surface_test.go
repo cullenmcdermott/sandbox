@@ -107,7 +107,28 @@ var (
 	// TestSSHTarget against a fake backend.
 	_ func(*client.Session, context.Context, client.ShellOptions) (int, error)  = (*client.Session).Shell
 	_ func(*client.Session, context.Context) (*client.SSHTarget, func(), error) = (*client.Session).SSHTarget
+
+	// claude-pane interactive surface: AttachPane dials the session's pane
+	// WebSocket over the existing runner forward and returns the raw PTY byte
+	// stream. Signature-pinned only (a live attach needs a claude-pane pod);
+	// the sentinel errors are what a consumer branches on when a Read ends.
+	_ func(*client.Session, context.Context, int, int) (client.PaneStream, error) = (*client.Session).AttachPane
+
+	_ error = client.ErrPanePreempted
+	_ error = client.ErrPaneChildExited
 )
+
+// consumerPaneStream proves client.PaneStream is implementable outside the
+// main module (nothing in the interface names an internal type), so a consumer
+// can fake the pane in its own tests.
+type consumerPaneStream struct{}
+
+func (consumerPaneStream) Read([]byte) (int, error)  { return 0, nil }
+func (consumerPaneStream) Write([]byte) (int, error) { return 0, nil }
+func (consumerPaneStream) Close() error              { return nil }
+func (consumerPaneStream) Resize(int, int) error     { return nil }
+
+var _ client.PaneStream = consumerPaneStream{}
 
 // --- client: per-session worktree surface (wave 2) --------------------------
 
