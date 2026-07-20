@@ -156,4 +156,3 @@ func TestSeedRestoresPersistedTitle(t *testing.T) {
 		}
 	}
 }
-

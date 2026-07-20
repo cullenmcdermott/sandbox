@@ -50,7 +50,7 @@ Returns the runner's `session.json` state:
   "lastActivity": "2026-06-18T22:30:00Z",
   "model": "claude-sonnet-4-5-20250929",
   "protocolVersion": 2,
-  "capabilities": { "autopilot": true }
+  "capabilities": { "autopilot": false }
 }
 ```
 `activity` is the runner's turn-activity signal — `idle` | `busy` | `error`. It
@@ -66,14 +66,10 @@ both sides at once.)
 `model` is **optional**: it is omitted until the runner has seen the model id in
 the SDK's init message (i.e. before the first turn it is absent).
 
-`capabilities` is the backend capability map the CLI reads to pick a code path.
-`capabilities.autopilot` is **true** when this backend has a runner-side
-autopilot driver (the server-side `/loop`-`/goal` loop — see
-`PUT/DELETE /sessions/:id/autopilot` below): the TUI then arms **that** driver
-and renders from `autopilot.state` events instead of running its local
-`tea.Tick` loop, avoiding two drivers double-submitting turns. It is **false**
-for backends without a runner driver (`opencode-server`, supervise-only), where
-the TUI keeps its local driver. Today only `claude-sdk` reports `true`.
+`capabilities` is the backend capability map. `capabilities.autopilot` is
+**always false** since claude-pane-first removed the server-side autopilot
+driver (revival path: headless `claude -p --resume`); the key is retained so
+old clients still decode `/status`.
 
 `lastTurnId` vs `activeTurnId`: `lastTurnId` is the most recently *started* turn
 and persists after it finishes (it seeds the next turn id). `activeTurnId` is
@@ -105,28 +101,19 @@ Starts a new turn. Request body:
   "effort": "high"
 }
 ```
-`prompt` (non-empty string) is required; the rest are optional. `mode` is the
-turn's tool-approval policy (Go: the owned `TurnInput.ApprovalPolicy` enum) — one
-of `default`, `acceptEdits`, `plan`, or `bypassPermissions`; an empty or
-unrecognized value defaults to `bypassPermissions` (§2d yolo default — the
-sandbox pod is the isolation boundary, so an unpinned turn runs without per-tool
-permission prompts). The runner maps this **per-backend**: the `claude-sdk`
-backend applies it 1:1 as the SDK `permissionMode`; the `opencode-server` backend
-does **not** honor it (its interactive client owns its own permission modal) and
-ignores the field — a documented no-op, not a silent drop. The TUI pins the mode
-explicitly and surfaces `bypassPermissions` as a distinct warning chip in its
-status line. (`bypassPermissions` additionally requires the SDK's
-`allowDangerouslySkipPermissions` gate, which the runner sets only for that
-mode.) `model` is the per-turn model override (the in-session `/model` switch) —
+`prompt` (non-empty string) is required; the rest are optional. Since
+claude-pane-first the only backend that accepts runner turns is
+`opencode-server` (its headless first turn); every other backend answers 409
+(see the table below). `mode` is the turn's tool-approval policy (Go: the owned
+`TurnInput.ApprovalPolicy` enum) — one of `default`, `acceptEdits`, `plan`, or
+`bypassPermissions`. The `opencode-server` backend does **not** honor it (its
+interactive client owns its own permission modal) and ignores the field — a
+documented no-op, not a silent drop. `model` is the per-turn model override —
 an id or alias like `opus`, `sonnet`, `haiku`, or a full id; it wins over the
-session default (`SANDBOX_MODEL`, set from `claude --model`), and an empty value
-falls back to that default and then the account default. `effort` is the per-turn
-reasoning-effort override (the in-session `/effort` switch) — one of `low`,
-`medium`, `high`, `xhigh`, or `max`; it maps to the SDK's `options.effort`. An
-empty or unrecognized value leaves effort unset (SDK adaptive-thinking default).
-Effort is supported only on Fable 5 / Opus 4.6+ / Sonnet 4.6 and is silently
-ignored (or downgraded) on other models. The TUI displays the `max` tier under
-the label "ultracode", but the wire value sent here is always the real SDK enum.
+session default (`SANDBOX_MODEL`), and an empty value falls back to that
+default and then the account default. `effort` is the per-turn reasoning-effort
+override — one of `low`, `medium`, `high`, `xhigh`, or `max`; ignored by
+backends that don't support it.
 
 Optional request header: `X-Sandbox-Trace-Id: <id>` — a client-side trace
 correlation id (the Go client stamps its connect-flow tracer id on requests
@@ -153,9 +140,8 @@ new one:
 | An interactive `opencode-server` turn is in flight (surfaces only as `activity: busy` via the observer, no registered turn) | `the opencode session is busy; interrupt the active turn before starting a new one` |
 | A supervise-only backend that has no `Agent` (accepts no runner turns: `codex-app-server`, `claude-pane`) | `backend <name> does not accept runner turns` |
 
-The first two are the authoritative `turnRejectReason` set (`runner/src/turns.ts`),
-shared verbatim by the autopilot driver's self-submit gate; the third is the
-no-Agent short-circuit in the route itself.
+The first two are the authoritative `turnRejectReason` set (`runner/src/turns.ts`);
+the third is the no-Agent short-circuit in the route itself.
 
 ### `POST /sessions/:id/turns/:turn_id/interrupt`
 Cancels an active turn. Returns 200 with `{"turnId": "turn-13"}`. Returns 404
@@ -172,86 +158,12 @@ active turn" is unambiguous without an id. (For an `opencode-server` session who
 interactive turn runs inside `opencode serve` and thus never registers as a runner
 turn, a `busy` session is aborted directly and returns 200 rather than 404.)
 
-### `PUT /sessions/:id/autopilot`
-Arms (or replaces) the runner-owned autopilot driver — the server-side
-`/loop`-`/goal` loop that self-submits the next turn on turn-completion plus an
-interval, so a loop keeps running with the laptop closed (see
-[`server-side-loop-adr.md`](server-side-loop-adr.md)). Only backends that report
-`capabilities.autopilot: true` (claude-sdk today) accept it; the rest return
-**409** so the CLI falls back to its local `tea.Tick` driver. Request body:
-```json
-{
-  "kind": "loop",
-  "prompt": "keep working through TODO.md",
-  "sentinel": "ALL_DONE",
-  "intervalMs": 0,
-  "overrides": { "model": "opus", "effort": "high", "mode": "acceptEdits" },
-  "maxIterations": 50,
-  "tokenBudget": null
-}
-```
-`kind` (`loop` | `goal`) and `prompt` (non-empty string) are required; the rest
-are optional. `sentinel` is a completion marker scanned in each turn's completed
-assistant text — a match stops the loop (`''`/omitted disables it). `intervalMs`
-is the delay between iterations (default `0` = immediate). `overrides` are
-per-turn `model`/`effort`/`mode` applied to every self-submitted turn.
-`maxIterations` is a hard iteration ceiling — **always enforced**, default `50`.
-`tokenBudget` is an optional hard token ceiling (input+output summed across the
-loop; `null`/omitted = no cap). Hitting either ceiling stops the loop
-(`reason: "budget"`). Arming **overwrites** any prior spec wholesale and bumps
-the driver `gen`. Invalid fields return **400** with a typed message (e.g.
-`kind must be 'loop' or 'goal'`, `maxIterations must be a positive integer`).
-Returns **200** with the `/status` body (its `capabilities`/state reflect the
-now-armed driver). The driver submits the first turn immediately unless a turn
-is already in flight, in which case it defers (a manual turn counts as a free
-iteration). Driver transitions are emitted as `autopilot.state` events (see
-[Event Types](#event-types)); the loop lives inside the same permission mode,
-Bash guards, egress allowlist, and audit log as user-submitted turns.
-
-### `DELETE /sessions/:id/autopilot`
-Disarms the driver: sets the persisted spec to `state: "stopped"` with
-`reason: "user"` (the spec is **retained**, never deleted, so attach + reaper
-idle logic read a stable terminal record) and bumps `gen` so any pending tick is
-dropped. Returns **200** with the `/status` body, or **404**
-(`no autopilot spec to disarm`) when the driver was never armed. Backends without
-a runner-side driver return **409** as for `PUT`.
-
-While the driver is armed the session is reported **non-idle** on
-`GET /sessions/:id/idle` (so the reaper leaves the pod alone between iterations);
-it becomes idle-eligible again once the driver stops for any reason. A driver
-armed with no turn-completion for 30 minutes is auto-stopped (`reason: "lapsed"`)
-so a wedged loop can't keep the pod unreapable forever. On a runner restart, a
-persisted `state: "armed"` spec is re-armed automatically (re-emitting `armed`
-and re-scheduling the next turn anchored on the last completed turn).
-
-### `POST /sessions/:id/permissions/:permission_id`
-Resolves a permission request. The session and permission ids come from the URL,
-so the body carries only the decision:
-```json
-{
-  "allow": true,
-  "scope": "once",
-  "editedInput": ""
-}
-```
-`allow` (boolean) is required; `scope` and `editedInput` are optional. `scope`
-is one of `once` | `session` (defaults to `once`). When `allow` is true and
-`editedInput` is non-empty it must be valid JSON (validated at the boundary; a
-malformed edit returns 400 and leaves the permission pending so the client can
-retry). Returns 200 with `{"permissionId": "...", "resolved": true}`.
-
-Resolution is first-write-wins: the runner auto-denies a pending permission on
-its internal deadline, an interrupt, or client detach. A POST that loses that
-race returns **409** with
-`{"error": "...", "permissionId": "...", "resolved": false, "reason": "expired"}`
-instead of falsely claiming success.
-
-> **`session` scope** is a **tool-name-level** grant: when an allow resolves with
-> `scope: "session"`, the runner records a grant for that tool name and
-> auto-allows every subsequent use of the same tool for the rest of the session
-> (no further prompt). Grants are in-memory for the pod's lifetime — a pod
-> restart re-prompts. The resulting `permission.resolved` event carries
-> `decision: "allow-session"` (vs `"allow-once"` for `scope: "once"`).
+> **Removed endpoints (claude-pane-first).** `PUT/DELETE /sessions/:id/autopilot`
+> (the server-side `/loop`-`/goal` driver) and
+> `POST /sessions/:id/permissions/:permission_id` (programmatic permission
+> resolution) no longer exist — permission decisions happen inside the agent's
+> own interactive UI, observed as `permission.requested`/`permission.resolved`
+> events. Old clients calling them get a plain 404.
 
 ### `POST /sessions/:id/exec`
 Runs a one-shot shell command in the session's project cwd and returns its

@@ -312,9 +312,7 @@ type State struct {
 	RunnerToken  string    `json:"-"`
 	// Capabilities is the backend capability map reported by the runner on
 	// GET /sessions/:id/status. It is populated only by the runner client's
-	// SessionState (the k8s backend cannot know it and leaves it zero). The TUI
-	// reads Capabilities.Autopilot to pick the autopilot code path (runner-owned
-	// driver vs the local tea.Tick fallback — ADR §Q3 precedence).
+	// SessionState (the k8s backend cannot know it and leaves it zero).
 	Capabilities Capabilities `json:"capabilities,omitempty"`
 }
 
@@ -329,9 +327,9 @@ type StateEvent struct {
 }
 
 // Capabilities is the backend capability map from GET /status (mirrors the
-// StatusResponse.capabilities object in runner/src/types.ts). Autopilot is true
-// when this backend has a runner-side autopilot driver (the server-side
-// /loop-/goal loop); today only claude-sdk reports true.
+// StatusResponse.capabilities object in runner/src/types.ts). Autopilot is
+// always false since claude-pane-first removed the server-side driver; the
+// runner keeps reporting the key so old clients still decode /status.
 type Capabilities struct {
 	Autopilot bool `json:"autopilot"`
 }
@@ -374,15 +372,6 @@ type TurnInput struct {
 type TurnRef struct {
 	Session ID     `json:"session"`
 	Turn    TurnID `json:"turn"`
-}
-
-// PermissionDecision is a user's response to a permission request.
-type PermissionDecision struct {
-	Session     ID     `json:"session"`
-	Permission  string `json:"permission"` // permission event ID
-	Allow       bool   `json:"allow"`
-	Scope       string `json:"scope"` // "once" | "session"
-	EditedInput string `json:"editedInput,omitempty"`
 }
 
 // ExecResult is the outcome of a one-shot shell command run in the session

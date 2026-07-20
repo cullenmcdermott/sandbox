@@ -78,7 +78,6 @@ func nudge(t *testing.T, a *App) string {
 	return rawString(t, cmd)
 }
 
-
 // On Ghostty, every aggregate-state transition must emit the matching OSC
 // progress via tea.Raw from App.Update, and only on the edge. The walk covers all
 // three states — idle/busy/error — so a regression from the three-valued

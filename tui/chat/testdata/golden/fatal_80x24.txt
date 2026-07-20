@@ -1,7 +1,0 @@
-> run the migration
-⏺ Starting the migration now.                                                   
-⏺ Bash(./migrate.sh)
-  ⎿  exit 137 (OOMKilled)
-fatal: the runner exited (code 137) — the session was terminated and the turn
-did not complete                                                             
-⎿  turn aborted

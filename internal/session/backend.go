@@ -53,9 +53,6 @@ type RunnerClient interface {
 	// InterruptTurn cancels an active turn.
 	InterruptTurn(ctx context.Context, ref Ref, turn TurnRef) error
 
-	// ResolvePermission sends a permission decision.
-	ResolvePermission(ctx context.Context, ref Ref, decision PermissionDecision) error
-
 	// Events opens an SSE stream of events after the given sequence number.
 	// The channel closes when the stream ends or ctx is cancelled.
 	Events(ctx context.Context, ref Ref, afterSeq uint64) (<-chan Event, error)

@@ -273,10 +273,6 @@ type RunOptions struct {
 	// delta (Workstream C).
 	EventCache EventCache
 
-	// DriverStore persists the last-armed autopilot driver spec per session so a
-	// bare /loop or /goal re-arms it after a re-attach without retyping (§1e).
-	DriverStore DriverStore
-
 	// ObserverConnector is the lightweight connect path for background passive
 	// status streams (port-forward + runner health, no file-sync setup). When
 	// nil, background streams use Connector.
@@ -328,9 +324,6 @@ func (a *App) applyOpts(opts []RunOptions) {
 	}
 	if opts[0].EventCache != nil {
 		a.dashboard = a.dashboard.WithEventCache(opts[0].EventCache)
-	}
-	if opts[0].DriverStore != nil {
-		a.dashboard = a.dashboard.WithDriverStore(opts[0].DriverStore)
 	}
 	if opts[0].ObserverConnector != nil {
 		a.dashboard = a.dashboard.WithObserverConnector(opts[0].ObserverConnector)

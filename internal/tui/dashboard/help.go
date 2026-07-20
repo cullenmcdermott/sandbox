@@ -142,4 +142,3 @@ func keymapCategories(km KeyMap) []helpCategory {
 	}
 	return cats
 }
-

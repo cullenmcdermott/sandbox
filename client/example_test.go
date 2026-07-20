@@ -158,19 +158,14 @@ streamLoop:
 				fmt.Println(t.Tool, t.Output, t.Error)
 			}
 		case client.EventPermissionRequested:
-			// The agent is blocked awaiting approval. Decode the request, then
-			// answer it — PermissionDecision.Permission MUST echo the payload's
-			// PermissionID so the runner links the decision to the pending request.
+			// The agent is blocked awaiting approval. Since claude-pane-first the
+			// decision is made inside the agent's own interactive UI (attach the
+			// pane); this event is the attention signal a consumer surfaces —
+			// there is no programmatic resolve API.
 			var p client.PermissionPayload
-			if json.Unmarshal(ev.Payload, &p) != nil {
-				continue
+			if json.Unmarshal(ev.Payload, &p) == nil {
+				fmt.Println("attention: permission requested for", p.Tool)
 			}
-			_ = sess.ResolvePermission(ctx, client.PermissionDecision{
-				Session:    sess.ID(),
-				Permission: p.PermissionID,
-				Allow:      true,
-				Scope:      "once", // "session" persists the grant for the rest of the session
-			})
 		case client.EventUsageUpdated:
 			// Token counts for a ctx% indicator / running cost readout.
 			var u client.UsagePayload
@@ -246,7 +241,6 @@ func TestPublicSurface(t *testing.T) {
 	}
 	_ = client.State{ID: "x", Status: client.StatusRunning}
 	_ = client.TurnInput{Prompt: "hi"}
-	_ = client.PermissionDecision{Allow: true, Scope: "once"}
 
 	// The event model is consumable: EventType constants + payload aliases exist.
 	if len(client.AllEventTypes) == 0 {

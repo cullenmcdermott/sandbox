@@ -298,7 +298,7 @@ func (m *Model) probeIdleCmd(id session.ID) tea.Cmd {
 	}
 	ref := session.Ref{ID: id}
 	return func() tea.Msg {
-		// Bounded like approveCmd: a wedged port-forward must not pin this
+		// Bounded: a wedged port-forward must not pin this
 		// goroutine (and its probe slot) forever.
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -408,12 +408,6 @@ func liveSSEReconnectTick(id session.ID, attempt int, delay time.Duration) tea.C
 	return tea.Tick(delay, func(time.Time) tea.Msg {
 		return liveSSEReconnectMsg{id: id, attempt: attempt}
 	})
-}
-
-// approveResultMsg signals that a ResolvePermission call completed (or failed).
-type approveResultMsg struct {
-	id  session.ID
-	err error
 }
 
 // seedFailedMsg signals that the initial cluster seed (backend.List) failed, so
@@ -728,53 +722,6 @@ func liveSSEBatchCmd(id session.ID, ch <-chan session.Event, gen uint64) tea.Cmd
 			}
 		}
 		return RunnerEventBatchMsg{ID: id, Events: events, gen: gen}
-	}
-}
-
-// approveCmd fires a ResolvePermission call for the selected session.
-// It is non-blocking (runs in a Cmd); errors are ignored (fire-and-forget).
-func (m *Model) approveCmd(sess Session, allow bool) tea.Cmd {
-	if sess.PendingPermissionID == "" {
-		return nil
-	}
-	id := sess.ID()
-	ref := session.Ref{ID: id}
-	decision := session.PermissionDecision{
-		Session:    id,
-		Permission: sess.PendingPermissionID,
-		Allow:      allow,
-		Scope:      "once",
-	}
-
-	// Prefer the live SSE client: its port-forward is already open, so
-	// approve/deny doesn't pay for a fresh connect + health check.
-	if client, ok := m.liveSSEClients[id]; ok {
-		return func() tea.Msg {
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			defer cancel()
-			err := client.ResolvePermission(ctx, ref, decision)
-			return approveResultMsg{id: id, err: err}
-		}
-	}
-
-	connector := m.backgroundConnector()
-	if connector == nil {
-		return nil
-	}
-	projectPath := sess.State.ProjectPath
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		res, err := connector(ctx, ref, projectPath, func(ConnectStage, string) {})
-		if err != nil {
-			return approveResultMsg{id: id, err: err}
-		}
-		// One-shot connection: release its forward once the call returns (§1d C1).
-		if res.Close != nil {
-			defer res.Close()
-		}
-		err = res.Client.ResolvePermission(ctx, ref, decision)
-		return approveResultMsg{id: id, err: err}
 	}
 }
 

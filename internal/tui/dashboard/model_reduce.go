@@ -65,15 +65,15 @@ func (m *Model) handleRunnerEvent(msg RunnerEventMsg) (tea.Model, tea.Cmd) {
 	if msg.StreamEnded {
 		return m, m.handleStreamEnded(msg.ID)
 	}
-	autopilotCmd := m.applyRunnerEvent(msg.ID, msg.Event)
+	m.applyRunnerEvent(msg.ID, msg.Event)
 	// Re-issue the Cmd to read the next event from the stored channel. Carry the
 	// same generation forward so the continuing reader stays tagged as this
 	// stream (msg.gen matched the registered gen via the guard above).
 	ch, ok := m.liveSSEChannels[msg.ID]
 	if !ok {
-		return m, autopilotCmd // channel cancelled; still deliver any autopilot Cmd
+		return m, nil // channel cancelled
 	}
-	return m, tea.Batch(autopilotCmd, liveSSENextCmd(msg.ID, ch, msg.gen))
+	return m, liveSSENextCmd(msg.ID, ch, msg.gen)
 }
 
 // handleRunnerEventBatch applies a burst of SSE events read from one passive
@@ -86,34 +86,28 @@ func (m *Model) handleRunnerEvent(msg RunnerEventMsg) (tea.Model, tea.Cmd) {
 // One channel is one generation, so the stale-stream guard gates the WHOLE batch
 // with a single check. If the channel closed mid-drain (StreamEnded), the events
 // read before the close are applied FIRST, then the stream-ended handling runs —
-// no event read before the close is lost. Per-event autopilot Cmds are collected
-// and batched; the once-per-batch post-handling (maybeStartAnim,
-// notifyIfBackgroundAttention) lives in the RunnerEventBatchMsg case in Update.
+// no event read before the close is lost. The once-per-batch post-handling
+// (maybeStartAnim, notifyIfBackgroundAttention) lives in the RunnerEventBatchMsg
+// case in Update.
 func (m *Model) handleRunnerEventBatch(msg RunnerEventBatchMsg) (tea.Model, tea.Cmd) {
 	if msg.gen != 0 {
 		if cur, ok := m.liveSSEStreamGen[msg.ID]; !ok || cur != msg.gen {
 			return m, nil
 		}
 	}
-	var cmds []tea.Cmd
 	for _, ev := range msg.Events {
-		if c := m.applyRunnerEvent(msg.ID, ev); c != nil {
-			cmds = append(cmds, c)
-		}
+		m.applyRunnerEvent(msg.ID, ev)
 	}
 	if msg.StreamEnded {
 		// Channel closed mid-drain: apply the drained events (above) THEN the
 		// stream-ended degrade/reconnect — do not re-arm the reader.
-		if c := m.handleStreamEnded(msg.ID); c != nil {
-			cmds = append(cmds, c)
-		}
-		return m, tea.Batch(cmds...)
+		return m, m.handleStreamEnded(msg.ID)
 	}
 	// Re-arm the batch reader on the same channel + generation.
 	if ch, ok := m.liveSSEChannels[msg.ID]; ok {
-		cmds = append(cmds, liveSSEBatchCmd(msg.ID, ch, msg.gen))
+		return m, liveSSEBatchCmd(msg.ID, ch, msg.gen)
 	}
-	return m, tea.Batch(cmds...)
+	return m, nil
 }
 
 // handleStreamEnded degrades a session whose SSE stream closed: warm→cold drop,
@@ -182,7 +176,7 @@ func (m *Model) handleStreamEnded(id session.ID) tea.Cmd {
 // The stale-generation guard is the CALLER's responsibility — one channel is one
 // generation, so the batch path checks it once for the whole burst (§4 E5). This
 // is the shared reduction body for handleRunnerEvent and handleRunnerEventBatch.
-func (m *Model) applyRunnerEvent(id session.ID, event session.Event) tea.Cmd {
+func (m *Model) applyRunnerEvent(id session.ID, event session.Event) {
 	// Patch the session's status from this event.
 	for i, s := range m.sessions {
 		if s.ID() == id {
@@ -252,7 +246,6 @@ func (m *Model) applyRunnerEvent(id session.ID, event session.Event) tea.Cmd {
 			break
 		}
 	}
-	return nil
 }
 
 // --------------------------------------------------------------------------

@@ -105,26 +105,6 @@ type Entry struct {
 	// made the TUI flash notifications and count usage up from zero on every
 	// launch. Nil until the dashboard has observed at least one live event.
 	Snapshot *Snapshot `json:"snapshot,omitempty"`
-	// Driver is the last-armed autopilot driver spec for this session (§1e). It
-	// lets a bare `/loop` or `/goal` re-arm the runner-owned driver after a
-	// detach/re-attach without retyping the prompt. Nil until a driver is armed;
-	// retained (not cleared on stop) so a stopped/lapsed driver stays re-armable.
-	Driver *DriverSpec `json:"driver,omitempty"`
-}
-
-// DriverSpec is the persisted last-armed autopilot driver spec (§1e). It mirrors
-// session.AutopilotRequest (overrides flattened) without importing the session
-// package into the index; the CLI's DriverStore adapter converts between them.
-type DriverSpec struct {
-	Kind          string `json:"kind"`
-	Prompt        string `json:"prompt"`
-	Sentinel      string `json:"sentinel,omitempty"`
-	IntervalMs    int64  `json:"intervalMs,omitempty"`
-	Model         string `json:"model,omitempty"`
-	Effort        string `json:"effort,omitempty"`
-	Mode          string `json:"mode,omitempty"`
-	MaxIterations int    `json:"maxIterations,omitempty"`
-	TokenBudget   *int64 `json:"tokenBudget,omitempty"`
 }
 
 // Snapshot is the cached dashboard read-model for a session, captured at
@@ -318,9 +298,6 @@ func mergeEntry(prev, next Entry) Entry {
 	}
 	if next.Snapshot == nil {
 		next.Snapshot = prev.Snapshot
-	}
-	if next.Driver == nil {
-		next.Driver = prev.Driver
 	}
 	return next
 }

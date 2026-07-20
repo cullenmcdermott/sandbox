@@ -196,9 +196,8 @@ const (
 	NoticeError
 )
 
-// Notice renders a calm one-line notice in the given tone, clamped to width. For
-// a scrollback (transcript) notice as a list item, use tui/chat's NoticeItem;
-// this is the chrome-level transient line.
+// Notice renders a calm one-line notice in the given tone, clamped to width —
+// the chrome-level transient line.
 func Notice(kind NoticeKind, text string, width int) string {
 	var c color.Color
 	switch kind {

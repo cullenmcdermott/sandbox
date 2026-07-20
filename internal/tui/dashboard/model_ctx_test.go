@@ -69,7 +69,7 @@ func TestListTablePrecedence(t *testing.T) {
 	}
 	want := []string{
 		"r", "esc", "R", "b", "space", "ctrl+g", "ctrl+k", "q", "?",
-		"g", "G", "k", "j", "/", "s", "S", "\\", "enter", "v", "a", "d", "n",
+		"g", "G", "k", "j", "/", "s", "S", "\\", "enter", "v", "n",
 		"x", "r", "!",
 	}
 	if len(got) != len(want) {
@@ -91,7 +91,6 @@ func footerHasDesc(bindings []key.Binding, desc string) bool {
 	}
 	return false
 }
-
 
 // TestSeedErrRetryPrecedesResume pins that the seedErr retry entry claims r ahead
 // of the resume binding: with the initial seed failed, r re-issues the seed (and

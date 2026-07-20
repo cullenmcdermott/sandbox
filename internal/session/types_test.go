@@ -172,26 +172,6 @@ func TestToolPayloadNestingRoundTrip(t *testing.T) {
 	}
 }
 
-func TestPermissionDecisionJSON(t *testing.T) {
-	d := PermissionDecision{
-		Session:    "claude-sdk-7f3a",
-		Permission: "perm-abc",
-		Allow:      true,
-		Scope:      "once",
-	}
-	data, err := json.Marshal(d)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	var decoded PermissionDecision
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if !decoded.Allow || decoded.Scope != "once" {
-		t.Errorf("got allow=%v scope=%q, want true/once", decoded.Allow, decoded.Scope)
-	}
-}
-
 func TestSpecDefaults(t *testing.T) {
 	// Spec doesn't have defaults built in; callers (k8s.Backend) fill them.
 	// This test verifies the type is usable with zero values.

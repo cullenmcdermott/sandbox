@@ -200,29 +200,6 @@ func TestInterruptTurn(t *testing.T) {
 	}
 }
 
-func TestResolvePermission(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/sessions/test/permissions/perm-1" {
-			http.NotFound(w, r)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	c := New(srv.URL, "token")
-	ref := session.Ref{ID: "test"}
-	dec := session.PermissionDecision{
-		Session:    "test",
-		Permission: "perm-1",
-		Allow:      true,
-		Scope:      "once",
-	}
-	if err := c.ResolvePermission(context.Background(), ref, dec); err != nil {
-		t.Fatalf("resolve: %v", err)
-	}
-}
-
 func TestSessionState(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/sessions/test/status" {
@@ -386,8 +363,6 @@ func invoke(c *Client, method string) error {
 		return err
 	case "InterruptTurn":
 		return c.InterruptTurn(ctx, ref, session.TurnRef{Session: "test", Turn: "turn-1"})
-	case "ResolvePermission":
-		return c.ResolvePermission(ctx, ref, session.PermissionDecision{Session: "test", Permission: "perm-1", Allow: true, Scope: "once"})
 	case "SessionState":
 		_, err := c.SessionState(ctx, ref)
 		return err
@@ -405,13 +380,12 @@ func invoke(c *Client, method string) error {
 // opPrefix is the error-message prefix each method uses (see statusError calls
 // in client.go). Used to assert the right operation is named in the error.
 var opPrefix = map[string]string{
-	"Health":            "runner health",
-	"StartTurn":         "runner start turn",
-	"InterruptTurn":     "runner interrupt turn",
-	"ResolvePermission": "runner resolve permission",
-	"SessionState":      "runner session state",
-	"Exec":              "runner exec",
-	"Idle":              "runner idle",
+	"Health":        "runner health",
+	"StartTurn":     "runner start turn",
+	"InterruptTurn": "runner interrupt turn",
+	"SessionState":  "runner session state",
+	"Exec":          "runner exec",
+	"Idle":          "runner idle",
 }
 
 // TestErrorPathStatusSurfaced asserts that every method turns a non-2xx response
@@ -419,7 +393,7 @@ var opPrefix = map[string]string{
 // sends a {"error":...} body — the server's message. This is the regression
 // guard for the opaque "status 409"/"status 404" bug reports.
 func TestErrorPathStatusSurfaced(t *testing.T) {
-	methods := []string{"Health", "StartTurn", "InterruptTurn", "ResolvePermission", "SessionState", "Exec", "Idle"}
+	methods := []string{"Health", "StartTurn", "InterruptTurn", "SessionState", "Exec", "Idle"}
 
 	cases := []struct {
 		name        string
@@ -475,8 +449,7 @@ func TestErrorPathStatusSurfaced(t *testing.T) {
 // TestErrorPathMalformedSuccessBody asserts that a 2xx response with a body the
 // client cannot decode (truncated/garbage JSON) is reported as a decode error
 // rather than being silently swallowed. Only methods that decode a response
-// body are covered (Health/InterruptTurn/ResolvePermission have no body to
-// decode).
+// body are covered (Health/InterruptTurn have no body to decode).
 func TestErrorPathMalformedSuccessBody(t *testing.T) {
 	methods := []string{"StartTurn", "SessionState", "Exec", "Idle"}
 	for _, m := range methods {

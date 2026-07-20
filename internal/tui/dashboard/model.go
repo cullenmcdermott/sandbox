@@ -287,11 +287,6 @@ type Model struct {
 	// streams only the delta (Workstream C). nil in unit tests (no caching).
 	eventCache EventCache
 
-	// driverStore, when non-nil, persists the last-armed autopilot driver spec per
-	// session so a bare /loop or /goal re-arms it after a re-attach (§1e). Copied
-	// into each attached transcript. nil in unit tests.
-	driverStore DriverStore
-
 	// actionErr is the last suspend/resume/destroy/create error, surfaced in
 	// the detail pane. Cleared when an action succeeds.
 	actionErr error
@@ -424,25 +419,6 @@ type SnapshotStore interface {
 // WithSnapshotStore registers the persistent per-session snapshot store.
 func (m *Model) WithSnapshotStore(s SnapshotStore) *Model {
 	m.snapStore = s
-	return m
-}
-
-// DriverStore persists the last-armed autopilot driver spec per session so a
-// stopped/lapsed driver can be re-armed with a single bare `/loop` or `/goal`
-// after a detach/re-attach without retyping the prompt (§1e). Implemented by the
-// CLI on top of the local index; nil in unit tests (re-arm then works only within
-// one attach, from the in-memory record).
-type DriverStore interface {
-	// LoadDriver returns the last-armed spec for a session; ok is false when none
-	// was recorded (or the entry can't be read).
-	LoadDriver(id session.ID) (spec session.AutopilotRequest, ok bool)
-	// SaveDriver records the last-armed spec for a session.
-	SaveDriver(id session.ID, spec session.AutopilotRequest)
-}
-
-// WithDriverStore registers the persistent autopilot-driver-spec store (§1e).
-func (m *Model) WithDriverStore(s DriverStore) *Model {
-	m.driverStore = s
 	return m
 }
 
@@ -833,17 +809,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.sessions[i].PendingAction = ""
 				break
 			}
-		}
-		return m, nil
-
-	case approveResultMsg:
-		// Surface a failed approve/deny instead of leaving the optimistic UI
-		// looking successful: the decision never reached the runner, so the
-		// session is still blocked. Reuses the detail-pane ErrorBlock render.
-		if msg.err != nil {
-			m.actionErr = fmt.Errorf("resolve permission: %w", msg.err)
-		} else {
-			m.actionErr = nil
 		}
 		return m, nil
 

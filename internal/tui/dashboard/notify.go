@@ -115,25 +115,6 @@ func (m *Model) notifyIfBackgroundAttention(attached session.ID) tea.Cmd {
 	return cmd
 }
 
-// autopilotToast surfaces an autopilot driver's termination — goal reached, loop
-// finished, or a silent lapse when the pod suspended — as a cross-session toast +
-// OS notification, reusing the toastMsg plumbing (§1e items 1–3) so a driver that
-// ends while the user is on the dashboard is never invisible. It pre-marks the
-// session notified so the generic attention pass in this same Update tick doesn't
-// also emit a plain "needs you" toast that would clobber this more specific one.
-func (m *Model) autopilotToast(id session.ID, note string) tea.Cmd {
-	if m.notifiedAttention == nil {
-		m.notifiedAttention = make(map[session.ID]bool)
-	}
-	m.notifiedAttention[id] = true
-	title := m.sessionByID(id).DisplayTitle()
-	if title == "" {
-		title = string(id)
-	}
-	toast := toastMsg{id: id, title: title, note: note, status: StatusNeedsInput}
-	return func() tea.Msg { return toast }
-}
-
 // renderToast builds the toast box and the column it should sit at for the
 // current frame (it slides in from the right edge during the first few frames).
 // The caller composites the box as a single layer at that column — see

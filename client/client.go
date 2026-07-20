@@ -23,65 +23,42 @@ import (
 // the engine types (a Go alias is type identity, not a copy), so callers and the
 // CLI/TUI share the exact same structs with no conversion or drift.
 type (
-	ID                 = session.ID
-	Ref                = session.Ref
-	Spec               = session.Spec
-	State              = session.State
-	StateEvent         = session.StateEvent
-	Status             = session.Status
-	Activity           = session.Activity
-	ApprovalPolicy     = session.ApprovalPolicy
-	Event              = session.Event
-	TurnInput          = session.TurnInput
-	TurnRef            = session.TurnRef
-	TurnID             = session.TurnID
-	PermissionDecision = session.PermissionDecision
-	ExecResult         = session.ExecResult
-	IdleStatus         = session.IdleStatus
-	Capabilities       = session.Capabilities
-	AutopilotRequest   = session.AutopilotRequest
-	AutopilotOverrides = session.AutopilotOverrides
-)
-
-// Autopilot driver kinds, re-exported for consumers building an AutopilotRequest.
-const (
-	AutopilotKindLoop = session.AutopilotKindLoop
-	AutopilotKindGoal = session.AutopilotKindGoal
-)
-
-// Autopilot arm/disarm sentinel errors a consumer branches on with errors.Is:
-// ErrAutopilotUnsupported when the backend has no runner-side driver (409 —
-// fall back to a local driver), ErrAutopilotNotArmed when a disarm targets a
-// never-armed session (404 — already disarmed).
-var (
-	ErrAutopilotUnsupported = runner.ErrAutopilotUnsupported
-	ErrAutopilotNotArmed    = runner.ErrAutopilotNotArmed
+	ID             = session.ID
+	Ref            = session.Ref
+	Spec           = session.Spec
+	State          = session.State
+	StateEvent     = session.StateEvent
+	Status         = session.Status
+	Activity       = session.Activity
+	ApprovalPolicy = session.ApprovalPolicy
+	Event          = session.Event
+	TurnInput      = session.TurnInput
+	TurnRef        = session.TurnRef
+	TurnID         = session.TurnID
+	ExecResult     = session.ExecResult
+	IdleStatus     = session.IdleStatus
+	Capabilities   = session.Capabilities
 )
 
 // RunnerClient is the live connection to a session's in-pod runner: start and
-// interrupt turns, resolve permissions, run one-shot commands, and stream the
-// normalized event model. It is the narrow public surface exposed by
-// Connection.Runner and Session.Runner() — deliberately an interface, not the
-// concrete engine type, so the package stays a thin façade and the runner's
-// internal signatures aren't frozen as public API.
+// interrupt turns (the opencode headless first-turn path), run one-shot
+// commands, and stream the normalized event model. It is the narrow public
+// surface exposed by Connection.Runner and Session.Runner() — deliberately an
+// interface, not the concrete engine type, so the package stays a thin façade
+// and the runner's internal signatures aren't frozen as public API.
+//
+// The claude Agent SDK turn engine, programmatic permission resolution, and the
+// server-side autopilot driver were removed with claude-pane-first — claude
+// runs the interactive pane, so those APIs are gone.
 type RunnerClient interface {
 	Health(ctx context.Context) error
 	StartTurn(ctx context.Context, ref Ref, input TurnInput) (TurnRef, error)
 	InterruptTurn(ctx context.Context, ref Ref, turn TurnRef) error
-	ResolvePermission(ctx context.Context, ref Ref, decision PermissionDecision) error
 	Events(ctx context.Context, ref Ref, afterSeq uint64) (<-chan Event, error)
 	EventsPassive(ctx context.Context, ref Ref, afterSeq uint64) (<-chan Event, error)
 	SessionState(ctx context.Context, ref Ref) (State, error)
 	Exec(ctx context.Context, ref Ref, command string) (ExecResult, error)
 	Idle(ctx context.Context, ref Ref) (IdleStatus, error)
-	// ArmAutopilot arms (or replaces) the runner-owned autopilot driver — the
-	// server-side /loop-/goal loop that self-submits turns so a loop survives a
-	// closed laptop (docs/archive/server-side-loop-adr.md). Returns the runner's /status
-	// body; a backend without a driver returns ErrAutopilotUnsupported.
-	ArmAutopilot(ctx context.Context, ref Ref, req AutopilotRequest) (State, error)
-	// DisarmAutopilot disarms the runner-owned driver. Returns the /status body;
-	// a never-armed session returns ErrAutopilotNotArmed.
-	DisarmAutopilot(ctx context.Context, ref Ref) (State, error)
 }
 
 // The concrete runner client satisfies the public interface.

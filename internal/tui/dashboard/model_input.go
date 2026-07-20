@@ -332,27 +332,6 @@ func (m *Model) dashListTable() []boundAction[*Model] {
 				return nil, true
 			},
 		},
-		// Approve / Deny — inline permission from the detail pane.
-		{
-			binding: m.keys.Approve,
-			run: func(m *Model, _ tea.KeyPressMsg) (tea.Cmd, bool) {
-				sel := m.selectedSession()
-				if sel != nil && sel.DashStatus == StatusWaiting {
-					return m.approveCmd(*sel, true), true
-				}
-				return nil, true
-			},
-		},
-		{
-			binding: m.keys.Deny,
-			run: func(m *Model, _ tea.KeyPressMsg) (tea.Cmd, bool) {
-				sel := m.selectedSession()
-				if sel != nil && sel.DashStatus == StatusWaiting {
-					return m.approveCmd(*sel, false), true
-				}
-				return nil, true
-			},
-		},
 		// New session — delegated to the App, which owns the Creator.
 		{
 			binding: m.keys.New,

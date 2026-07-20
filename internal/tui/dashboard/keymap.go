@@ -28,13 +28,10 @@ type KeyMap struct {
 	AttentionToggle key.Binding
 
 	// Session actions
-	New       key.Binding
-	Suspend   key.Binding
-	Resume    key.Binding
-	Approve   key.Binding
-	Deny      key.Binding
-	Destroy   key.Binding
-	PermQueue key.Binding
+	New     key.Binding
+	Suspend key.Binding
+	Resume  key.Binding
+	Destroy key.Binding
 
 	// Global
 	Help     key.Binding
@@ -65,10 +62,7 @@ func DefaultKeyMap() KeyMap {
 		New:             key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "new")),
 		Suspend:         key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "suspend")),
 		Resume:          key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "resume")),
-		Approve:         key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "approve")),
-		Deny:            key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "deny")),
 		Destroy:         key.NewBinding(key.WithKeys("!"), key.WithHelp("!", "destroy")),
-		PermQueue:       key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "perm queue (when waiting)")),
 		Help:            key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 		Quit:            key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 		Command:         key.NewBinding(key.WithKeys(":"), key.WithHelp(":", "command"), key.WithDisabled()),
@@ -86,7 +80,7 @@ func (km KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{km.Up, km.Down, km.Top, km.Bottom, km.Attach, km.Detach, km.NextAttention},
 		{km.Filter, km.SortCycle, km.SortFlip, km.AttentionToggle, km.GroupToggle},
-		{km.New, km.Suspend, km.Resume, km.Approve, km.Deny, km.Destroy, km.PermQueue},
+		{km.New, km.Suspend, km.Resume, km.Destroy},
 		{km.Rename, km.Branch, km.Help, km.Switcher, km.Quit},
 	}
 }
