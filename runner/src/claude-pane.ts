@@ -410,6 +410,7 @@ export function createClaudePaneSupervisor(deps: ClaudePaneDeps): ClaudePaneSupe
 export function startClaudePaneSupervisor(
   cfg: RunnerConfig,
   spawn: PaneSpawner = defaultPaneSpawner,
+  onExit?: (info: PaneExitInfo) => void,
 ): ClaudePaneSupervisor {
   const reg = getRegistry();
   const sup = createClaudePaneSupervisor({
@@ -420,9 +421,11 @@ export function startClaudePaneSupervisor(
     },
     spawn,
     onExit: (info) => {
-      // Observer/status integration lands in a later task; for now just surface
-      // the exit in the pod log so a crashed pane is visible.
+      // Pod-log visibility first, then the observer (which closes any open
+      // synthetic turn as interrupted — Stop/SessionEnd hooks are graceful-only
+      // and never fire on a crash).
       console.log(`claude-pane: interactive child exited (code=${info.code} signal=${info.signal})`);
+      onExit?.(info);
     },
     onStop: () => setExternalActivityProbe(null),
   });

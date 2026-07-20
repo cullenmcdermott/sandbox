@@ -19,6 +19,8 @@ import { materializeCodexAuth, startCodexSupervisor, type CodexSupervisor } from
 import { startCodexObserver, type CodexObserver } from './codex-observer.js';
 import { startClaudePaneSupervisor, type ClaudePaneSupervisor } from './claude-pane.js';
 import { materializeClaudePaneConfig } from './claude-config.js';
+import { provisionPaneObserver, startClaudePaneObserver, type PaneObserverCore } from './claude-pane-observer.js';
+import { type PaneObserverHandle } from './server.js';
 import { startBootTrace } from './trace.js';
 
 // Seconds before SIGKILL, reported in session.terminating so the TUI can show
@@ -41,8 +43,11 @@ let codex: CodexSupervisor | null = null;
 let codexObserver: CodexObserver | null = null;
 
 // Set for claude-pane sessions: the runner-owned interactive `claude` PTY
-// supervisor, spawned lazily on the first pane attach (claude-pane.ts).
+// supervisor, spawned lazily on the first pane attach (claude-pane.ts), and the
+// passive hook/statusline observer that translates Claude Code's own telemetry
+// into normalized events (claude-pane-observer.ts).
 let claudePane: ClaudePaneSupervisor | null = null;
+let paneObserverCore: PaneObserverCore | null = null;
 
 /**
  * Graceful shutdown on SIGTERM (node drain/reboot, suspend, eviction). Warn
@@ -68,7 +73,14 @@ function shutdown(signal: string): void {
   const codexObserverStopped = codexObserver ? codexObserver.stop() : Promise.resolve();
   // Kill the interactive claude-pane child now so it isn't orphaned past the pod
   // grace window (stop() is synchronous — a PTY kill needs no drain). The pane
-  // uuid is persisted, so the next boot respawns with --resume.
+  // uuid is persisted, so the next boot respawns with --resume. Reset the
+  // observer FIRST so an open synthetic turn gets its turn.interrupted terminal
+  // deterministically (the child's async onExit may not land before exit).
+  try {
+    paneObserverCore?.reset(`pod terminating (${signal})`);
+  } catch {
+    /* registry may not be initialized yet */
+  }
   claudePane?.stop();
 
   let turnsAborted = 0;
@@ -206,6 +218,7 @@ function main(): void {
   // built here (registering its idle-activity probe) but spawns the child lazily
   // on the first attach, so a detached pod runs no idle TUI. selectAgent returns
   // null for this backend, so the /turns path 409s like any supervise-only one.
+  let paneObserver: PaneObserverHandle | null = null;
   if (reg.state.backend === 'claude-pane') {
     // Materialize .credentials.json (only-if-absent — in-pod refresh wins) and
     // the seamless-start .claude.json seed from the session Secret BEFORE the
@@ -213,7 +226,15 @@ function main(): void {
     // authenticated, trust-seeded config dir. Fail-closed on missing/invalid
     // credential material (crash boot visibly, mirroring materializeCodexAuth).
     materializeClaudePaneConfig({ workspaceDir: resolveWorkspaceDir(cfg.projectPath) });
-    claudePane = startClaudePaneSupervisor(cfg);
+    // Provision the observer surfaces (settings hooks + statusline + helper
+    // scripts + scoped ingestion token) and build the mapping core; the
+    // supervisor chains child exits into it for crash-terminal events.
+    const { token } = provisionPaneObserver();
+    paneObserverCore = startClaudePaneObserver();
+    paneObserver = { core: paneObserverCore, token };
+    claudePane = startClaudePaneSupervisor(cfg, undefined, (info) =>
+      paneObserverCore?.handleChildExit(info),
+    );
   }
   // boot_prep covers everything between registry init and the listen call:
   // orphaned-turn terminals, the session.started emit, agent/autopilot setup,
@@ -230,6 +251,7 @@ function main(): void {
       boot.done();
     },
     claudePane,
+    paneObserver,
   );
 }
 

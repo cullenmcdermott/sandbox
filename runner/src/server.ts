@@ -11,6 +11,7 @@ import { type Duplex } from 'node:stream';
 import { WebSocketServer, type WebSocket, type RawData } from 'ws';
 import { readBody, BodyTooLargeError, InvalidJsonError } from './httputil.js';
 import { type ClaudePaneSupervisor, type PaneSocket } from './claude-pane.js';
+import { type PaneObserverCore } from './claude-pane-observer.js';
 import { appendEvent, attachSseClient, lastSeq, sseTotalClientCount, MAX_SSE_CLIENTS } from './events.js';
 import { getRegistry, loadConfig, toStatusResponse } from './session.js';
 import { PORT, PROTOCOL_VERSION, type PermissionRequestBody, type TurnRequestBody, type TurnResponse, type ExecRequestBody, type AutopilotRequestBody } from './types.js';
@@ -327,14 +328,22 @@ function httpStatusText(status: 401 | 404 | 409): string {
  * replay against the same code path production runs. startServer() adds the
  * .listen(PORT); nothing about routing changes.
  */
+/** The claude-pane observer's server-side handle: the mapping core plus the
+ * scoped ingestion token the provisioned hook scripts authenticate with. */
+export interface PaneObserverHandle {
+  core: PaneObserverCore;
+  token: string;
+}
+
 export function createRunnerServer(
   cfg: ReturnType<typeof loadConfig>,
   agent: Agent | null,
   autopilot: Autopilot | null = null,
   pane: ClaudePaneSupervisor | null = null,
+  paneObserver: PaneObserverHandle | null = null,
 ): Server {
   const server = createServer((req, res) => {
-    handle(req, res, cfg, agent, autopilot).catch((err) => {
+    handle(req, res, cfg, agent, autopilot, paneObserver).catch((err) => {
       const message = err instanceof Error ? err.message : String(err);
       // B9: readBody's typed rejections are client faults, not server bugs — map
       // an oversized body to 413 and malformed JSON to 400 instead of a blanket
@@ -359,9 +368,10 @@ export function startServer(
   autopilot: Autopilot | null = null,
   onListening?: () => void,
   pane: ClaudePaneSupervisor | null = null,
+  paneObserver: PaneObserverHandle | null = null,
 ): void {
   const cfg = loadConfig();
-  const server = createRunnerServer(cfg, agent, autopilot, pane);
+  const server = createRunnerServer(cfg, agent, autopilot, pane, paneObserver);
   server.listen(PORT, () => {
     console.log(`runner listening on :${PORT} (session=${cfg.sessionId})`);
     // Fires once the socket is actually accepting, not when listen() was
@@ -370,7 +380,7 @@ export function startServer(
   });
 }
 
-async function handle(req: IncomingMessage, res: ServerResponse, cfg: ReturnType<typeof loadConfig>, agent: Agent | null, autopilot: Autopilot | null): Promise<void> {
+async function handle(req: IncomingMessage, res: ServerResponse, cfg: ReturnType<typeof loadConfig>, agent: Agent | null, autopilot: Autopilot | null, paneObserver: PaneObserverHandle | null = null): Promise<void> {
   const url = new URL(req.url ?? '/', `http://localhost:${PORT}`);
   const path = url.pathname;
   const method = req.method ?? 'GET';
@@ -378,6 +388,27 @@ async function handle(req: IncomingMessage, res: ServerResponse, cfg: ReturnType
   // healthz: no auth.
   if (path === '/healthz' && method === 'GET') {
     return ok(res, healthzBody());
+  }
+
+  // claude-pane observer ingestion (hook/statusline forwarders). These run
+  // inside the pane child's scrubbed env — which deliberately lacks the runner
+  // token — so they authenticate with the pane-observer token minted at
+  // provision time, accepted ONLY for these telemetry routes (runner-token
+  // callers pass too). Placed before the global auth gate for that reason.
+  if (paneObserver && path.startsWith('/observer/claude/') && method === 'POST') {
+    const authed =
+      bearerTokenOk(paneObserver.token, req.headers['authorization']) || authOk(req);
+    if (!authed) return unauthorized(res);
+    const body = await readBody<Record<string, unknown>>(req);
+    if (path === '/observer/claude/hook') {
+      if (body !== null) paneObserver.core.handleHook(body);
+      return ok(res, {});
+    }
+    if (path === '/observer/claude/statusline') {
+      if (body !== null) paneObserver.core.handleStatusline(body);
+      return ok(res, {});
+    }
+    return notFound(res);
   }
 
   if (!authOk(req)) return unauthorized(res);
