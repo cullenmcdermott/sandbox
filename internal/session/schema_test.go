@@ -56,11 +56,8 @@ func payloadRegistry() map[string]reflect.Type {
 		"RateLimitPayload":        reflect.TypeOf(RateLimitPayload{}),
 		"WorkspaceStatusPayload":  reflect.TypeOf(WorkspaceStatusPayload{}),
 		"SessionTitlePayload":     reflect.TypeOf(SessionTitlePayload{}),
-		"ModelsAvailablePayload":  reflect.TypeOf(ModelsAvailablePayload{}),
-		"TodoUpdatedPayload":      reflect.TypeOf(TodoUpdatedPayload{}),
 		"ErrorPayload":            reflect.TypeOf(ErrorPayload{}),
 		"ContextCompactedPayload": reflect.TypeOf(ContextCompactedPayload{}),
-		"AutopilotStatePayload":   reflect.TypeOf(AutopilotStatePayload{}),
 	}
 }
 
@@ -68,9 +65,7 @@ func payloadRegistry() map[string]reflect.Type {
 // its hand-written Go struct. objectArray payload fields reference these.
 func objectRegistry() map[string]reflect.Type {
 	return map[string]reflect.Type{
-		"TodoItem":  reflect.TypeOf(TodoItem{}),
-		"ModelInfo": reflect.TypeOf(ModelInfo{}),
-		"Citation":  reflect.TypeOf(Citation{}),
+		"Citation": reflect.TypeOf(Citation{}),
 	}
 }
 

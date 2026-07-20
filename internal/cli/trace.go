@@ -170,7 +170,7 @@ func renderTrace(w io.Writer, events []session.Event, opts traceOptions) error {
 // tool's activity).
 func traceMatchesTool(ev session.Event, tool string) bool {
 	switch ev.Type {
-	case session.EventToolStarted, session.EventToolDelta, session.EventToolCompleted, session.EventToolFailed:
+	case session.EventToolStarted, session.EventToolCompleted, session.EventToolFailed:
 		var p session.ToolPayload
 		if err := json.Unmarshal(ev.Payload, &p); err != nil {
 			return false
@@ -197,7 +197,7 @@ func formatTraceLine(ev session.Event) string {
 // traceSummary extracts the most useful payload detail per event type.
 func traceSummary(ev session.Event) string {
 	switch ev.Type {
-	case session.EventToolStarted, session.EventToolDelta, session.EventToolCompleted, session.EventToolFailed:
+	case session.EventToolStarted, session.EventToolCompleted, session.EventToolFailed:
 		var p session.ToolPayload
 		_ = json.Unmarshal(ev.Payload, &p)
 		parts := []string{p.Tool}

@@ -1,8 +1,7 @@
 // Normalized event and session model for the runner. Mirrors
 // ./internal/session/event.go and the runner API contract
-// (./docs/runner-api.md). The runner maps Claude Agent SDK
-// messages into these types before persisting to events.db and streaming
-// to SSE clients.
+// (./docs/runner-api.md). Backend observers map their native signals into
+// these types before persisting to events.db and streaming to SSE clients.
 
 // The EventType union, ALL_EVENT_TYPES, and the event payload interfaces are
 // generated from schema/events.json by cmd/gen-eventschema (run `just gen`;
@@ -25,8 +24,6 @@ export type {
   RateLimitPayload,
   WorkspaceStatusPayload,
   SessionTitlePayload,
-  TodoItem,
-  TodoUpdatedPayload,
   ErrorPayload,
   Citation,
 } from './events.gen.js';
@@ -182,13 +179,9 @@ export interface StatusResponse {
   /** The runner's PROTOCOL_VERSION (see events.gen.ts), so a status poll also
    * surfaces CLI/runner skew, not just /healthz. */
   protocolVersion: number;
-  /** Backend capability bits the CLI reads to pick a code path. `autopilot` is
-   * true when this backend has a runner-side autopilot driver (the server-side
-   * /loop-/goal loop): the TUI then arms that driver via PUT/DELETE
-   * /sessions/:id/autopilot and renders from autopilot.state events instead of
-   * running its local tea.Tick loop (ADR §Q3 precedence). False for backends
-   * without a runner driver (opencode/supervise-only), where the TUI keeps its
-   * local driver. */
+  /** Backend capability bits. `autopilot` is always false since
+   * claude-pane-first removed the server-side driver; the key is retained so
+   * old clients still decode /status. */
   capabilities: { autopilot: boolean };
 }
 

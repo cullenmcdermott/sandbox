@@ -32,26 +32,23 @@ type Event struct {
 }
 
 // TurnStartedPayload is the payload for turn.started events: the prompt that
-// drives this turn. Prompt is the user's (or autopilot /loop) message and is
-// empty when the runner only mirrors an externally-driven turn (the opencode
-// observer emits turn.started with no prompt because the attached opencode
-// client owns the input). The runner-driven turn adapters (Claude, opencode)
-// also emit a message.started/completed role:"user" echo of the same prompt, so
-// the TUI renders the user block off that shared path rather than off this
-// payload (avoids double-printing the optimistic block for live sessions).
+// drives this turn. Prompt is the user's message when the runner knows it (the
+// claude-pane observer's UserPromptSubmit hook, the opencode headless first
+// turn) and is empty when the runner only mirrors an externally-driven turn
+// whose input the attached client owns. Backends that know the prompt also
+// emit a message.started/completed role:"user" echo of it, so consumers render
+// the user block off that shared path rather than off this payload.
 type TurnStartedPayload struct {
 	Prompt string `json:"prompt,omitempty"`
 }
 
 // TurnCompletedPayload is the payload for turn.completed events: the terminal
-// result summary. Every field is optional — the Claude backend fills them from
-// the SDK result message; the opencode backend emits turn.completed with an
-// empty payload (its result text arrives via message.completed instead).
+// result summary. Result is the complete final assistant message when the
+// backend reports one (the claude-pane observer's Stop hook); the opencode and
+// codex observers emit turn.completed with an empty payload (their result text
+// arrives via message.completed instead).
 type TurnCompletedPayload struct {
-	Result     string `json:"result,omitempty"`     // final assistant result text (Claude); absent on opencode
-	StopReason string `json:"stopReason,omitempty"` // SDK stop reason (e.g. "end_turn"); absent on opencode
-	NumTurns   int    `json:"numTurns,omitempty"`   // SDK-internal sub-turn count; absent on opencode
-	DurationMs int    `json:"durationMs,omitempty"` // wall-clock duration in ms; absent on opencode
+	Result string `json:"result,omitempty"` // final assistant result text; absent when not reported
 }
 
 // TurnFailedPayload is the payload for turn.failed events: a turn that ended in
@@ -98,12 +95,10 @@ type MessagePayload struct {
 
 // ToolPayload is the payload for tool.* events.
 type ToolPayload struct {
-	Tool            string          `json:"tool"`                     // "Bash", "Edit", etc.
-	Input           json.RawMessage `json:"input,omitempty"`          // tool input
-	Output          string          `json:"output,omitempty"`         // tool output (completed)
-	PartialJSON     string          `json:"partialJson,omitempty"`    // tool.delta: a chunk of the tool's input JSON as it streams (input_json_delta)
-	ElapsedSeconds  *float64        `json:"elapsedSeconds,omitempty"` // tool.progress: seconds the tool has been running (SDK heartbeat)
-	ExitCode        *int            `json:"exitCode,omitempty"`       // Bash exit code
+	Tool            string          `json:"tool"`               // "Bash", "Edit", etc.
+	Input           json.RawMessage `json:"input,omitempty"`    // tool input
+	Output          string          `json:"output,omitempty"`   // tool output (completed)
+	ExitCode        *int            `json:"exitCode,omitempty"` // Bash exit code
 	Error           string          `json:"error,omitempty"`
 	ToolUseID       string          `json:"toolUseId,omitempty"`       // this tool_use block's id
 	ParentToolUseID string          `json:"parentToolUseId,omitempty"` // Task tool_use id that spawned a subagent's child tool (empty on main thread)
@@ -161,37 +156,32 @@ type ErrorPayload struct {
 	Code    string `json:"code,omitempty"`
 }
 
-// ContextCompactedPayload is the payload for context.compacted events: emitted
-// when the SDK compacts (summarizes) the conversation to fit the context window
-// (the SDK's compact_boundary system message). The TUI resets the ctx% gauge to
-// PostTokens (when reported) so it reflects the post-compaction size instead of
-// the stale pre-compaction count, and drops a one-line "context compacted"
-// marker so a long run's compaction is visible in scrollback.
+// ContextCompactedPayload is the payload for context.compacted events: the
+// conversation was compacted (summarized) to fit the context window. The TUI
+// resets the ctx% gauge to PostTokens (when reported) so it reflects the
+// post-compaction size instead of the stale pre-compaction count. No backend
+// currently emits this (the claude SDK engine that did was removed by
+// claude-pane-first); the vocabulary + consumer are retained because in-pane
+// compaction is observable and an observer may re-emit it.
 type ContextCompactedPayload struct {
 	Trigger    string `json:"trigger"`
 	PreTokens  int    `json:"preTokens"`
 	PostTokens int    `json:"postTokens,omitempty"`
 }
 
-// SessionStartedPayload is the payload for session.started events: the model,
-// pod cwd, and applied permission mode reported by the SDK init message. The
-// CLI uses model+cwd for the status line and the model id to look up the
-// context-window limit (ctx%).
-//
-// Tools and PermissionMode are emitted by the runner but not yet consumed by
-// the Go CLI; they are kept on the wire for forward-compat (future status-line
-// features) and validated by schema_test.go. AgentSessionID, by contrast, IS
-// consumed: the dashboard read model reads it (internal/tui/dashboard/readmodel.go)
-// and persists it to the local session index (SaveAgentSessionID) so the laptop
-// resume-history feature can offer the session to `claude --resume`.
-// AgentSessionID is the backend's resume id (the Claude SDK session UUID today);
-// it is the SSE-payload analogue of State.AgentSessionID (§8 De-Claude rename).
+// SessionStartedPayload is the payload for session.started events: the model
+// (and, when known, cwd + backend resume id) reported by a backend observer.
+// The opencode and claude-pane observers re-emit it on every model CHANGE
+// (deduped) so the Go read-model resolves a context-window limit for the ctx%
+// indicator and the dashboard chip; Cwd may be empty for observer-mirrored
+// sessions. AgentSessionID is the backend's resume id: the dashboard read
+// model persists it to the local session index (SaveAgentSessionID) so the
+// session stays resumable from the laptop; it is the SSE-payload analogue of
+// State.AgentSessionID.
 type SessionStartedPayload struct {
-	Model          string   `json:"model"`
-	Cwd            string   `json:"cwd"`
-	Tools          []string `json:"tools,omitempty"`
-	PermissionMode string   `json:"permissionMode,omitempty"`
-	AgentSessionID string   `json:"agentSessionId,omitempty"`
+	Model          string `json:"model"`
+	Cwd            string `json:"cwd"`
+	AgentSessionID string `json:"agentSessionId,omitempty"`
 }
 
 // SessionStatusPayload is the payload for session.status_changed events.
@@ -200,10 +190,11 @@ type SessionStatusPayload struct {
 	Reason string `json:"reason,omitempty"` // why the status changed (e.g. SessionEnd reason); M1
 }
 
-// WorkspaceStatusPayload is the payload for workspace.status events. The runner
-// emits it at session start and after each turn completes so the status line can
-// show the git branch + dirty marker. Skipped entirely when cwd is not a git
-// repo (no event, no error).
+// WorkspaceStatusPayload is the payload for workspace.status events: git
+// branch + dirty/ahead/behind for the session row. No backend currently emits
+// this (the claude SDK engine that did was removed by claude-pane-first); the
+// vocabulary + consumer (the Branch/Dirty read-model) are retained because the
+// pane statusline / backend observers can re-emit it.
 type WorkspaceStatusPayload struct {
 	Branch string `json:"branch"`
 	Dirty  bool   `json:"dirty"`
@@ -219,40 +210,6 @@ type SessionTitlePayload struct {
 	Title string `json:"title"`
 }
 
-// ModelInfo is one model from the SDK's supportedModels() list (models.available),
-// used to populate the in-session /model palette dynamically instead of the
-// hardcoded opus/sonnet/haiku aliases.
-type ModelInfo struct {
-	Value       string `json:"value"`       // model id for --model (e.g. claude-opus-4-8)
-	DisplayName string `json:"displayName"` // human-readable name (e.g. "Opus 4.8")
-	Description string `json:"description,omitempty"`
-}
-
-// ModelsAvailablePayload is the payload for models.available events: the list of
-// models the account/SDK supports (Query.supportedModels()). Emitted once per
-// session, fetched in-turn on the SDK init message (same open-control-channel
-// window as rate_limit.updated). Absent until the first turn; the TUI falls back
-// to the opus/sonnet/haiku aliases until it arrives.
-type ModelsAvailablePayload struct {
-	Models []ModelInfo `json:"models"`
-}
-
-// TodoItem is a single entry in a todo.updated list, mirroring the SDK
-// TodoWrite tool's items.
-type TodoItem struct {
-	Content    string `json:"content"`
-	Status     string `json:"status"`               // "pending" | "in_progress" | "completed"
-	ActiveForm string `json:"activeForm,omitempty"` // present-tense form shown while in_progress
-}
-
-// TodoUpdatedPayload is the payload for todo.updated events: the agent's current
-// task list, emitted by the runner whenever the SDK TodoWrite tool runs. Each
-// event carries the full list (it replaces any prior list). The TUI renders it
-// as a checklist.
-type TodoUpdatedPayload struct {
-	Todos []TodoItem `json:"todos"`
-}
-
 // TerminatingPayload is the payload for session.terminating events. The runner
 // emits this when it receives SIGTERM (node drain, suspend, eviction) so the
 // TUI can warn the user and the client can begin reconnecting once the pod is
@@ -261,24 +218,6 @@ type TerminatingPayload struct {
 	Reason       string `json:"reason"`       // human-readable cause, e.g. "pod terminating (SIGTERM)"
 	GraceSeconds int    `json:"graceSeconds"` // best-effort seconds before SIGKILL
 	TurnsAborted int    `json:"turnsAborted"` // in-flight turns aborted during shutdown
-}
-
-// AutopilotStatePayload is the payload for autopilot.state events: a transition
-// of the runner-owned autopilot driver (the server-side /loop-/goal loop; see
-// docs/archive/server-side-loop-adr.md). The runner emits State "armed" on arm (and on a
-// boot re-arm — same shape, so a fresh attach re-renders the armed chip via
-// replay), "ticked" at each iteration boundary (carrying Iteration for the TUI's
-// progress chip), and "stopped" with a Reason on termination. Reason mirrors the
-// spec's stopped_reason (sentinel|budget|user|lapsed|error) and is empty except
-// on a stopped transition. Gen is the driver generation: a disarm/rearm bumps it
-// so a stale scheduled tick fired against an old gen is dropped. The TUI renders
-// the driver purely from these events.
-type AutopilotStatePayload struct {
-	State     string `json:"state"`            // "armed" | "ticked" | "stopped"
-	Kind      string `json:"kind"`             // "loop" | "goal"
-	Reason    string `json:"reason,omitempty"` // set on stopped: sentinel|budget|user|lapsed|error
-	Iteration int    `json:"iteration"`        // completed-iteration count at this transition
-	Gen       int    `json:"gen"`              // driver generation; disarm/rearm bumps it
 }
 
 // IdleStatus is the /sessions/:id/idle response: enough for an external reaper

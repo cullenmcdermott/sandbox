@@ -68,8 +68,6 @@ func (s schema) tsFieldType(f fieldSchema) string {
 // output (before the payload interfaces that reference them). Kept explicit so
 // generated output is stable.
 var objectOrder = []string{
-	"TodoItem",
-	"ModelInfo",
 	"Citation",
 }
 
@@ -90,11 +88,8 @@ var payloadOrder = []string{
 	"RateLimitPayload",
 	"WorkspaceStatusPayload",
 	"SessionTitlePayload",
-	"ModelsAvailablePayload",
-	"TodoUpdatedPayload",
 	"ErrorPayload",
 	"ContextCompactedPayload",
-	"AutopilotStatePayload",
 }
 
 func main() {

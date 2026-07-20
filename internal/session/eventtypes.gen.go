@@ -10,7 +10,7 @@ package session
 // /sessions/:id/status); internal/runner.Client.Health records it, and
 // callers compare it against this const to warn (not refuse) on skew — see
 // client/session.go Connect and internal/cli/connect.go waitHealthy.
-const ProtocolVersion = 2
+const ProtocolVersion = 3
 
 // EventType consts. EventType itself is declared in event.go.
 const (
@@ -28,20 +28,15 @@ const (
 	EventReasoningDelta       EventType = "reasoning.delta"
 	EventReasoningCompleted   EventType = "reasoning.completed"
 	EventToolStarted          EventType = "tool.started"
-	EventToolDelta            EventType = "tool.delta"
-	EventToolProgress         EventType = "tool.progress"
 	EventToolCompleted        EventType = "tool.completed"
 	EventToolFailed           EventType = "tool.failed"
 	EventPermissionRequested  EventType = "permission.requested"
 	EventPermissionResolved   EventType = "permission.resolved"
-	EventTodoUpdated          EventType = "todo.updated"
 	EventUsageUpdated         EventType = "usage.updated"
 	EventContextCompacted     EventType = "context.compacted"
 	EventRateLimitUpdated     EventType = "rate_limit.updated"
 	EventWorkspaceStatus      EventType = "workspace.status"
 	EventSessionTitle         EventType = "session.title"
-	EventModelsAvailable      EventType = "models.available"
-	EventAutopilotState       EventType = "autopilot.state"
 	EventError                EventType = "error"
 )
 
@@ -62,19 +57,14 @@ var AllEventTypes = []EventType{
 	EventReasoningDelta,
 	EventReasoningCompleted,
 	EventToolStarted,
-	EventToolDelta,
-	EventToolProgress,
 	EventToolCompleted,
 	EventToolFailed,
 	EventPermissionRequested,
 	EventPermissionResolved,
-	EventTodoUpdated,
 	EventUsageUpdated,
 	EventContextCompacted,
 	EventRateLimitUpdated,
 	EventWorkspaceStatus,
 	EventSessionTitle,
-	EventModelsAvailable,
-	EventAutopilotState,
 	EventError,
 }

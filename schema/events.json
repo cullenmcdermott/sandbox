@@ -1,7 +1,7 @@
 {
   "$comment": "SOURCE OF TRUTH for the normalized session event model. Go event-type consts (internal/session/eventtypes.gen.go) and the entire TS event model (runner/src/events.gen.ts) are generated from this file by cmd/gen-eventschema. Go payload structs (internal/session/event.go) are hand-written but validated against this schema by internal/session/schema_test.go. Edit this file, then run `just gen`; never hand-edit a *.gen.* file. Scope is event payloads only: HTTP request/response bodies and IdleStatus stay hand-written in both languages (see docs/architecture.md).",
   "$protocolVersionComment": "protocolVersion is the CLI<->runner wire protocol version, generated as session.ProtocolVersion (Go) and PROTOCOL_VERSION (TS) — the one exception to the 'payloads only' scope note above, since it needs the same single-source-of-truth + codegen treatment as the event model it versions. The runner reports it on GET /healthz (and /sessions/:id/status); the CLI's runner client (internal/runner/client.go Health) records it and callers warn — but do not refuse — on a mismatch, since OSS users routinely pair a self-built runner image against a different CLI version. Bump it when an event type, payload shape, or SSE framing change could silently misbehave against an older/newer counterpart (new fields renamed/removed, event types repurposed) rather than failing cleanly.",
-  "protocolVersion": 2,
+  "protocolVersion": 3,
   "typeVocabulary": {
     "string": {"go": "string", "ts": "string"},
     "int": {"go": "int", "ts": "number"},
@@ -14,22 +14,6 @@
   },
   "$objectArrayComment": "A field with type \"objectArray\" carries an \"items\" key naming an entry in \"objects\". The generator emits the named object as its own TS interface and types the field as <Item>[]. The Go side hand-writes a []<Item> slice; schema_test.go maps a slice-of-struct to the \"objectArray\" category and asserts the element type name matches \"items\".",
   "objects": {
-    "TodoItem": {
-      "doc": "a single entry in a todo.updated list, mirroring the SDK TodoWrite tool's items.",
-      "fields": [
-        {"json": "content", "type": "string", "optional": false, "doc": "imperative description of the task"},
-        {"json": "status", "type": "string", "optional": false, "doc": "pending | in_progress | completed"},
-        {"json": "activeForm", "type": "string", "optional": true, "doc": "present-tense form shown while in_progress"}
-      ]
-    },
-    "ModelInfo": {
-      "doc": "one model from the SDK's supportedModels() list (models.available), used to populate the in-session /model palette dynamically instead of the hardcoded opus/sonnet/haiku aliases.",
-      "fields": [
-        {"json": "value", "type": "string", "optional": false, "doc": "model id to use in API calls / --model (e.g. claude-opus-4-8)"},
-        {"json": "displayName", "type": "string", "optional": false, "doc": "human-readable name (e.g. 'Opus 4.8')"},
-        {"json": "description", "type": "string", "optional": true, "doc": "short capability description; may be empty"}
-      ]
-    },
     "Citation": {
       "doc": "one source citation attached to an assistant message (message.completed only, §2b gap 6). Flattened from the SDK's five citation location shapes to what a footnote render needs: web citations carry url+title, document/search citations carry title (document_title or source) only. citedText is the quoted snippet, capped by the mapper.",
       "fields": [
@@ -54,30 +38,23 @@
     "reasoning.delta",
     "reasoning.completed",
     "tool.started",
-    "tool.delta",
-    "tool.progress",
     "tool.completed",
     "tool.failed",
     "permission.requested",
     "permission.resolved",
-    "todo.updated",
     "usage.updated",
     "context.compacted",
     "rate_limit.updated",
     "workspace.status",
     "session.title",
-    "models.available",
-    "autopilot.state",
     "error"
   ],
   "payloads": {
     "SessionStartedPayload": {
-      "doc": "payload for session.started events: the model, pod cwd, tools, and applied permission mode reported by the SDK init message. The CLI uses model+cwd for the status line and the model id to look up the context-window limit (ctx%).",
+      "doc": "payload for session.started events: the model (and, when known, cwd + backend resume id) reported by a backend observer. The opencode and claude-pane observers re-emit it on every model CHANGE (deduped) so the Go read-model resolves a context-window limit for the ctx% indicator and the dashboard chip; cwd may be empty for observer-mirrored sessions.",
       "fields": [
         {"json": "model", "type": "string", "optional": false},
         {"json": "cwd", "type": "string", "optional": false},
-        {"json": "tools", "type": "stringArray", "optional": true},
-        {"json": "permissionMode", "type": "string", "optional": true},
         {"json": "agentSessionId", "type": "string", "optional": true}
       ]
     },
@@ -97,18 +74,15 @@
       ]
     },
     "TurnStartedPayload": {
-      "doc": "payload for turn.started events: the prompt that drives this turn. `prompt` is the user's (or autopilot's /loop) message; it is absent when the runner only mirrors an externally-driven turn (the opencode observer emits turn.started with no prompt because the attached opencode client owns the input). Clients render the prompt as a user block so a replayed/attached transcript shows the question, not just the answer.",
+      "doc": "payload for turn.started events: the prompt that drives this turn. `prompt` is the user's message when the runner knows it (the claude-pane observer's UserPromptSubmit hook, the opencode headless first turn); it is absent when the runner only mirrors an externally-driven turn whose input the attached client owns. Clients render the prompt as a user block so a replayed/attached transcript shows the question, not just the answer.",
       "fields": [
-        {"json": "prompt", "type": "string", "optional": true, "doc": "the user/autopilot prompt that started this turn; absent for observer-mirrored turns"}
+        {"json": "prompt", "type": "string", "optional": true, "doc": "the user prompt that started this turn; absent for observer-mirrored turns without one"}
       ]
     },
     "TurnCompletedPayload": {
-      "doc": "payload for turn.completed events: the terminal result summary. Every field is optional — the Claude backend fills them from the SDK result message; the opencode backend emits turn.completed with an empty payload (its result text arrives via message.completed instead).",
+      "doc": "payload for turn.completed events: the terminal result summary. `result` is the complete final assistant message when the backend reports one (the claude-pane observer's Stop hook); the opencode and codex observers emit turn.completed with an empty payload (their result text arrives via message.completed instead).",
       "fields": [
-        {"json": "result", "type": "string", "optional": true, "doc": "final assistant result text (Claude SDK result.result); absent on opencode"},
-        {"json": "stopReason", "type": "string", "optional": true, "doc": "SDK stop reason (e.g. \"end_turn\"); absent on opencode"},
-        {"json": "numTurns", "type": "int", "optional": true, "doc": "SDK-internal sub-turn count for this turn; absent on opencode"},
-        {"json": "durationMs", "type": "int", "optional": true, "doc": "wall-clock duration of the turn in milliseconds; absent on opencode"}
+        {"json": "result", "type": "string", "optional": true, "doc": "final assistant result text; absent when the backend does not report it"}
       ]
     },
     "TurnFailedPayload": {
@@ -132,7 +106,7 @@
         {"json": "content", "type": "string", "optional": false, "doc": "text content or delta"},
         {"json": "delta", "type": "bool", "optional": true, "doc": "true for message.delta events"},
         {"json": "parentToolUseId", "type": "string", "optional": true, "doc": "Task tool_use id that spawned the emitting subagent (empty on the main thread)"},
-        {"json": "citations", "type": "objectArray", "items": "Citation", "optional": true, "doc": "sources cited by this text (message.completed only; never on started/delta). Clients render as a footnote list under the message (§2b gap 6)."}
+        {"json": "citations", "type": "objectArray", "items": "Citation", "optional": true, "doc": "sources cited by this text (message.completed only; never on started/delta). Clients render as a footnote list. No backend currently emits citations (claude SDK engine removed); retained with its consumer for observer revival."}
       ]
     },
     "ToolPayload": {
@@ -141,8 +115,6 @@
         {"json": "tool", "type": "string", "optional": false, "doc": "\"Bash\", \"Edit\", etc."},
         {"json": "input", "type": "raw", "optional": true, "doc": "tool input"},
         {"json": "output", "type": "string", "optional": true, "doc": "tool output (completed)"},
-        {"json": "partialJson", "type": "string", "optional": true, "doc": "tool.delta: a chunk of the tool's input JSON as it streams (input_json_delta)"},
-        {"json": "elapsedSeconds", "type": "floatPtr", "optional": true, "doc": "tool.progress: seconds the tool has been running (SDK heartbeat)"},
         {"json": "exitCode", "type": "intPtr", "optional": true, "doc": "Bash exit code"},
         {"json": "error", "type": "string", "optional": true},
         {"json": "toolUseId", "type": "string", "optional": true, "doc": "this tool_use block's id"},
@@ -185,7 +157,7 @@
       ]
     },
     "WorkspaceStatusPayload": {
-      "doc": "payload for workspace.status events: git branch + dirty/ahead/behind for the status line. Emitted at session start and after each turn; skipped for non-git cwd.",
+      "doc": "payload for workspace.status events: git branch + dirty/ahead/behind for the session row. NOTE: no backend currently emits this (the claude SDK engine that did was removed by claude-pane-first); the vocabulary + Go consumer (Branch/Dirty read-model) are retained because the pane statusline / backend observers can re-emit it.",
       "fields": [
         {"json": "branch", "type": "string", "optional": false},
         {"json": "dirty", "type": "bool", "optional": false},
@@ -199,18 +171,6 @@
         {"json": "title", "type": "string", "optional": false}
       ]
     },
-    "ModelsAvailablePayload": {
-      "doc": "payload for models.available events: the list of models the account/SDK supports (Query.supportedModels()), used to populate the in-session /model palette dynamically. Emitted once per session, fetched in-turn on the SDK init message (same open-control-channel window as rate_limit.updated). Absent until the first turn runs; the TUI falls back to the opus/sonnet/haiku aliases until it arrives.",
-      "fields": [
-        {"json": "models", "type": "objectArray", "items": "ModelInfo", "optional": false, "doc": "the supported models, in SDK order"}
-      ]
-    },
-    "TodoUpdatedPayload": {
-      "doc": "payload for todo.updated events: the agent's current task list, emitted by the runner whenever the SDK TodoWrite tool runs. The TUI renders it as a checklist.",
-      "fields": [
-        {"json": "todos", "type": "objectArray", "items": "TodoItem", "optional": false, "doc": "the full todo list (replaces any prior list)"}
-      ]
-    },
     "ErrorPayload": {
       "doc": "payload for error events.",
       "fields": [
@@ -219,21 +179,11 @@
       ]
     },
     "ContextCompactedPayload": {
-      "doc": "payload for context.compacted events: emitted when the SDK compacts (summarizes) the conversation to fit the context window. preTokens/postTokens let the TUI reset the ctx% gauge to the post-compaction size instead of the stale pre-compaction count, and drop a one-line transcript marker.",
+      "doc": "payload for context.compacted events: the conversation was compacted (summarized) to fit the context window. preTokens/postTokens let the TUI reset the ctx% gauge to the post-compaction size instead of the stale pre-compaction count. NOTE: no backend currently emits this (the claude SDK engine that did was removed by claude-pane-first); the vocabulary + Go consumer are retained because in-pane compaction is observable and an observer may re-emit it.",
       "fields": [
         {"json": "trigger", "type": "string", "optional": false, "doc": "'auto' (context-window pressure) or 'manual' (/compact)"},
         {"json": "preTokens", "type": "int", "optional": false, "doc": "effective token count before compaction"},
-        {"json": "postTokens", "type": "int", "optional": true, "doc": "effective token count after compaction; 0/absent when the SDK did not report it"}
-      ]
-    },
-    "AutopilotStatePayload": {
-      "doc": "payload for autopilot.state events: a transition of the runner-owned autopilot driver (the server-side /loop-/goal loop; see docs/archive/server-side-loop-adr.md). Emitted on arm (state:'armed' — re-emitted on a boot re-arm so a fresh `sandbox attach` re-renders the armed chip without special-casing), at each iteration boundary (state:'ticked', carrying the iteration count for the TUI's progress chip), and on termination (state:'stopped' with a reason). The TUI renders the driver PURELY from these events (armed chip, iteration counter, terminal toast/OS-notification), so a replayed stopped(sentinel) must not re-fire the OS notification — only the flip-to-live one does.",
-      "fields": [
-        {"json": "state", "type": "string", "optional": false, "doc": "'armed' | 'ticked' | 'stopped'"},
-        {"json": "kind", "type": "string", "optional": false, "doc": "'loop' | 'goal' — the driver flavour"},
-        {"json": "reason", "type": "string", "optional": true, "doc": "set on state:'stopped' — 'sentinel' | 'budget' | 'user' | 'lapsed' | 'error' (mirrors the spec's stopped_reason); absent otherwise"},
-        {"json": "iteration", "type": "int", "optional": false, "doc": "completed-iteration count at this transition (0 on the initial armed event)"},
-        {"json": "gen", "type": "int", "optional": false, "doc": "the driver generation; a disarm/rearm bumps it so a stale scheduled tick fired against an old gen is dropped"}
+        {"json": "postTokens", "type": "int", "optional": true, "doc": "effective token count after compaction; 0/absent when not reported"}
       ]
     }
   }

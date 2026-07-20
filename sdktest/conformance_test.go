@@ -70,20 +70,15 @@ func TestEventConstantsCoverAllTypes(t *testing.T) {
 		client.EventReasoningDelta:       true,
 		client.EventReasoningCompleted:   true,
 		client.EventToolStarted:          true,
-		client.EventToolDelta:            true,
-		client.EventToolProgress:         true,
 		client.EventToolCompleted:        true,
 		client.EventToolFailed:           true,
 		client.EventPermissionRequested:  true,
 		client.EventPermissionResolved:   true,
-		client.EventTodoUpdated:          true,
 		client.EventUsageUpdated:         true,
 		client.EventContextCompacted:     true,
 		client.EventRateLimitUpdated:     true,
 		client.EventWorkspaceStatus:      true,
 		client.EventSessionTitle:         true,
-		client.EventModelsAvailable:      true,
-		client.EventAutopilotState:       true,
 		client.EventError:                true,
 	}
 	// Every persisted type must have a re-exported constant.
@@ -123,8 +118,8 @@ func TestEventPayloadAliasesDecode(t *testing.T) {
 		t.Errorf("TurnStartedPayload: got %+v err=%v", ts, err)
 	}
 	var tc client.TurnCompletedPayload
-	if err := json.Unmarshal([]byte(`{"result":"done","stopReason":"end_turn"}`), &tc); err != nil ||
-		tc.Result != "done" || tc.StopReason != "end_turn" {
+	if err := json.Unmarshal([]byte(`{"result":"done"}`), &tc); err != nil ||
+		tc.Result != "done" {
 		t.Errorf("TurnCompletedPayload: got %+v err=%v", tc, err)
 	}
 	var tf client.TurnFailedPayload

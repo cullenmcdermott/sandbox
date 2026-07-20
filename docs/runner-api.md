@@ -20,7 +20,7 @@ unexpected failures return 500.
 ### `GET /healthz`
 Returns 200 if the runner process is alive. No auth required. Body:
 ```json
-{ "status": "ok", "protocolVersion": 2 }
+{ "status": "ok", "protocolVersion": 3 }
 ```
 `protocolVersion` is the runner's `PROTOCOL_VERSION`. Because this route needs no
 bearer token, a client can hit it before it has one to distinguish "no runner
@@ -49,7 +49,7 @@ Returns the runner's `session.json` state:
   "activeTurnId": "",
   "lastActivity": "2026-06-18T22:30:00Z",
   "model": "claude-sonnet-4-5-20250929",
-  "protocolVersion": 2,
+  "protocolVersion": 3,
   "capabilities": { "autopilot": false }
 }
 ```
@@ -63,8 +63,8 @@ resume id. (Both fields were renamed from `status`/`claudeSession` in the §8
 De-Claude break; the CLI and runner ship together, so the wire rename lands on
 both sides at once.)
 
-`model` is **optional**: it is omitted until the runner has seen the model id in
-the SDK's init message (i.e. before the first turn it is absent).
+`model` is **optional**: it is omitted until the backend observer has reported
+a model id (i.e. before the first turn it is absent).
 
 `capabilities` is the backend capability map. `capabilities.autopilot` is
 **always false** since claude-pane-first removed the server-side autopilot
@@ -202,8 +202,9 @@ head (the client tails live from there) rather than silently swallowing every
 live event.
 
 Replay notes: sequence numbers may have gaps — the runner compacts `*.delta`
-and `tool.progress` events of turns older than the most recent N
-(`DELTA_COMPACT_KEEP_TURNS`, default 2) once a turn completes; the non-ephemeral
+events (and legacy `tool.progress` rows from pre-pane logs) of turns older
+than the most recent N (`DELTA_COMPACT_KEEP_TURNS`, default 2) once a turn
+completes; the non-ephemeral
 events always survive, so a full replay still reconstructs the transcript. Payloads of `turn.started`,
 `tool.*`, `permission.*`, and role-`user` `message.*` events are
 secret-redacted before they are persisted or broadcast (same masking as
@@ -296,24 +297,23 @@ depend on them yet.
 and payload shapes. The Go consts (`internal/session/eventtypes.gen.go`) and the
 entire TS event model (`runner/src/events.gen.ts`) are generated from it; edit the
 schema and run `just gen` (see "Event model" in `docs/architecture.md`). The
-runner maps Claude Agent SDK messages into these normalized types before
-persisting to `events.db` and streaming to clients.
+backend observers (claude-pane hooks/statusline, opencode SSE, codex) map
+their native signals into these normalized types before persisting to
+`events.db` and streaming to clients.
 
-**Subagent (Task) attribution:** every `message.*`, `reasoning.*`, and `tool.*`
-event emitted from a dispatched subagent's stream carries
-`parentToolUseId: <Task tool_use id>`; the field is absent on the main thread.
-Clients must route parented events to that Task's presentation (the CLI nests
-child tools and the live narration under the Task card) — never into the main
-streaming transcript, where they would interleave with the main reply.
+> **Pruned vocabulary (claude-pane-first, protocolVersion 3).** The SDK-engine
+> event types `tool.delta`, `tool.progress`, `todo.updated`,
+> `models.available`, and `autopilot.state` were removed from the schema —
+> nothing produces or consumes them anymore. `workspace.status` and
+> `context.compacted` remain in the vocabulary with live Go consumers but no
+> current producer (observers can re-emit them). Old event logs may still hold
+> pruned rows; consumers ignore unknown types.
 
-The `tool.progress` event is a heartbeat for a long-running tool (and the SDK's
-background Task runner): the runner maps the SDK's `tool_progress` message to it,
-carrying `{ tool, toolUseId, elapsedSeconds, parentToolUseId? }` (see
-`schema/events.json` `ToolPayload`) so a client can show a live "…running Ns"
-pill on the tool card instead of a frozen one. Like the `*.delta` streaming
-events it is ephemeral: the runner compacts `tool.progress` rows of turns older
-than the most recent N (`DELTA_COMPACT_KEEP_TURNS`) once a turn completes, so a
-full replay reconstructs the transcript without the intra-turn heartbeat tail.
+**Subagent (Task) attribution:** a `message.*`, `reasoning.*`, or `tool.*`
+event may carry `parentToolUseId: <Task tool_use id>` marking a dispatched
+subagent's stream; the field is absent on the main thread. Clients route
+parented events out of the main transcript. (No current backend sets it —
+retained vocabulary from the SDK engine era.)
 
 The `tool.completed` / `tool.failed` events carry an optional `exitCode`
 (`ToolPayload.exitCode`), populated for Bash tool completions from the exit code
@@ -322,58 +322,27 @@ code was recorded).
 
 A `message.completed` event may carry an optional `citations` array (see
 `schema/events.json` `MessagePayload.citations` / the `Citation` object):
-sources the assistant cited, flattened to `{ url?, title?, citedText? }` (web
-citations carry url+title; document/search citations title only; `citedText` is
-the quoted snippet, capped at 200 chars). Citations never appear on
-`message.started`/`message.delta` — the full-message completed is the
-authoritative source. The CLI renders them as a dim numbered "Sources:"
-footnote under the reply.
-
-**Server-executed tools:** the runner also maps server-side `web_search` /
-`web_fetch` invocations (SDK `server_tool_use` blocks) to normal
-`tool.started` events, and their `web_search_tool_result` /
-`web_fetch_tool_result` blocks to `tool.completed` / `tool.failed` — note there
-is **no client-side `tool_result` user message** for these; the terminal event
-comes from the result block inside the assistant message itself. Result shapes
-outside the known union map to a degraded `tool.completed` (never an orphaned
-running card, never a thrown turn). Other server-tool names (the
-`code_execution` family, `advisor`, …) are not mapped and emit nothing.
-
-The `todo.updated` event surfaces the agent's plan/checklist. Payload:
-`{ todos: [{ content, status, activeForm }] }`, where `status` is one of
-`pending` | `in_progress` | `completed`. The runner emits it when the SDK uses
-the `TodoWrite` tool; the CLI renders the list with a per-item status glyph.
-
-The `autopilot.state` event reports a transition of the runner-owned autopilot
-driver (armed via `PUT /sessions/:id/autopilot`). Payload (see
-`schema/events.json` `AutopilotStatePayload`):
-`{ state, kind, reason, iteration, gen }`. `state` is `armed` (arm — also
-re-emitted on a boot re-arm so a fresh attach re-renders the armed chip via
-replay), `ticked` (each iteration boundary, carrying the `iteration` count), or
-`stopped` (termination, with `reason` one of `sentinel` | `budget` | `user` |
-`lapsed` | `error`). `kind` mirrors the spec (`loop` | `goal`); `gen` is the
-driver generation. The CLI renders the driver **purely** from these events (the
-armed chip, iteration counter, and terminal toast/OS-notification), so a
-*replayed* `stopped` must not re-fire the OS notification — only a flip-to-live
-one does.
+sources the assistant cited, flattened to `{ url?, title?, citedText? }`.
+Citations never appear on `message.started`/`message.delta`. (No current
+backend emits them — retained vocabulary.)
 
 The `rate_limit.updated` event carries the claude.ai plan usage windows for the
 status line. Payload (see `schema/events.json` `RateLimitPayload` for the
 authoritative list): `{ available, subscriptionType, fiveHourUtil,
 fiveHourResetsAt, sevenDayUtil, sevenDayResetsAt, sevenDayOpusUtil,
 sevenDayOpusResetsAt, sevenDaySonnetUtil, sevenDaySonnetResetsAt }` —
-utilizations are 0–100 and resets are RFC3339 (and may be empty when the SDK
-reports null). The runner fetches this from the SDK's structured `/usage` data
-(`Query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET`) once per
-turn, fired on the SDK init message (the control channel is only open until the
-turn's result closes stdin). `available` is `false` for API-key/Bedrock/Vertex
-sessions where plan limits do not apply; the CLI then hides the windows rather
-than fabricating values. `subscriptionType` (`pro`/`max`/`team`/`enterprise`)
-lets the status line distinguish headless (empty), API-key, and subscription
-sessions. The per-model `sevenDayOpus*` / `sevenDaySonnet*` fields are absent
-(nil / undefined) unless the plan has a separate weekly cap for that model; the
-status line surfaces the one matching the attached model. Best-effort: if the
-experimental call fails, no event is emitted.
+utilizations are 0–100 and resets are RFC3339 (and may be empty when the source
+reports null). The claude-pane observer derives it from the provisioned
+statusline's stdin JSON, which is event-driven while a turn runs (min ~0.3 s
+spacing, silent when idle) — see the observer ingestion endpoints below.
+`available` is `false` for API-key/Bedrock/Vertex sessions where plan limits do
+not apply; the CLI then hides the windows rather than fabricating values.
+`subscriptionType` (`pro`/`max`/`team`/`enterprise`) lets the status line
+distinguish headless (empty), API-key, and subscription sessions. The per-model
+`sevenDayOpus*` / `sevenDaySonnet*` fields are absent (nil / undefined) unless
+the plan has a separate weekly cap for that model; the status line surfaces the
+one matching the attached model. Best-effort: when the source carries no
+rate-limit data, no event is emitted.
 
 ## Persistence
 

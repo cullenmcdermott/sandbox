@@ -10,7 +10,7 @@
  * refuse, since OSS users routinely pair a self-built runner against a
  * different CLI version).
  */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 /** Canonical event type enum. */
 export type EventType =
@@ -28,20 +28,15 @@ export type EventType =
   | 'reasoning.delta'
   | 'reasoning.completed'
   | 'tool.started'
-  | 'tool.delta'
-  | 'tool.progress'
   | 'tool.completed'
   | 'tool.failed'
   | 'permission.requested'
   | 'permission.resolved'
-  | 'todo.updated'
   | 'usage.updated'
   | 'context.compacted'
   | 'rate_limit.updated'
   | 'workspace.status'
   | 'session.title'
-  | 'models.available'
-  | 'autopilot.state'
   | 'error';
 
 /** Every event type, in schema order. */
@@ -60,42 +55,17 @@ export const ALL_EVENT_TYPES: EventType[] = [
   'reasoning.delta',
   'reasoning.completed',
   'tool.started',
-  'tool.delta',
-  'tool.progress',
   'tool.completed',
   'tool.failed',
   'permission.requested',
   'permission.resolved',
-  'todo.updated',
   'usage.updated',
   'context.compacted',
   'rate_limit.updated',
   'workspace.status',
   'session.title',
-  'models.available',
-  'autopilot.state',
   'error',
 ];
-
-/** a single entry in a todo.updated list, mirroring the SDK TodoWrite tool's items. */
-export interface TodoItem {
-  /** imperative description of the task */
-  content: string;
-  /** pending | in_progress | completed */
-  status: string;
-  /** present-tense form shown while in_progress */
-  activeForm?: string;
-}
-
-/** one model from the SDK's supportedModels() list (models.available), used to populate the in-session /model palette dynamically instead of the hardcoded opus/sonnet/haiku aliases. */
-export interface ModelInfo {
-  /** model id to use in API calls / --model (e.g. claude-opus-4-8) */
-  value: string;
-  /** human-readable name (e.g. 'Opus 4.8') */
-  displayName: string;
-  /** short capability description; may be empty */
-  description?: string;
-}
 
 /** one source citation attached to an assistant message (message.completed only, §2b gap 6). Flattened from the SDK's five citation location shapes to what a footnote render needs: web citations carry url+title, document/search citations carry title (document_title or source) only. citedText is the quoted snippet, capped by the mapper. */
 export interface Citation {
@@ -107,12 +77,10 @@ export interface Citation {
   citedText?: string;
 }
 
-/** payload for session.started events: the model, pod cwd, tools, and applied permission mode reported by the SDK init message. The CLI uses model+cwd for the status line and the model id to look up the context-window limit (ctx%). */
+/** payload for session.started events: the model (and, when known, cwd + backend resume id) reported by a backend observer. The opencode and claude-pane observers re-emit it on every model CHANGE (deduped) so the Go read-model resolves a context-window limit for the ctx% indicator and the dashboard chip; cwd may be empty for observer-mirrored sessions. */
 export interface SessionStartedPayload {
   model: string;
   cwd: string;
-  tools?: string[];
-  permissionMode?: string;
   agentSessionId?: string;
 }
 
@@ -134,22 +102,16 @@ export interface TerminatingPayload {
   turnsAborted: number;
 }
 
-/** payload for turn.started events: the prompt that drives this turn. `prompt` is the user's (or autopilot's /loop) message; it is absent when the runner only mirrors an externally-driven turn (the opencode observer emits turn.started with no prompt because the attached opencode client owns the input). Clients render the prompt as a user block so a replayed/attached transcript shows the question, not just the answer. */
+/** payload for turn.started events: the prompt that drives this turn. `prompt` is the user's message when the runner knows it (the claude-pane observer's UserPromptSubmit hook, the opencode headless first turn); it is absent when the runner only mirrors an externally-driven turn whose input the attached client owns. Clients render the prompt as a user block so a replayed/attached transcript shows the question, not just the answer. */
 export interface TurnStartedPayload {
-  /** the user/autopilot prompt that started this turn; absent for observer-mirrored turns */
+  /** the user prompt that started this turn; absent for observer-mirrored turns without one */
   prompt?: string;
 }
 
-/** payload for turn.completed events: the terminal result summary. Every field is optional — the Claude backend fills them from the SDK result message; the opencode backend emits turn.completed with an empty payload (its result text arrives via message.completed instead). */
+/** payload for turn.completed events: the terminal result summary. `result` is the complete final assistant message when the backend reports one (the claude-pane observer's Stop hook); the opencode and codex observers emit turn.completed with an empty payload (their result text arrives via message.completed instead). */
 export interface TurnCompletedPayload {
-  /** final assistant result text (Claude SDK result.result); absent on opencode */
+  /** final assistant result text; absent when the backend does not report it */
   result?: string;
-  /** SDK stop reason (e.g. "end_turn"); absent on opencode */
-  stopReason?: string;
-  /** SDK-internal sub-turn count for this turn; absent on opencode */
-  numTurns?: number;
-  /** wall-clock duration of the turn in milliseconds; absent on opencode */
-  durationMs?: number;
 }
 
 /** payload for turn.failed events: a turn that ended in error. `message` is always present (a human-readable reason; the runner also emits a parallel `error` event with the same text). `subtype` and `errors` are the richer Claude result-path detail (the SDK result subtype + the individual error strings) and are absent on the opencode backend and the Claude mid-turn failure path, which emit `message` only. The Go TUI renders `message`. */
@@ -178,7 +140,7 @@ export interface MessagePayload {
   delta?: boolean;
   /** Task tool_use id that spawned the emitting subagent (empty on the main thread) */
   parentToolUseId?: string;
-  /** sources cited by this text (message.completed only; never on started/delta). Clients render as a footnote list under the message (§2b gap 6). */
+  /** sources cited by this text (message.completed only; never on started/delta). Clients render as a footnote list. No backend currently emits citations (claude SDK engine removed); retained with its consumer for observer revival. */
   citations?: Citation[];
 }
 
@@ -190,10 +152,6 @@ export interface ToolPayload {
   input?: unknown;
   /** tool output (completed) */
   output?: string;
-  /** tool.delta: a chunk of the tool's input JSON as it streams (input_json_delta) */
-  partialJson?: string;
-  /** tool.progress: seconds the tool has been running (SDK heartbeat) */
-  elapsedSeconds?: number;
   /** Bash exit code */
   exitCode?: number;
   error?: string;
@@ -247,7 +205,7 @@ export interface RateLimitPayload {
   sevenDaySonnetResetsAt?: string;
 }
 
-/** payload for workspace.status events: git branch + dirty/ahead/behind for the status line. Emitted at session start and after each turn; skipped for non-git cwd. */
+/** payload for workspace.status events: git branch + dirty/ahead/behind for the session row. NOTE: no backend currently emits this (the claude SDK engine that did was removed by claude-pane-first); the vocabulary + Go consumer (Branch/Dirty read-model) are retained because the pane statusline / backend observers can re-emit it. */
 export interface WorkspaceStatusPayload {
   branch: string;
   dirty: boolean;
@@ -260,44 +218,18 @@ export interface SessionTitlePayload {
   title: string;
 }
 
-/** payload for models.available events: the list of models the account/SDK supports (Query.supportedModels()), used to populate the in-session /model palette dynamically. Emitted once per session, fetched in-turn on the SDK init message (same open-control-channel window as rate_limit.updated). Absent until the first turn runs; the TUI falls back to the opus/sonnet/haiku aliases until it arrives. */
-export interface ModelsAvailablePayload {
-  /** the supported models, in SDK order */
-  models: ModelInfo[];
-}
-
-/** payload for todo.updated events: the agent's current task list, emitted by the runner whenever the SDK TodoWrite tool runs. The TUI renders it as a checklist. */
-export interface TodoUpdatedPayload {
-  /** the full todo list (replaces any prior list) */
-  todos: TodoItem[];
-}
-
 /** payload for error events. */
 export interface ErrorPayload {
   message: string;
   code?: string;
 }
 
-/** payload for context.compacted events: emitted when the SDK compacts (summarizes) the conversation to fit the context window. preTokens/postTokens let the TUI reset the ctx% gauge to the post-compaction size instead of the stale pre-compaction count, and drop a one-line transcript marker. */
+/** payload for context.compacted events: the conversation was compacted (summarized) to fit the context window. preTokens/postTokens let the TUI reset the ctx% gauge to the post-compaction size instead of the stale pre-compaction count. NOTE: no backend currently emits this (the claude SDK engine that did was removed by claude-pane-first); the vocabulary + Go consumer are retained because in-pane compaction is observable and an observer may re-emit it. */
 export interface ContextCompactedPayload {
   /** 'auto' (context-window pressure) or 'manual' (/compact) */
   trigger: string;
   /** effective token count before compaction */
   preTokens: number;
-  /** effective token count after compaction; 0/absent when the SDK did not report it */
+  /** effective token count after compaction; 0/absent when not reported */
   postTokens?: number;
-}
-
-/** payload for autopilot.state events: a transition of the runner-owned autopilot driver (the server-side /loop-/goal loop; see docs/archive/server-side-loop-adr.md). Emitted on arm (state:'armed' — re-emitted on a boot re-arm so a fresh `sandbox attach` re-renders the armed chip without special-casing), at each iteration boundary (state:'ticked', carrying the iteration count for the TUI's progress chip), and on termination (state:'stopped' with a reason). The TUI renders the driver PURELY from these events (armed chip, iteration counter, terminal toast/OS-notification), so a replayed stopped(sentinel) must not re-fire the OS notification — only the flip-to-live one does. */
-export interface AutopilotStatePayload {
-  /** 'armed' | 'ticked' | 'stopped' */
-  state: string;
-  /** 'loop' | 'goal' — the driver flavour */
-  kind: string;
-  /** set on state:'stopped' — 'sentinel' | 'budget' | 'user' | 'lapsed' | 'error' (mirrors the spec's stopped_reason); absent otherwise */
-  reason?: string;
-  /** completed-iteration count at this transition (0 on the initial armed event) */
-  iteration: number;
-  /** the driver generation; a disarm/rearm bumps it so a stale scheduled tick fired against an old gen is dropped */
-  gen: number;
 }

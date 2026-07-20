@@ -1,7 +1,7 @@
 // Shared backend-conformance contract (Phase A of docs/archive/testing-parity-plan.md).
 //
-// Every backend's event mapper (claude-sdk `mapping.ts`, opencode
-// `opencode-turn.ts`, Codex next) emits normalized events through the SAME
+// Every backend's event mapper (opencode `opencode-turn.ts`, the claude-pane
+// and codex observers) emits normalized events through the SAME
 // `EmitFn = (type, payload) => void` shape into a captured list. This module
 // asserts the invariants EVERY backend's emitted stream must hold, so each
 // backend's unit test routes its captured output through one place — that is what
@@ -25,7 +25,6 @@ const CONTENT = new Set([
   'reasoning.delta',
   'reasoning.completed',
   'tool.started',
-  'tool.delta',
   'tool.completed',
   'tool.failed',
 ]);
