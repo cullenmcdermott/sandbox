@@ -6,9 +6,10 @@ PVC, so you can detach, close the lid, and pick the conversation back up later �
 or run several agents in parallel without tying up your machine.
 
 You drive it all from a local terminal UI: a command-center dashboard that lists
-your sessions, flags the ones waiting on you, and drops you into a live chat (or
-the agent's own TUI) on demand. The agents run on the cluster; your keystrokes
-and files stay local. It targets a cluster running the
+your sessions, flags the ones waiting on you, and drops you into the **agent's
+own TUI** — the real Claude Code or opencode interface, running in the pod,
+streamed to your terminal. The agents run on the cluster; your keystrokes and
+files stay local. It targets a cluster running the
 [agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) controller
 (v0.4.6).
 
@@ -18,10 +19,10 @@ and files stay local. It targets a cluster running the
   <sub><em>Cold-start a Claude session: the pod schedules + syncs (fast-forwarded), then you chat — all from your terminal.</em></sub>
 </p>
 
-> **Status — early.** The component boundaries and the auth/env wiring are
-> implemented and unit-tested, but the end-to-end file-sync path (Mutagen over
-> SSH) and the runner image build have **not** been validated on a live cluster
-> yet. Treat this as a working prototype, not a turnkey product — see the
+> **Status — early.** The core paths (runner image, live turns, Mutagen-over-SSH
+> sync) have been validated on a real cluster, but the claude-pane path
+> (2026-07) is unit/e2e-tested only and still awaits its live cluster pass.
+> Treat this as a working prototype, not a turnkey product — see the
 > [unvalidated paths](docs/architecture.md#unvalidated-paths).
 
 ## Why use this
@@ -48,55 +49,60 @@ you left it, follow-up and all.
 ## How it works
 
 1. `sandbox claude` creates a Sandbox CRD + PVC in the `agent-sessions`
-   namespace and waits for the runner pod to be ready.
+   namespace — provisioning your Claude credential into the per-session
+   Secret — and waits for the runner pod to be ready.
 2. The CLI port-forwards to the pod's runner API (port 8787), health-checks it,
-   and opens a TUI.
-3. You type a prompt; the runner invokes the Claude Agent SDK and streams
-   normalized events back over SSE to the TUI (transcript, tool cards,
-   permission prompts).
-4. Detach with `Ctrl+]` — the pod keeps running and the PVC persists state.
-   `sandbox attach <id>` reconnects and replays the event log.
+   and opens the dashboard TUI.
+3. Attach to the session: the runner spawns the **real Claude Code TUI** in the
+   pod (a PTY the runner owns) and streams it to your terminal over a
+   WebSocket. In parallel, provisioned hooks feed a normalized event stream
+   (SSE) that powers the dashboard's status rows, attention routing, and
+   read-only activity feed.
+4. Detach with `Ctrl+]` — the claude process and pod keep running, and the PVC
+   persists state. `sandbox attach <id>` reconnects, repaints the pane from
+   its scrollback, and catches the feed up from the event log.
 
 See `docs/architecture.md` for the component design, lifecycle, and security
 model (with diagrams), and `docs/runner-api.md` for the HTTP+SSE contract.
 
-### Continue a session locally with `claude --resume`
+### `claude --resume` is how continuity works — and your local escape hatch
 
-A sandbox Claude session can be picked up on your laptop with full history. This
-is deliberate: the runner mounts the workspace at the session's **real host path**
-(e.g. `/Users/you/git/project`, via a PVC `subPath` bind-mount), so the Claude SDK
-keys its transcript directory by that path — exactly the path a local `claude`
-would use. Transcripts sync one-way remote→host (into `~/.claude/projects/…`), so
-once a session has synced you can:
+In-pod `claude --resume` is the **product mechanism**, not an escape hatch: the
+runner pins each session's conversation UUID at first spawn and respawns
+`claude --resume <uuid>` after a child exit or a pod suspend/resume, so the
+conversation continues across restarts (see
+`docs/session-lifecycle.md`).
+
+The same design gives you a local escape hatch. The runner mounts the workspace
+at the session's **real host path** (e.g. `/Users/you/git/project`, via a PVC
+`subPath` bind-mount), so the in-pod claude keys its transcript directory by
+that path — exactly the path a local `claude` would use — and transcripts sync
+one-way remote→host (into `~/.claude/projects/…`). Once a session has synced:
 
 ```bash
 cd <project>            # the same directory you launched the session from
-claude --resume         # pick the session from claude's list, or:
-claude --resume <agentSession>
+claude --resume         # pick the sandbox session from claude's own list
 ```
 
-`<agentSession>` is the Claude SDK session UUID, surfaced by the runner status
-API (`GET /sessions/:id/status`, field `agentSession`) and recorded in the local
-session index; `claude --resume` with no id also lists it for that project.
-
 This is a **one-way fork**: local turns run entirely on your laptop and never flow
-back to the sandbox — the pod, its guards, and the audit log see none of them. Use
-it to keep working offline or hand off to the local CLI, not as a two-way bridge.
+back to the sandbox — the pod and its audit log see none of them. Use it to keep
+working offline or hand off to the local CLI, not as a two-way bridge.
 
 ## Quickstart
 
 ```bash
 sandbox                    # open the command-center dashboard:
                            # session list, attention routing, attach, create
-sandbox claude "fix the flaky test"   # shortcut: start a NEW Claude session for
-                                      # the current project and open its TUI
+sandbox claude             # shortcut: start a NEW Claude session for the
+                           # current project and attach to its pane
 ```
 
 `sandbox` with no args is the way in: it opens the dashboard, where you create,
-attach to, and route between sessions. `sandbox claude [prompt]` skips straight to
-a new Claude session for the current directory. It always starts a fresh session —
-to return to an existing one, run `sandbox attach <id>` or pick it from the
-dashboard.
+attach to, and route between sessions. `sandbox claude` skips straight to a new
+Claude session for the current directory (interactive — you type your prompt in
+the pane, so there is no positional-prompt form). It always starts a fresh
+session — to return to an existing one, run `sandbox attach <id>` or pick it
+from the dashboard.
 
 For development, `just` is the canonical command surface (`just` lists recipes,
 `just check` is the full CI gate). See `CLAUDE.md` for the toolchain notes.
@@ -125,43 +131,34 @@ turns still need credentials; the dashboard and session-list views don't.)
   a separate private deployment.
 - A kubeconfig with access to the `agent-sessions` namespace.
 - [Mutagen](https://mutagen.io/) on your local machine for file sync.
-- **Claude credentials in the cluster.** The default `claude-sdk` backend reads a
-  **Claude Code OAuth token** (subscription auth) from a Secret named
-  `anthropic-credentials` (key `api-key`) in the `agent-sessions` namespace and
-  injects it into session pods as `CLAUDE_CODE_OAUTH_TOKEN`. Generate the token
-  with `claude setup-token`, then provision the Secret once:
+- **Claude credentials: your own local login.** The `claude` backend runs the
+  real Claude Code binary in the pod, so it authenticates like Claude Code — no
+  cluster-wide Secret to provision. By default `sandbox claude` reads **your
+  own Claude Code login** (the macOS Keychain item / `~/.claude/.credentials.json`
+  plus your `~/.claude.json` account identity — so you must have logged into
+  `claude` locally), writes the full credential into that session's own Secret,
+  and the runner materializes it into the pod's config dir on boot. This is the
+  **Max-mode** path: the in-pod claude behaves exactly like your local one,
+  refreshes its own tokens against the PVC copy, and never sees a token env
+  var. The create fails closed if no credential can be resolved.
 
-  ```bash
-  kubectl create secret generic anthropic-credentials \
-    --namespace agent-sessions \
-    --from-literal=api-key="$(claude setup-token)"
-  ```
-
-  > This must be a Claude Code OAuth token, **not** an `ANTHROPIC_API_KEY` —
-  > Claude Code rejects a raw API key in this slot and every turn would fail to
-  > authenticate. (The separate `opencode` backend instead reads provider API
-  > keys from an `opencode-credentials` Secret.)
-
-  The reference is optional, so pods start without it, but turns will fail to
-  authenticate until it exists.
-
-  **Alternative: per-session accounts (no shared Secret needed).** Instead of
-  the cluster-wide Secret you can store one or more Anthropic accounts locally
-  and pick one per session — each session pod then receives only that account's
-  credential, provisioned into its own per-session Secret:
+  **Alternative: stored per-session accounts.** You can store one or more
+  Anthropic accounts locally and pin a session to one — a documented *degraded*
+  path for claude sessions (a `claude setup-token` credential authenticates,
+  but as "Claude API" rather than your Max login):
 
   ```bash
   sandbox auth login --subscription   # claude.ai login via `claude setup-token`
   sandbox auth login --console        # paste an Anthropic Console API key
   sandbox auth list                   # enumerate stored accounts
   sandbox auth default <id>           # pick the default account
-  sandbox claude --account work       # run a session on a specific account
+  sandbox claude --account work       # pin a session to a stored account
   ```
 
   In the TUI, `n` → claude opens an account picker (with an add-account flow)
   once at least one account is stored. Credentials live in the macOS Keychain
-  (per-account `0600` files elsewhere); with no stored accounts, behavior is
-  unchanged — sessions use the shared Secret above.
+  (per-account `0600` files elsewhere); with no stored accounts, sessions use
+  your local Claude Code login as above.
 
 The per-session runner bearer token is generated by the CLI and stored in a
 per-session Secret (`<session-id>-runner`); you do not manage it manually.
@@ -219,7 +216,8 @@ per-session Secret (`<session-id>-runner`); you do not manage it manually.
   air-gapped from GHCR:
 
   ```bash
-  # Runner (the per-session pod that runs the Claude Agent SDK):
+  # Runner (the per-session pod: supervises the agent, bundles the pinned
+  # Claude Code binary):
   docker build -t <your-registry>/sandbox-claude-runner:latest -f runner/Dockerfile runner/
   # Reaper (the idle-suspend Job):
   docker build -t <your-registry>/sandbox-reaper:latest      -f Dockerfile.reaper .
@@ -252,7 +250,7 @@ cd runner && npm install --ignore-scripts && ./node_modules/.bin/tsc --noEmit
 | Command | Description |
 |---|---|
 | `sandbox` | Open the command-center dashboard (session list, attention routing, attach) |
-| `sandbox claude [prompt]` | Start a **new** Claude Agent SDK session for the current project and open the TUI (`--model <id\|alias>` sets the session model; switch in-session with `/model`; `--worktree auto\|on\|off` controls per-session git worktree isolation). To resume an existing one, use `sandbox attach` |
+| `sandbox claude` | Start a **new** Claude session for the current project — the real Claude Code TUI running in the pod, attached as a pane (`--model <id\|alias>` sets the session default, or use claude's own `/model` in-pane; `--account` pins a stored account; `--worktree auto\|on\|off` controls per-session git worktree isolation). Interactive-only (no positional prompt). To resume an existing session, use `sandbox attach` |
 | `sandbox opencode [prompt]` | Start a **new** OpenCode-backend session (external `opencode serve` + attach). `--model <provider/model>` sets the session default (e.g. `anthropic/claude-sonnet-4-5`); `--provider anthropic\|openai\|opencode-zen` picks which key the pod receives from the shared Secret |
 | `sandbox attach <id>` | Reconnect to a running/suspended session and replay history |
 | `sandbox trace <id>` | Replay a session's normalized event timeline (`--json`, `--since`, `--tool` filters) |
@@ -264,7 +262,7 @@ cd runner && npm install --ignore-scripts && ./node_modules/.bin/tsc --noEmit
 | `sandbox sync gc` | Terminate orphaned file-sync sessions whose pod is gone (`--dry-run` to preview; needs cluster access to confirm live sessions) |
 | `sandbox suspend <id>` | Terminate the pod, keep the PVC |
 | `sandbox resume <id>` | Resume a suspended session |
-| `sandbox cancel <id>` | Interrupt the active turn |
+| `sandbox cancel <id>` | Interrupt the active turn (opencode turns; for a claude pane session, interrupt in-pane with `Esc`) |
 | `sandbox rename <id> <name>` | Set a persistent display title for a session |
 | `sandbox shell <id>` | Open a debug shell into the session pod |
 | `sandbox worktree gc` | Garbage-collect orphaned per-session git worktrees (`--dry-run` to preview); dirty worktrees are committed to their branch before removal, never discarded |
