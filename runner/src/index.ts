@@ -18,6 +18,7 @@ import { startOpencodeObserver, type OpencodeObserver } from './opencode-observe
 import { materializeCodexAuth, startCodexSupervisor, type CodexSupervisor } from './codex.js';
 import { startCodexObserver, type CodexObserver } from './codex-observer.js';
 import { startClaudePaneSupervisor, type ClaudePaneSupervisor } from './claude-pane.js';
+import { materializeClaudePaneConfig } from './claude-config.js';
 import { startBootTrace } from './trace.js';
 
 // Seconds before SIGKILL, reported in session.terminating so the TUI can show
@@ -206,6 +207,12 @@ function main(): void {
   // on the first attach, so a detached pod runs no idle TUI. selectAgent returns
   // null for this backend, so the /turns path 409s like any supervise-only one.
   if (reg.state.backend === 'claude-pane') {
+    // Materialize .credentials.json (only-if-absent — in-pod refresh wins) and
+    // the seamless-start .claude.json seed from the session Secret BEFORE the
+    // supervisor exists, so the first attach's lazy spawn finds a fully
+    // authenticated, trust-seeded config dir. Fail-closed on missing/invalid
+    // credential material (crash boot visibly, mirroring materializeCodexAuth).
+    materializeClaudePaneConfig({ workspaceDir: resolveWorkspaceDir(cfg.projectPath) });
     claudePane = startClaudePaneSupervisor(cfg);
   }
   // boot_prep covers everything between registry init and the listen call:
