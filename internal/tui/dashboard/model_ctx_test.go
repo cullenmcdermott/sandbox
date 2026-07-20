@@ -74,7 +74,7 @@ func TestListTablePrecedence(t *testing.T) {
 	}
 	want := []string{
 		"r", "esc", "q", "R", "b", "space", "ctrl+g", "ctrl+k", "q", "?",
-		"g", "G", "k", "j", "/", "s", "S", "\\", "enter", "a", "d", "n",
+		"g", "G", "k", "j", "/", "s", "S", "\\", "enter", "v", "a", "d", "n",
 		"x", "r", "!",
 	}
 	if len(got) != len(want) {

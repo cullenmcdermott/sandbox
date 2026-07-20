@@ -331,6 +331,25 @@ func (m *Model) dashListTable() []boundAction[*Model] {
 			},
 			footerRank: 3,
 		},
+		// View the read-only activity feed (`v`) for an external-pane session — a
+		// detached monitor of its normalized events, from which enter/a attaches
+		// the pane. For a non-external (claude-sdk transcript) session `v` is a
+		// no-op: it has its own attach screen and no feed.
+		{
+			binding: key.NewBinding(key.WithKeys("v"), key.WithHelp("v", "view feed")),
+			when: func(m *Model) bool {
+				sel := m.selectedSession()
+				return sel != nil && externalPaneBackend(sel.State.Backend)
+			},
+			run: func(m *Model, _ tea.KeyPressMsg) (tea.Cmd, bool) {
+				sel := m.selectedSession()
+				if sel != nil {
+					s := *sel
+					return func() tea.Msg { return viewFeedMsg{sess: s} }, true
+				}
+				return nil, true
+			},
+		},
 		// Approve / Deny — inline permission from the detail pane.
 		{
 			binding: m.keys.Approve,

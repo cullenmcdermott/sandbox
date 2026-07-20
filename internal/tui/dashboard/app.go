@@ -30,8 +30,12 @@ const (
 	// ScreenConnecting is a transient screen shown while the connector runs.
 	ScreenConnecting
 	// ScreenExternal hands the terminal to an external full-screen client
-	// (opencode attach) for opencode-server sessions.
+	// (opencode attach / the claude-pane PTY) for external-pane sessions.
 	ScreenExternal
+	// ScreenFeed is the read-only activity feed for an external-pane session
+	// (claude-pane-first): a detached monitor built from normalized events,
+	// from which the user can attach the pane. No input, no terminal handover.
+	ScreenFeed
 )
 
 // --------------------------------------------------------------------------
@@ -42,6 +46,14 @@ const (
 // the session to attach to; the App kicks off a Connector call and transitions
 // to ScreenConnecting until the result arrives.
 type attachMsg struct {
+	sess Session
+}
+
+// viewFeedMsg is sent when the user opens the read-only activity feed for an
+// external-pane session (the `v` key). Unlike attachMsg it establishes no
+// connection and takes no terminal: the feed renders from the events already
+// flowing on the background stream (claude-pane-first).
+type viewFeedMsg struct {
 	sess Session
 }
 
@@ -134,7 +146,8 @@ type App struct {
 	screen     Screen
 	dashboard  *Model
 	transcript *TranscriptModel // nil until first attach
-	external   *ExternalPane    // nil unless attached to an opencode-server session
+	external   *ExternalPane    // nil unless attached to an external-pane session
+	feed       *feedModel       // nil unless viewing an external-pane session's activity feed
 
 	// lastProgress is the OSC 9;4 tab-progress state last emitted to the terminal.
 	// App.Update compares the live session aggregate against it and emits a tea.Raw
@@ -464,6 +477,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case attachMsg:
 		return a.handleAttach(msg)
 
+	case viewFeedMsg:
+		return a.handleViewFeed(msg)
+
 	case createSessionMsg:
 		// `n` opens the backend picker; provisioning happens when the user
 		// confirms a choice (pickerKey → createCmd). The picker is an overlay
@@ -562,11 +578,21 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.transcript.syncStatus = a.dashboard.sessionByID(a.transcript.ref.ID).SyncStatus
 	}
 
+	// Tap the same runner events the dashboard just reduced into the open
+	// activity feed (claude-pane-first): the feed is a read-only monitor with no
+	// stream of its own — it rides the background passive stream's events for
+	// the session it is watching.
+	if a.screen == ScreenFeed && a.feed != nil {
+		a.tapFeed(msg)
+	}
+
 	switch a.screen {
 	case ScreenTranscript:
 		return a.updateTranscriptScreen(msg, dashCmd)
 	case ScreenExternal:
 		return a.updateExternalScreen(msg, dashCmd)
+	case ScreenFeed:
+		return a.updateFeedScreen(msg, dashCmd)
 	case ScreenConnecting:
 		// Key presses never reach here: the top-level KeyPressMsg case cancels
 		// the in-flight connect (and returns) while this screen is active.
@@ -655,6 +681,113 @@ func (a *App) handleAttach(msg attachMsg) (tea.Model, tea.Cmd) {
 		a.connectingPreview = a.buildConnectingPreview(msg.sess)
 	}
 	return a, a.connectCmd(msg.sess)
+}
+
+// handleViewFeed opens the read-only activity feed for an external-pane session.
+// It builds a fresh feed model, seeds it from the host event cache (history where
+// available), and ensures the background passive stream is live so activity
+// keeps arriving via the event tap. No connection is established and the terminal
+// is not handed over — attaching the pane (enter/a on the feed) does that.
+func (a *App) handleViewFeed(msg viewFeedMsg) (tea.Model, tea.Cmd) {
+	id := msg.sess.ID()
+	f := newFeedModel(session.Ref{ID: id}, msg.sess.DisplayTitle(), ClientLabel(msg.sess.State.Backend))
+	if a.dashboard.eventCache != nil {
+		if events, err := a.dashboard.eventCache.LoadEvents(id); err == nil {
+			f.seed(events)
+		}
+	}
+	f.SetSize(a.width, a.height)
+	a.feed = f
+	a.screen = ScreenFeed
+	// Ensure the background observer stream is live for this session so the feed
+	// receives activity as it happens (idempotent — reconnects if it was cold).
+	return a, a.dashboard.startLiveSSECmd(a.dashboard.sessionByID(id))
+}
+
+// tapFeed forwards the runner events the dashboard just reduced into the open
+// feed (matching session only). It handles both the batched and single-event
+// stream messages and narrates stream drops/reconnects as calm feed notices.
+func (a *App) tapFeed(msg tea.Msg) {
+	feedID := a.feed.ref.ID
+	switch m := msg.(type) {
+	case RunnerEventBatchMsg:
+		if m.ID != feedID {
+			return
+		}
+		for _, ev := range m.Events {
+			a.feed.ingest(ev)
+		}
+		if m.StreamEnded {
+			a.feed.notice("Connection lost — reconnecting…")
+			a.feed.setConnection(true, false)
+		} else if a.feed.reconnecting {
+			a.feed.notice("Reconnected")
+			a.feed.setConnection(false, false)
+		}
+	case RunnerEventMsg:
+		if m.ID != feedID {
+			return
+		}
+		if m.StreamEnded {
+			a.feed.notice("Connection lost — reconnecting…")
+			a.feed.setConnection(true, false)
+			return
+		}
+		a.feed.ingest(m.Event)
+		if a.feed.reconnecting {
+			a.feed.notice("Reconnected")
+			a.feed.setConnection(false, false)
+		}
+	}
+}
+
+// updateFeedScreen handles keys on the read-only activity feed: navigation,
+// attach (enter/a) → hand off to the pane, and esc/back → dashboard. Every
+// other key is swallowed (the feed accepts no text input). The window resize is
+// applied so the feed reflows.
+func (a *App) updateFeedScreen(msg tea.Msg, dashCmd tea.Cmd) (tea.Model, tea.Cmd) {
+	if a.feed == nil {
+		a.screen = ScreenDashboard
+		return a, dashCmd
+	}
+	if ws, ok := msg.(tea.WindowSizeMsg); ok {
+		a.feed.SetSize(ws.Width, ws.Height)
+		return a, dashCmd
+	}
+	kp, ok := msg.(tea.KeyPressMsg)
+	if !ok {
+		return a, dashCmd
+	}
+	switch kp.String() {
+	case "esc", "ctrl+]", "q":
+		// Back to the dashboard (the feed holds no resources to release; the row
+		// cursor is still on the session the feed was opened from).
+		a.feed = nil
+		a.screen = ScreenDashboard
+		return a, dashCmd
+	case "enter", "a":
+		// Attach the pane for full-fidelity interaction (the feed's one
+		// session-directed action). Reuse the standard attach path.
+		sess := a.dashboard.sessionByID(a.feed.ref.ID)
+		a.feed = nil
+		return a, tea.Batch(dashCmd, func() tea.Msg { return attachMsg{sess: sess} })
+	case "up", "k":
+		a.feed.scroll(-1)
+	case "down", "j":
+		a.feed.scroll(1)
+	case "pgup", "ctrl+u":
+		a.feed.scroll(-(a.feed.bodyHeight() / 2))
+	case "pgdown", "ctrl+d":
+		a.feed.scroll(a.feed.bodyHeight() / 2)
+	case "g", "home":
+		a.feed.top()
+	case "G", "end":
+		a.feed.bottom()
+	case "ctrl+g":
+		// Attention nav still works from the feed (parity with the pane leader).
+		a.dashboard.jumpToNextNeedingAttention()
+	}
+	return a, dashCmd
 }
 
 // handleAttachReady builds (or reuses) the transcript / external pane once the
@@ -1220,6 +1353,10 @@ func (a *App) windowTitle() string {
 				return t
 			}
 		}
+	case ScreenFeed:
+		if a.feed != nil && a.feed.title != "" {
+			return a.feed.title
+		}
 	}
 	return "sandbox"
 }
@@ -1277,6 +1414,11 @@ func (a *App) screenView() tea.View {
 			return a.dashboard.View()
 		}
 		return a.external.View()
+	case ScreenFeed:
+		if a.feed == nil {
+			return a.dashboard.View()
+		}
+		return tea.NewView(a.feed.View())
 	case ScreenTranscript:
 		if a.transcript == nil {
 			return a.dashboard.View()
