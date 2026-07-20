@@ -170,9 +170,17 @@ test('statusline maps usage/rate-limit/model/title with duplicate suppression', 
   };
   core.handleStatusline(payload);
   core.handleStatusline(payload); // identical → suppressed
-  assert.deepEqual(types(emitted), ['session.title', 'usage.updated', 'rate_limit.updated']);
+  assert.deepEqual(types(emitted), [
+    'session.started',
+    'session.title',
+    'usage.updated',
+    'rate_limit.updated',
+  ]);
   assert.deepEqual(models, ['claude-opus-4-8']);
-  const usage = emitted[1].payload;
+  // The model is ALSO emitted as session.started so the Go read-model resolves
+  // Model + CtxLimit (ctx% in the pane status row) — opencode-observer parity.
+  assert.deepEqual(emitted[0].payload, { model: 'claude-opus-4-8', cwd: '' });
+  const usage = emitted[2].payload;
   assert.deepEqual(usage, {
     inputTokens: 10,
     outputTokens: 41,
@@ -180,13 +188,21 @@ test('statusline maps usage/rate-limit/model/title with duplicate suppression', 
     cacheWriteTokens: 31162,
     totalCostUsd: 0.5,
   });
-  const rl = emitted[2].payload;
+  const rl = emitted[3].payload;
   assert.equal(rl.fiveHourUtil, 41);
   assert.equal(rl.sevenDayUtil, 4);
   assert.equal(rl.fiveHourResetsAt, new Date(1784528400 * 1000).toISOString());
 
   core.handleStatusline({ ...payload, cost: { total_cost_usd: 0.6 } });
   assert.equal(types(emitted).filter((t) => t === 'usage.updated').length, 2);
+  // An unchanged model never re-emits session.started…
+  assert.equal(types(emitted).filter((t) => t === 'session.started').length, 1);
+  // …but an in-pane /model switch does (V45 parity: the dashboard chip/ctx%
+  // must track the change, not stay latched to the first-observed model).
+  core.handleStatusline({ ...payload, model: { id: 'claude-sonnet-5' } });
+  const started = emitted.filter((e) => e.type === 'session.started');
+  assert.equal(started.length, 2);
+  assert.deepEqual(started[1].payload, { model: 'claude-sonnet-5', cwd: '' });
 });
 
 test('summarizeToolResponse prefers stdout/stderr and truncates', () => {

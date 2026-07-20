@@ -147,3 +147,38 @@ func TestPhase4_ExternalPaneFallsBackToSnapshot(t *testing.T) {
 		t.Errorf("a pane with no observed turn should show no ctx%%/cost, got:\n%s", row)
 	}
 }
+
+// Task 4.4 (claude-pane status row parity): a claude-pane pane renders
+// title · claude · model · status · ctx% · cost from the same live read-model
+// the opencode pane uses — the runner's hook/statusline observer feeds
+// session.started (model→CtxLimit), usage.updated (tokens/cost), and the
+// turn lifecycle (status) through the identical reducer.
+func TestClaudePaneLiveStatusRowParity(t *testing.T) {
+	live := Session{
+		State:     session.State{ID: "claude-pane-xyz", Backend: session.BackendClaudePane},
+		AutoTitle: "Fix the build",
+	}
+	// Feed the read-model through the real reducer with observer-shaped events
+	// (what runner/src/claude-pane-observer.ts emits), not hand-set fields.
+	ApplyRunnerEvent(&live, mkEvent(session.EventSessionStarted, session.SessionStartedPayload{Model: "claude-opus-4-8"}))
+	ApplyRunnerEvent(&live, mkEvent(session.EventTurnStarted, nil))
+	ApplyRunnerEvent(&live, mkEvent(session.EventUsageUpdated, session.UsagePayload{InputTokens: 10, CacheReadTokens: 30000, CacheWriteTokens: 10000, OutputTokens: 41, TotalCostUSD: 0.5}))
+
+	pane := NewExternalPaneTransport(Session{Title: "stale"}, "claude", nil, func() Session { return live })
+	pane.w, pane.h = 120, 30
+	row := pane.statusRow()
+	for _, want := range []string{"Fix the build", "claude", "claude-opus-4-8", "busy", "$0.5000"} {
+		if !strings.Contains(row, want) {
+			t.Errorf("claude pane status row missing %q:\n%s", want, row)
+		}
+	}
+	// ctx% must be computed (CtxLimit resolved from the session.started model);
+	// asserting the presence of a nonzero ctx segment rather than an exact
+	// percentage keeps the test stable across model-limit table changes.
+	if !strings.Contains(row, "ctx ") || strings.Contains(row, "ctx 0%") {
+		t.Errorf("claude pane status row missing a live ctx%% segment:\n%s", row)
+	}
+	if live.CtxLimit == 0 {
+		t.Error("session.started model did not resolve a context-window limit (models.Limit)")
+	}
+}

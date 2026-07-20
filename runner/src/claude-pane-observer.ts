@@ -237,6 +237,12 @@ export function createPaneObserverCore(deps: PaneObserverDeps): PaneObserverCore
     if (model !== '' && model !== lastModel) {
       lastModel = model;
       deps.setModel(model);
+      // Emit the model so the Go side resolves a context-window limit for ctx%
+      // (readmodel.go: session.started → Model + CtxLimit drive the pane status
+      // row and dashboard chip) — the same parity rule as the opencode observer
+      // (V45): re-emit on every CHANGE, deduped above, so an in-pane /model
+      // switch updates the dashboard instead of latching the first model.
+      deps.emit(turnId ?? undefined, 'session.started', { model, cwd: '' });
     }
 
     const title = str(payload.session_name);
