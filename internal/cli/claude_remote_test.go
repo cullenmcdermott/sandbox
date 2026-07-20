@@ -95,30 +95,24 @@ func TestStartPromptTurnFailsClosedOnUnhealthyRunner(t *testing.T) {
 	}
 }
 
-// TestClaudePaneFlagRejectsPrompt: `sandbox claude --pane "prompt"` must fail
-// fast with the interactive-only explanation — there is no headless turn path
-// to deliver the prompt through (POST /turns answers 409 for claude-pane), and
-// silently dropping it would be worse than refusing.
-func TestClaudePaneFlagRejectsPrompt(t *testing.T) {
+// TestClaudeCmdRejectsPositionalPrompt: after the pane-first flip `sandbox
+// claude` is interactive-only (cobra.NoArgs) — a positional prompt has no
+// headless turn path to travel (POST /turns 409s for claude-pane), so cobra
+// rejects it rather than silently dropping it.
+func TestClaudeCmdRejectsPositionalPrompt(t *testing.T) {
 	cmd := newClaudeRemoteCmd()
-	cmd.SetArgs([]string{"--pane", "fix", "the", "build"})
+	cmd.SetArgs([]string{"fix", "the", "build"})
 	cmd.SilenceUsage, cmd.SilenceErrors = true, true
-	err := cmd.Execute()
-	if err == nil || !strings.Contains(err.Error(), "interactive-only") {
-		t.Fatalf("claude --pane with a prompt: got %v, want the interactive-only rejection", err)
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("sandbox claude with a positional prompt should be rejected (interactive-only)")
 	}
 }
 
-// TestClaudePaneFlagExists pins the overlap-release opt-in surface: the claude
-// command carries a --pane bool flag (default false — the SDK backend stays
-// the default until the 6.2 flip).
-func TestClaudePaneFlagExists(t *testing.T) {
+// TestClaudeCmdHasNoPaneFlag pins the flip: the overlap-release `--pane` opt-in
+// is gone — claude is unconditionally the interactive pane backend now.
+func TestClaudeCmdHasNoPaneFlag(t *testing.T) {
 	cmd := newClaudeRemoteCmd()
-	f := cmd.Flags().Lookup("pane")
-	if f == nil {
-		t.Fatal("claude command has no --pane flag")
-	}
-	if f.DefValue != "false" {
-		t.Errorf("--pane default = %q, want false (pane-first flip is a later release)", f.DefValue)
+	if f := cmd.Flags().Lookup("pane"); f != nil {
+		t.Error("claude command still carries the removed --pane flag")
 	}
 }

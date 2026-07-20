@@ -113,7 +113,7 @@ func (a *App) beginCreate(params CreateParams) tea.Cmd {
 // §6 reauth flow (a re-login entry for an existing account slots in here).
 func (a *App) enterAccountStage() tea.Cmd {
 	if a.accountStore == nil {
-		return a.beginCreate(CreateParams{Backend: session.BackendClaudeSDK})
+		return a.beginCreate(CreateParams{Backend: session.BackendClaudePane})
 	}
 	accounts, err := a.accountStore.ListAccounts()
 	if err != nil {
@@ -177,12 +177,12 @@ func (a *App) pickerKeyAccount(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 		switch {
 		case sel < len(a.picker.accounts):
 			return a.beginCreate(CreateParams{
-				Backend:            session.BackendClaudeSDK,
+				Backend:            session.BackendClaudePane,
 				AnthropicAccountID: a.picker.accounts[sel].ID,
 			}), true
 		case sel == len(a.picker.accounts):
 			// Cluster default (shared Secret) — an explicit, visible legacy choice.
-			return a.beginCreate(CreateParams{Backend: session.BackendClaudeSDK}), true
+			return a.beginCreate(CreateParams{Backend: session.BackendClaudePane}), true
 		default:
 			// ＋ add account
 			a.picker.stage = stageAddType

@@ -30,7 +30,7 @@ type backendChoice struct {
 // backendChoices are the backends a new session can run, in display order. The
 // first is the default landing selection.
 var backendChoices = []backendChoice{
-	{session.BackendClaudeSDK, "claude", "Claude Agent SDK — the native transcript UI"},
+	{session.BackendClaudePane, "claude", "Claude Code — the real interactive TUI in the pane"},
 	{session.BackendOpenCode, "opencode", "opencode serve — external opencode TUI"},
 }
 
@@ -171,7 +171,7 @@ func (a *App) pickerKeyBackend(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 			sel = 0
 		}
 		backend := backendChoices[sel].backend
-		if backend == session.BackendClaudeSDK {
+		if backend == session.BackendClaudePane {
 			return a.enterAccountStage(), true
 		}
 		return a.beginCreate(CreateParams{Backend: backend}), true

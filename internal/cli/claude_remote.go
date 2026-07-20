@@ -24,39 +24,27 @@ func newClaudeRemoteCmd() *cobra.Command {
 		modelFlag    string
 		accountFlag  string
 		worktreeFlag string
-		paneFlag     bool
 	)
 	cmd := &cobra.Command{
-		Use:   "claude [prompt]",
-		Short: "Start a new remote Claude SDK session and open the local TUI (resume with `attach`)",
+		Use:   "claude",
+		Short: "Start a new remote Claude Code session (interactive pane) and open the local TUI",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// [V26] Join all positionals so an unquoted `sandbox claude fix the
-			// build` sends the whole prompt, not just "fix" (extra args were
-			// silently dropped before).
-			prompt := strings.Join(args, " ")
-			backend := session.BackendClaudeSDK
-			if paneFlag {
-				backend = session.BackendClaudePane
-				// The pane child owns its own input loop; there is no headless
-				// turn path to deliver a positional prompt through (POST /turns
-				// answers 409), so reject it rather than silently dropping it.
-				if prompt != "" {
-					return fmt.Errorf("claude-pane sessions are interactive-only — start without a prompt and type it in the pane")
-				}
-			}
-			// claude has no opencode provider step, so the provider selector is empty.
-			return runStartSession(cmd, backend, prompt, runnerImage, reaperImage, nameFlag, modelFlag, accountFlag, worktreeFlag, "")
+			// claude-pane-first: `sandbox claude` runs the real interactive Claude
+			// Code TUI in the pod (claude-pane backend). The pane child owns its own
+			// input loop, so there is no headless first-turn path to seed a
+			// positional prompt through (POST /turns 409s) — cobra.NoArgs rejects
+			// stray args. Auth is provisioned from the host's Claude Code login
+			// (Max mode); attach/detach happen through the dashboard pane.
+			return runStartSession(cmd, session.BackendClaudePane, "", runnerImage, reaperImage, nameFlag, modelFlag, accountFlag, worktreeFlag, "")
 		},
 	}
 	cmd.Flags().StringVar(&runnerImage, "runner-image", client.DefaultRunnerImage, "runner container image")
 	cmd.Flags().StringVar(&reaperImage, "reaper-image", k8s.DefaultReaperImage, "idle-reaper container image")
 	cmd.Flags().StringVar(&nameFlag, "name", "", "custom display name for the session (overrides the auto title)")
 	cmd.Flags().StringVar(&modelFlag, "model", "", "model id/alias for the session default (e.g. opus, sonnet, haiku); empty uses the account default. Switch in-session with /model")
-	cmd.Flags().StringVar(&accountFlag, "account", "", "stored Anthropic account (id or label from `sandbox auth list`) to run the session on; empty uses the default account, or the shared cluster Secret when none are stored")
+	cmd.Flags().StringVar(&accountFlag, "account", "", "stored Anthropic account (id or label from `sandbox auth list`) to run the session on; empty uses your local Claude Code login (Max mode)")
 	cmd.Flags().StringVar(&worktreeFlag, "worktree", "auto", "per-session git worktree isolation: auto (worktree iff the project is a git repo), on (require a git repo), off (never)")
-	// Overlap-release opt-in (claude-pane-first migration step 1): the default
-	// flip — pane-first with no flag — is a later, breaking release.
-	cmd.Flags().BoolVar(&paneFlag, "pane", false, "run the real interactive Claude Code TUI in the pod (claude-pane backend): auth provisioned from your local Claude Code login (Max mode), attach/detach via the dashboard pane")
 	return cmd
 }
 
@@ -208,19 +196,6 @@ func runStartSession(cmd *cobra.Command, backendName, prompt, runnerImage, reape
 		Model:            model,
 		Worktree:         worktreeMode,
 		OpencodeProvider: opencodeProvider,
-	}
-	// Resolve the Anthropic account → per-session credential (fail closed): a
-	// requested account that can't be resolved/read is a hard error, never a
-	// silent fall-back to the shared cluster Secret. Only claude is
-	// account-aware; opencode always uses the empty selector.
-	if backendName == session.BackendClaudeSDK {
-		store, serr := newCredStore()
-		if serr != nil {
-			return serr
-		}
-		if aerr := applyAccountSelection(store, account, &opts); aerr != nil {
-			return aerr
-		}
 	}
 	// claude-pane: full credential material, resolved fail-closed before any
 	// cluster call. No --account → the host's own Claude Code login (Max mode);

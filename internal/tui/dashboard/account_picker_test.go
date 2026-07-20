@@ -172,8 +172,8 @@ func TestAccountPickerZeroAccountsClusterDefaultParity(t *testing.T) {
 		t.Fatal("zero accounts: cluster default returned no create command")
 	}
 	p := waitParams(t, ch)
-	if p.Backend != session.BackendClaudeSDK || p.AnthropicAccountID != "" {
-		t.Errorf("zero accounts cluster default: params = %+v, want {claude-sdk, \"\"}", p)
+	if p.Backend != session.BackendClaudePane || p.AnthropicAccountID != "" {
+		t.Errorf("zero accounts cluster default: params = %+v, want {claude-pane, \"\"}", p)
 	}
 }
 
@@ -245,8 +245,8 @@ func TestAccountPickerEnterThreadsAccountID(t *testing.T) {
 		t.Errorf("enter on account: screen = %v, want ScreenConnecting", app.screen)
 	}
 	p := waitParams(t, ch)
-	if p.Backend != session.BackendClaudeSDK || p.AnthropicAccountID != "acct-bbbb" {
-		t.Errorf("params = %+v, want {claude-sdk, acct-bbbb}", p)
+	if p.Backend != session.BackendClaudePane || p.AnthropicAccountID != "acct-bbbb" {
+		t.Errorf("params = %+v, want {claude-pane, acct-bbbb}", p)
 	}
 }
 
@@ -266,8 +266,8 @@ func TestAccountPickerClusterDefaultThreadsEmptyID(t *testing.T) {
 	}
 	app.Update(keyMsg("enter"))
 	p := waitParams(t, ch)
-	if p.Backend != session.BackendClaudeSDK || p.AnthropicAccountID != "" {
-		t.Errorf("cluster default: params = %+v, want {claude-sdk, \"\"}", p)
+	if p.Backend != session.BackendClaudePane || p.AnthropicAccountID != "" {
+		t.Errorf("cluster default: params = %+v, want {claude-pane, \"\"}", p)
 	}
 }
 
