@@ -151,7 +151,7 @@ new one:
 |---|---|
 | A registered runner turn is already active (any backend) | `a turn is already active; interrupt it before starting a new one` |
 | An interactive `opencode-server` turn is in flight (surfaces only as `activity: busy` via the observer, no registered turn) | `the opencode session is busy; interrupt the active turn before starting a new one` |
-| A supervise-only backend that has no `Agent` (accepts no runner turns) | `backend <name> does not accept runner turns` |
+| A supervise-only backend that has no `Agent` (accepts no runner turns: `codex-app-server`, `claude-pane`) | `backend <name> does not accept runner turns` |
 
 The first two are the authoritative `turnRejectReason` set (`runner/src/turns.ts`),
 shared verbatim by the autopilot driver's self-submit gate; the third is the
@@ -324,6 +324,50 @@ connection slot for the cap below.
 (passive and active alike). When the cap is reached, a new `/events` request is
 rejected with `429` and `{"error":"too many concurrent event streams"}` rather
 than fanning out unbounded.
+
+### `GET /sessions/:id/pane` (WebSocket)
+
+claude-pane sessions only (409 for every other backend; 404 for a wrong id;
+401 — decided **before** the id match so a bad token cannot probe which id is
+live — for a bad bearer token, all rejected pre-upgrade as plain HTTP). On
+upgrade the socket carries the interactive `claude` child's PTY:
+
+- **Binary frames** are raw PTY bytes in both directions: server→client is
+  terminal output, client→server is keyboard/paste input written to the PTY
+  master verbatim.
+- **Text frames** are JSON control messages. Currently only
+  `{"type":"resize","cols":N,"rows":N}` (positive integers; malformed frames
+  are ignored). Resize is applied to the PTY (SIGWINCH), so the child reflows.
+- **On attach** the server first sends the retained scrollback (a bounded
+  ~256 KiB ring) as one binary frame, then live output. The interactive child
+  is spawned lazily on the first attach ever (`--session-id <uuid>`) and
+  resumed (`--resume <uuid>`) on every later spawn; the uuid is persisted in
+  session.json.
+- **Single attacher.** A new attach preempts the current one: the old socket
+  is closed with code **4001**. When the interactive child exits, the attached
+  socket is closed with code **4002** (the next attach respawns via
+  `--resume`).
+- Detaching (closing the socket) leaves the child running; an attached pane
+  counts as external activity for `GET /sessions/:id/idle`.
+
+### `POST /observer/claude/hook`, `POST /observer/claude/statusline`
+
+claude-pane telemetry ingestion (absent for other backends). The pod-side
+provisioning installs Claude Code settings hooks and a statusline command
+whose helper scripts POST their stdin JSON here; the runner's observer
+translates them into normalized events on the same log/SSE channel as every
+other backend (turn boundaries, streaming assistant text, tool one-liners,
+`permission.requested`/`permission.resolved`, `usage.updated`,
+`rate_limit.updated`, `session.title`).
+
+Auth is the **pane-observer token**, not the runner token: the helper scripts
+execute inside the interactive child's environment, which is deliberately
+scrubbed of the runner bearer token, so provisioning mints a scoped token
+(persisted at `$CLAUDE_CONFIG_DIR/pane-observer/token`, 0600) accepted only
+for these two routes. The runner token is also accepted. Bodies are the raw
+hook / statusline stdin JSON; the response is always `200 {}` for an
+authenticated request (ingestion is best-effort telemetry — the hook scripts
+must never block the interactive session on a runner error).
 
 ## Planned endpoints (not yet implemented)
 
