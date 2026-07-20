@@ -1,7 +1,0 @@
-{"seq":1,"time":"2026-06-22T00:00:01Z","sessionId":"alpha","turnId":"t1","type":"turn.started","payload":{"prompt":"list the go files"}}
-{"seq":2,"time":"2026-06-22T00:00:02Z","sessionId":"alpha","turnId":"t1","type":"reasoning.completed","payload":{"content":"The user wants the Go files; I'll run ls."}}
-{"seq":3,"time":"2026-06-22T00:00:03Z","sessionId":"alpha","turnId":"t1","type":"message.completed","payload":{"role":"assistant","content":"I'll list the Go files."}}
-{"seq":4,"time":"2026-06-22T00:00:04Z","sessionId":"alpha","turnId":"t1","type":"tool.started","payload":{"tool":"Bash","toolUseId":"tu1","input":{"command":"ls *.go"}}}
-{"seq":5,"time":"2026-06-22T00:00:05Z","sessionId":"alpha","turnId":"t1","type":"tool.completed","payload":{"tool":"Bash","toolUseId":"tu1","output":"main.go\nutil.go","exitCode":0}}
-{"seq":6,"time":"2026-06-22T00:00:06Z","sessionId":"alpha","turnId":"t1","type":"message.completed","payload":{"role":"assistant","content":"There are two Go files: main.go and util.go."}}
-{"seq":7,"time":"2026-06-22T00:00:07Z","sessionId":"alpha","turnId":"t1","type":"turn.completed","payload":{"role":"assistant","content":"Done."}}

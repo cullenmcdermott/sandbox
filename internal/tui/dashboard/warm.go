@@ -272,12 +272,6 @@ func (m *Model) markWarm(id session.ID) {
 	}
 }
 
-// isWarm reports whether a session is in the warm set (has a live observer).
-func (m *Model) isWarm(id session.ID) bool {
-	_, ok := m.warmSet[id]
-	return ok
-}
-
 // dropRetained removes a session from the warm set (warm→cold). Called when a
 // pod suspends, is deleted, or its observer stream is exhausted.
 func (m *Model) dropRetained(id session.ID) {

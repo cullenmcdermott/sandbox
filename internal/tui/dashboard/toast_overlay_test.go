@@ -16,7 +16,7 @@ import (
 // toast was invisible behind the chat modal / connecting splash — exactly when a
 // background session needs attention. withToast now overlays it at the App level.
 func TestToastCompositesOverModalScreen(t *testing.T) {
-	a := &App{screen: ScreenTranscript, dashboard: New(nil), width: 80, height: 24}
+	a := &App{screen: ScreenFeed, dashboard: New(nil), width: 80, height: 24}
 	a.dashboard.width, a.dashboard.height = 80, 24
 	a.dashboard.toast = &notification{
 		title:     "BgSess",
@@ -44,7 +44,7 @@ func TestToastCompositesOverModalScreen(t *testing.T) {
 // TestWithToastNoOpWithoutToast keeps the no-toast path byte-identical so the
 // OSC-signal frame assertions (and every non-toast frame) are unaffected.
 func TestWithToastNoOpWithoutToast(t *testing.T) {
-	a := &App{screen: ScreenTranscript, dashboard: New(nil), width: 80, height: 24}
+	a := &App{screen: ScreenFeed, dashboard: New(nil), width: 80, height: 24}
 	base := tea.NewView("hello")
 	if got := a.withToast(base).Content; got != "hello" {
 		t.Fatalf("withToast with no toast changed content: %q", got)
@@ -69,7 +69,7 @@ func TestWithToastSuppressedOnBareDashboard(t *testing.T) {
 // prepended spaces to only line 0, leaving the body + bottom border at column 0
 // while the top border sat at the right.
 func TestToastNotSheared(t *testing.T) {
-	a := &App{screen: ScreenTranscript, dashboard: New(nil), width: 80, height: 24}
+	a := &App{screen: ScreenFeed, dashboard: New(nil), width: 80, height: 24}
 	a.dashboard.width, a.dashboard.height = 80, 24
 	a.dashboard.toast = &notification{title: "BgSess", note: "claude · proj", status: StatusWaiting, createdAt: time.Now()}
 

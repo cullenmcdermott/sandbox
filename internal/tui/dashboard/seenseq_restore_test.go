@@ -55,29 +55,6 @@ func TestApplySeedCarriesLiveStateForward(t *testing.T) {
 	}
 }
 
-// §1a review fix (detach inflation): detaching syncs the dashboard cursor
-// forward to the transcript's position and marks it all seen, so the restarted
-// background stream doesn't replay the just-watched events into a phantom unread
-// badge.
-func TestSyncCursorFromTranscriptOnDetach(t *testing.T) {
-	m := New(nil)
-	s := SessionFromState(session.State{ID: "s1", Status: session.StatusRunning})
-	s.lastSeq = 100 // frozen while attached (transcript owned the live stream)
-	s.seenSeq = 100
-	m.sessions = []Session{s}
-
-	// The transcript consumed up to seq 130 while the user watched live.
-	m.syncCursorFromTranscript("s1", 130)
-
-	got := m.sessionByID("s1")
-	if got.lastSeq != 130 {
-		t.Fatalf("detach did not advance lastSeq to the transcript position: %d, want 130", got.lastSeq)
-	}
-	if got.seenSeq != 130 || got.Unread() != 0 {
-		t.Fatalf("detach left a phantom unread badge: seenSeq=%d Unread=%d, want 130/0", got.seenSeq, got.Unread())
-	}
-}
-
 // Cold hydrate from a snapshot must treat all restored history as already-seen,
 // so a relaunch shows Unread()==0 immediately (silent restore), for both a
 // running pod (via applySnapshot) and a suspended pod (which skips it).

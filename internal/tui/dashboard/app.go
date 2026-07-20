@@ -11,8 +11,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	"github.com/charmbracelet/x/ansi"
-
 	"github.com/cullenmcdermott/sandbox/internal/session"
 	"github.com/cullenmcdermott/sandbox/tui/terminal"
 	"github.com/cullenmcdermott/sandbox/tui/theme"
@@ -24,8 +22,6 @@ type Screen int
 const (
 	// ScreenDashboard is the default command-center list+detail view.
 	ScreenDashboard Screen = iota
-	// ScreenTranscript is the per-session transcript view (Phase B).
-	ScreenTranscript
 	// ScreenConnecting is a transient screen shown while the connector runs.
 	ScreenConnecting
 	// ScreenExternal hands the terminal to an external full-screen client
@@ -56,9 +52,9 @@ type viewFeedMsg struct {
 	sess Session
 }
 
-// attachReadyMsg is returned by the connector Cmd on success. The App
-// transitions to the correct pane (transcript for claude-sdk, external PTY for
-// opencode-server) and initialises it.
+// attachReadyMsg is returned by the connector Cmd on success. The App routes
+// every attach to an ExternalPane (a local child process for opencode, the
+// WebSocket pane transport for claude-pane) and initialises it.
 type attachReadyMsg struct {
 	sess          Session
 	client        RunnerClient
@@ -96,10 +92,6 @@ type attachFailedMsg struct {
 	sess session.Ref
 	err  error
 }
-
-// detachMsg is sent by the transcript model when the user presses esc. The
-// App transitions back to ScreenDashboard with state intact.
-type detachMsg struct{}
 
 // externalPaneFinishedMsg is returned when the opencode attach subprocess
 // exits, so the App can return to the dashboard.
@@ -945,10 +937,8 @@ func (a *App) updateExternalScreen(msg tea.Msg, dashCmd tea.Cmd) (tea.Model, tea
 // leaderJump completes an external-pane leader g/k jump. With a target session it
 // minimizes the current pane (screen → dashboard; the child keeps running, and
 // attachReadyMsg's O1 branch closes it only if a different session's pane comes
-// up) and emits an attachMsg for the target — mirroring the transcript ctrl+g
-// path (app.go, ScreenTranscript) minus its transcript-only park/live-SSE work.
-// With nil (nothing needs attention) it stays on the external screen, already
-// disarmed by the caller.
+// up) and emits an attachMsg for the target. With nil (nothing needs attention)
+// it stays on the external screen, already disarmed by the caller.
 func (a *App) leaderJump(dashCmd tea.Cmd, target *Session) tea.Cmd {
 	if target == nil {
 		return dashCmd
@@ -1085,32 +1075,6 @@ func (a *App) screenView() tea.View {
 	default:
 		return a.dashboard.View()
 	}
-}
-
-// dimBackdrop ghosts content behind a modal: it strips each line's colors and
-// re-renders them as dim text on the flat page background, normalized to a solid
-// w×h block — recognizable but recessed. Used by the reconnect splash to keep
-// the cached conversation visible (dimmed) behind the stepper. The transcript
-// modal does NOT use this; it uses opaqueBackdrop (a solid fill) so nothing
-// shows through.
-func dimBackdrop(bg string, w, h int) string {
-	dim := lipgloss.NewStyle().Foreground(theme.TextDim).Background(theme.Page)
-	lines := strings.Split(bg, "\n")
-	out := make([]string, h)
-	for i := range out {
-		var raw string
-		if i < len(lines) {
-			raw = ansi.Strip(lines[i])
-		}
-		if lipgloss.Width(raw) > w {
-			raw = ansi.Truncate(raw, w, "")
-		}
-		if pad := w - lipgloss.Width(raw); pad > 0 {
-			raw += strings.Repeat(" ", pad)
-		}
-		out[i] = dim.Render(raw)
-	}
-	return strings.Join(out, "\n")
 }
 
 // solidBlock returns a w×h block of spaces with the given background color.

@@ -13,9 +13,8 @@ import (
 )
 
 const (
-	rowEnterDur         = 180 * time.Millisecond // new row fades in
-	statusFlashDur      = 300 * time.Millisecond // brief bg pulse when a row changes status
-	permissionAppearDur = 150 * time.Millisecond // gold permission box fades in
+	rowEnterDur    = 180 * time.Millisecond // new row fades in
+	statusFlashDur = 300 * time.Millisecond // brief bg pulse when a row changes status
 )
 
 // rowEnter returns the eased 0→1 reveal fraction for a row that first appeared
@@ -55,12 +54,4 @@ func flashBg(base, accent color.Color, since time.Time) (color.Color, bool) {
 		return nil, false
 	}
 	return anim.LerpColor(base, accent, f*0.4), true
-}
-
-// permissionAppear returns the eased 0→1 reveal fraction for a permission box
-// that became pending at `since` (gold box fades/expands in over
-// permissionAppearDur), collapsing to 1 immediately under reduce-motion.
-func permissionAppear(since time.Time) float64 {
-	tr := anim.Transition{Total: permissionAppearDur}
-	return tr.At(nowFunc().Sub(since))
 }

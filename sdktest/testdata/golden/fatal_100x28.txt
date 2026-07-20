@@ -1,2 +1,0 @@
-> run the migration
-✗ runner exited (code 137) — OOMKilled

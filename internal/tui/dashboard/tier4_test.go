@@ -413,7 +413,7 @@ func TestNoMatchCopyWiredWhenFiltered(t *testing.T) {
 
 // ORACLE: a fake Connector that calls onStage(StageCheck..StageAttach) then
 // succeeds must advance a.connectStage through all stages and eventually
-// transition to ScreenTranscript — proving the U1 channel-streaming path is
+// leave ScreenConnecting — proving the U1 channel-streaming path is
 // wired end-to-end. [U1]
 func TestConnectStageProgressAndAttach(t *testing.T) {
 	t.Setenv("SANDBOX_REDUCE_MOTION", "1")

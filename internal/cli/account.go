@@ -4,15 +4,13 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/cullenmcdermott/sandbox/client"
 	"github.com/cullenmcdermott/sandbox/client/cred"
 )
 
-// account.go — thin CLI shims over the public SDK's account API (client/cred +
-// client.CreateOptions.UseAnthropicAccount/SelectAnthropicAccount). The logic
-// lives in the SDK so library consumers get identical semantics; this file only
-// opens the store and decorates SDK sentinel errors with `sandbox`-command
-// remediation hints.
+// account.go — thin CLI shims over the public SDK's account API (client/cred).
+// The logic lives in the SDK so library consumers get identical semantics; this
+// file only opens the store and decorates SDK sentinel errors with
+// `sandbox`-command remediation hints.
 
 // newCredStore builds the platform-appropriate multi-account credential store
 // (macOS Keychain, else per-account files). It is the single entry point the
@@ -34,18 +32,4 @@ func resolveAccount(accounts []cred.Account, selector string) (cred.Account, err
 		return cred.Account{}, fmt.Errorf("%w; run `sandbox auth login` first", err)
 	}
 	return acct, err
-}
-
-// applyAccountSelection applies `--account` semantics to opts via the SDK's
-// SelectAnthropicAccount (selector | default | legacy shared-Secret; fail
-// closed once an account is in play), decorating its sentinels with CLI hints.
-func applyAccountSelection(store cred.Store, selector string, opts *client.CreateOptions) error {
-	err := opts.SelectAnthropicAccount(store, selector)
-	switch {
-	case errors.Is(err, client.ErrNoDefaultAnthropicAccount):
-		return fmt.Errorf("%w; pass --account <id|label> or set one with `sandbox auth default <id>`", err)
-	case errors.Is(err, cred.ErrNoAccounts):
-		return fmt.Errorf("%w; run `sandbox auth login` first", err)
-	}
-	return err
 }
