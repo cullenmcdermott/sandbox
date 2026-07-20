@@ -17,6 +17,7 @@ import { warmupOpencodeSession } from './opencode-turn.js';
 import { startOpencodeObserver, type OpencodeObserver } from './opencode-observer.js';
 import { materializeCodexAuth, startCodexSupervisor, type CodexSupervisor } from './codex.js';
 import { startCodexObserver, type CodexObserver } from './codex-observer.js';
+import { startClaudePaneSupervisor, type ClaudePaneSupervisor } from './claude-pane.js';
 import { startBootTrace } from './trace.js';
 
 // Seconds before SIGKILL, reported in session.terminating so the TUI can show
@@ -37,6 +38,10 @@ let observer: OpencodeObserver | null = null;
 // supervisor/observer pair above).
 let codex: CodexSupervisor | null = null;
 let codexObserver: CodexObserver | null = null;
+
+// Set for claude-pane sessions: the runner-owned interactive `claude` PTY
+// supervisor, spawned lazily on the first pane attach (claude-pane.ts).
+let claudePane: ClaudePaneSupervisor | null = null;
 
 /**
  * Graceful shutdown on SIGTERM (node drain/reboot, suspend, eviction). Warn
@@ -60,6 +65,10 @@ function shutdown(signal: string): void {
   // doesn't outlive us. Both are awaited in the Promise.all below.
   const codexStopped = codex ? codex.stop() : Promise.resolve();
   const codexObserverStopped = codexObserver ? codexObserver.stop() : Promise.resolve();
+  // Kill the interactive claude-pane child now so it isn't orphaned past the pod
+  // grace window (stop() is synchronous — a PTY kill needs no drain). The pane
+  // uuid is persisted, so the next boot respawns with --resume.
+  claudePane?.stop();
 
   let turnsAborted = 0;
   try {
@@ -190,17 +199,31 @@ function main(): void {
     // Owns its own ws reconnect loop, so it must not block boot on server readiness.
     codexObserver = startCodexObserver();
   }
+
+  // claude-pane sessions: the runner owns an interactive `claude` PTY child that
+  // the CLI drives over the GET /sessions/:id/pane WebSocket. The supervisor is
+  // built here (registering its idle-activity probe) but spawns the child lazily
+  // on the first attach, so a detached pod runs no idle TUI. selectAgent returns
+  // null for this backend, so the /turns path 409s like any supervise-only one.
+  if (reg.state.backend === 'claude-pane') {
+    claudePane = startClaudePaneSupervisor(cfg);
+  }
   // boot_prep covers everything between registry init and the listen call:
   // orphaned-turn terminals, the session.started emit, agent/autopilot setup,
   // and (opencode) supervisor/observer spawn initiation.
   boot.phase('boot_prep');
 
-  startServer(agent, autopilot, () => {
-    // Closes when the socket is accepting (the listen callback), so boot.listen
-    // covers the real bind, and boot.total is boot-start → ready-to-serve.
-    boot.phase('listen');
-    boot.done();
-  });
+  startServer(
+    agent,
+    autopilot,
+    () => {
+      // Closes when the socket is accepting (the listen callback), so boot.listen
+      // covers the real bind, and boot.total is boot-start → ready-to-serve.
+      boot.phase('listen');
+      boot.done();
+    },
+    claudePane,
+  );
 }
 
 main();

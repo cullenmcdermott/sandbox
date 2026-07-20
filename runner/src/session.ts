@@ -179,6 +179,7 @@ export function reviveSessionState(parsed: Partial<SessionState>, cfg: RunnerCon
     last_activity: parsed.last_activity ?? new Date().toISOString(),
     ...(parsed.model ? { model: parsed.model } : {}),
     ...(parsed.title_generated ? { title_generated: true } : {}),
+    ...(parsed.claude_pane_session_id ? { claude_pane_session_id: parsed.claude_pane_session_id } : {}),
   };
 }
 
@@ -479,6 +480,23 @@ class SessionRegistry {
    * armed for this session. */
   getAutopilot(): AutopilotSpec | undefined {
     return this.state.autopilot;
+  }
+
+  /** The persisted interactive-pane UUID (claude-pane backend), or '' when the
+   * session has never spawned a pane. Read by the claude-pane supervisor to
+   * decide first-spawn (`--session-id`) vs resume (`--resume`). */
+  getClaudePaneSession(): string {
+    return this.state.claude_pane_session_id ?? '';
+  }
+
+  /** Persist a freshly generated interactive-pane UUID (the claude-pane analogue
+   * of setClaudeSession). Written once, on the first pane spawn ever; no-op when
+   * empty or unchanged so re-attaches don't churn session.json. */
+  setClaudePaneSession(claudePaneSessionId: string): void {
+    if (!claudePaneSessionId || this.state.claude_pane_session_id === claudePaneSessionId) return;
+    this.state.claude_pane_session_id = claudePaneSessionId;
+    this.state.last_activity = new Date().toISOString();
+    saveSessionState(this.state);
   }
 
   /** Persist the one-shot auto-title guard (title_generated = true) (T6). */

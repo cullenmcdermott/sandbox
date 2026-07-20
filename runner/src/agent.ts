@@ -57,13 +57,14 @@ export interface Agent {
 // `opencode serve` over its HTTP API (opencode-turn.ts) — additive to the
 // interactive `opencode attach` path, which still talks to the same server.
 //
-// codex-app-server is SUPERVISE-ONLY: the runner supervises a child `codex
-// app-server` and a passive metrics observer (codex.ts / codex-observer.ts), but
-// codex turns are driven by the interactive `codex` TUI over the app-server's
-// loopback WebSocket, never through the runner's turn path — so it returns null.
-// server.ts guards a null agent (POST /turns 409s) exactly as for any future
-// supervise-only backend. An unknown backend throws so the runner fails fast at
-// startup rather than at first turn.
+// codex-app-server and claude-pane are SUPERVISE-ONLY: the runner supervises the
+// backend's own interactive process (codex.ts / claude-pane.ts) plus, for codex,
+// a passive metrics observer, but turns are driven by the interactive client
+// (the `codex` TUI over the app-server's loopback WebSocket, or the `claude` PTY
+// over GET /sessions/:id/pane), never through the runner's turn path — so both
+// return null. server.ts guards a null agent (POST /turns 409s) exactly as for
+// any future supervise-only backend. An unknown backend throws so the runner
+// fails fast at startup rather than at first turn.
 export function selectAgent(backend: string): Agent | null {
   switch (backend) {
     case 'claude-sdk':
@@ -72,9 +73,15 @@ export function selectAgent(backend: string): Agent | null {
       return opencodeAgent;
     case 'codex-app-server':
       return null;
+    case 'claude-pane':
+      // Supervise-only, like codex-app-server: the runner owns an interactive
+      // `claude` PTY child (claude-pane.ts) that the CLI drives over a WebSocket
+      // pane; turns/permissions are the interactive child's own, never the
+      // runner's turn path — so POST /turns 409s on the null agent.
+      return null;
     default:
       throw new Error(
-        `unsupported backend: ${backend} (known: claude-sdk, opencode-server, codex-app-server)`,
+        `unsupported backend: ${backend} (known: claude-sdk, opencode-server, codex-app-server, claude-pane)`,
       );
   }
 }

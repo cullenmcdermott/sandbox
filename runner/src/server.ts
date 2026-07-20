@@ -7,7 +7,10 @@
 // a wrong id returns 404 rather than cross-session leakage.
 
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
+import { type Duplex } from 'node:stream';
+import { WebSocketServer, type WebSocket, type RawData } from 'ws';
 import { readBody, BodyTooLargeError, InvalidJsonError } from './httputil.js';
+import { type ClaudePaneSupervisor, type PaneSocket } from './claude-pane.js';
 import { appendEvent, attachSseClient, lastSeq, sseTotalClientCount, MAX_SSE_CLIENTS } from './events.js';
 import { getRegistry, loadConfig, toStatusResponse } from './session.js';
 import { PORT, PROTOCOL_VERSION, type PermissionRequestBody, type TurnRequestBody, type TurnResponse, type ExecRequestBody, type AutopilotRequestBody } from './types.js';
@@ -176,6 +179,144 @@ export function validateAutopilotBody(
   };
 }
 
+// --- WebSocket pane (claude-pane backend) ---------------------------------
+
+/** The outcome of authorizing a `GET /sessions/:id/pane` WebSocket upgrade. */
+export type PaneUpgradeOutcome =
+  | { ok: true }
+  | { ok: false; status: 401 | 404 | 409; message: string };
+
+/**
+ * Decide whether a WebSocket upgrade to `path` may proceed. Rules, in order:
+ *   - the path must be exactly `/sessions/:id/pane` (else 404);
+ *   - the bearer token must be valid (401) — checked BEFORE the session-id match
+ *     so a bad token can't probe which session id is live;
+ *   - the id must match the configured session (404);
+ *   - the backend must be `claude-pane` (409) — no other backend has a pane.
+ * Pure/exported so the authorization is unit-testable without a socket.
+ */
+export function evaluatePaneUpgrade(
+  path: string,
+  sid: string,
+  backend: string,
+  authed: boolean,
+): PaneUpgradeOutcome {
+  const m = /^\/sessions\/([^/]+)\/pane$/.exec(path);
+  if (!m) return { ok: false, status: 404, message: 'not found' };
+  if (!authed) return { ok: false, status: 401, message: 'unauthorized' };
+  if (m[1] !== sid) return { ok: false, status: 404, message: 'session not found' };
+  if (backend !== 'claude-pane') {
+    return { ok: false, status: 409, message: `backend ${backend} has no interactive pane` };
+  }
+  return { ok: true };
+}
+
+/** Parse a pane text control frame. Currently only a resize:
+ * `{"type":"resize","cols":N,"rows":N}`. Returns null for anything invalid so a
+ * malformed frame is ignored rather than throwing on the socket. Pure/exported. */
+export function parsePaneControl(text: string): { type: 'resize'; cols: number; rows: number } | null {
+  let msg: unknown;
+  try {
+    msg = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!msg || typeof msg !== 'object') return null;
+  const m = msg as Record<string, unknown>;
+  if (m.type !== 'resize') return null;
+  const cols = m.cols;
+  const rows = m.rows;
+  if (typeof cols !== 'number' || typeof rows !== 'number') return null;
+  if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols <= 0 || rows <= 0) return null;
+  return { type: 'resize', cols, rows };
+}
+
+/** Coalesce a `ws` RawData frame into a single Buffer. */
+function rawToBuffer(data: RawData): Buffer {
+  if (Array.isArray(data)) return Buffer.concat(data);
+  if (Buffer.isBuffer(data)) return data;
+  return Buffer.from(data as ArrayBuffer);
+}
+
+/** Adapt a `ws` WebSocket to the supervisor's minimal PaneSocket seam. Sends are
+ * always binary frames (raw PTY bytes); send/close are guarded so a closed
+ * socket never throws into the supervisor. */
+function paneSocketAdapter(ws: WebSocket): PaneSocket {
+  return {
+    send(data: Buffer): void {
+      try {
+        ws.send(data, { binary: true });
+      } catch {
+        /* socket closing */
+      }
+    },
+    close(code?: number, reason?: string): void {
+      try {
+        ws.close(code, reason);
+      } catch {
+        /* already closed */
+      }
+    },
+  };
+}
+
+/**
+ * Wire the `GET /sessions/:id/pane` WebSocket endpoint onto `server` for a
+ * claude-pane session. Runs in noServer mode: the http server's 'upgrade' event
+ * authorizes the request (evaluatePaneUpgrade) and either rejects it with a raw
+ * HTTP status (before any upgrade) or hands the socket to `ws` and attaches it to
+ * the supervisor. Binary frames are raw PTY bytes (both directions); text frames
+ * are JSON control (resize). Only wired when a pane supervisor is present.
+ */
+function attachPaneUpgrade(server: Server, cfg: ReturnType<typeof loadConfig>, pane: ClaudePaneSupervisor): void {
+  const wss = new WebSocketServer({ noServer: true });
+  server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+    const url = new URL(req.url ?? '/', `http://localhost:${PORT}`);
+    const outcome = evaluatePaneUpgrade(url.pathname, cfg.sessionId, cfg.backend, authOk(req));
+    if (!outcome.ok) {
+      // Reject before upgrading: write a minimal HTTP response and destroy.
+      socket.write(
+        `HTTP/1.1 ${outcome.status} ${httpStatusText(outcome.status)}\r\n` +
+          'Connection: close\r\nContent-Length: 0\r\n\r\n',
+      );
+      socket.destroy();
+      return;
+    }
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      const adapter = paneSocketAdapter(ws);
+      pane.attach(adapter);
+      ws.on('message', (data: RawData, isBinary: boolean) => {
+        if (isBinary) {
+          pane.write(rawToBuffer(data));
+          return;
+        }
+        const control = parsePaneControl(rawToBuffer(data).toString('utf8'));
+        if (control) pane.resize(control.cols, control.rows);
+      });
+      const onGone = (): void => {
+        // Only clear if we're still the active socket — a later attach may have
+        // preempted us (the supervisor already closed us with 4001), and its own
+        // close must not detach the newcomer.
+        if (pane.current() === adapter) pane.detachAll();
+      };
+      ws.on('close', onGone);
+      ws.on('error', onGone);
+    });
+  });
+}
+
+/** Reason phrase for the pane-upgrade reject statuses. */
+function httpStatusText(status: 401 | 404 | 409): string {
+  switch (status) {
+    case 401:
+      return 'Unauthorized';
+    case 404:
+      return 'Not Found';
+    case 409:
+      return 'Conflict';
+  }
+}
+
 // --- Router ---------------------------------------------------------------
 
 /**
@@ -190,8 +331,9 @@ export function createRunnerServer(
   cfg: ReturnType<typeof loadConfig>,
   agent: Agent | null,
   autopilot: Autopilot | null = null,
+  pane: ClaudePaneSupervisor | null = null,
 ): Server {
-  return createServer((req, res) => {
+  const server = createServer((req, res) => {
     handle(req, res, cfg, agent, autopilot).catch((err) => {
       const message = err instanceof Error ? err.message : String(err);
       // B9: readBody's typed rejections are client faults, not server bugs — map
@@ -205,15 +347,21 @@ export function createRunnerServer(
       if (!res.writableEnded) res.end(JSON.stringify({ error: message }));
     });
   });
+  // claude-pane sessions add a WebSocket pane endpoint on the same server (the
+  // interactive `claude` PTY, driven over GET /sessions/:id/pane). No-op for
+  // every other backend (pane is null).
+  if (pane) attachPaneUpgrade(server, cfg, pane);
+  return server;
 }
 
 export function startServer(
   agent: Agent | null,
   autopilot: Autopilot | null = null,
   onListening?: () => void,
+  pane: ClaudePaneSupervisor | null = null,
 ): void {
   const cfg = loadConfig();
-  const server = createRunnerServer(cfg, agent, autopilot);
+  const server = createRunnerServer(cfg, agent, autopilot, pane);
   server.listen(PORT, () => {
     console.log(`runner listening on :${PORT} (session=${cfg.sessionId})`);
     // Fires once the socket is actually accepting, not when listen() was

@@ -69,6 +69,13 @@ export interface SessionState {
    * across pod restarts instead of re-creating a fresh session each boot.
    * Empty until the first opencode turn creates one. */
   opencode_session_id: string;
+  /** Persisted UUID for the interactive `claude-pane` backend (claude-pane.ts).
+   * Generated ONCE, on the first pane spawn ever (passed as `--session-id`), and
+   * reused as `--resume` on every later spawn so the interactive conversation
+   * continues across child exits and pod restarts. Absent/empty until the first
+   * pane attach; unused by every other backend. Additive-optional field (no
+   * STATE_VERSION bump). */
+  claude_pane_session_id?: string;
   project_path: string;
   status: 'idle' | 'busy' | 'error';
   last_turn_id: string;
