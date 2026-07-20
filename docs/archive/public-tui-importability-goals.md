@@ -1,6 +1,14 @@
 # Goal: public TUI packages sufficient to reproduce the Sandbox transcript
 
-Status: planning
+Status: superseded (2026-07-20, claude-pane-first). The goal WAS reached —
+T1–T8 driven to green 2026-07-18 (`just check` green, no `tui/` package
+importing `internal/`, external-consumer conformance via
+`TestTranscriptFromPublicEvents`) — but claude-pane-first then deleted the
+transcript surface it reproduced: `tui/chat`, `tui/transcript`, and
+`cmd/chatdemo` are gone (the real Claude Code TUI now renders in-pane). The
+surviving public packages this drive produced or hardened — `tui/composer`,
+`tui/picker`, `tui/chrome`, plus kit/list/anim/theme/terminal — remain on
+main. Kept as the record of that work; contents below are as-of-2026-07-18.
 Owner: driver agent (run via `/goal`, see the prompt at the bottom of this file)
 
 ## Objective (unchanged from the original handoff)

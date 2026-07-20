@@ -1,5 +1,8 @@
 # Chat UX overhaul — implementation plan
 
+Status: implemented (2026-07, done log); superseded 2026-07-20 — the custom
+chat/transcript surface this plan polished was deleted by claude-pane-first.
+
 One plan covering the chat/transcript work we scoped together. Three independent
 workstreams; **B is the highest-impact and lowest-effort** (a real correctness
 bug — the model has been losing conversation history), so it should land first.

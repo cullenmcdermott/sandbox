@@ -739,7 +739,7 @@ naming-break, and Shell items each stand alone.
   `cmd/chatdemo` is the public-package-only runnable example. The higher-level
   interactive layer is now DONE too — see the next item.
 - [x] **Public TUI importability goal COMPLETE — done 2026-07-18**: drove
-  `docs/public-tui-importability-goals.md` (T1–T8) to green. Added the
+  `docs/archive/public-tui-importability-goals.md` (T1–T8) to green. Added the
   `tui/chat` turn-footer item (`FooterItem`/`TurnFooter`) + item-level goldens
   (streaming/fatal/empty) + list scenario tests (resize/append-while-scrolled),
   then the higher-level public packages: `tui/transcript` (the `Apply(client.Event)`

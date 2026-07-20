@@ -1,6 +1,11 @@
 # ADR: Server-side autopilot loop (runner-owned driver)
 
-- **Status:** IMPLEMENTED 2026-07-11 (runner half 9943f59, client/TUI half 21a709f; maintainer sign-off 2026-07-07) — all open items
+- **Status:** SUPERSEDED 2026-07-20 (claude-pane-first) — the entire autopilot
+  feature was deleted with the SDK turn engine; pane backends have no
+  programmatic turns for a driver to submit. The revival path is a headless
+  `claude -p --resume` loop (TODO §1e watch item). Previously: IMPLEMENTED
+  2026-07-11 (runner half 9943f59, client/TUI half 21a709f; maintainer
+  sign-off 2026-07-07) — all open items
   resolved as proposed in `docs/archive/decision-proposals-2026-07-06.md` §1:
   endpoint shape (a) `PUT/DELETE /sessions/:id/autopilot`; `max_iterations`
   default **50** (always enforced), `token_budget` optional but shipped in

@@ -1,11 +1,16 @@
 # TUI premium-feel program — design
 
-Status: draft (awaiting maintainer sign-off)
+Status: draft (awaiting maintainer sign-off); §B (transcript depth) OBSOLETE
+as of 2026-07-20 — claude-pane-first deleted the custom transcript renderer,
+so skip §B; the remaining workstreams target surfaces that still exist
+(dashboard modals, session list, feed, theming). Backlog now lives in
+TODO §2e ("dashboard premium-feel backlog").
 Date: 2026-07-07
 Provenance: five-agent comparative study of Charm Crush, ultraviolet, gh-dash,
 huh, and the iTerm2-Color-Schemes collection vs. our TUI
-(`internal/tui/dashboard`, `tui/*`). Extends the §2 "feels like Claude Code"
-program in `TODO.md` — same goal (premium feel), new source material.
+(`internal/tui/dashboard`, `tui/*`). Extended the (now-closed) §2 "feels like
+Claude Code" program in `TODO.md` — same goal (premium feel), new source
+material.
 
 ## 0. License ground rules
 

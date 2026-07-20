@@ -1,10 +1,21 @@
 # Public API & importability plan
 
-Status: **TUI-importability track implemented** (2026-07-18); auth/device-code +
-full-dashboard tracks still draft, awaiting maintainer sign-off on sequencing.
+Status: **chat sections superseded** (2026-07-20, claude-pane-first);
+auth/device-code + full-dashboard tracks still draft, awaiting maintainer
+sign-off on sequencing.
+
+> **Update (2026-07-20):** claude-pane-first deleted the chat/transcript stack
+> this plan promoted — `tui/chat`, `tui/transcript`, and `cmd/chatdemo` are
+> gone (the real Claude Code TUI renders in-pane; see TODO §3). Sections 1
+> (chat construction), 2 (transcript), and the chat-specific halves of 3/5 are
+> **historical**; `tui/composer`, `tui/picker`, `tui/chrome`, and the
+> kit/list/anim/theme/terminal base remain public. Section 6 (**device-code
+> auth**) is the live remainder. Section 7's [V8] event-constant list predates
+> the protocolVersion-3 pruning (`tool.progress` no longer exists) — re-derive
+> from `schema/events.json` before acting on it.
 
 > **Update (2026-07-18):** the reusable **chat/transcript TUI** track is DONE and
-> verified by `docs/public-tui-importability-goals.md` (its Convergence Gate is
+> verified by `docs/archive/public-tui-importability-goals.md` (its Convergence Gate is
 > green — `just check` passes, no `tui/` package imports `internal/`, and an
 > external consumer builds + drives the transcript from public `client.Event`
 > values via `TestTranscriptFromPublicEvents`). The public packages now cover the

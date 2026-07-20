@@ -1,5 +1,8 @@
 # TUI chat fixes — work-in-progress plan & resume note
 
+Status: implemented (merged to main ba37a93); superseded 2026-07-20 — the
+chat/transcript surface these fixes targeted was deleted by claude-pane-first.
+
 Branch: `perf/transcript-load-typing-reconnect`. Captured 2026-06-23.
 
 Nine reported TUI/dashboard issues, fully diagnosed (root cause + file:line +
