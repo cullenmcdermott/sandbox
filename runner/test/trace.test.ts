@@ -8,8 +8,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { startTurnTrace, traceTurnLink, traceIDFromHeader, startBootTrace } from '../src/trace.js';
-import { isAssistantTextDelta } from '../src/claude.js';
-import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 
 // fakeClock returns a now() that advances by `step` ms on each call, so elapsed
 // times in the emitted lines are deterministic.
@@ -122,24 +120,4 @@ test('startBootTrace: phases are deltas from the previous mark; total is cumulat
     'trace: boot boot.session_state 10ms',
     'trace: boot boot.total 30ms',
   ]);
-});
-
-test('isAssistantTextDelta: true only for a text_delta stream_event', () => {
-  const textDelta = {
-    type: 'stream_event',
-    event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'hi' } },
-  } as unknown as SDKMessage;
-  assert.equal(isAssistantTextDelta(textDelta), true);
-
-  const thinkingDelta = {
-    type: 'stream_event',
-    event: { type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: 'x' } },
-  } as unknown as SDKMessage;
-  assert.equal(isAssistantTextDelta(thinkingDelta), false);
-
-  const initMsg = { type: 'system', subtype: 'init' } as unknown as SDKMessage;
-  assert.equal(isAssistantTextDelta(initMsg), false);
-
-  const assistantMsg = { type: 'assistant' } as unknown as SDKMessage;
-  assert.equal(isAssistantTextDelta(assistantMsg), false);
 });

@@ -8,7 +8,7 @@
 
 import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { AutopilotSpec, EventType, IdleStatus, SessionState, StatusResponse } from './types.js';
+import type { EventType, IdleStatus, SessionState, StatusResponse } from './types.js';
 import { PROTOCOL_VERSION, SESSION_JSON_PATH } from './types.js';
 import { appendEvent, sseClientCount, setClientsChangedHandler, maxTurnNumber, hasTurnTerminal } from './events.js';
 
@@ -282,16 +282,6 @@ export function saveSessionState(state: SessionState): void {
   saveSessionStateTo(state, sessionJsonPath);
 }
 
-/** True when `backend` has a runner-side autopilot driver (the server-side
- * /loop-/goal loop). Claude-backend-first: only the Claude SDK backend runs the
- * driver in-runner today (it lives in the SDK turn loop). opencode-server is
- * driven through an external pane and supervise-only has no turn path, so both
- * report false and the TUI keeps its local tea.Tick driver. This is the single
- * source for the /status capability bit and the PUT/DELETE endpoint's gate. */
-export function backendHasAutopilot(backend: string): boolean {
-  return backend === 'claude-sdk';
-}
-
 export function toStatusResponse(state: SessionState, activeTurnId = ''): StatusResponse {
   return {
     id: state.sandbox_session_id,
@@ -304,25 +294,14 @@ export function toStatusResponse(state: SessionState, activeTurnId = ''): Status
     lastActivity: state.last_activity,
     ...(state.model ? { model: state.model } : {}),
     protocolVersion: PROTOCOL_VERSION,
-    capabilities: { autopilot: backendHasAutopilot(state.backend) },
+    // The runner-side autopilot driver was removed with claude-pane-first; no
+    // backend advertises it. The field stays in the /status contract (false) so
+    // an older Go client still decodes it.
+    capabilities: { autopilot: false },
   };
 }
 
 // --- Turn + permission registry -------------------------------------------
-
-/** A pending permission request awaiting an HTTP POST resolution. */
-export interface PendingPermission {
-  permissionId: string;
-  tool: string;
-  input: Record<string, unknown>;
-  // B8: returns true when THIS call won the first-write-wins race (the canUseTool
-  // closure was still pending and is now resolved), false when the closure had
-  // already settled (auto-denied by deadline / abort / detach) so this resolution
-  // was a no-op. The server maps false → 409 rather than lying resolved:true. The
-  // `void` arm keeps pre-existing test doubles that return nothing compiling; the
-  // real callback (claude.ts makeCanUseTool) always returns a boolean.
-  resolve: (allow: boolean, scope: string, editedInput?: string) => boolean | void;
-}
 
 /** In-flight turn bookkeeping. */
 export interface ActiveTurn {
@@ -334,7 +313,6 @@ export interface ActiveTurn {
 class SessionRegistry {
   state: SessionState;
   readonly activeTurns = new Map<string, ActiveTurn>();
-  readonly pendingPermissions = new Map<string, PendingPermission>();
 
   // RFC3339 instant the session last became idle (turn-done AND no attached
   // clients), or null when active. The reaper reads this via /idle; keeping the
@@ -379,23 +357,9 @@ class SessionRegistry {
    * idleSince on the transition into idle, clears it on any activity. Safe to
    * call often.
    */
-  /** Q1: an armed autopilot driver marks the session non-idle (keyed off the
-   * explicit lifecycle field from §1/H3, never off `kind`) — the same way an
-   * in-flight turn does — so the reaper can't suspend a session mid-loop between
-   * iterations. When the driver transitions to 'stopped' (any reason) the session
-   * becomes idle-eligible again. Reads the PVC-persisted state, so it is correct
-   * across a runner restart: the boot re-arm keeps a genuinely-armed spec
-   * non-idle, while a spec that already reached 'stopped' stays idle-eligible.
-   * The staleness bound (armed but wedged for 30m) is enforced by the driver,
-   * which flips state to 'stopped'(lapsed) and thereby releases this hold. */
-  autopilotArmed(): boolean {
-    return this.state.autopilot?.state === 'armed';
-  }
-
   recomputeIdle(): void {
     const busyBlocksIdle = this.state.status === 'busy' && !this.syntheticBusyStale();
-    const idle =
-      this.activeTurns.size === 0 && !busyBlocksIdle && !this.autopilotArmed() && this.isDetached();
+    const idle = this.activeTurns.size === 0 && !busyBlocksIdle && this.isDetached();
     if (idle && this.idleSince === null) {
       // Only reachable with status still 'busy' via the stale-synthetic-busy
       // release (a normal turn end flips status to 'idle' first); surface it.
@@ -464,24 +428,6 @@ class SessionRegistry {
     saveSessionState(this.state);
   }
 
-  /** Persist the autopilot spec wholesale (state.autopilot) and recompute idle —
-   * an armed spec marks the session non-idle (Q1), a stopped one releases it.
-   * The driver (autopilot.ts) owns the spec's field mutations and calls this
-   * after every transition; passing `undefined` is disallowed (the spec is never
-   * deleted — H3), so callers always hand back a spec. */
-  setAutopilot(spec: AutopilotSpec): void {
-    this.state.autopilot = spec;
-    this.state.last_activity = new Date().toISOString();
-    saveSessionState(this.state);
-    this.recomputeIdle();
-  }
-
-  /** The persisted autopilot spec, or undefined when the driver has never been
-   * armed for this session. */
-  getAutopilot(): AutopilotSpec | undefined {
-    return this.state.autopilot;
-  }
-
   /** The persisted interactive-pane UUID (claude-pane backend), or '' when the
    * session has never spawned a pane. Read by the claude-pane supervisor to
    * decide first-spawn (`--session-id`) vs resume (`--resume`). */
@@ -515,13 +461,10 @@ class SessionRegistry {
     this.recomputeIdle();
     return {
       // A synthetic 'busy' counts as an active turn only while fresh; a stale
-      // one (wedged mapper) reports inactive so it can't block the reaper. An
-      // armed autopilot driver (Q1) also reports active so the reaper leaves the
-      // pod alone between iterations.
+      // one (wedged mapper) reports inactive so it can't block the reaper.
       turnActive:
         this.activeTurns.size > 0 ||
-        (this.state.status === 'busy' && !this.syntheticBusyStale()) ||
-        this.autopilotArmed(),
+        (this.state.status === 'busy' && !this.syntheticBusyStale()),
       attachedClients: sseClientCount(),
       ...(this.idleSince ? { idleSince: this.idleSince } : {}),
     };
@@ -619,20 +562,6 @@ class SessionRegistry {
     if (this.activeTurns.size === 0) this.setStatus('idle');
   }
 
-  registerPermission(p: PendingPermission): void {
-    this.pendingPermissions.set(p.permissionId, p);
-  }
-
-  resolvePermission(
-    permissionId: string,
-  ): PendingPermission | undefined {
-    return this.pendingPermissions.get(permissionId);
-  }
-
-  /** Delete a pending permission entry. Called after resolving (R2). */
-  deletePermission(permissionId: string): void {
-    this.pendingPermissions.delete(permissionId);
-  }
 }
 
 let registry: SessionRegistry | null = null;

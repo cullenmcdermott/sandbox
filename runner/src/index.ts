@@ -6,11 +6,10 @@
 // next turn continues the same Claude session via resume.
 
 import { openEventLog, appendEvent, closeEventLog } from './events.js';
-import { loadConfig, loadSessionState, initRegistry, getRegistry, backendHasAutopilot } from './session.js';
+import { loadConfig, loadSessionState, initRegistry, getRegistry } from './session.js';
 import { startServer } from './server.js';
 import { selectAgent } from './agent.js';
 import { shutdownInterruptedEvents } from './turns.js';
-import { createAutopilot, type Autopilot } from './autopilot.js';
 import { resolveWorkspaceDir } from './exec.js';
 import { startOpencodeSupervisor, type OpencodeSupervisor } from './opencode.js';
 import { warmupOpencodeSession } from './opencode-turn.js';
@@ -167,22 +166,11 @@ function main(): void {
   });
 
   // Resolve the agent backend up front so an unknown SANDBOX_BACKEND fails at
-  // startup rather than on the first turn. Both shipping backends (claude-sdk,
-  // opencode-server) implement the turn seam; null is reserved for any future
-  // supervise-only backend, whose /turns route then 409s.
+  // startup rather than on the first turn. Only opencode-server drives turns
+  // through the runner (its headless first-turn bridge); the interactive
+  // backends (claude-pane, codex-app-server) and the retired claude-sdk id
+  // return null, so their /turns route 409s.
   const agent = selectAgent(cfg.backend);
-
-  // Autopilot driver (server-side /loop-/goal loop). Claude-backend-first: only
-  // backends with a runner-side driver get one; the PUT/DELETE endpoint 409s for
-  // the rest, and the CLI falls back to its local tea.Tick driver. Created after
-  // session.started is emitted so the boot re-arm's `armed` event replays AFTER
-  // it. bootReArm re-emits armed + reschedules for a still-armed persisted spec
-  // (H1); it is a no-op for a stopped or absent spec.
-  let autopilot: Autopilot | null = null;
-  if (agent && backendHasAutopilot(cfg.backend)) {
-    autopilot = createAutopilot(cfg, agent);
-    autopilot.bootReArm();
-  }
 
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
@@ -243,7 +231,6 @@ function main(): void {
 
   startServer(
     agent,
-    autopilot,
     () => {
       // Closes when the socket is accepting (the listen callback), so boot.listen
       // covers the real bind, and boot.total is boot-start → ready-to-serve.

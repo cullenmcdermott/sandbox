@@ -14,11 +14,10 @@ import { type ClaudePaneSupervisor, type PaneSocket } from './claude-pane.js';
 import { type PaneObserverCore } from './claude-pane-observer.js';
 import { appendEvent, attachSseClient, lastSeq, sseTotalClientCount, MAX_SSE_CLIENTS } from './events.js';
 import { getRegistry, loadConfig, toStatusResponse } from './session.js';
-import { PORT, PROTOCOL_VERSION, type PermissionRequestBody, type TurnRequestBody, type TurnResponse, type ExecRequestBody, type AutopilotRequestBody } from './types.js';
+import { PORT, PROTOCOL_VERSION, type TurnRequestBody, type TurnResponse, type ExecRequestBody } from './types.js';
 import { type Agent } from './agent.js';
 import { startTurn, turnRejectReason } from './turns.js';
 import { traceTurnLink, traceIDFromHeader } from './trace.js';
-import { type Autopilot, type AutopilotArmInput } from './autopilot.js';
 import { opencodeTurnClient } from './opencode-turn.js';
 import { markObservedTurnInterrupted } from './opencode-observer.js';
 import { runExec } from './exec.js';
@@ -80,104 +79,6 @@ export function healthzBody(): { status: 'ok'; protocolVersion: number } {
  */
 export function clampAfterSeq(after: number, lastSeq: number): number {
   return after > lastSeq ? lastSeq : after;
-}
-
-/**
- * B8: the HTTP outcome of resolving a pending permission, given whether the
- * resolution actually took effect. Resolution is first-write-wins: the canUseTool
- * closure's absolute deadline / abort / detach paths can auto-deny between the
- * route fetching the pending entry and calling its resolve, so a late POST may
- * LOSE the race. When it does (`applied === false`), we must not reply
- * `resolved:true` — that lies to the client that its choice won. Report honestly
- * with 409 + `resolved:false, reason:'expired'`; the `error` field is what the Go
- * client's ResolvePermission surfaces (it treats any non-200/204 as an error and
- * reads `{error}` — see internal/runner/client.go statusError/serverErrorMessage),
- * so a lost race becomes a visible error rather than a silent lie. A winning
- * resolution keeps the original 200 `{permissionId, resolved:true}` shape.
- */
-export function permissionResolveResponse(
-  permissionId: string,
-  applied: boolean,
-): { status: number; body: Record<string, unknown> } {
-  if (!applied) {
-    return {
-      status: 409,
-      body: {
-        error: 'permission already resolved (auto-denied by timeout, interrupt, or client detach)',
-        permissionId,
-        resolved: false,
-        reason: 'expired',
-      },
-    };
-  }
-  return { status: 200, body: { permissionId, resolved: true } };
-}
-
-/**
- * Validate + normalize a PUT /sessions/:id/autopilot body into an
- * AutopilotArmInput (the arm() input; the driver fills state/gen/iterations/
- * timestamps). Returns `{ error }` with a typed 400 message on any invalid field
- * (B9 conventions), else `{ input }`. Defaults: sentinel '', intervalMs 0,
- * maxIterations 50 (always enforced), tokenBudget null, overrides {}. Pure +
- * exported so the validation is unit-testable without the http server.
- */
-export function validateAutopilotBody(
-  body: AutopilotRequestBody | null,
-): { input: AutopilotArmInput } | { error: string } {
-  if (!body || typeof body !== 'object') return { error: 'body is required' };
-  if (body.kind !== 'loop' && body.kind !== 'goal') {
-    return { error: "kind must be 'loop' or 'goal'" };
-  }
-  if (typeof body.prompt !== 'string' || !body.prompt) {
-    return { error: 'prompt is required' };
-  }
-  if (body.sentinel !== undefined && typeof body.sentinel !== 'string') {
-    return { error: 'sentinel must be a string' };
-  }
-  let intervalMs = 0;
-  if (body.intervalMs !== undefined) {
-    if (typeof body.intervalMs !== 'number' || !Number.isFinite(body.intervalMs) || body.intervalMs < 0) {
-      return { error: 'intervalMs must be a non-negative number' };
-    }
-    intervalMs = body.intervalMs;
-  }
-  let maxIterations = 50;
-  if (body.maxIterations !== undefined) {
-    if (
-      typeof body.maxIterations !== 'number' ||
-      !Number.isInteger(body.maxIterations) ||
-      body.maxIterations < 1
-    ) {
-      return { error: 'maxIterations must be a positive integer' };
-    }
-    maxIterations = body.maxIterations;
-  }
-  let tokenBudget: number | null = null;
-  if (body.tokenBudget !== undefined && body.tokenBudget !== null) {
-    if (typeof body.tokenBudget !== 'number' || !Number.isFinite(body.tokenBudget) || body.tokenBudget <= 0) {
-      return { error: 'tokenBudget must be a positive number or null' };
-    }
-    tokenBudget = body.tokenBudget;
-  }
-  if (body.overrides !== undefined && (typeof body.overrides !== 'object' || body.overrides === null)) {
-    return { error: 'overrides must be an object' };
-  }
-  const ov = body.overrides ?? {};
-  return {
-    input: {
-      kind: body.kind,
-      prompt: body.prompt,
-      sentinel: body.sentinel ?? '',
-      interval_ms: intervalMs,
-      overrides: {
-        ...(typeof ov.model === 'string' ? { model: ov.model } : {}),
-        ...(typeof ov.effort === 'string' ? { effort: ov.effort } : {}),
-        ...(typeof ov.mode === 'string' ? { mode: ov.mode } : {}),
-      },
-      max_iterations: maxIterations,
-      token_budget: tokenBudget,
-    },
-  };
 }
 
 // --- WebSocket pane (claude-pane backend) ---------------------------------
@@ -338,12 +239,11 @@ export interface PaneObserverHandle {
 export function createRunnerServer(
   cfg: ReturnType<typeof loadConfig>,
   agent: Agent | null,
-  autopilot: Autopilot | null = null,
   pane: ClaudePaneSupervisor | null = null,
   paneObserver: PaneObserverHandle | null = null,
 ): Server {
   const server = createServer((req, res) => {
-    handle(req, res, cfg, agent, autopilot, paneObserver).catch((err) => {
+    handle(req, res, cfg, agent, paneObserver).catch((err) => {
       const message = err instanceof Error ? err.message : String(err);
       // B9: readBody's typed rejections are client faults, not server bugs — map
       // an oversized body to 413 and malformed JSON to 400 instead of a blanket
@@ -365,13 +265,12 @@ export function createRunnerServer(
 
 export function startServer(
   agent: Agent | null,
-  autopilot: Autopilot | null = null,
   onListening?: () => void,
   pane: ClaudePaneSupervisor | null = null,
   paneObserver: PaneObserverHandle | null = null,
 ): void {
   const cfg = loadConfig();
-  const server = createRunnerServer(cfg, agent, autopilot, pane, paneObserver);
+  const server = createRunnerServer(cfg, agent, pane, paneObserver);
   server.listen(PORT, () => {
     console.log(`runner listening on :${PORT} (session=${cfg.sessionId})`);
     // Fires once the socket is actually accepting, not when listen() was
@@ -380,7 +279,7 @@ export function startServer(
   });
 }
 
-async function handle(req: IncomingMessage, res: ServerResponse, cfg: ReturnType<typeof loadConfig>, agent: Agent | null, autopilot: Autopilot | null, paneObserver: PaneObserverHandle | null = null): Promise<void> {
+async function handle(req: IncomingMessage, res: ServerResponse, cfg: ReturnType<typeof loadConfig>, agent: Agent | null, paneObserver: PaneObserverHandle | null = null): Promise<void> {
   const url = new URL(req.url ?? '/', `http://localhost:${PORT}`);
   const path = url.pathname;
   const method = req.method ?? 'GET';
@@ -515,36 +414,6 @@ async function handle(req: IncomingMessage, res: ServerResponse, cfg: ReturnType
     return ok(res, turnResp);
   }
 
-  // /sessions/:id/autopilot (PUT arm/replace, DELETE disarm). The runner-owned
-  // autopilot driver (server-side /loop-/goal loop). Only backends with a
-  // runner-side driver (claude-sdk today) expose it; opencode/supervise-only 409
-  // so the CLI falls back to its local tea.Tick driver.
-  const autopilotMatch = /^\/sessions\/([^/]+)\/autopilot$/.exec(path);
-  if (autopilotMatch && (method === 'PUT' || method === 'DELETE')) {
-    if (autopilotMatch[1] !== sid) return notFound(res, 'session not found');
-    if (!autopilot) {
-      res.writeHead(409, { 'Content-Type': 'application/json' });
-      res.end(
-        JSON.stringify({
-          error: `backend ${cfg.backend} has no runner-side autopilot driver; use the local driver`,
-        }),
-      );
-      return;
-    }
-    if (method === 'DELETE') {
-      // Disarm → stopped(user); the spec is retained (H3), never deleted. 404 when
-      // there is nothing to disarm (never armed).
-      if (!autopilot.disarm()) return notFound(res, 'no autopilot spec to disarm');
-      return ok(res, toStatusResponse(reg.state, reg.activeTurnId()));
-    }
-    // PUT: arm/replace. Validate the body (B9 typed 400s) before touching state.
-    const body = await readBody<AutopilotRequestBody>(req);
-    const validated = validateAutopilotBody(body);
-    if ('error' in validated) return badRequest(res, validated.error);
-    autopilot.arm(validated.input);
-    return ok(res, toStatusResponse(reg.state, reg.activeTurnId()));
-  }
-
   // /sessions/:id/turns/:turn_id/interrupt (POST). The turn segment may be EMPTY
   // (note [^/]* not [^/]+): the client doesn't always know the live turn id when
   // the user hits esc — it can fire before StartTurn's response or the first SSE
@@ -583,39 +452,6 @@ async function handle(req: IncomingMessage, res: ServerResponse, cfg: ReturnType
     turn.abort.abort();
     appendEvent(sid, turnId, 'turn.interrupted', { reason: 'client interrupt' });
     return ok(res, { turnId }, 200);
-  }
-
-  // /sessions/:id/permissions/:permission_id (POST)
-  const permMatch = /^\/sessions\/([^/]+)\/permissions\/([^/]+)$/.exec(path);
-  if (permMatch && method === 'POST') {
-    if (permMatch[1] !== sid) return notFound(res, 'session not found');
-    const permissionId = permMatch[2];
-    const pending = reg.resolvePermission(permissionId);
-    if (!pending) return notFound(res, 'permission request not found');
-    const body = await readBody<PermissionRequestBody>(req);
-    if (!body || typeof body.allow !== 'boolean') {
-      return badRequest(res, 'allow (boolean) is required');
-    }
-    // Validate editedInput as JSON at the boundary so a malformed edit can't
-    // throw inside the permission resolver and wedge the turn (C8). The
-    // permission stays pending, so the client can retry with valid JSON.
-    if (body.allow && body.editedInput) {
-      try {
-        JSON.parse(body.editedInput);
-      } catch {
-        return badRequest(res, 'editedInput must be valid JSON');
-      }
-    }
-    // B8: first-write-wins. resolve returns false when the canUseTool closure was
-    // already settled (auto-denied by the absolute deadline / abort / detach)
-    // between resolvePermission's fetch above and this call — this POST lost the
-    // race and must not claim resolved:true. permissionResolveResponse maps the
-    // honest outcome (200 won / 409 expired). (real callback always returns a
-    // boolean; a void from a non-prod test double is treated as "won".)
-    const applied = pending.resolve(body.allow, body.scope ?? 'once', body.editedInput) !== false;
-    reg.deletePermission(permissionId); // R2: prevent unbounded map growth
-    const { status, body: respBody } = permissionResolveResponse(permissionId, applied);
-    return ok(res, respBody, status);
   }
 
   // /sessions/:id/exec (POST) — one-shot shell command in the session cwd.

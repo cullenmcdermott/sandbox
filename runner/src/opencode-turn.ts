@@ -35,12 +35,29 @@ import type { Event, Part, AssistantMessage } from '@opencode-ai/sdk';
 
 import type { Agent } from './agent.js';
 import { appendEvent } from './events.js';
-import { capToolOutput } from './mapping.js';
 import { appendAudit } from './audit.js';
 import { getRegistry, type RunnerConfig } from './session.js';
 import type { EventType } from './types.js';
 
 const DEFAULT_PORT = 4096;
+
+/**
+ * TOOL_OUTPUT_CAP bounds the captured tool output carried on a normalized
+ * tool.completed event; capToolOutput keeps the first and last half of the cap
+ * with a "… N bytes truncated …" marker so both the command echo/headers and
+ * the exit/error tail survive. (Moved here from the deleted SDK mapping module
+ * — this is the sole remaining consumer.)
+ */
+const TOOL_OUTPUT_CAP = 64 * 1024;
+
+export function capToolOutput(s: string): string {
+  if (s.length <= TOOL_OUTPUT_CAP) return s;
+  const half = Math.floor(TOOL_OUTPUT_CAP / 2);
+  const head = s.slice(0, half);
+  const tail = s.slice(s.length - half);
+  const omitted = s.length - head.length - tail.length;
+  return `${head}\n… ${omitted} bytes truncated …\n${tail}`;
+}
 
 type OpencodeClient = ReturnType<typeof createOpencodeClient>;
 

@@ -1,18 +1,16 @@
 // Agent backend seam. The runner is the translation layer between a concrete
-// coding-agent implementation (Claude Agent SDK, OpenCode, Codex) and the
-// normalized HTTP+SSE API the CLI consumes. Each backend implements this one
-// interface; everything else in the runner — the turn registry, idle clock,
-// permission flow, event log, SSE replay — is backend-agnostic and reused as-is.
+// coding-agent implementation and the normalized HTTP+SSE API the CLI consumes.
+// Each turn-driving backend implements this one interface; everything else in
+// the runner — the turn registry, idle clock, event log, SSE replay — is
+// backend-agnostic and reused as-is.
 //
-// To add a backend (e.g. `opencode serve`):
-//   1. write `opencode.ts` exporting `const opencodeAgent: Agent = { runTurn }`
-//      that drives the backend and maps its events into the normalized model
-//      (appendEvent), reusing the session registry's registerTurn/finishTurn
-//      and permission registry so the idle clock and reaper keep working;
-//   2. add a case to selectAgent below.
+// Only opencode-server drives turns through the runner today (its headless
+// first-turn bridge, opencode-turn.ts); the interactive agents (claude-pane,
+// codex-app-server) are supervise-only and return null. The claude Agent SDK
+// turn engine was removed with claude-pane-first — claude sessions are now the
+// interactive Claude Code TUI in the pane, not a runner-driven SDK query loop.
 
 import type { RunnerConfig } from './session.js';
-import { claudeAgent } from './claude.js';
 import { opencodeAgent } from './opencode-turn.js';
 
 export interface Agent {
@@ -63,25 +61,23 @@ export interface Agent {
 // (the `codex` TUI over the app-server's loopback WebSocket, or the `claude` PTY
 // over GET /sessions/:id/pane), never through the runner's turn path — so both
 // return null. server.ts guards a null agent (POST /turns 409s) exactly as for
-// any future supervise-only backend. An unknown backend throws so the runner
-// fails fast at startup rather than at first turn.
+// any supervise-only backend.
+//
+// claude-sdk is a RETIRED backend id (claude-pane-first removed the SDK turn
+// engine): it returns null too, so a lingering old claude-sdk pod boots and
+// serves status/idle but 409s on /turns rather than crashing. An unknown
+// backend throws so the runner fails fast at startup rather than at first turn.
 export function selectAgent(backend: string): Agent | null {
   switch (backend) {
-    case 'claude-sdk':
-      return claudeAgent;
     case 'opencode-server':
       return opencodeAgent;
     case 'codex-app-server':
-      return null;
     case 'claude-pane':
-      // Supervise-only, like codex-app-server: the runner owns an interactive
-      // `claude` PTY child (claude-pane.ts) that the CLI drives over a WebSocket
-      // pane; turns/permissions are the interactive child's own, never the
-      // runner's turn path — so POST /turns 409s on the null agent.
+    case 'claude-sdk':
       return null;
     default:
       throw new Error(
-        `unsupported backend: ${backend} (known: claude-sdk, opencode-server, codex-app-server, claude-pane)`,
+        `unsupported backend: ${backend} (known: opencode-server, codex-app-server, claude-pane, claude-sdk)`,
       );
   }
 }

@@ -13,7 +13,6 @@
     "lint": "eslint src"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.181",
     "@anthropic-ai/sdk": "^0.93.0",
     "@opencode-ai/sdk": "^1.17.7",
     "better-sqlite3": "^11.8.1",
