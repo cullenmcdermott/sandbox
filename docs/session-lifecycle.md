@@ -25,18 +25,44 @@ ephemeral and resilient.
 ## Definitions
 
 - **Idle** = *turn-done AND detached*: no turn is running **and** no SSE client
-  is attached. Background processes are intentionally **not** considered. (Chosen
-  for simplicity; revisit if leftover dev servers/watchers become a problem.)
+  is attached. For external-pane backends (claude-pane, opencode) the same
+  probe counts **attached pane clients** as activity and the observer drives a
+  **synthetic busy** between turn-start and Stop, so a detached-but-working
+  agent is never reaped mid-turn. Background processes are intentionally
+  **not** considered. (Chosen for simplicity; revisit if leftover dev
+  servers/watchers become a problem.)
 - **Grace period** = **15 minutes** of continuous idle before suspend.
 
 ## Key design decisions
 
 ### Unique session IDs (done)
-`sandbox claude` mints a fresh ID per invocation: `claude-sdk-<pathhash6>-<rand>`
-(minted in `client/client.go`, `newSessionID`). The path hash keeps sessions grouped by
-project at a glance; the random suffix guarantees distinct pods. Reconnecting is
-done by **explicit ID** via `attach`, `status`, etc. — not by re-deriving from
-the path.
+`sandbox claude` mints a fresh ID per invocation: `<backend>-<pathhash6>-<rand>`
+(e.g. `claude-pane-ab12cd-x7`; minted in `client/client.go`, `NewID`). The path
+hash keeps sessions grouped by project at a glance; the random suffix
+guarantees distinct pods. Reconnecting is done by **explicit ID** via `attach`,
+`status`, etc. — not by re-deriving from the path.
+
+### claude-pane process lifecycle (claude-pane-first)
+The runner owns the interactive `claude` child for the pod lifetime (design
+D1/D3, `runner/src/claude-pane.ts`):
+
+- **Lazy spawn on first attach.** The first `GET /sessions/:id/pane` WebSocket
+  attach spawns `claude --session-id <runner-generated-uuid>` under node-pty;
+  the uuid is persisted in `session.json` as `claude_pane_session_id`.
+- **Detach keeps it alive.** Ctrl+] closes the WS; the child keeps running
+  (core product behavior). Reattach replays a bounded scrollback ring
+  (~256 KiB) so the screen repaints instantly. One concurrent attacher; a new
+  attach preempts the old (WS close 4001).
+- **Child exit → `--resume` chain.** On child exit the supervisor records the
+  reason, emits status (+ a synthetic turn-abort for an open turn), closes any
+  attached WS (4002), and respawns with `claude --resume <uuid>` on the next
+  attach — the conversation continues.
+- **Suspend/resume rides the same chain.** Pod suspend kills the child; the
+  PVC keeps `CLAUDE_CONFIG_DIR` (transcript, credentials); resume boots a
+  fresh runner that spawns `--resume <uuid>` on the next attach.
+- **Env hygiene.** The child sees an allowlisted env (PATH/HOME/TERM/LANG/
+  CLAUDE_CONFIG_DIR + workspace cwd) — never the runner token or credential
+  env vars, because provisioned hooks inherit the child's entire env.
 
 ### Per-session git worktrees (create / convert / destroy)
 For a git project, `sandbox claude` creates the session on its own git worktree

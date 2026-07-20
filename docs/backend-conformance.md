@@ -1,9 +1,16 @@
 # Backend conformance checklist
 
 The canonical, testable definition of "a backend is at parity." Every agent
-backend (claude-sdk, opencode, Codex) must satisfy **both** surfaces below. This is
-the spec the shared harnesses enforce; see `docs/archive/testing-parity-plan.md` for the
-rollout plan and the current status matrix.
+backend (claude-pane, opencode, Codex) must satisfy **both** surfaces below.
+This is the spec the shared harnesses enforce; see
+`docs/archive/testing-parity-plan.md` for the original rollout plan.
+
+Since claude-pane-first every backend is **supervised + observed**: the agent's
+own interactive client is the product surface, the runner is the supervisor and
+the single metrics source (the agent parity bar), and normalized events come
+from an observer, not a turn adapter. `opencode-server` additionally keeps a
+turn adapter (`Agent.runTurn`, `runner/src/agent.ts`) for its headless first
+turn — the only backend that accepts `POST /turns`.
 
 A backend is onboarded by **filling its column**, not inventing tests: add it to
 each shared harness's table and make the rows green.
@@ -12,61 +19,101 @@ each shared harness's table and make the rows green.
 
 | Harness | Surface | Location | Add a backend by |
 |---|---|---|---|
-| `assertMapperInvariants(events)` | backend (unit) | `runner/test/backend-contract.ts` | feeding the backend's captured mapper output through it |
+| `assertMapperInvariants(events)` | backend (unit) | `runner/test/backend-contract.ts` | feeding the backend's captured observer/mapper output through it |
 | `backendCases` table | backend (live) | `internal/k8sit/local_test.go` | appending a `backendCase` row |
-| `renderBackendTranscript` / `backendTranscriptCases` | frontend (golden) | `internal/tui/dashboard/golden_multiturn_test.go` | appending a row → a per-backend golden |
-| `driveBackendTurn` (interactive) | frontend | _Phase F (planned)_ | — |
+| feed goldens + App nav tests | frontend | `internal/tui/dashboard/feed_test.go` (TestGoldenFeed, TestAppViewFeedNavigation) | extending the backend-parameterized cases |
+| pane e2e smoke | seam | `internal/e2e/pane_e2e_test.go` (`//go:build e2e`) | — (transport-level; backend-agnostic) |
 
-## Backend surface (runner adapter)
+## Backend surface (runner supervisor + observer)
 
-The adapter implements `Agent.runTurn` (`runner/src/agent.ts`) and maps the agent's
-native events into the normalized model (`schema/events.json`).
+The supervisor owns the agent process; the observer maps its native signals
+into the normalized model (`schema/events.json`).
 
-- [ ] **Event mapping (unit)** — native events → normalized events, per type, with
-      correct payloads. (claude `mapping.test.ts`, opencode `opencode-turn.test.ts`)
+### Provisioning (pane backends)
+
+- [ ] **Auth/state materialization** — boot materializes the agent's full
+      credential/state documents from the per-session Secret, idempotently and
+      **only-if-absent** (an agent-refreshed credential survives a runner
+      restart); fail-closed when material is missing (claude-pane:
+      `.credentials.json` + `.claude.json` seed + settings merge,
+      `runner/src/claude-config.ts`).
+- [ ] **Env hygiene** — the agent child sees an allowlisted env: no runner
+      token, no credential env vars (hooks inherit the child env — this is the
+      secret-hygiene boundary).
+- [ ] **Zero-dialog start** — a fresh session reaches the agent's composer
+      with no onboarding/trust dialogs (live validation).
+
+### Supervisor lifecycle
+
+- [ ] **Lazy spawn + resume chain** — first pane attach spawns with a pinned
+      session id; child exit / pod resume respawns with the agent's own resume
+      flag on the persisted id (conversation continuity).
+- [ ] **Detach survival** — client disconnect never kills the agent process;
+      reattach replays bounded scrollback; single attacher with preemption.
+- [ ] **Exit recording** — child exit records the reason, emits status, and
+      synthesizes a turn-abort for an open turn (graceful-only hooks cannot
+      report a crash).
+
+### Observer events
+
+- [ ] **Event mapping (unit)** — native signals → normalized events, per type,
+      with correct payloads (claude-pane `claude-pane-observer.test.ts`,
+      opencode `opencode-turn.test.ts` / observer tests, codex
+      `codex-observer` tests).
 - [ ] **Mapper invariants (unit)** — routes its captured output through
-      `assertMapperInvariants`: ≤1 terminal (turn.completed XOR turn.failed); no
-      content event after a terminal; every `message.*` role ∈ {user, assistant};
-      `turn.failed` carries a non-empty `message`.
-- [ ] **Turn lifecycle (unit)** — `turn.started` once at the top; `finishTurn`
-      ALWAYS runs (every return/throw/abort path); settle-once (no double terminal).
-- [ ] **Abort / interrupt (unit)** — abort stops the turn and does NOT emit a second
-      `turn.interrupted` (the `/interrupt` route owns it); `finishTurn` still runs.
-- [ ] **Hang / deadline safety (unit)** — an out-of-band settle (failed prompt,
-      stuck server) cannot block the loop forever; an absolute deadline backstops.
-- [ ] **Model selection** — per-turn model id parsed/resolved; default when empty.
-- [ ] **Permission flow** — a tool requiring approval surfaces `permission.requested`
-      and resolves (or auto-responds) — bounded, never hangs.
-- [ ] **Resume / continuity** — conversation continuity across turns; survives pod
-      restart (persisted session id); honors the `resume` arg.
-- [ ] **Error surface** — auth failure / bad model → `turn.failed` with a reason,
-      no wedge.
-- [ ] **Live turn (k8sit)** — real reply when keyed/free; plumbing-only fallback
-      (assert the runner accepted + began the turn) when no key.
-- [ ] **Live interrupt + lifecycle ops (k8sit)** — interrupt returns the session to
-      idle; suspend→resume→turn; destroy idempotent; reconnect/`after=seq` replay.
-- [ ] **Schema conformance** — every emitted event is a valid `EventType` with a
-      schema-valid payload (replay check).
+      `assertMapperInvariants`: ≤1 terminal (turn.completed XOR turn.failed);
+      no content event after a terminal; every `message.*` role ∈
+      {user, assistant}; `turn.failed` carries a non-empty `message`.
+- [ ] **Permission lifecycle** — a real permission prompt surfaces
+      `permission.requested` (→ dashboard waiting/attention) and clears on
+      in-agent resolution or turn end; no field fabrication.
+- [ ] **Metrics** — model (re-emitted on change, deduped), usage/ctx%, rate
+      limits, session title flow as normalized events; the runner is the
+      metrics source for every backend.
+- [ ] **Schema conformance** — every emitted event is a valid `EventType` with
+      a schema-valid payload (replay check).
+
+### Turn adapter (opencode headless only)
+
+- [ ] **Turn lifecycle / abort / deadline (unit)** — `turn.started` once;
+      `finishTurn` always runs; settle-once; abort does not double-emit
+      `turn.interrupted`; an absolute deadline backstops hangs.
+- [ ] **409 contract (every other backend)** — `POST /turns` and any
+      programmatic-control route answer 409 for supervise-only backends.
+
+### Idle probe
+
+- [ ] **Pane attach counts as activity** — attached pane clients hold the
+      session non-idle.
+- [ ] **Synthetic busy** — observer sets busy on turn-start, idle on
+      Stop/exit/shutdown; observer-event staleness clock refreshes on every
+      ingested event (a detached-but-working agent is never reaped mid-turn).
+
+### Live (k8sit)
+
+- [ ] **Live lifecycle ops** — suspend→resume→continuity; destroy idempotent;
+      reconnect/`after=seq` replay.
 
 ## Frontend surface (TUI)
 
-How the dashboard presents the backend. Because all backends emit normalized
-events, the goal is to render them through the **one** transcript renderer.
+How the dashboard presents the backend. All backends render through the same
+backend-agnostic surfaces: the session list/status rows, the read-only
+activity feed, and the external pane.
 
-- [ ] **Transcript render (golden)** — message/tool/reasoning/usage/turn-footer
-      blocks render correctly from the backend's events (`renderBackendTranscript`).
-- [ ] **Interactive turn** — input → submit → `StartTurn` → streamed events →
-      render updates → reply shown (Model/`teatest` drive).
-- [ ] **Adverse-state frames** — permission modal, error block, plan/tool cards,
-      streaming — all golden-guarded.
-- [ ] **Status line / metrics parity** — ctx% · usage · rate_limit · model ·
-      workspace render the same for every backend (fed by the runner observer).
-- [ ] **Startup / connecting UX** — connecting preview / attach progress.
+- [ ] **Feed render (golden)** — prompts, streamed assistant text, one-line
+      tool entries, calm notices render from the backend's events
+      (TestGoldenFeed; backend-parameterized nav in
+      TestAppViewFeedNavigation).
+- [ ] **Status row / metrics parity** — title · model · status · ctx% · cost
+      render the same for every backend (fed by the runner observer).
+- [ ] **Attention routing** — observer-emitted `permission.requested` floats
+      the row / fires the toast; clears on activity.
+- [ ] **Startup / connecting UX** — connecting splash / attach progress.
 - [ ] **Reconnect / SSE replay UI** — stage updates, give-up handling.
-- [ ] **Detach / keybindings / interrupt UX (the parity bar)** — Ctrl-] detach, key
-      bindings, and interrupt behave identically across backends.
-- [ ] **External-pane lifecycle** (if the backend also offers a PTY pane) —
-      attach/detach/resize/close-reap + the chrome around it.
+- [ ] **Detach / keybindings / interrupt UX (the parity bar)** — Ctrl-]
+      detach, leader chords, and minimize behave identically across backends.
+- [ ] **External-pane lifecycle** — attach/detach/resize/close-reap over the
+      backend's transport (child process or WebSocket) + the chrome around it.
 
 ## Codex — Phase 1 status
 
@@ -82,11 +129,10 @@ plumbing only** and deliberately leaves most rows above red:
   command. The pod supervises `codex app-server` (runner-side, landing
   separately); metrics come from a runner observer connection, and activity/idle
   is the runner's signal — same source every backend uses.
-- **Deferred (later waves):** the runner turn path (no `Agent.runTurn` adapter yet
-  → no headless turns, no normalized event mapping), the permission flow, the
-  interactive/external codex pane, and the frontend transcript/golden rows. A
-  codex `connect` therefore creates + health-checks the session but has no turn
-  path yet (accepted for Phase 1).
+- **Deferred (later waves):** the interactive/external codex pane (it rides
+  the same PaneTransport seam claude-pane landed) and the frontend feed/golden
+  rows. Programmatic turns are no longer a goal for pane-class backends —
+  `POST /turns` answers 409 for codex, matching claude-pane.
 
 Every deferred item stays a tracked red row below — never a silent omission.
 

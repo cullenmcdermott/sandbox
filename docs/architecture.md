@@ -4,7 +4,8 @@
 has two halves that talk over one HTTP+SSE API:
 
 - a **Go CLI** that runs on your laptop (lifecycle, port-forward, TUI, file sync), and
-- a **TypeScript runner** that runs one session per pod (Claude Agent SDK, event log, sshd).
+- a **TypeScript runner** that runs one session per pod (agent supervisor +
+  observer, event log, sshd).
 
 The PVC behind each pod is the source of truth for session state, so a session
 survives detach, suspend/resume, and CLI restarts.
@@ -12,14 +13,16 @@ survives detach, suspend/resume, and CLI restarts.
 > **Status:** implemented and unit-tested; the end-to-end path — runner image
 > build, live turn round-trip, and Mutagen-over-SSH sync — was validated on a
 > real cluster 2026-06-23 (see `docs/archive/done-log-2026-06.md`) and the
-> runner/reaper images publish to GHCR via `.depot/workflows/`.
+> runner/reaper images publish to GHCR via `.depot/workflows/`. The
+> claude-pane-first path (2026-07-20) is unit/e2e-tested but awaits its live
+> cluster pass — see "Unvalidated paths" below.
 
 ## Components
 
 | Where | Package / file | Role |
 |---|---|---|
 | Local | `internal/cli` | Cobra command tree; composes backend + runner client + sync; idle-reaper Job (`reap.go`) |
-| Local | `internal/tui/dashboard` | Bubble Tea v2 command-center: session list, attention routing, transcript, tool cards, permission modal, external (opencode) PTY pane |
+| Local | `internal/tui/dashboard` | Bubble Tea v2 command-center: session list, attention routing, read-only activity feed, external PTY pane (opencode child process / claude-pane WebSocket) |
 | Local | `internal/k8s` | `Backend`: Sandbox/PVC/Secret CRUD, suspend/resume, port-forward, exec; reaper Job spec (`reaper.go`) |
 | Local | `internal/runner` | HTTP+SSE client implementing `RunnerClient` (active + passive streams) |
 | Local | `internal/sync` | Mutagen manager, SSH keypair + per-session ssh-config alias |
@@ -28,35 +31,46 @@ survives detach, suspend/resume, and CLI restarts.
 | SDK   | `client/models` | Resolves a model's context-window limit + per-million-token pricing; drives the TUI ctx% indicator; importable by external consumers |
 | Local | `internal/authstatus` | Offline per-agent auth-status report behind `sandbox auth status` (Claude/Codex/OpenCode providers) |
 | SDK   | `client/`, `client/cred` | Public Go SDK (create/connect/suspend/destroy/turns/events/sync) the CLI + TUI dogfood; `client/cred` is the multi-account Anthropic credential store. New capability lands here first |
-| SDK   | `tui/` | Public, importable TUI building blocks split out of the dashboard: `tui/kit`, `tui/anim`, `tui/list`, `tui/theme`, `tui/terminal` |
+| SDK   | `tui/` | Public, importable TUI building blocks split out of the dashboard: `tui/kit`, `tui/anim`, `tui/list`, `tui/picker`, `tui/theme`, `tui/composer`, `tui/chrome`, `tui/terminal` |
 | Test  | `sdktest/` | Separate Go module that imports `client`/`client/cred` as an external consumer — compile-time signature pins + behavioral contract tests (`just sdk-conformance`) |
 | Test  | `internal/k8sit` | Build-tagged two-layer integration tests (CLI→controller→pod) incl. the backend-conformance `backendCases` harness |
 | Test  | `internal/e2e` | Build-tagged (`//go:build e2e`) CLI↔runner smoke test: a full turn across the `internal/runner` HTTP+SSE seam against an in-process fake runner |
-| Pod | `runner/src/server.ts` | node:http server, bearer auth, routes (see `runner-api.md`) |
-| Pod | `runner/src/claude.ts` | Claude Agent SDK `query()`, hooks, permission flow, event mapping |
-| Pod | `runner/src/mapping.ts` | SDK message → normalized event mapper (shared turn-mapper invariants) |
-| Pod | `runner/src/guards.ts` | Shared Bash blocklist enforced by the claude PreToolUse hook, `/exec`, and the generated opencode guard plugin |
-| Pod | `runner/src/grants.ts` | Session-scoped permission grants (`scope:'session'`, edited input) |
+| Pod | `runner/src/server.ts` | node:http server, bearer auth, routes incl. the pane WebSocket + observer ingestion (see `runner-api.md`) |
+| Pod | `runner/src/claude-pane.ts` | claude-pane supervisor: lazy node-pty spawn of the real `claude` TUI (`--session-id`/`--resume`), scrubbed env allowlist, scrollback ring, child-exit recording |
+| Pod | `runner/src/claude-pane-observer.ts` | Observer: provisioned command hooks + statusline POST to localhost; maps them to normalized turn/message/tool/permission/usage events |
+| Pod | `runner/src/claude-config.ts` | Boot materialization of the pane's auth/state: `.credentials.json`, `.claude.json` seed, settings merge (hooks, statusline, native-sandbox-off), helper scripts |
+| Pod | `runner/src/guards.ts` | Shared Bash blocklist enforced by `/exec` and the generated opencode guard plugin |
+| Pod | `runner/src/grants.ts` | Session-scoped permission grants (retained for the opencode turn path) |
 | Pod | `runner/src/auth.ts` | Constant-time bearer-token gate for every non-`/healthz` route |
 | Pod | `runner/src/opencode.ts` | OpenCode backend: supervises `opencode serve` for `sandbox opencode` sessions |
 | Pod | `runner/src/opencode-turn.ts` | OpenCode turn adapter: drives a one-shot turn via the `opencode serve` HTTP API (@opencode-ai/sdk), mapping its events into the normalized model |
 | Pod | `runner/src/opencode-observer.ts` | Second-client observer that surfaces interactive opencode turns as normalized busy/idle + events |
+| Pod | `runner/src/codex.ts` / `codex-observer.ts` | Codex backend: supervises `codex app-server` (pod-loopback websocket :8788) and observes its turns as normalized events |
 | Pod | `runner/src/events.ts` | SQLite event log; append-before-stream; SSE replay |
 
-There are **two agent backends** today, both implementing the runner's `Agent`
-turn seam (`runner/src/agent.ts`): the default `claude-sdk` (the Claude Agent SDK)
-and `opencode-server` (a supervised `opencode serve` process). Both accept
-one-shot runner turns through the HTTP+SSE turns API — claude-sdk via the SDK,
-opencode by bridging to `opencode serve`'s own API (`opencode-turn.ts`). The
-interactive `sandbox opencode` PTY pane attaches to that same `opencode serve`
-process directly. A third backend, `codex-app-server` (a supervised
-`codex app-server` process the runner drives over a pod-loopback websocket on port
-8788), is being onboarded in waves: its Go-side plumbing — backend id, the
-ChatGPT-OAuth auth.json credential contract, Secret/env/port wiring, and the
-`sandbox codex` command — is in place, while the runner turn adapter and the
-interactive pane land in later phases (see `docs/backend-conformance.md`). The idle
-reaper is a per-session Kubernetes Job that polls the runner's `/idle` and suspends
-the Sandbox (replicas→0) after the idle timeout.
+There are **three agent backends**, all supervised by the runner (the metrics
+source for every backend — the agent parity bar):
+
+- **`claude-pane`** (the default for `sandbox claude`, claude-pane-first): the
+  runner spawns the real Claude Code TUI under node-pty and owns the PTY for
+  the pod lifetime; the CLI attaches over a WebSocket
+  (`GET /sessions/:id/pane`) through the existing 8787 forward. Programmatic
+  turns, permission resolution, and autopilot were removed with the SDK
+  engine — interaction happens in-pane; the observer (provisioned hooks +
+  statusline) feeds the normalized event stream for the dashboard/feed.
+- **`opencode-server`**: a supervised `opencode serve` process. Accepts the
+  one-shot headless first turn through `POST /turns` (`opencode-turn.ts`); the
+  interactive `sandbox opencode` PTY pane attaches to that same process as a
+  local child, observed by `opencode-observer.ts`.
+- **`codex-app-server`**: a supervised `codex app-server` process
+  (pod-loopback websocket :8788) with observer-sourced events; the interactive
+  pane rides the same transport seam as claude-pane in a later phase (see
+  `docs/backend-conformance.md`).
+
+The idle reaper is a per-session Kubernetes Job that polls the runner's `/idle`
+and suspends the Sandbox (replicas→0) after the idle timeout; pane attaches
+count as external activity, and the observers drive synthetic busy between
+turn.started and Stop.
 
 ```mermaid
 flowchart LR
@@ -74,18 +88,21 @@ flowchart LR
 
     subgraph pod["Runner pod · agent-sessions ns"]
         server["server.ts (bearer auth)"]
-        claude["claude.ts (Claude Agent SDK)"]
+        pane["claude-pane.ts (node-pty · real claude TUI)"]
+        obs["claude-pane-observer.ts (hooks + statusline)"]
         sshd["sshd"]
         events[("events.db (SQLite)")]
-        server --> claude --> events
+        server -->|"WS /pane"| pane
+        pane -. "hook/statusline POST" .-> obs --> events
+        server --> events
     end
 
     be -->|"Sandbox/PVC/Secret CRUD,<br/>port-forward, exec"| api
     api --> pod
-    rc -. "HTTP+SSE · port-forward :8787" .-> server
+    rc -. "HTTP+SSE+WS · port-forward :8787" .-> server
     sm -. "SSH · port-forward :22" .-> sshd
     pod --- pvc[("PVC /session")]
-    claude -->|CLAUDE_CODE_OAUTH_TOKEN| anthropic(["Anthropic API"])
+    pane -->|"materialized .credentials.json"| anthropic(["Anthropic API"])
 ```
 
 ## Session lifecycle (`sandbox claude`)
@@ -98,10 +115,11 @@ sequenceDiagram
     participant R as runner pod
     participant M as mutagen
 
-    U->>CLI: sandbox claude "prompt"
-    CLI->>CLI: ensure local SSH keypair
-    CLI->>K: create Secret (token + ssh pubkey), PVC, Sandbox
+    U->>CLI: sandbox claude
+    CLI->>CLI: ensure local SSH keypair + resolve full Claude credential (SystemMaterial)
+    CLI->>K: create Secret (token + ssh pubkey + credential docs), PVC, Sandbox
     K-->>R: schedule pod (PVC mounted, env injected)
+    R->>R: materialize .credentials.json + .claude.json seed + settings/hooks
     CLI->>K: wait for pod ready
     CLI->>K: port-forward :8787 and :22
     CLI->>R: GET /healthz
@@ -109,12 +127,13 @@ sequenceDiagram
     CLI->>M: write ssh alias + mutagen sync create
     M-->>R: sync project into the host project path (SSH)
     CLI-->>U: open TUI
-    U->>CLI: submit prompt
-    CLI->>R: POST /sessions/:id/turns (Bearer token)
-    R->>R: Claude Agent SDK query()
-    R-->>CLI: SSE events (transcript, tools, permissions)
-    CLI-->>U: render transcript
-    Note over U,R: Ctrl+] detaches; pod + PVC persist.<br/>`sandbox attach` re-forwards and replays from last seq.
+    U->>CLI: attach (enter)
+    CLI->>R: WS GET /sessions/:id/pane (Bearer token)
+    R->>R: lazy-spawn claude under node-pty (--session-id / --resume)
+    R-->>CLI: scrollback replay + live PTY bytes (keystrokes go back up)
+    R-->>CLI: SSE events in parallel (observer: turns, tools, permissions, usage)
+    CLI-->>U: real Claude Code TUI in the pane; dashboard/feed from SSE
+    Note over U,R: Ctrl+] detaches; the claude child keeps running.<br/>`sandbox attach` re-forwards, replays the pane scrollback,<br/>and resumes SSE from the last seq.
 ```
 
 ## State & storage
@@ -167,32 +186,30 @@ anthropic-secrets/                    per-account 0600 secret files (file backen
   `secretKeyRef`. The same value is read back from the Secret for `claude`,
   `attach`, and `cancel`. The runner rejects every non-`/healthz` request without
   it.
-- **Model auth (claude-sdk backend).** Two paths, branched on whether a stored
-  Anthropic account was chosen at create time (see `buildEnv` in
-  `internal/k8s/backend.go`):
-  - **Account-backed (per-session Secret).** `sandbox auth login` stores
-    accounts locally (metadata in `anthropic-accounts.json`, secret bytes in
-    the macOS Keychain or per-account 0600 files); the TUI account picker or
-    `sandbox claude --account <id|label>` selects one. The CLI resolves the
-    account to credential bytes and `CreateSession` writes them into the
-    per-session Secret under `anthropic-credential`, injected as
-    `CLAUDE_CODE_OAUTH_TOKEN` (subscription account, `AnthropicAuth: oauth`)
-    or `ANTHROPIC_API_KEY` (console account, `api-key`) — a **required** ref,
-    since we wrote it. The pod sees exactly one credential. This path fails
-    closed: an account id that can't be resolved to bytes aborts the create
-    rather than silently falling back to the shared Secret. To rotate, re-login
-    and update the labeled Secrets, then suspend/resume (env is resolved at
-    container start).
-  - **Shared-Secret fallback (no account chosen).** A Claude Code OAuth token is
-    read from the shared `anthropic-credentials` Secret (key `api-key`) and
-    injected as `CLAUDE_CODE_OAUTH_TOKEN` (optional ref, so the pod still starts
-    before it exists; turns fail to authenticate until it does). It must be a
-    subscription OAuth token (`claude setup-token`), **not** a raw
-    `ANTHROPIC_API_KEY` — Claude Code would reject an x-api-key in this slot,
-    unless the session was created with `AnthropicAuth: api-key`, which selects
-    the `console-api-key` key → `ANTHROPIC_API_KEY` instead. `ANTHROPIC_API_KEY`
-    is otherwise injected only for the `opencode` backend, from the separate
-    `opencode-credentials` Secret.
+- **Model auth (claude-pane backend).** The pane runs the real Claude Code
+  binary, so it authenticates like Claude Code — from full credential
+  documents, never an env token (an env `CLAUDE_CODE_OAUTH_TOKEN` forces
+  degraded "Claude API" mode; a pane pod is **never** given one):
+  - At create time the CLI resolves the **full claudeAiOauth credential**:
+    by default `cred.SystemMaterial` — the host's own Claude Code login
+    (macOS Keychain item `Claude Code-credentials` / `.credentials.json`,
+    plus `.claude.json`'s `oauthAccount`) — the Max-mode path; or, with
+    `--account`, the stored setup token (`ProvisionMaterial`, a documented
+    degraded fallback). Fail-closed: no resolvable material aborts the create
+    (`ErrClaudePaneCredentialMissing`); there is no shared-Secret fallback.
+  - The documents ride the per-session Secret (`claude-credentials-json`,
+    `claude-oauth-account-json`) into the pod as required-ref envs, and the
+    runner **materializes** them on boot, idempotently and only-if-absent:
+    `$CLAUDE_CONFIG_DIR/.credentials.json`, the `.claude.json` seed
+    (onboarding + workspace trust), the settings merge (observer hooks,
+    statusline, native-sandbox-off), and the helper scripts
+    (`runner/src/claude-config.ts`). In-pod claude refreshes tokens against
+    the PVC copy; the host store copy diverges (accepted single-user scope).
+- **Model auth (other backends).** `opencode-server` and `codex-app-server`
+  keep their own credential contracts (`ANTHROPIC_API_KEY` /
+  `OPENAI_API_KEY` / ChatGPT-OAuth `auth.json`), per-session-Secret-backed
+  with fail-closed account selection, or the shared operator Secrets as the
+  legacy fallback (see `buildEnv` in `internal/k8s/backend.go`).
 - **Sync auth.** The CLI generates a per-session ed25519 keypair; the public key
   rides in the session Secret and is installed as the pod's `authorized_keys`,
   the private key stays local and is referenced by the ssh-config alias. Mutagen
@@ -219,9 +236,10 @@ port, and Mutagen self-heals on its next reconnect.
 ## Event model
 
 `schema/events.json` is the **single source of truth** for the normalized event
-model (the event-type strings + the payload field shapes). The runner maps Claude
-SDK messages into these events, persists them to `events.db`, then streams them via
-SSE; the CLI consumes the stream with `after=<seq>` replay.
+model (the event-type strings + the payload field shapes). The runner's backend
+observers map their native signals (claude-pane hooks/statusline, opencode SSE,
+codex app-server) into these events, persist them to `events.db`, then stream
+them via SSE; the CLI consumes the stream with `after=<seq>` replay.
 
 Both languages are kept honest against the schema:
 
@@ -240,19 +258,14 @@ regenerated (or a hand-edited `*.gen.*`), and the Go drift test fails on a struc
 that diverges. Scope is event payloads only — HTTP request/response bodies and
 `IdleStatus` stay hand-written in both languages.
 
-**`autopilot.state`** is the event type for the runner-owned autopilot driver
-(the server-side `/loop`-`/goal` loop; see
-[`server-side-loop-adr.md`](server-side-loop-adr.md)). The runner drives the
-loop server-side — self-submitting the next turn on turn-completion plus an
-interval — and emits `autopilot.state` (`{ state, kind, reason, iteration, gen }`)
-on arm (`armed`, re-emitted on a boot re-arm), each iteration boundary
-(`ticked`), and termination (`stopped` with a `reason`). Because it is a
-normalized event in the SSE log, a fresh `sandbox attach` catches up the driver's
-state via `after=<seq>` replay like any other state, and the TUI renders the
-driver purely from these events rather than from local `tea.Tick` bookkeeping.
-The arm/disarm surface is `PUT/DELETE /sessions/:id/autopilot` (a lifecycle
-action distinct from submitting a turn), gated by the `capabilities.autopilot`
-bit in `GET /status`; both are HTTP bodies, hand-written outside the schema.
+Since claude-pane-first (protocolVersion 3) the vocabulary is pruned to what
+the observers actually produce: the SDK-engine types (`autopilot.state`,
+`models.available`, `todo.updated`, `tool.delta`, `tool.progress`) are gone;
+`workspace.status` and `context.compacted` remain with live Go consumers but
+no current producer (observers can re-emit them). The server-side autopilot
+driver was removed with the SDK engine — the revival path is headless
+`claude -p --resume` (see `docs/archive/server-side-loop-adr.md` for the
+retired design).
 
 ## Observability (`SANDBOX_TRACE`)
 
@@ -306,29 +319,36 @@ big §5 unknown) and SSE first-event latency (TODO §10).
   `allowPrivilegeEscalation: false` (BR1). The runner still runs as **root**
   (sshd + single-uid workspace ownership); moving to non-root + `fsGroup` is a
   tracked follow-up (M20).
-- **Tool guardrails:** both backends gate + audit in-agent Bash use from one
-  blocklist (`runner/src/guards.ts`; defense-in-depth, not a boundary). Claude
-  enforces it via the PreToolUse(Bash) hook, with a PostToolUse audit log.
-  opencode — whose tools run inside the un-proxied `opencode serve` process — is
-  gated by a guardrail plugin the runner generates at boot from the same
-  patterns and registers in the opencode config's `plugin` array; its
-  `tool.execute.before` hook throws to block a match. Every opencode tool
-  execution (headless `/turns` and interactive `attach` cycles) is audited to
-  `audit.jsonl` through the shared turn mapper. Both mechanisms fail open (a
-  plugin-install failure logs loudly but never blocks `opencode serve`).
+- **Tool guardrails:** the k8s pod is the isolation boundary for every
+  backend; in-pod guardrails are defense-in-depth, not a boundary. The shared
+  Bash blocklist (`runner/src/guards.ts`) is enforced by `/exec` and, for
+  opencode — whose tools run inside the un-proxied `opencode serve` process —
+  by a guardrail plugin the runner generates at boot and registers in the
+  opencode config's `plugin` array; its `tool.execute.before` hook throws to
+  block a match, and every opencode tool execution is audited to
+  `audit.jsonl` (fail-open: a plugin-install failure logs loudly but never
+  blocks `opencode serve`). The claude pane runs Claude Code's own permission
+  system interactively (native OS sandbox disabled — the pod is the sandbox,
+  and native-sandbox auto-approval would suppress the permission hooks the
+  observer needs); its tool use is audited to `audit.jsonl` via the
+  observer's PreToolUse hook, which is deliberately observational (always
+  exits 0 — telemetry may never block the interactive session).
 
 ## Unvalidated paths
 
-These are implemented but not yet exercised on a real cluster (tracked
-separately):
+These are implemented but not yet exercised on a real cluster (tracked in
+`openspec/changes/claude-pane-first/tasks.md`, maintainer-pending):
 
-- Building the runner image (`runner/entrypoint.sh`, `ssh-keygen -A`, key-only
-  root login) and confirming sshd starts.
-- The full turn round-trip (token auth + model response) against a live runner.
-- Mutagen actually syncing over the SSH port-forward (root login, agent install),
-  including `attach` re-sync and `sandbox sync --pause/--resume/--terminate`.
-- Container-level hardening (non-root + `fsGroup`; capability drops already landed
-  in BR1) without breaking sshd privilege separation.
+- The runner image build with the pinned claude binary + node-pty
+  (`.depot/workflows/build-runner-image.yml`, task 1.4).
+- claude-pane live validation: fresh session reaches the composer with zero
+  dialogs in Max mode; attach → work → detach mid-turn → feed → suspend →
+  resume → reattach continuity (tasks 2.5 / 8.2).
+- Credential-refresh rotation observation on a throwaway session (task 8.3;
+  gates multi-account polish, not the change).
+- Container-level hardening (non-root + `fsGroup`; capability drops already
+  landed in BR1) without breaking sshd privilege separation (pre-existing
+  follow-up M20).
 
 ## See also
 
