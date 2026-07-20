@@ -53,7 +53,7 @@ func TestSystemMaterialFileSource(t *testing.T) {
 // -w output's trailing newline is stripped and nothing else is altered.
 func TestSystemMaterialKeychainSource(t *testing.T) {
 	if _, err := os.Stat(securityBin); err != nil {
-		t.Skipf("no %s on this host", securityBin)
+		t.Skipf("no %s on this host", securityBin) // gate-ok: darwin-only keychain path, self-skips visibly on non-macOS; the exec seam is faked so darwin/CI run it for real
 	}
 	dir := t.TempDir()
 	writeSystemState(t, dir, `{"accountUuid":"u-2"}`)
