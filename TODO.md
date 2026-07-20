@@ -39,13 +39,14 @@
 > tui-render, tui-input) died on a spend limit — re-running them is a
 > maintainer call.
 >
-> **Opus-ready map:** §1c–§1d residuals, §2a–§2d, §4, §7a and the §5 GC
-> follow-ups carry pointers + fix direction — pick a cluster and go. Drafted,
-> awaiting maintainer sign-off: §1e server-side-loop ADR, §7b package-manager
-> ADR, §10 KRO ADR, §9 worktree design. Still gated on a maintainer decision:
-> §8 (deliberate design calls), the §2d yolo-default + first-account items
-> (Fable recommendations recorded inline). Needs the real cluster or live
-> services: §5 Spegel deploy, §6 codex spike, §7 verify sweeps, parts of §1d.
+> **Opus-ready map:** §1c–§1d residuals, §4, §7a and the §5 GC follow-ups
+> carry pointers + fix direction — pick a cluster and go. (§2a–§2d closed
+> with claude-pane-first, 2026-07-20 — see the §2 closeout.) Drafted,
+> awaiting maintainer sign-off: §7b package-manager ADR, §10 KRO ADR, §9
+> worktree design. Still gated on a maintainer decision: §8 (deliberate
+> design calls). Needs the real cluster or live services: §5 Spegel deploy,
+> §6 codex spike, §7 verify sweeps, parts of §1d, the claude-pane-first live
+> gates (openspec tasks 2.5/8.2/8.3).
 
 ## 0) Inbox — human notes, needs triage
 
@@ -142,28 +143,24 @@ row-model consolidation moved to §2a where it belongs.
   `ConnectResult.ForwardDone` seam through client/cli — only worth it if
   mid-stream (non-reconnect) death detection matters.
 
-### 1e. Autopilot (`/loop`/`/goal`)
+### 1e. Autopilot (`/loop`/`/goal`) — REMOVED 2026-07-20 (claude-pane-first)
 
-The local driver is complete (items 1–5: detach-durable `/goal` continuation,
-sentinel termination, lapse toast, idle-reaper interval warn, esc contract —
-done log; the item-3 follow-up below is the one loose end).
+The entire autopilot feature (local tea.Tick driver AND the 2026-07-11
+server-side loop) was deleted with the SDK turn engine in the
+claude-pane-first change (maintainer decision; see
+`openspec/changes/claude-pane-first/design.md` D8 and the archived
+[`server-side-loop-adr.md`](docs/archive/server-side-loop-adr.md), now
+Status: superseded). Programmatic turns don't exist for pane backends, so
+there is nothing for a driver to submit.
 
-- [x] **Driver-spec re-arm — done 2026-07-11** (done log): last-armed spec
-  persisted via a `DriverStore` seam (`index.Entry.Driver`, survives
-  detach); bare `/loop` / `/goal` re-arms it without retyping.
-- [x] **6. Server-side loop — IMPLEMENTED 2026-07-11** (done log; ADR
-  archived to
-  [`docs/archive/server-side-loop-adr.md`](docs/archive/server-side-loop-adr.md)):
-  `autopilot.state` schema event; runner spec persistence + driver
-  (sentinel/budget/lapse/error stops, 409-defer to manual turns, 5× retry
-  ladder, boot re-arm anchored on `last_completed_at`,
-  persist-stopped-before-emit, armed ⇒ non-idle) +
-  `PUT/DELETE /sessions/:id/autopilot` + `/status` capability bit; SDK
-  `ArmAutopilot`/`DisarmAutopilot` + sdktest pins; TUI arms the runner
-  driver when capable, renders purely from `autopilot.state` (replay never
-  re-notifies), local tea.Tick kept as the no-capability fallback. NOT yet
-  live-verified on a real cluster (the laptop-closed overnight run —
-  maintainer eyeball).
+- [ ] **Autopilot revival via headless `claude -p --resume` (watch item).**
+  The verified revival path: a runner-side loop that appends turns to the
+  SAME pane conversation with `claude -p --resume <claude_pane_session_id>`
+  between interactive attaches (append semantics verified in the 2026-07-20
+  pane research). Needs: serialize against the interactive child (never run
+  both at once), map `-p` stream-json output through the observer's event
+  path, re-arm UX. No code now — revisit when a laptop-closed loop is
+  actually missed.
 
 ### 1f. Security & runner-reliability hardening (2026-07-07 handoff review)
 
@@ -179,7 +176,11 @@ in [`docs/review-2026-07-07.md`](docs/review-2026-07-07.md) §A/§B (id in brack
   (`server.ts:77`). Fix: run the agent child as a non-root uid distinct from
   the runner (or mount `/proc` with `hidepid=2`); pod-spec + Dockerfile work,
   coordinate with the §7b base-image spike. Until then A1 is
-  raised-bar-not-closed; comments in `claude.ts` say so.
+  raised-bar-not-closed; comments in `opencode.ts`/`codex.ts` say so, and the
+  claude-pane child's env allowlist (`runner/src/claude-pane.ts`) is scoped
+  against the same threat (2026-07-20: applies to the pane child too — it
+  gets a scoped observer token by design, but uid-0 `/proc` still exposes
+  the full runner token).
 - [x] **PreToolUse block result modernized — done 2026-07-11** (done log):
   returns `hookSpecificOutput.permissionDecision:'deny'` AND keeps the
   legacy `decision:'block'` alongside (both shapes verified against the
@@ -210,256 +211,40 @@ in [`docs/review-2026-07-07.md`](docs/review-2026-07-07.md) §A/§B (id in brack
   aside + reseed; permission resolve first-write-wins with honest 409;
   typed 413/400 body errors.
 
-## 2) The "feels like Claude Code" program (2026-07-04 audit)
+## 2) The "feels like Claude Code" program — CLOSED 2026-07-20 (claude-pane-first)
 
-**Strategy context:** using Claude Code itself as the client is SETTLED — not
-happening (see §3). This program is the alternative: close the gap between our
-TUI and Claude Code's feel. Three coordinated tracks: **2a structure**
-(enablers — do the first two before heavy 2c work), **2b pipeline** (what the
-event model can even represent), **2c renderer** (what it looks like). §2d
-carries still-open items from earlier UX passes that slot into the same work.
-Already at parity: plan mode, interrupt-with-partial-output, file-edit diffs,
-resume.
+**Closeout:** the program's premise died when the 2026-07-04 §3 decision was
+reversed — `sandbox claude` now runs the **real Claude Code TUI** in an
+external pane (runner-owned PTY + WebSocket attach; see
+`openspec/changes/claude-pane-first/`), so there is no custom claude
+transcript left to bring to parity. The custom chat renderer, SDK event
+pipeline for claude, and their public surfaces were deleted (tasks 6.2–6.7 of
+that change). What the program had already shipped is in the done logs
+(2026-07: §2a structural enablers, §2b pipeline gaps 1/2/3/6/8 + D1–D12, most
+of §2c/§2d); those payoffs live on in the shared reducer, the event model,
+and the dashboard.
 
-### 2a. Structural enablers (transcript/model decomposition)
+Disposition of the items that were still open here:
 
-Block unification, the one-event-reducer, and the mechanical god-file split
-all landed (done log) — the items below are what remains.
+- **Obsolete with the renderer/SDK engine deleted** (do not revive): 2b gap 5
+  render-half (tool.progress elapsed — event pruned), gap 7 (images), gap 9
+  (prompt queue), gap 10 (MCP wiring), AskUserQuestion answer flow, gap 2's
+  editedInput/canUseTool residuals, 2c tool-card follow-ups + the
+  `↓ new output` pill residual — Claude Code itself now provides all of these
+  in-pane (images, queueing, MCP, AskUserQuestion, tool expansion).
+- **Still live, retargeted at the dashboard/feed**: the §2e premium-feel
+  items below (renamed — they never depended on the transcript), and the §2a
+  clock-injection deferrals (folded into §10 test hygiene territory).
 
-- [x] **Declarative vertical layout regions — done 2026-07-12** (done log):
-  per-frame `[]region` band stack (body = flex) behind `liveLayout`/
-  `previewLayout`; render, list sizing, and scrollbar hit-test all walk it.
-  `App.modalRect` deliberately excluded (popup margin geometry, not a band).
-  Goldens byte-identical; §2c layout changes are now one-line band edits.
-- [x] **Row models consolidated — done 2026-07-12** (done log): one typed
-  `[]listRow` from `visibleRows()`; cursor indexes it; `sessionAt(cursor)`
-  is the single accessor for render/nav/actions/attention routing.
-  `visibleSessions()` remains the flat data source only.
-- [x] **App.Update flat dispatch + one detachTranscript() — done 2026-07-15**
-  (done log): Update is a ~158-line flat router of named `handle*` methods;
-  the 4 detach sites share `detachTranscript()`; the recursive
-  `a.Update(*msg.ready/failed)` re-entry replaced by direct
-  `handleAttachReady/Failed` calls (verified equivalent); `delegateDashboard`
-  is the single B17 call site; per-screen tails extracted.
-- [x] **Explicit input contexts + binding tables — done 2026-07-15** (done
-  log): derived context enums both layers + ordered `boundAction` tables
-  (`inputctx.go` — precedence is data, help text rides the binding); esc
-  cascade = one `escStep` list read by BOTH handleKey and escapeConsumes
-  (closed a real queued-prompt divergence); overlay internals stay as
-  delegate fallbacks. Landed WITH the §2d q/g footer fix + leader chord.
-- [x] **permissionPrompt component — CONSOLIDATED 2026-07-15** (done log):
-  one `permPrompt` component (Render/Height/HandleKey) owns the tool panel
-  AND plan card — static bodies cached, fade chrome live (kills the permBox
-  asymmetric refresh); plan grammar joined permPromptKey; queue shares the
-  wants-summary vocabulary (full panel reuse deliberately NOT done — the
-  queue is a cross-session list, allow-once by design). §2a structural work
-  is now fully closed (clock-sweep deferrals remain below).
-- [~] **Clock injection sweep** — dashboard-package clocks all on `nowFunc`
-  (grace gate, turn elapsed, toast lifecycle, motion loop, transitions), with
-  clock-swap tests; Fable-approved 2026-07-06. DEFERRED: (a) `statusChangedAt`
-  assignments + `lastSnapSave` were parked as §1a territory — §1a is now
-  closed, so these are unblocked; (b) `tui/theme.FadeColor` computes elapsed
-  internally (`tui/theme/styles.go`) — public §8 surface change; (c) test-only
-  counters (`reconciles`/`fpComputes`/`bdBuilds`) → observer interface.
-
-### 2b. Event-model parity gaps (schema → mapper → renderer)
-
-Which Claude Code UI capabilities the pipeline can't represent / doesn't map /
-doesn't render. These cap how Claude-Code-like ANY client can feel. Schema
-changes go through `schema/events.json` + `just gen` (never hand-edit `*.gen.*`).
-(Numbering preserved from the audit; gap 4 — compaction — landed, done log.)
-
-- [x] **1. Subagent output flattening FIXED — done 2026-07-13** (done log):
-  `MessagePayload.parentToolUseId` (schema + gen, additive — no protocol
-  bump); the mapper stamps it on every message.*/reasoning.* emit; the
-  reducer routes parented events to the Task card (live bounded narration
-  line) and never the main buffers; `sandbox turn` stdout guarded too.
-  Follow-up still open: per-agent full transcripts (narration renders as one
-  live line; subagent thinking deliberately dropped — the event log retains
-  everything). Live pod verify wanted at next natural Task fan-out.
-- [x] **2. "Always allow" reachable — done 2026-07-13** (done log): the §2c
-  numbered panel's option 2 sends `Scope:"session"` (tool-name grant,
-  `grants.ts`); scrollback names the grant's tool-level breadth; the perm
-  queue and plan card stay allow-once by design. STILL OPEN residuals (small):
-  `editedInput` (runner validates it; TUI never sends an edited input) and
-  SDK `canUseTool` suggestions (3rd arg still dropped — `claude.ts` two-arg
-  callback; no PermissionPayload field; would inform richer option rows).
-- [x] **3. Thinking streaming + recoverable blocks — CLOSED 2026-07-15**
-  (done log): the live-streaming half had already landed with the §1a/§2a
-  cluster (live "∴ Thinking" tail; this item was stale — doc drift); the
-  remaining half (multi-line thinks unrecoverable after commit) closed with
-  the §2c thinking render: capped italic body + ctrl+o expansion, same
-  6-line shape live and committed.
-- [~] **5. Background tasks / tool progress — pipeline half DONE 2026-07-15**
-  (done log): `tool.progress` schema event + `elapsedSeconds` (additive,
-  protocol v2), mapper emit with parent attribution, E4-class compaction,
-  runner-api.md. REMAINING: the TUI render half (elapsed on running tool
-  cards; unlocks the §2c `⎿ exit 0 · 42 lines` combo) and background-task
-  correlation (SDK task_id + SDKToolUseSummaryMessage, noted in mapping.ts).
-- [x] **6. Citations + server-tool results — done 2026-07-18** (done log):
-  `Citation` schema object + `MessagePayload.citations` (message.completed
-  only, additive); mapper flattens/dedups/caps; web_search/web_fetch
-  server_tool_use + result blocks map to normal tool.* (total, no orphan
-  cards); TUI "Sources:" footnote (sanitized, width-safe) + headless
-  `sandbox turn` Sources print. Audit [V6]/[V24]/[V25]/[V29] folded in.
-  Live verify wanted at next natural WebSearch turn.
-- [ ] **7. Images unrepresentable end-to-end.** String-only MessagePayload;
-  image blocks dropped (`mapping.ts:153-156,183-188`). Kitty plumbing exists
-  TUI-side (gauge). Gap starts at schema (attachment payload or fetch-by-ref
-  given the SQLite log).
-- [x] **8. Project slash commands / skills / CLAUDE.md in-pod — done
-  2026-07-13** (done log): SDK turns load the user/project/local settings
-  tiers by default (was pinned `[]`); `SANDBOX_SETTING_SOURCES` overrides
-  (`none` = old isolation); title summarizer stays isolated; A1 not
-  reopened (settings-defined hooks inherit the stripped agent env —
-  SECURITY.md updated). Live in-pod verify (a synced `.claude/` command
-  actually firing) still wanted.
-- [ ] **AskUserQuestion answer flow (2026-07-18 audit [V15] residual).** The
-  tool was in `DEFAULT_ALLOWED_TOOLS` with no answer path in ANY mode (yolo
-  omits `canUseTool` entirely; prompting modes degraded to a useless generic
-  allow) — removed 2026-07-18 (done log). To re-enable: wire `canUseTool`
-  unconditionally, map AskUserQuestion's questions/options into
-  `permission.requested` as a distinct question kind, return selections via
-  `updatedInput`, and render a picker in the TUI (`runner/src/claude.ts`,
-  the §2c permPrompt component).
-- [ ] **9. Single-slot client-local prompt queue.** `queuedPrompt` is one
-  string (`transcript.go:332-334`) — second message overwrites; invisible
-  cross-client. Claude Code has a multi-message editable queue.
-- [ ] **10. MCP unwired.** No `mcpServers` in buildOptions; `mcp_*` blocks
-  dropped. Generic tool.* events would mostly work once configured; non-text
-  MCP results flattened.
-
-**2026-07-07 parity-audit additions** (detail in
-[`docs/review-2026-07-07.md`](docs/review-2026-07-07.md) §D; id in brackets):
-
-- [x] **[D1] tool completion id-matched + turn-boundary drain — done
-  2026-07-08** (done log): `finishToolCard` closes by `flatTools[toolUseId]`
-  first (FIFO only as the id-less fallback); `drainPendingTools` runs in all
-  three turn-terminal handlers.
-- [x] **[D2] mid-turn crash boot terminal events — done 2026-07-08** (done
-  log): boot appends `turn.interrupted` + `status_changed{idle}` for the
-  orphaned turn before `session.started` (`orphanedTurnBootEvents`).
-- [x] **[D3] turn.* payloads on-schema — done 2026-07-09** (done log): four
-  payload defs (field union across all emitters) + `just gen` + hand-written
-  Go structs; TUI decodes `turn.failed` via the real `TurnFailedPayload`.
-- [x] **[D4] interrupt mid-think reasoning teardown — done 2026-07-08** (done
-  log): `finalizeStreaming` resets `m.reasoning`/`reasoningBuf`.
-- [x] **[D5] opencode replay shows user prompts — done 2026-07-09** (done
-  log): the turn adapter echoes the prompt as `message.* role:user`
-  (Claude-parity path; existing reducer dedup prevents double-print).
-- [x] **[D6] tool.delta attributed by id — done 2026-07-09** (done log): the
-  mapper tracks `(parent, blockIndex) → tool_use id` per turn and stamps both
-  ids on every `tool.delta`; the TUI targets by `flatTools` and drops parented
-  deltas with no flat card. Distinct from gap 1 (text/thinking deltas), which
-  stays open.
-- [x] **[D7/D8/D10/D11/D12] event-model LOW sweep — done 2026-07-11** (done
-  log): single id-carrying `tool.failed` (SDK tool_result is the terminal);
-  `ToolPayload.tool` recovered via the id→name map on
-  completed/failed/delta; `TurnRequestBody` mirrors `Advisor` + documents
-  `Resume`'s real semantics; observer title passthrough exempt from the
-  headless guard + pre-cycle `session.error` → synthetic failed turn;
-  exactly one `usage.updated` per result with real cost, cache-only turns
-  move ctx%. Deliberately NOT done here: `exitCode` (§2c plumbing, the
-  hook/mapping seam correlation is nontrivial).
-- [x] **[D9] Status dual vocabulary — done 2026-07-12** with the §8
-  De-Claude break (done log): `State.Status` = k8s lifecycle only;
-  new `State.Activity` (idle/busy/error) carries runner turn-activity.
-
-### 2c. Design/layout changes (renderer)
-
-Deduped against `docs/archive/ux-polish-plan.md` — nothing below is already committed
-there. HIGH items are the at-a-glance tells; most are renderer-local.
-
-- [ ] **Tool-card follow-ups** (the two-line ⏺/⎿ idiom + ctrl+o expansion
-  landed — done log): per-card focus/expand for older cards
-  (space/toggleSubagents has the same latest-only gap); `⎿ exit 0 · 42 lines`
-  combo needs exit-code plumbing (§2b gap 5). *(The 2026-07-07 [H4-H7]
-  regression residuals — control-sequence smearing, tab overflow, uncapped
-  opencode output, ctrl+o stranding on content-less cards — all fixed
-  2026-07-09, done log.)*
-- [x] **Gutter bars killed; quiet user prompts — done 2026-07-12** (done
-  log): assistant `⏺ ` + hanging indent, user dim `> `, goldens
-  regenerated deliberately.
-- [x] **Working indicator above the composer — done 2026-07-12** (done log):
-  `✳ <verb>… (elapsed · ↓tokens · esc to interrupt)`, `esc to steer` when
-  queued; context-aware verb; a new liveLayout band.
-- [x] **Statusline collapsed to one row — done 2026-07-12** (done log): one
-  budgeted width-safe row (model + mode chip never shed — closes the §1c
-  row-1 overflow residual); ctx gauge only ≥60% AND known limit (200k
-  fallback removed both places); cost ≥$0.10; rate-limit row transient 8s
-  after `rate_limit.updated` with fade.
-- [x] **Permission prompt: numbered-option question panel — done 2026-07-13**
-  (done log): per-tool question + ❯-selected numbered options
-  (`permprompt.go`); a/d hidden accelerators; ↵ confirms, diff reveal moved
-  to ctrl+o; grace gate covers all resolving keys; goldens regenerated.
-  "2. Yes, allow <tool> this session" landed WITH §2b gap 2.
-- [x] **De-bracket system notices — done 2026-07-15** (done log): connection
-  lifecycle = plain dim sentences; interrupted/interrupt-failed = Coral
-  `⎿  Interrupted by user` elbow via `appendElbowNotice` (blockShell so the
-  Coral survives blockInfo's dim restyle).
-- [x] **Blank line per top-level entry — done 2026-07-15** (done log):
-  `turnGap` → `entryGap` with one `startsEntry(prev,cur)` predicate shared by
-  committed blocks AND the streaming tail (T1 held); consecutive tool cards
-  tight, info/footer attach gapless. Goldens regenerated, diffs
-  blank-lines-only.
-- [x] **Persistent title header dropped — done 2026-07-15** (done log):
-  `headerBands()` returns bands only while reconnecting/session-gone; body
-  starts at row 0 normally; session title now rides the terminal tab via
-  `tea.View.WindowTitle` (`App.windowTitle`); bodyTop/scrollbar/preview
-  followed via the §2a band walk.
-- [x] **Todo pinned widget + checkbox progression — done 2026-07-15** (done
-  log): `todo.updated` mutates ONE `blockTodos` block (payload on the model);
-  ✓ strikethrough dim-green / ▸ bright / ○ dim, no `▤ todo list` header;
-  empty list → dim "todos cleared".
-- [x] **Thinking render — done 2026-07-15** (done log): committed multi-line
-  thinks show `∴ Thought` + italic TextMuted body capped at 6 wrapped lines
-  + `… +N lines (ctrl+o)`; live tail shows the same 6-line window
-  (tail-following, `… +N earlier lines`); ctrl+o generalized to
-  `toggleLatestExpandable` (tool cards + capped thinks). Single-line thinks
-  unchanged; goldens unchanged (none carry multi-line thinks).
-- [x] **Transient scrollbar — done 2026-07-15** (done log): thumb renders
-  only when off-bottom (`offset < total-h` gates kit.Scrollbar); blank gutter
-  at bottom, width math unchanged. STILL OPEN residual (LOW): the dim
-  `↓ new output · G bottom` pill during live turns — needs body-overlay
-  machinery (§2e-A/F territory).
-
-### 2d. Transcript/dashboard UX — still-open items from earlier passes
-
-- [x] **Prompt history — done 2026-07-15** (done log): ↑/↓ recall in the
-  compose context, gated on empty-composer-or-navigating so drafts keep
-  their scroll meaning; draft preserved on entry, restored on ↓ past newest;
-  edit exits nav; recorded only at user-origin `submit()` (driver ticks +
-  initialPrompt excluded), consecutive dedupe. Session-local by design
-  (parked-state survival = documented residual).
-- [x] **`q`/`g` overloads — advertising fixed 2026-07-15** (done log): the
-  footer now derives from the dispatching dctxList table (`shortHelp` →
-  `footerBindings`), so `q` truthfully reads "perm queue" when sessions
-  wait and "quit" otherwise; `g` help reads "group view · gg top" (footer +
-  `?` overlay). Behavior unchanged by design.
-- [x] **External-pane leader chord — done 2026-07-15** (done log): `ctrl+]`
-  arms a leader inside external panes — `g`/`k` = next/prev-attention
-  (minimize pane + attach target), double-tap or 500ms timeout = detach,
-  other keys disarm + forward; pure `leaderStep` classifier + gen-guarded
-  tick; `jumpToPrevNeedingAttention` added. Lone-ctrl+] detach now resolves
-  at the timeout (accepted trade). Live-verify wanted: chord + jumps in a
-  real cluster `opencode attach` pane.
-- [x] **First-account path — done 2026-07-15** (done log): zero stored
-  accounts now always shows the account stage ("cluster default" + "＋ add
-  account"); cluster-default selection is byte-identical to the old silent
-  skip (same `beginCreate` params, pinned); §6 reauth-stage signpost left
-  where the row set is decided.
-- [x] **Yolo default — done 2026-07-12** (done log): runner default flipped
-  to `bypassPermissions` (SDK gate verified to cover it); statusline renders
-  bypass as an inverted coral `⚠ bypass` chip (never invisible); the TUI
-  already pinned the mode per turn, so no status plumbing was needed.
-
-### 2e. Premium-feel program (2026-07-07 Crush/ecosystem research)
+### 2e. Dashboard premium-feel backlog (2026-07-07 Crush/ecosystem research)
 
 Design detail lives in [`docs/tui-premium-plan.md`](docs/tui-premium-plan.md)
 (draft, awaiting sign-off) — five-agent comparative study of Crush
 (FSL: **ideas only, never copy code**), ultraviolet, gh-dash, huh (all MIT).
-Items below are the plan's workstreams; the doc carries mechanics, license
-rules, and sequencing. Complements — does not supersede — §2a/§2c.
+Retargeted at the dashboard/feed after claude-pane-first deleted the
+transcript: workstream **B (transcript depth) is OBSOLETE** — skip it when
+reading the plan doc; the rest apply to surfaces that still exist (dashboard
+modals, session list, feed, theming).
 
 - [ ] **A. Dialog stack manager + async grace period + huh for form dialogs**
   — one `Dialog` interface + stack on App replaces ~8 bespoke overlays and 4
@@ -468,14 +253,9 @@ rules, and sequencing. Complements — does not supersede — §2a/§2c.
   async-permission blind-approve class. Plan §A.
 - [ ] **A4. Input coalescing** — no `tea.WithFilter` today; 16ms wheel/motion
   throttle with sign-aware delta summation. Plan §A4.
-- [ ] **B. Transcript depth** — per-tool body dispatch (grow
-  `toolExpandBody`, `transcript_render.go:524`), per-card
-  selection/expansion (today global-latest only,
-  `transcript_input.go:236-241`; unlocks per-subagent collapse + per-item
-  copy), three-state thinking view (slice AFTER glamour render), go-udiff +
-  chroma diffview replacing the hand-rolled LCS
-  (`permission_diff.go:228-277`), lipgloss/tree subagent cards (also retires
-  the §1c child-line budget residual). Plan §B.
+- [x] **B. Transcript depth — OBSOLETE 2026-07-20** (claude-pane-first
+  deleted the custom transcript renderer; Claude Code renders its own
+  transcript in-pane). Plan §B stays as-of-time in the doc — skip it.
 - [ ] **C. gh-dash lifts (MIT, same charm v2 stack)** — async action task
   queue (start/finish/error + `[⟳ N]` badge + 2s auto-clear in the
   statusline) and the fixed+Grow table/column engine for the session list.
@@ -503,13 +283,30 @@ rules, and sequencing. Complements — does not supersede — §2a/§2c.
   allowlist-gated DA1/XTVERSION/pixel/Kitty/OSC99 probe burst; notification
   escalation (native/OSC99/OSC777/bell) with focus suppression. Plan §G.
 
-## 3) Decision record — Claude Code as the local client (SETTLED 2026-07-04)
+## 3) Decision record — Claude Code as the client (REVERSED 2026-07-20)
+
+**2026-07-20 amendment: the 2026-07-04 rejection is SUPERSEDED by
+claude-pane-first.** The "Recorded, NOT planned" option below shipped — in a
+materially better shape than the one evaluated: a **runner-owned node-pty**
+child (not `ssh -t`; survives disconnects, no tmux rendering bugs), a
+**WebSocket pane** on the existing 8787 forward (no keystroke-over-ssh
+stack), provisioned **observer hooks + statusline** as the metrics tap (the
+"no metrics-observer API" cost turned out solvable), `--session-id` pinning
+(the "resume forks the session id" cost was wrong for interactive
+`--resume`), and full credential materialization for Max mode. The
+empirical groundwork that flipped each cost is in the 2026-07-20 pane
+research (maintainer-local); the shipped design is
+`openspec/changes/claude-pane-first/design.md`. The latency bar the 2026-07-04
+decision assumed was re-tested and judged excellent by the maintainer on the
+target network. The ssh-shim rejection below STANDS (it bypasses the runner
+control plane; pane-first does not). The upstream-transport watch item is
+obsolete — the pane transport ships in this repo.
+
+Original record (kept so the reasoning trail survives):
 
 Three-track research (official surface, community art, repo feasibility) into
 using Claude Code **directly** as the client for a remote sandbox session.
-Outcome: **not happening; invest in §2 instead.** Kept here so nobody re-treads.
-(The supported `claude --resume` escape hatch is documented in README —
-done log.)
+Outcome at the time: **not happening; invest in §2 instead.**
 
 - **Blocked upstream:** Claude Code has no remote-attach transport — no analog
   of `codex --remote ws://…` / `opencode attach <url>`;
@@ -536,10 +333,9 @@ done log.)
   `claude.ts:429`; since the §2b gap-8 fix both paths load on-disk settings),
   no metrics-observer API, resume forks the session id,
   needs pod tmux for TTY-death survival.
-- [ ] **Watch upstream for a real remote transport** (#10042, #72448, #24594).
-  If one ships, it slots into the codex Option-B pattern
-  (`docs/codex-integration-plan.md`) and obsoletes the custom transcript
-  renderer for the claude backend. Cheap periodic check; no code now.
+- [x] **Watch upstream for a real remote transport — OBSOLETE 2026-07-20:**
+  claude-pane-first ships our own pane transport (runner PTY + WS), so an
+  upstream remote-attach no longer gates anything.
 - Also evaluated and rejected: SSHFS mounts (per-file-op RTT),
   MCP-ssh-tools-with-built-ins-denied (token-expensive file ops, model drifts
   back to native tools), dev containers (local isolation only), web teleport
@@ -547,20 +343,17 @@ done log.)
 
 ## 4) Performance
 
-- [ ] Warm-session detail preview re-renders the retained transcript tail
-  every frame (no unchanged-guard). Re-verified 2026-07-04: it renders via
-  `tr.tailLines(5, width)` (bounded), so cost is lower than originally
-  claimed — measure before optimizing. `model.go:2537`, `transcript.go:2113`.
+- [x] **Transcript-renderer perf items — OBSOLETE 2026-07-20**
+  (claude-pane-first deleted the custom renderer): warm-preview tail
+  re-render, `lastCompleteBlock` block rescans, glamour per-space SGR
+  padding all left with it (`glamour` dropped from go.mod in the same
+  change).
 - [ ] **`visibleSessions()` re-filters+re-sorts 4+ times per frame**
   (`groups.go`) — measure-first; memoize only if profiling shows it matters.
   (The `partition()` render-path dedup itself landed — done log.)
-- [ ] `bodyView` still ~283µs/frame: `fitModal` does two ANSI `lipgloss.Width`
-  scans per visible line every frame. `transcript_list.go:302`.
-- [ ] **`lastCompleteBlock` still rescans per block-boundary crossing** —
-  O(blocks·N), a smaller term now that the incremental `mdScanner` landed
-  (done log); measure before touching.
-- [ ] Glamour pads wrapped lines with per-space SGR runs (bytes; upstream
-  glamour style; inflates parse work).
+- [ ] `fitModal` does two ANSI `lipgloss.Width` scans per visible line every
+  frame (`render_util.go`; feeds modal fitting + the feed view) — measure
+  before optimizing.
 
 **2026-07-07 perf-review additions** (two agents; ✓ = both flagged it; detail in
 [`docs/review-2026-07-07.md`](docs/review-2026-07-07.md) §E, id in brackets):
@@ -774,8 +567,9 @@ side effect of `cd`.
     (`internal/k8s/backend.go:1244-1277`) with package-manager preference,
     cache dirs, binary-cache config, optional `/nix`/Flox mounts, preserving
     the existing `/session` PVC + SSH mounts (`backend.go:1185-1241`).
-  - Propagate Flox/Nix preference to agent child processes: Claude's explicit
-    env map (`runner/src/claude.ts:213-231`); OpenCode inherits env
+  - Propagate Flox/Nix preference to agent child processes: the claude-pane
+    child's strict env allowlist (`runner/src/claude-pane.ts:138` — new vars
+    must be added there explicitly); OpenCode inherits env
     (`runner/src/opencode.ts:248-253`); inject PATH/cache/config env + agent
     guidance (prefer project Flox env → `flox run` → `nix run nixpkgs#…`).
   - Update runner-image CI triggers (`.depot/workflows/build-runner-image.yml:12-20`
@@ -959,6 +753,10 @@ naming-break, and Shell items each stand alone.
   composer from a scripted `[]client.Event` (no hand-assembled items); `sdktest`
   pins every surface + `TestTranscriptFromPublicEvents` (event-sourced conformance,
   six goldens). No `tui/` package imports `internal/`; `just check` green.
+  *(Historical record — claude-pane-first then deleted `tui/chat`,
+  `tui/transcript`, and `cmd/chatdemo` on 2026-07-20 with the custom claude
+  renderer they served (see §2/§3); the surviving public `tui/` surface is
+  kit / list / picker / anim / theme / composer / chrome / terminal.)*
 - [ ] **Remaining client-level capability gaps** (overlaps
   `docs/public-api-importability-plan.md`, which is TUI/auth focused):
   session titles/rename are `internal/index`-only
@@ -1072,38 +870,36 @@ naming-break, and Shell items each stand alone.
   observer-cap model remains absent from `docs/architecture.md` (doc drift,
   2026-07-06 harness audit).
 
-- [ ] **Visual-testing gaps (2026-07-13 review) — static goldens are strong,
-  motion/theme/size axes are not.** The golden harness
+- [ ] **Visual-testing gaps (2026-07-13 review; re-scoped 2026-07-20 after
+  claude-pane-first deleted the transcript surfaces) — static goldens are
+  strong, motion/theme/size axes are not.** The golden harness
   (`internal/tui/dashboard/golden_test.go:30`) deliberately pins
   `SANDBOX_REDUCE_MOTION=1`, so every committed frame is the settled
-  end-state; the transition catalog (`internal/tui/dashboard/transitions.go:16`)
-  is only value-tested (`tui/anim/transition_test.go`,
-  `internal/tui/dashboard/permission_clock_test.go:119` — and the latter only
-  at past-window end states). Sub-items:
+  end-state; the transition catalog (`internal/tui/dashboard/transitions.go`)
+  is only value-tested (`tui/anim/transition_test.go`). Sub-items:
   - [ ] *Mid-motion golden frames:* with motion forced ON and the injected
     `nowFunc` stepped through fixed offsets (0, ½-window, past-end of
-    `rowEnterDur`/`statusFlashDur`/`permissionAppearDur`), golden the rendered
-    frame at each step — pins the row fade (`model_render.go:347`), status
-    flash (`model_render.go:342`), and permission-box appear
-    (`permission_diff.go:64`) as reviewable frame sequences. All inputs are
-    already injectable, so this is byte-deterministic; it also gives agents a
-    static way to "see" the animation (the golden files ARE the frames).
+    `rowEnterDur`/`statusFlashDur`), golden the rendered frame at each step —
+    pins the row fade and status flash (`transitions.go`) as reviewable frame
+    sequences. All inputs are already injectable, so this is
+    byte-deterministic; it also gives agents a static way to "see" the
+    animation (the golden files ARE the frames).
   - [ ] *Theme axis:* goldens render only the default theme
     (`tui/theme/theme.go:161` — themes[0] Midnight); Daylight is never
-    snapshotted anywhere. Parameterize at least one dashboard + one transcript
+    snapshotted anywhere. Parameterize at least one dashboard + one feed
     golden per registered theme.
-  - [ ] *Size axis:* every golden is 100×30 (`golden_test.go:53`,
-    `golden_multiturn_test.go:37`). `tui/kit` covers narrow degradation
-    per-component (`components_test.go` TestCardDegradesNarrow) but no
-    narrow-terminal golden exists for the composed dashboard/transcript frame.
+  - [ ] *Size axis:* every golden is 100×30 (`golden_test.go:53`). `tui/kit`
+    covers narrow degradation per-component (`components_test.go`
+    TestCardDegradesNarrow) but no narrow-terminal golden exists for the
+    composed dashboard/feed frame.
   - [ ] *Animation eyeball harness:* no repeatable way to watch dashboard
     motion without a live cluster — `cmd/tuikit-demo` exercises only the
     public `tui/` packages, and `just dev-tui` (justfile:363) needs the kind
-    cluster. Options: a fixture-replay dev mode for the dashboard (the
-    `testdata/transcript-multiturn.jsonl` stream already drives the real
-    handleEvent→render path in tests), and/or a VHS tape
-    (`nix run nixpkgs#vhs`) recording tuikit-demo → gif as a non-gating CI
-    artifact (vhs already noted as a nice-to-have in
+    cluster. Options: a fixture-replay dev mode for the dashboard (needs a
+    new event fixture — the transcript-multiturn stream left with the
+    renderer; the feed's `[]client.Event` cases in `feed_test.go` are the
+    seed), and/or a VHS tape (`nix run nixpkgs#vhs`) recording tuikit-demo →
+    gif as a non-gating CI artifact (vhs already noted as a nice-to-have in
     `docs/archive/local-dev-turn-parity-plan.md:159`).
 
 ## Open caveats (carry-forward)
