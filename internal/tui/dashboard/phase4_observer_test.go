@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -180,5 +181,82 @@ func TestClaudePaneLiveStatusRowParity(t *testing.T) {
 	}
 	if live.CtxLimit == 0 {
 		t.Error("session.started model did not resolve a context-window limit (models.Limit)")
+	}
+}
+
+// Task 4.5 (claude-pane attention): the observer's permission lifecycle drives
+// attention routing end-to-end. The claude-pane observer emits
+// permission.requested (PermissionRequest hook) and clears it via
+// permission.resolved on the next observed activity (PreToolUse/PostToolUse/
+// Stop — the answer happened in-pane); the shared reducer must float the
+// session (waiting → needsAttention) and clear it back to busy, with no
+// claude-pane-specific code in the routing path.
+func TestClaudePaneObserverAttentionLifecycle(t *testing.T) {
+	sess := Session{State: session.State{ID: "claude-pane-att", Backend: session.BackendClaudePane}}
+
+	// UserPromptSubmit → turn.started: busy, no attention.
+	ApplyRunnerEvent(&sess, mkEvent(session.EventTurnStarted, nil))
+	if needsAttention(sess) {
+		t.Fatalf("busy session must not need attention (status %v)", sess.DashStatus)
+	}
+
+	// PermissionRequest hook → permission.requested (observer shape: pane-perm-N
+	// id, tool + raw input): waiting + attention float + pending descriptor.
+	ApplyRunnerEvent(&sess, mkEvent(session.EventPermissionRequested, session.PermissionPayload{
+		PermissionID: "pane-perm-1", Tool: "Bash", Input: json.RawMessage(`{"command":"rm -rf build"}`),
+	}))
+	if sess.DashStatus != StatusWaiting || !needsAttention(sess) {
+		t.Fatalf("permission.requested must float attention (status %v)", sess.DashStatus)
+	}
+	if sess.PendingPermissionTool != "Bash" || sess.PendingPermissionID != "pane-perm-1" {
+		t.Fatalf("pending permission descriptor not captured: %q/%q", sess.PendingPermissionID, sess.PendingPermissionTool)
+	}
+	if dot := attentionDot(sess); dot == "" {
+		t.Error("waiting session must render an attention dot")
+	}
+
+	// The user answers IN-PANE; the observer proves it via the next activity and
+	// emits permission.resolved {decision: allow-once} → back to busy, cleared.
+	ApplyRunnerEvent(&sess, mkEvent(session.EventPermissionResolved, session.PermissionPayload{
+		PermissionID: "pane-perm-1", Tool: "Bash", Decision: "allow-once",
+	}))
+	if sess.DashStatus != StatusBusy || needsAttention(sess) {
+		t.Fatalf("permission.resolved must clear attention back to busy (status %v)", sess.DashStatus)
+	}
+	if sess.PendingPermissionID != "" {
+		t.Error("pending permission descriptor not cleared on resolution")
+	}
+
+	// Stop → turn.completed: needs-input (attention again, by design — the
+	// reply is ready for the user), pending stays clear.
+	ApplyRunnerEvent(&sess, mkEvent(session.EventTurnCompleted, nil))
+	if sess.DashStatus != StatusNeedsInput || !needsAttention(sess) {
+		t.Fatalf("turn.completed should be needs-input attention (status %v)", sess.DashStatus)
+	}
+
+	// And the list actually floats it: attention-first ordering puts the
+	// waiting/needs-input session above a busy one.
+	busy := Session{State: session.State{ID: "other"}, sessionReadModel: sessionReadModel{DashStatus: StatusBusy}}
+	order := sortByAttention([]Session{busy, sess}, true)
+	if order[0].ID() != sess.ID() {
+		t.Errorf("attention-first ordering did not float the attention session: got %v first", order[0].ID())
+	}
+}
+
+// Task 4.5 (abort path): a synthetic turn-abort (child crash mid-permission —
+// the supervisor's turn.interrupted) must also clear a stale waiting state so
+// a dead prompt can't hold the session in attention forever.
+func TestClaudePaneObserverAttentionClearedByAbort(t *testing.T) {
+	sess := Session{State: session.State{ID: "claude-pane-abort", Backend: session.BackendClaudePane}}
+	ApplyRunnerEvent(&sess, mkEvent(session.EventTurnStarted, nil))
+	ApplyRunnerEvent(&sess, mkEvent(session.EventPermissionRequested, session.PermissionPayload{
+		PermissionID: "pane-perm-1", Tool: "Write",
+	}))
+	ApplyRunnerEvent(&sess, mkEvent(session.EventTurnInterrupted, nil))
+	if sess.DashStatus == StatusWaiting {
+		t.Fatal("turn.interrupted must clear the waiting state")
+	}
+	if sess.PendingPermissionID != "" {
+		t.Error("pending permission descriptor survived the turn abort")
 	}
 }
