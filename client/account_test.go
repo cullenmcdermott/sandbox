@@ -147,3 +147,81 @@ func TestSelectAnthropicAccount(t *testing.T) {
 		}
 	})
 }
+
+// TestUseClaudePaneMaterial: the claude-pane material setter is fail-closed —
+// partial material rejects with the sentinel and leaves the options untouched.
+func TestUseClaudePaneMaterial(t *testing.T) {
+	t.Run("full material is set", func(t *testing.T) {
+		var opts client.CreateOptions
+		m := cred.Material{CredentialsJSON: []byte(`{"claudeAiOauth":{}}`), AccountJSON: []byte(`{"oauthAccount":{}}`)}
+		if err := opts.UseClaudePaneMaterial(m); err != nil {
+			t.Fatalf("UseClaudePaneMaterial: %v", err)
+		}
+		if string(opts.ClaudeCredentialsJSON) != `{"claudeAiOauth":{}}` || string(opts.ClaudeOAuthAccountJSON) != `{"oauthAccount":{}}` {
+			t.Error("material not set on options")
+		}
+	})
+	t.Run("partial material is the sentinel", func(t *testing.T) {
+		var opts client.CreateOptions
+		err := opts.UseClaudePaneMaterial(cred.Material{CredentialsJSON: []byte(`{}`)})
+		if !errors.Is(err, client.ErrClaudePaneCredentialMissing) {
+			t.Fatalf("want ErrClaudePaneCredentialMissing, got %v", err)
+		}
+		if opts.ClaudeCredentialsJSON != nil {
+			t.Error("opts must not be mutated on failure")
+		}
+	})
+}
+
+// TestSelectClaudePaneMaterial covers the store-account (degraded) source: an
+// explicit selector resolves to that account's provisioned material and records
+// the account id for Secret labeling; failures are hard errors, never a
+// fallback. (The empty-selector path reads the host's real Claude Code login —
+// cred's own systemMaterial tests cover it with injected seams.)
+func TestSelectClaudePaneMaterial(t *testing.T) {
+	t.Run("explicit selector provisions store material", func(t *testing.T) {
+		store := cred.NewFileStore(t.TempDir())
+		a := cred.NewAccount("claude.ai", cred.AccountSubscription)
+		if err := store.Add(a, []byte("sk-ant-oat-TOKEN")); err != nil {
+			t.Fatalf("add: %v", err)
+		}
+		var opts client.CreateOptions
+		if err := opts.SelectClaudePaneMaterial(store, "claude.ai"); err != nil {
+			t.Fatalf("SelectClaudePaneMaterial: %v", err)
+		}
+		if len(opts.ClaudeCredentialsJSON) == 0 || len(opts.ClaudeOAuthAccountJSON) == 0 {
+			t.Error("material not populated from the store account")
+		}
+		if opts.AnthropicAccountID != a.ID {
+			t.Errorf("account id not recorded for Secret labeling: got %q, want %q", opts.AnthropicAccountID, a.ID)
+		}
+		// The claude-sdk token fields must stay untouched — a pane session
+		// never provisions the inference-scoped env-token path.
+		if opts.AnthropicCredential != nil || opts.AnthropicAuth != "" {
+			t.Error("pane material selection must not set the claude-sdk token fields")
+		}
+	})
+
+	t.Run("unresolvable selector is a hard error", func(t *testing.T) {
+		store := cred.NewFileStore(t.TempDir())
+		var opts client.CreateOptions
+		if err := opts.SelectClaudePaneMaterial(store, "ghost"); err == nil {
+			t.Fatal("expected a hard error for an unresolvable selector")
+		}
+		if opts.ClaudeCredentialsJSON != nil || opts.AnthropicAccountID != "" {
+			t.Error("opts must not be mutated on failure")
+		}
+	})
+
+	t.Run("console account is rejected (no OAuth credential)", func(t *testing.T) {
+		store := cred.NewFileStore(t.TempDir())
+		a := cred.NewAccount("work", cred.AccountConsole)
+		if err := store.Add(a, []byte("sk-ant-api-KEY")); err != nil {
+			t.Fatalf("add: %v", err)
+		}
+		var opts client.CreateOptions
+		if err := opts.SelectClaudePaneMaterial(store, "work"); !errors.Is(err, cred.ErrNotSubscriptionAccount) {
+			t.Fatalf("want ErrNotSubscriptionAccount, got %v", err)
+		}
+	})
+}

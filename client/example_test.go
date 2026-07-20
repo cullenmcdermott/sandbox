@@ -353,3 +353,72 @@ func TestNewRejectsInvalidReaperImagePullPolicy(t *testing.T) {
 		t.Fatalf("New with bad reaper pull policy: got %v, want ErrInvalidImagePullPolicy", err)
 	}
 }
+
+// TestCreateFailsClosedOnClaudePaneMaterial: a claude-pane session without the
+// full credential material is rejected before any cluster call — there is no
+// shared-Secret fallback for the pane, and a material-less create would stall
+// the pod in CreateContainerConfigError instead of failing actionably.
+func TestCreateFailsClosedOnClaudePaneMaterial(t *testing.T) {
+	c := &client.Client{}
+	_, err := c.Create(context.Background(), client.CreateOptions{
+		ProjectPath: "/p",
+		Backend:     client.BackendClaudePane,
+	})
+	if !errors.Is(err, client.ErrClaudePaneCredentialMissing) {
+		t.Fatalf("claude-pane without material: got %v, want ErrClaudePaneCredentialMissing", err)
+	}
+	// Half the material is still missing material.
+	_, err = c.Create(context.Background(), client.CreateOptions{
+		ProjectPath:           "/p",
+		Backend:               client.BackendClaudePane,
+		ClaudeCredentialsJSON: []byte(`{"claudeAiOauth":{}}`),
+	})
+	if !errors.Is(err, client.ErrClaudePaneCredentialMissing) {
+		t.Fatalf("claude-pane with partial material: got %v, want ErrClaudePaneCredentialMissing", err)
+	}
+}
+
+// TestCreatePlumbsClaudePaneMaterial: the full-material documents flow into the
+// per-session Secret (both keys + the account label), and the claude-sdk
+// token-path key is NOT written for a pane session even if a caller set the
+// sdk fields — the pane's only auth path is the materialized credentials file.
+func TestCreatePlumbsClaudePaneMaterial(t *testing.T) {
+	agents := agentsfake.NewSimpleClientset()
+	core := fake.NewSimpleClientset()
+	backend := k8s.NewForClients(agents, core, "agent-sessions")
+
+	c, err := client.New(client.WithBackend(backend), client.WithStateDir(t.TempDir()))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	sess, err := c.Create(context.Background(), client.CreateOptions{
+		ProjectPath:            "/work/repo",
+		Backend:                client.BackendClaudePane,
+		AnthropicAccountID:     "acct-work",
+		ClaudeCredentialsJSON:  []byte(`{"claudeAiOauth":{"accessToken":"AT","refreshToken":"RT"}}`),
+		ClaudeOAuthAccountJSON: []byte(`{"oauthAccount":{"emailAddress":"me@example.com"}}`),
+		// Stray sdk-path fields must not leak into a pane session's Secret.
+		AnthropicAuth:       "oauth",
+		AnthropicCredential: []byte("sk-ant-oat-STRAY"),
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	secret, err := core.CoreV1().Secrets("agent-sessions").Get(context.Background(), string(sess.ID())+"-runner", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get secret: %v", err)
+	}
+	if string(secret.Data["claude-credentials-json"]) == "" {
+		t.Error("claude-credentials-json key missing from the per-session Secret")
+	}
+	if string(secret.Data["claude-oauth-account-json"]) == "" {
+		t.Error("claude-oauth-account-json key missing from the per-session Secret")
+	}
+	if secret.Labels["sandbox.cullen.dev/anthropic-account"] != "acct-work" {
+		t.Errorf("account label did not plumb through: got %q", secret.Labels["sandbox.cullen.dev/anthropic-account"])
+	}
+	if _, ok := secret.Data["anthropic-credential"]; ok {
+		t.Error("claude-sdk token key written for a claude-pane session (the pane must never carry the env-token path)")
+	}
+}

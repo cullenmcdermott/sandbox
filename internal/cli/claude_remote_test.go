@@ -94,3 +94,31 @@ func TestStartPromptTurnFailsClosedOnUnhealthyRunner(t *testing.T) {
 		t.Fatalf("StartTurn must not fire on an unhealthy runner (called %d times)", len(f.started))
 	}
 }
+
+// TestClaudePaneFlagRejectsPrompt: `sandbox claude --pane "prompt"` must fail
+// fast with the interactive-only explanation — there is no headless turn path
+// to deliver the prompt through (POST /turns answers 409 for claude-pane), and
+// silently dropping it would be worse than refusing.
+func TestClaudePaneFlagRejectsPrompt(t *testing.T) {
+	cmd := newClaudeRemoteCmd()
+	cmd.SetArgs([]string{"--pane", "fix", "the", "build"})
+	cmd.SilenceUsage, cmd.SilenceErrors = true, true
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "interactive-only") {
+		t.Fatalf("claude --pane with a prompt: got %v, want the interactive-only rejection", err)
+	}
+}
+
+// TestClaudePaneFlagExists pins the overlap-release opt-in surface: the claude
+// command carries a --pane bool flag (default false — the SDK backend stays
+// the default until the 6.2 flip).
+func TestClaudePaneFlagExists(t *testing.T) {
+	cmd := newClaudeRemoteCmd()
+	f := cmd.Flags().Lookup("pane")
+	if f == nil {
+		t.Fatal("claude command has no --pane flag")
+	}
+	if f.DefValue != "false" {
+		t.Errorf("--pane default = %q, want false (pane-first flip is a later release)", f.DefValue)
+	}
+}

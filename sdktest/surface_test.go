@@ -195,9 +195,12 @@ var _ = client.CreateOptions{
 	CodexAccountID:      "acct-chatgpt",
 	CodexAuthJSON:       []byte("auth-json"),
 	OpencodeProvider:    client.OpencodeProviderAnthropic,
-	StorageClass:        "fast",
-	StorageGiB:          10,
-	Worktree:            client.WorktreeAuto,
+	// claude-pane full-material provisioning (claude-pane-first).
+	ClaudeCredentialsJSON:  []byte(`{"claudeAiOauth":{}}`),
+	ClaudeOAuthAccountJSON: []byte(`{"oauthAccount":{}}`),
+	StorageClass:           "fast",
+	StorageGiB:             10,
+	Worktree:               client.WorktreeAuto,
 }
 
 // OpencodeProvider vocabulary: re-exported so consumers pass a named constant
@@ -300,6 +303,22 @@ var (
 	_ func(*client.CreateOptions, cred.Store, string) error = (*client.CreateOptions).UseAnthropicAccount
 	_ func(*client.CreateOptions, cred.Store, string) error = (*client.CreateOptions).SelectAnthropicAccount
 	_ error                                                 = client.ErrNoDefaultAnthropicAccount
+)
+
+// --- client: claude-pane provisioning (claude-pane-first) ---------------------
+
+var (
+	// BackendClaudePane re-export + the full-material selection helpers: the
+	// system Claude Code login (Max mode) or a stored account's material.
+	_ string                                                = client.BackendClaudePane
+	_ func(*client.CreateOptions, cred.Material) error      = (*client.CreateOptions).UseClaudePaneMaterial
+	_ func(*client.CreateOptions, cred.Store, string) error = (*client.CreateOptions).SelectClaudePaneMaterial
+	_ func(string) (cred.Material, error)                   = cred.SystemMaterial
+	_ func(cred.Store, string) (cred.Material, error)       = cred.ProvisionMaterial
+	_                                                       = cred.Material{CredentialsJSON: []byte("{}"), AccountJSON: []byte("{}")}
+	_ error                                                 = client.ErrClaudePaneCredentialMissing
+	_ error                                                 = cred.ErrNotSubscriptionAccount
+	_ error                                                 = cred.ErrNoFullCredential
 )
 
 // --- client: codex backend + credential contract (Phase 1) --------------------

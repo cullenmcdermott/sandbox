@@ -24,6 +24,7 @@ func newClaudeRemoteCmd() *cobra.Command {
 		modelFlag    string
 		accountFlag  string
 		worktreeFlag string
+		paneFlag     bool
 	)
 	cmd := &cobra.Command{
 		Use:   "claude [prompt]",
@@ -33,8 +34,18 @@ func newClaudeRemoteCmd() *cobra.Command {
 			// build` sends the whole prompt, not just "fix" (extra args were
 			// silently dropped before).
 			prompt := strings.Join(args, " ")
+			backend := session.BackendClaudeSDK
+			if paneFlag {
+				backend = session.BackendClaudePane
+				// The pane child owns its own input loop; there is no headless
+				// turn path to deliver a positional prompt through (POST /turns
+				// answers 409), so reject it rather than silently dropping it.
+				if prompt != "" {
+					return fmt.Errorf("claude-pane sessions are interactive-only — start without a prompt and type it in the pane")
+				}
+			}
 			// claude has no opencode provider step, so the provider selector is empty.
-			return runStartSession(cmd, session.BackendClaudeSDK, prompt, runnerImage, reaperImage, nameFlag, modelFlag, accountFlag, worktreeFlag, "")
+			return runStartSession(cmd, backend, prompt, runnerImage, reaperImage, nameFlag, modelFlag, accountFlag, worktreeFlag, "")
 		},
 	}
 	cmd.Flags().StringVar(&runnerImage, "runner-image", client.DefaultRunnerImage, "runner container image")
@@ -43,6 +54,9 @@ func newClaudeRemoteCmd() *cobra.Command {
 	cmd.Flags().StringVar(&modelFlag, "model", "", "model id/alias for the session default (e.g. opus, sonnet, haiku); empty uses the account default. Switch in-session with /model")
 	cmd.Flags().StringVar(&accountFlag, "account", "", "stored Anthropic account (id or label from `sandbox auth list`) to run the session on; empty uses the default account, or the shared cluster Secret when none are stored")
 	cmd.Flags().StringVar(&worktreeFlag, "worktree", "auto", "per-session git worktree isolation: auto (worktree iff the project is a git repo), on (require a git repo), off (never)")
+	// Overlap-release opt-in (claude-pane-first migration step 1): the default
+	// flip — pane-first with no flag — is a later, breaking release.
+	cmd.Flags().BoolVar(&paneFlag, "pane", false, "run the real interactive Claude Code TUI in the pod (claude-pane backend): auth provisioned from your local Claude Code login (Max mode), attach/detach via the dashboard pane")
 	return cmd
 }
 
@@ -205,6 +219,19 @@ func runStartSession(cmd *cobra.Command, backendName, prompt, runnerImage, reape
 			return serr
 		}
 		if aerr := applyAccountSelection(store, account, &opts); aerr != nil {
+			return aerr
+		}
+	}
+	// claude-pane: full credential material, resolved fail-closed before any
+	// cluster call. No --account → the host's own Claude Code login (Max mode);
+	// an explicit --account → that account's stored material (degraded — see
+	// SelectClaudePaneMaterial).
+	if backendName == session.BackendClaudePane {
+		store, serr := newCredStore()
+		if serr != nil {
+			return serr
+		}
+		if aerr := opts.SelectClaudePaneMaterial(store, account); aerr != nil {
 			return aerr
 		}
 	}

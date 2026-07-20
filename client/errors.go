@@ -101,6 +101,17 @@ var (
 	// carries no credential material.
 	ErrInvalidCodexAccountID = errors.New("sandbox: codex account id is not a valid kubernetes label value")
 
+	// ErrClaudePaneCredentialMissing is returned by Create for a claude-pane
+	// session missing the full provisioning material (the credential +
+	// oauthAccount documents). The interactive pane authenticates ONLY from the
+	// materialized credentials file, and the pod template references the Secret
+	// keys non-Optionally — creating without material would stall the pod in
+	// CreateContainerConfigError; failing here is the actionable version.
+	// Populate CreateOptions via SelectClaudePaneMaterial (the system Claude
+	// Code login — the Max-mode source) or UseClaudePaneMaterial. The error
+	// carries no credential material.
+	ErrClaudePaneCredentialMissing = errors.New("sandbox: claude-pane session requires full Claude Code credential material (see CreateOptions.SelectClaudePaneMaterial)")
+
 	// ErrNotAGitRepo is returned by Create when CreateOptions.Worktree is
 	// WorktreeOn but ProjectPath is not inside a git work tree (or the git binary
 	// is unavailable), so a per-session worktree cannot be created. Under

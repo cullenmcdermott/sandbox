@@ -113,3 +113,61 @@ func (o *CreateOptions) SelectAnthropicAccount(store cred.Store, selector string
 	// Manifest drift: DefaultID names an account that is no longer stored.
 	return fmt.Errorf("default account: %w: %q", cred.ErrUnknownAccount, def)
 }
+
+// UseClaudePaneMaterial sets the claude-pane provisioning material on o: the
+// FULL Claude Code OAuth credential and oauthAccount identity documents (see
+// cred.Material). Fail-closed: empty documents are rejected here, not later as
+// a stalled pod. o is mutated only on success.
+func (o *CreateOptions) UseClaudePaneMaterial(m cred.Material) error {
+	if len(m.CredentialsJSON) == 0 || len(m.AccountJSON) == 0 {
+		return ErrClaudePaneCredentialMissing
+	}
+	o.ClaudeCredentialsJSON = m.CredentialsJSON
+	o.ClaudeOAuthAccountJSON = m.AccountJSON
+	return nil
+}
+
+// SelectClaudePaneMaterial applies credential-source selection to o for a
+// claude-pane session. selector is a raw user-supplied account selector (may
+// be ""):
+//
+//   - selector == "": the host's own Claude Code login (cred.SystemMaterial) —
+//     the Max-mode source, carrying the full claudeAiOauth document (refresh
+//     token, scopes, subscription type) the interactive pane needs for
+//     subscription mode and in-pod refresh. Fail-closed: no system login, or a
+//     partial credential, is a hard error.
+//   - selector != "": resolve id|label against the store and provision that
+//     account's stored material (cred.ProvisionMaterial). DEGRADED mode: the
+//     store holds per-account setup tokens, so the pane runs without
+//     subscription-mode niceties or in-pod refresh until the store learns full
+//     OAuth documents. The account id is recorded (AnthropicAccountID) so the
+//     per-session Secret is labeled for rotation/logout enumeration.
+//
+// Unlike SelectAnthropicAccount there is NO shared-Secret fallback: a
+// claude-pane session always carries its own full credential material.
+func (o *CreateOptions) SelectClaudePaneMaterial(store cred.Store, selector string) error {
+	if selector == "" {
+		m, err := cred.SystemMaterial("")
+		if err != nil {
+			return fmt.Errorf("read system Claude Code login (log in with `claude` locally, or pass an --account): %w", err)
+		}
+		return o.UseClaudePaneMaterial(m)
+	}
+	accounts, err := store.List()
+	if err != nil {
+		return fmt.Errorf("list accounts: %w", err)
+	}
+	acct, err := cred.Resolve(accounts, selector)
+	if err != nil {
+		return err
+	}
+	m, err := cred.ProvisionMaterial(store, acct.ID)
+	if err != nil {
+		return err
+	}
+	if err := o.UseClaudePaneMaterial(m); err != nil {
+		return err
+	}
+	o.AnthropicAccountID = acct.ID
+	return nil
+}

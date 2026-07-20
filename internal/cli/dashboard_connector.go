@@ -178,12 +178,24 @@ func newDashboardCreator(c *client.Client, runnerImage, reaperImage string) dash
 		// Dashboard-created sessions use the account default model; the in-session
 		// /model command can switch it per turn afterwards.
 		opts := client.CreateOptions{Backend: backendName, ProjectPath: projectPath, RunnerImage: runnerImage}
-		// A picked Anthropic account is resolved to a per-session credential here,
-		// via the SAME fail-closed SDK helper the CLI's `--account` flag uses: any
-		// resolution/Keychain error is returned (surfaced in the dashboard's
-		// connect-error UI), never a silent fall-back to the shared Secret. An empty
-		// id is the legacy/cluster-default path — opts is left untouched.
-		if params.AnthropicAccountID != "" {
+		switch {
+		case backendName == client.BackendClaudePane:
+			// claude-pane: full credential material, fail closed (no shared-Secret
+			// fallback exists). An empty picked id selects the host's own Claude
+			// Code login (Max mode) — same semantics as the CLI's --pane flag.
+			store, serr := newCredStore()
+			if serr != nil {
+				return dashboard.CreateResult{}, serr
+			}
+			if aerr := opts.SelectClaudePaneMaterial(store, params.AnthropicAccountID); aerr != nil {
+				return dashboard.CreateResult{}, aerr
+			}
+		case params.AnthropicAccountID != "":
+			// A picked Anthropic account is resolved to a per-session credential here,
+			// via the SAME fail-closed SDK helper the CLI's `--account` flag uses: any
+			// resolution/Keychain error is returned (surfaced in the dashboard's
+			// connect-error UI), never a silent fall-back to the shared Secret. An empty
+			// id is the legacy/cluster-default path — opts is left untouched.
 			store, serr := newCredStore()
 			if serr != nil {
 				return dashboard.CreateResult{}, serr

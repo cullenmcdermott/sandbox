@@ -425,6 +425,24 @@ type CreateOptions struct {
 	// Bytes without a CodexAccountID are rejected with ErrCodexAccountRequired.
 	// Ignored by non-codex backends.
 	CodexAuthJSON []byte `json:"-"`
+	// ClaudeCredentialsJSON is the FULL Claude Code OAuth credential document
+	// ({"claudeAiOauth": {...}}, the shape of ~/.claude/.credentials.json) a
+	// claude-pane session provisions into the pod, where the runner materializes
+	// it as $CLAUDE_CONFIG_DIR/.credentials.json — the interactive pane's ONLY
+	// auth path (claude-pane pods never receive CLAUDE_CODE_OAUTH_TOKEN /
+	// ANTHROPIC_API_KEY). Never serialized (json:"-"); carried into the
+	// per-session Secret and surfaced as a fail-closed SecretKeyRef env var.
+	// REQUIRED (with ClaudeOAuthAccountJSON) for the claude-pane backend —
+	// ErrClaudePaneCredentialMissing otherwise; ignored by every other backend.
+	// Populate via SelectClaudePaneMaterial / UseClaudePaneMaterial (see
+	// client/cred: SystemMaterial is the Max-mode source).
+	ClaudeCredentialsJSON []byte `json:"-"`
+	// ClaudeOAuthAccountJSON is the {"oauthAccount": {...}} identity document
+	// provisioned alongside ClaudeCredentialsJSON (it seeds the pod's
+	// .claude.json so the pane boots past login/onboarding). Never serialized
+	// (json:"-"). Required with the credential for claude-pane; ignored by
+	// other backends.
+	ClaudeOAuthAccountJSON []byte `json:"-"`
 	// StorageClass is the PVC storage class (empty uses the cluster default).
 	StorageClass string
 	// StorageGiB is the PVC size in GiB (0 uses the backend default, 50).
@@ -478,7 +496,14 @@ func (c *Client) Create(ctx context.Context, opt CreateOptions) (_ *Session, err
 	// a named account with no resolved bytes must NOT silently fall back to the
 	// shared cluster Secret, and bytes with no account id would provision an
 	// unlabeled, unenumerable Secret. Both are rejected before any cluster call.
-	if err := validateAnthropicAccount(opt.AnthropicAccountID, opt.AnthropicCredential); err != nil {
+	// claude-pane replaces this contract wholesale: it has no shared-Secret
+	// fallback at all — full material is required, and the account id is
+	// optional metadata (SystemMaterial, the host's own login, has none).
+	if backendName == session.BackendClaudePane {
+		if err := validateClaudePaneMaterial(opt); err != nil {
+			return nil, err
+		}
+	} else if err := validateAnthropicAccount(opt.AnthropicAccountID, opt.AnthropicCredential); err != nil {
 		return nil, err
 	}
 	// Fail closed on the codex account/credential contract, mirroring the
@@ -544,22 +569,31 @@ func (c *Client) Create(ctx context.Context, opt CreateOptions) (_ *Session, err
 	}
 
 	spec := session.Spec{
-		ID:                  sid,
-		ProjectPath:         opt.ProjectPath,
-		WorkspacePath:       workspacePath,
-		Backend:             backendName,
-		RunnerImage:         runnerImage,
-		ImagePullPolicy:     opt.ImagePullPolicy,
-		SSHPublicKey:        authKey,
-		Model:               opt.Model,
-		AnthropicAuth:       opt.AnthropicAuth,
-		AnthropicAccountID:  opt.AnthropicAccountID,
-		AnthropicCredential: opt.AnthropicCredential,
-		OpencodeProvider:    opt.OpencodeProvider,
-		CodexAccountID:      opt.CodexAccountID,
-		CodexAuthJSON:       opt.CodexAuthJSON,
-		StorageClass:        opt.StorageClass,
-		StorageGiB:          opt.StorageGiB,
+		ID:                 sid,
+		ProjectPath:        opt.ProjectPath,
+		WorkspacePath:      workspacePath,
+		Backend:            backendName,
+		RunnerImage:        runnerImage,
+		ImagePullPolicy:    opt.ImagePullPolicy,
+		SSHPublicKey:       authKey,
+		Model:              opt.Model,
+		AnthropicAccountID: opt.AnthropicAccountID,
+		OpencodeProvider:   opt.OpencodeProvider,
+		CodexAccountID:     opt.CodexAccountID,
+		CodexAuthJSON:      opt.CodexAuthJSON,
+		StorageClass:       opt.StorageClass,
+		StorageGiB:         opt.StorageGiB,
+	}
+	// Credential material branches by backend: claude-pane carries the FULL
+	// Claude Code documents (its only auth path — the inference-scoped token
+	// fields stay empty so a pane pod can never receive one), every other
+	// backend carries the claude-sdk token/credential fields unchanged.
+	if backendName == session.BackendClaudePane {
+		spec.ClaudeCredentialsJSON = opt.ClaudeCredentialsJSON
+		spec.ClaudeOAuthAccountJSON = opt.ClaudeOAuthAccountJSON
+	} else {
+		spec.AnthropicAuth = opt.AnthropicAuth
+		spec.AnthropicCredential = opt.AnthropicCredential
 	}
 
 	createSpan := tr.start("create.session")
@@ -778,6 +812,28 @@ func validateAnthropicAccount(accountID string, credential []byte) error {
 	if accountID != "" {
 		if errs := validation.IsValidLabelValue(accountID); len(errs) > 0 {
 			return fmt.Errorf("%w: %q (%s)", ErrInvalidAnthropicAccountID, accountID, strings.Join(errs, "; "))
+		}
+	}
+	return nil
+}
+
+// validateClaudePaneMaterial enforces the claude-pane provisioning contract:
+// the full credential + oauthAccount documents are REQUIRED (there is no
+// shared-Secret fallback — the interactive pane authenticates only from the
+// materialized credentials file, and the pod template's SecretKeyRefs are
+// non-Optional, so a material-less create would stall the pod in
+// CreateContainerConfigError instead of failing actionably here). The account
+// id is optional metadata (the system-login source has none) but must be a
+// valid Kubernetes label value when set, since it labels the per-session
+// Secret for rotation/logout enumeration. It never inspects or echoes the
+// credential bytes.
+func validateClaudePaneMaterial(opt CreateOptions) error {
+	if len(opt.ClaudeCredentialsJSON) == 0 || len(opt.ClaudeOAuthAccountJSON) == 0 {
+		return ErrClaudePaneCredentialMissing
+	}
+	if opt.AnthropicAccountID != "" {
+		if errs := validation.IsValidLabelValue(opt.AnthropicAccountID); len(errs) > 0 {
+			return fmt.Errorf("%w: %q (%s)", ErrInvalidAnthropicAccountID, opt.AnthropicAccountID, strings.Join(errs, "; "))
 		}
 	}
 	return nil
