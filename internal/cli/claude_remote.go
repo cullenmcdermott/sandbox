@@ -253,7 +253,7 @@ func runStartSession(cmd *cobra.Command, backendName, prompt, runnerImage, reape
 			newDashboardCreator(c, runnerImage, reaperImage),
 			dashSess,
 			prompt,
-			dashboard.RunOptions{TitleStore: indexTitleStore{}, SnapshotStore: indexSnapshotStore{}, EventCache: newIndexEventCache(), ObserverConnector: newDashboardObserverConnector(c, reaperImage), SyncProber: dashboardSyncProber(), SyncReaper: dashboardSyncReaper(), IdleTimeout: defaultReaperIdleTimeout, AccountStore: newDashboardAccountStore(), WorktreeOps: newWorktreeOps(c)},
+			dashboard.RunOptions{TitleStore: indexTitleStore{}, SnapshotStore: indexSnapshotStore{}, ObserverConnector: newDashboardObserverConnector(c, reaperImage), SyncProber: dashboardSyncProber(), SyncReaper: dashboardSyncReaper(), IdleTimeout: defaultReaperIdleTimeout, AccountStore: newDashboardAccountStore(), WorktreeOps: newWorktreeOps(c)},
 		)
 	})
 }

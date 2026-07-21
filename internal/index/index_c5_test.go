@@ -28,9 +28,10 @@ func TestValidateIDRejectsTraversal(t *testing.T) {
 	}
 }
 
-// [V30] The read side must enforce the same C5 guard as the write side: Load,
-// LoadCachedEvents, and DeleteEventCache all reject a traversing id with an
-// "escapes root" error instead of touching a file outside the index root.
+// [V30] The read side must enforce the same C5 guard as the write side: Load
+// rejects a traversing id with an "escapes root" error instead of touching a
+// file outside the index root. (The event-cache readers this test also
+// covered were deleted with the EventCache surface, L3 hygiene 2026-07-21.)
 func TestReadSideRejectsTraversal(t *testing.T) {
 	root := t.TempDir()
 	idx := New(root)
@@ -39,24 +40,12 @@ func TestReadSideRejectsTraversal(t *testing.T) {
 	if _, err := idx.Load(bad); err == nil || !strings.Contains(err.Error(), "escape") {
 		t.Errorf("Load(%q) error = %v, want an 'escapes root' error", bad, err)
 	}
-	if _, err := idx.LoadCachedEvents(bad); err == nil || !strings.Contains(err.Error(), "escape") {
-		t.Errorf("LoadCachedEvents(%q) error = %v, want an 'escapes root' error", bad, err)
-	}
-	if err := idx.DeleteEventCache(bad); err == nil || !strings.Contains(err.Error(), "escape") {
-		t.Errorf("DeleteEventCache(%q) error = %v, want an 'escapes root' error", bad, err)
-	}
 
 	// A well-formed id still works on the read side: Load of a missing entry
-	// returns a normal (non-escape) error, and the cache readers no-op cleanly.
+	// returns a normal (non-escape) error.
 	if _, err := idx.Load("session-a"); err == nil {
 		t.Error("Load of a missing well-formed id: got nil error, want a not-found error")
 	} else if strings.Contains(err.Error(), "escape") {
 		t.Errorf("Load of a well-formed id must not be rejected as traversal: %v", err)
-	}
-	if evs, err := idx.LoadCachedEvents("session-a"); err != nil || evs != nil {
-		t.Errorf("LoadCachedEvents of a missing well-formed id = (%v, %v), want (nil, nil)", evs, err)
-	}
-	if err := idx.DeleteEventCache("session-a"); err != nil {
-		t.Errorf("DeleteEventCache of a missing well-formed id = %v, want nil", err)
 	}
 }

@@ -257,11 +257,6 @@ type RunOptions struct {
 	// instead of replaying the full event history.
 	SnapshotStore SnapshotStore
 
-	// EventCache persists each foreground session's transcript events host-side so
-	// a cold re-attach rebuilds the conversation instantly and streams only the
-	// delta (Workstream C).
-	EventCache EventCache
-
 	// ObserverConnector is the lightweight connect path for background passive
 	// status streams (port-forward + runner health, no file-sync setup). When
 	// nil, background streams use Connector.
@@ -310,9 +305,6 @@ func (a *App) applyOpts(opts []RunOptions) {
 	}
 	if opts[0].SnapshotStore != nil {
 		a.dashboard = a.dashboard.WithSnapshotStore(opts[0].SnapshotStore)
-	}
-	if opts[0].EventCache != nil {
-		a.dashboard = a.dashboard.WithEventCache(opts[0].EventCache)
 	}
 	if opts[0].ObserverConnector != nil {
 		a.dashboard = a.dashboard.WithObserverConnector(opts[0].ObserverConnector)

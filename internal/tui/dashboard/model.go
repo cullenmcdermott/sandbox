@@ -282,11 +282,6 @@ type Model struct {
 	// instead of replaying full history. nil in unit tests (no caching).
 	snapStore SnapshotStore
 
-	// eventCache, when non-nil, persists each foreground session's transcript
-	// events host-side so a cold re-attach rebuilds the conversation instantly and
-	// streams only the delta (Workstream C). nil in unit tests (no caching).
-	eventCache EventCache
-
 	// actionErr is the last suspend/resume/destroy/create error, surfaced in
 	// the detail pane. Cleared when an action succeeds.
 	actionErr error
@@ -419,26 +414,6 @@ type SnapshotStore interface {
 // WithSnapshotStore registers the persistent per-session snapshot store.
 func (m *Model) WithSnapshotStore(s SnapshotStore) *Model {
 	m.snapStore = s
-	return m
-}
-
-// EventCache persists a session's transcript events host-side (Workstream C) so a
-// cold re-attach rebuilds the conversation instantly and resumes the runner SSE
-// stream from the last cached seq, replaying only the delta instead of the whole
-// history from 0. Implemented by the CLI on top of the local index; nil in unit
-// tests (the transcript replays from the runner as before). Delta events
-// (message/reasoning/tool .delta) are intentionally not cached — replay rebuilds
-// final state from the completed events.
-type EventCache interface {
-	// LoadEvents returns a session's cached transcript events, in append order.
-	LoadEvents(id session.ID) ([]session.Event, error)
-	// AppendEvent persists one event to a session's cache (best effort).
-	AppendEvent(id session.ID, ev session.Event) error
-}
-
-// WithEventCache registers the persistent host-side transcript cache.
-func (m *Model) WithEventCache(c EventCache) *Model {
-	m.eventCache = c
 	return m
 }
 

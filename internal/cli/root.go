@@ -77,7 +77,6 @@ func NewRoot() *cobra.Command {
 				return dashboard.Run(newClientLifecycleBackend(c, backend), connector, creator, dashboard.RunOptions{
 					TitleStore:        indexTitleStore{},
 					SnapshotStore:     indexSnapshotStore{},
-					EventCache:        newIndexEventCache(),
 					ObserverConnector: newDashboardObserverConnector(c, ""),
 					SyncProber:        dashboardSyncProber(),
 					SyncReaper:        dashboardSyncReaper(),

@@ -304,10 +304,10 @@ func mergeEntry(prev, next Entry) Entry {
 
 // Load reads a session index entry.
 func (i *Index) Load(id string) (Entry, error) {
-	// [V30] Enforce the same C5 traversal guard the write side (Save/Delete/
-	// OpenCacheWriter) applies, so a `../`-laden id can't read a file outside the
-	// index root. A rejected id surfaces as an error, exactly like a missing
-	// entry — callers already handle Load's error return.
+	// [V30] Enforce the same C5 traversal guard the write side (Save/Delete)
+	// applies, so a `../`-laden id can't read a file outside the index root. A
+	// rejected id surfaces as an error, exactly like a missing entry — callers
+	// already handle Load's error return.
 	if err := validateID(i.root, id); err != nil {
 		return Entry{}, err
 	}
