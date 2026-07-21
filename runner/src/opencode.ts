@@ -15,6 +15,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdirSync, writeFileSync, readFileSync, readdirSync, readlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { assertOpencodeAuthUsable, materializeOpencodeAuth, realAuthFs } from './agent-auth.js';
 import { serializeBlockedPatterns } from './guards.js';
 import { sanitizedExecEnv } from './exec.js';
 import { getRegistry, setExternalActivityProbe } from './session.js';
@@ -48,6 +49,12 @@ export function buildOpencodeServeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv
   for (const k of OPENCODE_SERVE_ENV_KEYS) {
     if (env[k] !== undefined) out[k] = env[k];
   }
+  // Never let the raw auth seed reach the agent child (A1, codex parity). opencode's
+  // Auth.all() prefers OPENCODE_AUTH_CONTENT over the on-disk store, so a leak of
+  // either var would SHADOW the materialized auth.json and break refresh persistence
+  // — the child must read only the file materializeOpencodeAuth wrote.
+  delete out.OPENCODE_AUTH_JSON;
+  delete out.OPENCODE_AUTH_CONTENT;
   return out;
 }
 
@@ -313,6 +320,12 @@ export function startOpencodeSupervisor(
         'binding an agent-with-shell to 0.0.0.0 without basic auth is unsafe (O3)',
     );
   }
+  // Materialize the injected auth.json into the PVC-persisted store (per-entry,
+  // refresh-preserving) and fail closed unless a usable provider credential is
+  // present — mirrors materializeCodexAuth. A seeded store now also satisfies the
+  // gate, so the API-key-only fallback path keeps working.
+  materializeOpencodeAuth(env, realAuthFs);
+  assertOpencodeAuthUsable(env, realAuthFs);
   const port = parseInt(env.OPENCODE_PORT ?? String(DEFAULT_PORT), 10);
   const configPath = writeOpencodeConfig(env);
   console.log(`opencode: config written to ${configPath ?? '(none)'}; starting serve on :${port}`);

@@ -16,9 +16,9 @@
 // since they are backend-agnostic (they parse /proc/net/tcp by port).
 
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { type AuthFs, realAuthFs, writeAuthFile0600 } from './agent-auth.js';
 import { sanitizedExecEnv } from './exec.js';
 import { externalClientConnections } from './opencode.js';
 import { getRegistry, setExternalActivityProbe } from './session.js';
@@ -38,14 +38,9 @@ const ACTIVITY_POLL_MS = 20_000;
 export const STOP_GRACE_MS = 5_000;
 
 /** Injectable filesystem surface for materializeCodexAuth so the auth-seeding +
- * fail-closed logic is unit-testable off-pod (production uses node:fs). */
-export interface CodexAuthFs {
-  readFileSync: typeof readFileSync;
-  writeFileSync: typeof writeFileSync;
-  mkdirSync: typeof mkdirSync;
-}
-
-const realFs: CodexAuthFs = { readFileSync, writeFileSync, mkdirSync };
+ * fail-closed logic is unit-testable off-pod (production uses node:fs). Aliases
+ * the shared AuthFs (agent-auth.ts) so codex and opencode share one type. */
+export type CodexAuthFs = AuthFs;
 
 /** Resolve $CODEX_HOME (PVC-persisted state dir) from the env, defaulting to
  * ~/.codex the same way codex itself does. Exported so the boot wiring and the
@@ -89,7 +84,7 @@ function lastRefreshMs(json: string): number {
  *
  * Returns the resolved $CODEX_HOME.
  */
-export function materializeCodexAuth(env: NodeJS.ProcessEnv = process.env, fs: CodexAuthFs = realFs): string {
+export function materializeCodexAuth(env: NodeJS.ProcessEnv = process.env, fs: CodexAuthFs = realAuthFs): string {
   const codexHome = codexHomeDir(env);
   const authPath = join(codexHome, 'auth.json');
 
@@ -103,14 +98,14 @@ export function materializeCodexAuth(env: NodeJS.ProcessEnv = process.env, fs: C
       existing = undefined; // absent/unreadable — seed it
     }
     if (existing === undefined) {
-      writeAuthFile(fs, authPath, seed);
+      writeAuthFile0600(fs, authPath, seed, 'codex: auth.json');
     } else if (existing !== seed) {
       // Content diverged: prefer the on-disk file only if it is demonstrably a
       // NEWER refresh; otherwise the operator rotated the credential — seed wins.
       const onDisk = lastRefreshMs(existing);
       const seedTs = lastRefreshMs(seed);
       const onDiskIsNewer = Number.isFinite(onDisk) && Number.isFinite(seedTs) && onDisk > seedTs;
-      if (!onDiskIsNewer) writeAuthFile(fs, authPath, seed);
+      if (!onDiskIsNewer) writeAuthFile0600(fs, authPath, seed, 'codex: auth.json');
     }
     // existing === seed: identical, skip the write (avoids churning the PVC).
   }
@@ -131,12 +126,6 @@ export function materializeCodexAuth(env: NodeJS.ProcessEnv = process.env, fs: C
     );
   }
   return codexHome;
-}
-
-/** Write auth.json with owner-only (0600) permissions; never logs the content. */
-function writeAuthFile(fs: CodexAuthFs, authPath: string, content: string): void {
-  fs.writeFileSync(authPath, content, { mode: 0o600 });
-  console.log(`codex: auth.json materialized at ${authPath} (mode 0600)`);
 }
 
 /**

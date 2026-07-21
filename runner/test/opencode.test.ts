@@ -136,7 +136,7 @@ test('starts opencode serve when a server password is present', async () => {
   let child: FakeChild | undefined;
   const spy = ((cmd: string, args: string[]) => { calls.push({ cmd, args }); child = fakeChild(); return child; }) as unknown as SpawnFn;
   const sup = startOpencodeSupervisor(
-    { OPENCODE_PORT: '4096', OPENCODE_SERVER_PASSWORD: 's3cret' } as NodeJS.ProcessEnv,
+    { OPENCODE_PORT: '4096', OPENCODE_SERVER_PASSWORD: 's3cret', ANTHROPIC_API_KEY: 'k' } as NodeJS.ProcessEnv,
     spy,
   );
   try {
@@ -156,7 +156,7 @@ test('starts opencode serve when a server password is present', async () => {
 test('stop() SIGTERMs the child and resolves only after it exits', async () => {
   const child = fakeChild();
   const sup = startOpencodeSupervisor(
-    { OPENCODE_PORT: '4096', OPENCODE_SERVER_PASSWORD: 's3cret' } as NodeJS.ProcessEnv,
+    { OPENCODE_PORT: '4096', OPENCODE_SERVER_PASSWORD: 's3cret', ANTHROPIC_API_KEY: 'k' } as NodeJS.ProcessEnv,
     (() => child) as unknown as SpawnFn,
   );
   let resolved = false;
@@ -178,7 +178,7 @@ test('a spawn error does not crash the supervisor and schedules exactly one resp
   const children: FakeChild[] = [];
   const spy = (() => { const c = fakeChild(); children.push(c); return c; }) as unknown as SpawnFn;
   const sup = startOpencodeSupervisor(
-    { OPENCODE_PORT: '4096', OPENCODE_SERVER_PASSWORD: 's3cret' } as NodeJS.ProcessEnv,
+    { OPENCODE_PORT: '4096', OPENCODE_SERVER_PASSWORD: 's3cret', ANTHROPIC_API_KEY: 'k' } as NodeJS.ProcessEnv,
     spy,
   );
   try {
@@ -205,7 +205,7 @@ test('stop() escalates to SIGKILL when the child ignores SIGTERM', async () => {
   try {
     const child = fakeChild();
     const sup = startOpencodeSupervisor(
-      { OPENCODE_PORT: '4096', OPENCODE_SERVER_PASSWORD: 's3cret' } as NodeJS.ProcessEnv,
+      { OPENCODE_PORT: '4096', OPENCODE_SERVER_PASSWORD: 's3cret', ANTHROPIC_API_KEY: 'k' } as NodeJS.ProcessEnv,
       (() => child) as unknown as SpawnFn,
     );
     const p = sup.stop();
