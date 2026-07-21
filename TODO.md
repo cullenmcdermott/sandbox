@@ -321,7 +321,8 @@ unified redaction):
 - [x] **[S4] done 2026-07-20:** grants.ts + its test deleted; the unused
   `@anthropic-ai/sdk` dep dropped in the same hygiene commit.
 - [ ] **[S5] Set pane WS maxPayload + resize bounds when next touching
-  `server.ts:174,119-134` (INFO).**
+  `server.ts:174,119-134` (INFO).** Slated to ride the §4 slow-link
+  compression change (2026-07-21), which touches exactly that surface.
 - [ ] **[S6] runAsNonRoot deferral stays tracked**
   (`internal/k8s/backend.go:1572-1582,1667-1673`; PSA baseline permits root,
   restricted warns).
@@ -558,6 +559,63 @@ E-series SSE fixes verified intact — do-not-regress list in the doc):
   with a runner subcommand and would strand that work.
 - [ ] **[P7] Feed streaming O(n²) per message (LOW, only if felt).**
   `internal/tui/dashboard/feed.go:198-201`.
+- [ ] **Pane transport RTT probe — measure BEFORE tuning (2026-07-21
+  transport review; prerequisite for the slow-link item below).** Nothing
+  measures transport RTT on the pane path, so all tuning is guesswork.
+  Self-contained in `internal/runner/pane.go` (`PaneStream`), behind the
+  SANDBOX_TRACE gate — read the env directly, mirroring
+  `client/trace.go:34` `traceEnabled` (the client tracer is unexported in
+  another package; do NOT export it for this). Design (decided): on dial,
+  start a pinger goroutine — every 5s
+  `WriteControl(websocket.PingMessage, <8-byte big-endian nanotime>,
+  deadline)`; WriteControl is concurrency-safe alongside the P4 writer
+  (gorilla contract, already noted at `pane.go:159`). `SetPongHandler`
+  (runs on the reader goroutine) parses the echoed timestamp → RTT sample
+  into a mutex-guarded ring (cap ~256, overwrite oldest). On Close emit
+  ONE stderr summary line (n/p50/p95/max, trace style) and export
+  `RTTStats()` for a future dashboard debug row. The node `ws` server
+  auto-pongs — ZERO runner changes. Pinger must exit via the existing
+  Close path (no goroutine leak; no ticker after Close). Extract the
+  percentile math as a pure helper and unit-test it on crafted samples;
+  integration: extend the existing pane test server (gorilla's default
+  ping handler auto-pongs while the server reads) — samples accumulate,
+  pinger stops on Close. `internal/runner` binds ports: run
+  `go test ./internal/runner/` UNSANDBOXED (CLAUDE.md caveat).
+  Cross-ref: §10 observability residual wants SSE first-event latency —
+  same family, keep the output format consistent.
+- [ ] **Slow-link mode: pane WS compression + runner output coalescing
+  (2026-07-21 transport review; GATED on the RTT probe above showing it
+  matters, or a real slow-link use case — on LAN it buys nothing
+  perceptible). Execute §1f [S5] in the same change (it's "when next
+  touching server.ts").** ANSI redraw streams compress 5-10x, but both
+  ends ship compression OFF: `runner/src/server.ts:179`
+  `new WebSocketServer({ noServer: true })` has no `perMessageDeflate`,
+  and `internal/runner/pane.go:77` dials with gorilla `DefaultDialer`
+  (EnableCompression false). Separately, every `pty.onData` chunk becomes
+  its own WS frame (`runner/src/claude-pane.ts` onData → `ring.push` +
+  `safeSend`). Three parts, one change: (1) server.ts: enable
+  `perMessageDeflate` conservatively (`threshold: 512`,
+  `zlibDeflateOptions: { level: 1 }`) + [S5]'s `maxPayload` and resize
+  bounds (`server.ts:174,119-134`). (2) pane.go: `DefaultDialer` → a
+  `websocket.Dialer{EnableCompression: true}`; CAUTION — permessage-
+  deflate is historically gorilla's flakiest feature; if frames corrupt
+  under load, swap the client lib to `coder/websocket` INSIDE pane.go
+  only (PaneStream is the seam; sdktest pins the PaneStream API, not the
+  wire lib). (3) claude-pane.ts: coalesce output — buffer onData chunks,
+  flush on a ~5ms timer OR ≥32 KiB, and flush synchronously on child
+  exit, on detach/close, and before the attach replay snapshot;
+  `ring.push` stays per-chunk (replay fidelity unaffected); safeSend's
+  P2 backpressure check unchanged (runs per flush). Flush interval
+  injectable for tests (existing runner deps-seam conventions). Tests:
+  runner suite — two rapid onData within the window → one send; size
+  cutoff flushes immediately; exit flushes the tail. Run
+  `cd runner && npm test` + `go test ./internal/runner/` (unsandboxed).
+  NOT worth doing regardless of measurements: semantic/diff protocols
+  (pane-first deliberately ships bytes-of-truth) and mosh-style
+  prediction (machinery >> benefit at current latencies); the
+  data-plane-off-apiserver move (direct Service/tailnet to 8787) is a
+  separate future call with [S1] security tradeoffs — don't fold it in
+  here.
 
 - [x] **Transcript-renderer perf items — OBSOLETE 2026-07-20**
   (claude-pane-first deleted the custom renderer): warm-preview tail
@@ -1283,9 +1341,10 @@ do well is recorded there too; fix in roughly this order):
   `turn.link` in the pod log); runner boot spans (`index.ts`, socket-accept
   anchored); `SANDBOX_TRACE` now documented in `docs/architecture.md`
   (Observability section). STILL OPEN: pod-ready sub-phases (schedule vs
-  pull vs ready — the big §5 unknown); SSE first-event latency; the §1d
-  observer-cap model remains absent from `docs/architecture.md` (doc drift,
-  2026-07-06 harness audit).
+  pull vs ready — the big §5 unknown); SSE first-event latency; pane WS
+  RTT (§4 "Pane transport RTT probe", 2026-07-21 — same family, keep
+  output formats consistent); the §1d observer-cap model remains absent
+  from `docs/architecture.md` (doc drift, 2026-07-06 harness audit).
 
 - [ ] **Visual-testing gaps (2026-07-13 review; re-scoped 2026-07-20 after
   claude-pane-first deleted the transcript surfaces) — static goldens are
