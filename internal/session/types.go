@@ -181,6 +181,19 @@ type Spec struct {
 	// them. Ignored by non-codex backends.
 	CodexAuthJSON []byte `json:"-"`
 
+	// OpencodeAuthJSON is the FULL local opencode auth.json document (the entire
+	// {"<provider>": {...}, ...} map the `opencode auth login` command writes) for
+	// an opencode-server session, written into the per-session Secret at
+	// CreateSession and surfaced to the runner as OPENCODE_AUTH_JSON. It is NEVER
+	// serialized (json:"-") — like SSHPublicKey, AnthropicCredential, and
+	// CodexAuthJSON it is create-time-only material that must not land in the local
+	// session index or any wire payload. The pod receives it as a SecretKeyRef env
+	// var (under Secret key "opencode-auth-json") and materializes it as a FILE at
+	// $XDG_DATA_HOME/opencode/auth.json — a file contract, not an env-var
+	// credential the process reads directly. The CLI/TUI harvests it host-side; the
+	// client layer just carries and writes it. Ignored by non-opencode backends.
+	OpencodeAuthJSON []byte `json:"-"`
+
 	// ClaudeCredentialsJSON is the FULL Claude Code OAuth credential document
 	// ({"claudeAiOauth": {...}}, the shape of ~/.claude/.credentials.json) for a
 	// claude-pane session's selected Anthropic account, written into the

@@ -5,6 +5,8 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -385,6 +387,20 @@ type CreateOptions struct {
 	// not select a different provider's credential). Ignored by non-opencode
 	// backends.
 	OpencodeProvider string
+	// OpencodeAuthJSON is the resolved FULL local opencode auth.json document
+	// (the whole {"<provider>": {...}, ...} map the `opencode auth login` command
+	// writes), harvested host-side via HarvestOpencodeAuth and optionally narrowed
+	// with OpencodeAuthMaterial.Filter. Never serialized (json:"-" keeps a
+	// consumer's debug json.Marshal of the options from leaking it); provisioned
+	// into the per-session Secret under key "opencode-auth-json" and surfaced to
+	// the runner as a SecretKeyRef env var (OPENCODE_AUTH_JSON), which the pod
+	// materializes as a FILE at $XDG_DATA_HOME/opencode/auth.json — a file
+	// contract, not an env-var credential the process reads directly. When set it
+	// MUST carry an entry for the selected OpencodeProvider, else
+	// ErrOpencodeProviderNotSeeded; empty keeps the shared opencode-credentials
+	// Secret path (backward-compatible). Create-time-only material. Only
+	// meaningful for the opencode backend; ignored by every other backend.
+	OpencodeAuthJSON []byte `json:"-"`
 	// CodexAccountID names the stored ChatGPT account a codex-app-server session
 	// runs on. When set, CodexAuthJSON MUST hold the resolved auth.json bytes for
 	// that account — the caller (CLI/TUI) resolves account → bytes before calling
@@ -468,6 +484,14 @@ func (c *Client) Create(ctx context.Context, opt CreateOptions) (_ *Session, err
 		return nil, err
 	}
 	if err := validateOpencodeProvider(opt.OpencodeProvider); err != nil {
+		return nil, err
+	}
+	// Fail closed on a seed that omits the selected provider: an opencode session
+	// handed a host-harvested auth.json must actually contain the provider it will
+	// run as, or the pod would materialize an auth.json with no usable credential
+	// and boot unauthenticated. An empty seed is the shared-Secret path and is
+	// allowed. Validation parses but never echoes the seed bytes.
+	if err := validateOpencodeSeed(opt.OpencodeProvider, opt.OpencodeAuthJSON); err != nil {
 		return nil, err
 	}
 	// Fail closed on account/credential mismatch (a design-review requirement):
@@ -557,6 +581,7 @@ func (c *Client) Create(ctx context.Context, opt CreateOptions) (_ *Session, err
 		Model:              opt.Model,
 		AnthropicAccountID: opt.AnthropicAccountID,
 		OpencodeProvider:   opt.OpencodeProvider,
+		OpencodeAuthJSON:   opt.OpencodeAuthJSON,
 		CodexAccountID:     opt.CodexAccountID,
 		CodexAuthJSON:      opt.CodexAuthJSON,
 		StorageClass:       opt.StorageClass,
@@ -768,6 +793,55 @@ func validateOpencodeProvider(p string) error {
 		return fmt.Errorf("%w: %q (must be %q, %q, or %q)", ErrInvalidOpencodeProvider,
 			p, session.OpencodeProviderAnthropic, session.OpencodeProviderOpenAI, session.OpencodeProviderZen)
 	}
+}
+
+// opencodeAuthEntryKey maps our OpencodeProvider wire vocabulary to the key
+// opencode itself uses for that provider INSIDE auth.json. The two agree for
+// Anthropic and OpenAI, but opencode stores its Zen (hosted) credential under
+// the key "opencode" — NOT our wire value "opencode-zen" — so a seed check keyed
+// on the raw wire value would spuriously fail for Zen. internal/k8s mirrors this
+// same mapping when it sets the pod's SANDBOX_OPENCODE_PROVIDER env (added
+// separately). Empty maps to the default (anthropic), matching
+// validateOpencodeProvider's "empty means Anthropic" contract.
+func opencodeAuthEntryKey(provider string) string {
+	switch provider {
+	case "", session.OpencodeProviderAnthropic:
+		return "anthropic"
+	case session.OpencodeProviderOpenAI:
+		return "openai"
+	case session.OpencodeProviderZen:
+		return "opencode"
+	default:
+		// Unreachable in Create (validateOpencodeProvider rejects unknowns first),
+		// but pass the value through rather than silently rewriting it.
+		return provider
+	}
+}
+
+// validateOpencodeSeed enforces the fail-closed opencode seed contract: when a
+// caller supplies a host-harvested auth.json seed (CreateOptions.OpencodeAuthJSON),
+// it MUST be a non-empty JSON object that carries the provider this session
+// selected — otherwise the pod would materialize an auth.json with no usable
+// credential for its provider and opencode would boot unauthenticated. An empty
+// seed is allowed (the shared-Secret path is unchanged). It parses but never
+// echoes the seed bytes — no credential value reaches an error — and reports a
+// missing provider via the ErrOpencodeProviderNotSeeded sentinel so a caller can
+// branch on it with errors.Is.
+func validateOpencodeSeed(provider string, seed []byte) error {
+	if len(seed) == 0 {
+		return nil
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(seed, &doc); err != nil || doc == nil {
+		return errors.New("sandbox: CreateOptions.OpencodeAuthJSON is not a JSON object")
+	}
+	if len(doc) == 0 {
+		return errors.New("sandbox: CreateOptions.OpencodeAuthJSON has no provider entries")
+	}
+	if _, ok := doc[opencodeAuthEntryKey(provider)]; !ok {
+		return fmt.Errorf("%w: %q", ErrOpencodeProviderNotSeeded, provider)
+	}
+	return nil
 }
 
 // validateAnthropicAccount enforces the fail-closed account/credential contract:

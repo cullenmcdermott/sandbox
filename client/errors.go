@@ -54,6 +54,16 @@ var (
 	// credential than the caller intended.
 	ErrInvalidOpencodeProvider = errors.New("sandbox: invalid opencode provider")
 
+	// ErrOpencodeProviderNotSeeded is returned by Create when
+	// CreateOptions.OpencodeAuthJSON is a non-empty seed that does NOT contain an
+	// entry for the session's selected OpencodeProvider — so the pod would
+	// materialize an auth.json with no usable credential for its provider and
+	// opencode would boot unauthenticated. Create fails closed here (mirroring the
+	// claude-pane / codex "required material" gates) rather than launching a
+	// session that cannot authenticate. The remediation is in the message; the
+	// error carries no credential material.
+	ErrOpencodeProviderNotSeeded = errors.New("sandbox: selected opencode provider is not present in the auth.json seed — run `opencode auth login <provider>` on this machine, or include it in the seed filter")
+
 	// ErrAnthropicCredentialMissing is returned by Create when
 	// CreateOptions.AnthropicAccountID names an account but AnthropicCredential
 	// is empty — the resolver produced no bytes (e.g. a denied Keychain read or

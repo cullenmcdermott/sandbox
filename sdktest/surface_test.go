@@ -192,6 +192,7 @@ var _ = client.CreateOptions{
 	CodexAccountID:      "acct-chatgpt",
 	CodexAuthJSON:       []byte("auth-json"),
 	OpencodeProvider:    client.OpencodeProviderAnthropic,
+	OpencodeAuthJSON:    []byte(`{"anthropic":{}}`),
 	// claude-pane full-material provisioning (claude-pane-first).
 	ClaudeCredentialsJSON:  []byte(`{"claudeAiOauth":{}}`),
 	ClaudeOAuthAccountJSON: []byte(`{"oauthAccount":{}}`),
@@ -328,6 +329,33 @@ var (
 	_ error = client.ErrCodexCredentialMissing
 	_ error = client.ErrCodexAccountRequired
 	_ error = client.ErrInvalidCodexAccountID
+)
+
+// --- client: opencode host-side credential harvest (multi-provider auth) ------
+
+var (
+	// HarvestOpencodeAuth reads the host's local opencode auth.json into seed
+	// material a consumer can Filter and hand to CreateOptions.OpencodeAuthJSON.
+	_ func() (client.OpencodeAuthMaterial, error) = client.HarvestOpencodeAuth
+
+	// Filter (value-receiver method expression) narrows harvested material to a
+	// chosen provider subset. Retyping it breaks a consumer here first.
+	_ func(client.OpencodeAuthMaterial, ...string) (client.OpencodeAuthMaterial, error) = client.OpencodeAuthMaterial.Filter
+
+	// Material + entry struct-literal pins: removing or retyping a field breaks a
+	// consumer here first.
+	_ = client.OpencodeAuthMaterial{
+		JSON:    []byte(`{"anthropic":{}}`),
+		Entries: []client.OpencodeAuthEntry{{Provider: "anthropic", Type: "oauth"}},
+	}
+	_ = client.OpencodeAuthEntry{
+		Provider: "anthropic",
+		Type:     "oauth",
+	}
+
+	// Seed sentinels a consumer branches on with errors.Is.
+	_ error = client.ErrOpencodeAuthNotFound
+	_ error = client.ErrOpencodeProviderNotSeeded
 )
 
 // --- cred: store + account model ----------------------------------------------
