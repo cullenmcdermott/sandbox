@@ -116,6 +116,18 @@ row-model consolidation moved to §2a where it belongs.
   replay starts without cursor context. Fix direction: force full repaint
   after replay (resize jiggle) or trim replay to the last clear-screen
   marker; pin against a live session first.
+- [ ] **[L7] Trackpad/wheel scroll does nothing in the claude pane
+  (2026-07-20 live session).** Local claude "scrolling" is the TERMINAL
+  scrolling its own history (claude runs inline, no alt-screen) — but the
+  pane renders only the vt emulator's live screen, and the emulator's
+  scrollback (10k lines, `external_pane.go:142`) is retained yet never
+  exposed. Fix direction: wheel events over the pane, when the child hasn't
+  enabled mouse tracking, scroll the emulator scrollback locally (a view
+  offset over `Scrollback()` + live screen, like a real terminal), with any
+  keypress/output snapping back to live. NOTE this INVERTS [P3]'s fix
+  direction (§4): the scrollback must be KEPT and used, not
+  `SetScrollbackSize(1)`-ed — [P3]'s cost concern gets addressed by capping
+  the size (e.g. 2k lines) instead of removing it.
 - [ ] **[L3] Detached feed opens empty — host event cache has a reader but no
   writer (MED).** `app.go:588-590` seeds from `eventCache.LoadEvents` but
   `AppendEvent` has zero production callers (orphaned by a935541);
@@ -433,8 +445,10 @@ E-series SSE fixes verified intact — do-not-regress list in the doc):
   paused — wedged client grows pod memory unbounded. Fix: E3 parity —
   close-with-code over ~4 MiB (client reconnects into the ring).
 - [ ] **[P3] vt emulator retains a 10k-line scrollback the pane never reads
-  (MED).** `external_pane.go:142`; check alt-screen first (moot if claude
-  stays alt-screen), else `SetScrollbackSize(1)`.
+  (MED).** `external_pane.go:142`. DIRECTION CHANGED 2026-07-20: claude runs
+  inline (no alt-screen) and [L7] (§1h) wants wheel-scroll over this exact
+  buffer — so KEEP the scrollback but cap it smaller (e.g. 2k lines) and
+  implement the [L7] viewer; do NOT SetScrollbackSize(1).
 - [ ] **[P4] Pane input is a blocking network write on the UI goroutine
   (MED).** `external_pane.go:297-358` → `internal/runner/pane.go:130-137`;
   stalled forward freezes the dashboard incl. ctrl+] detach. Fix: buffered
@@ -902,6 +916,27 @@ naming-break, and Shell items each stand alone.
   longest-common-prefix completion, validation) + overlay struct (open/close,
   prefill, Tab, recents) + wiring before the backend picker + thread
   `projectPath` into the Creator. None exists.
+  **Re-raised by the maintainer 2026-07-20 during the first live pane
+  session** — the dashboard creator still hard-cwd's every new session
+  (`internal/cli/claude_remote.go:142` resolveProjectPath ← cwd; used by
+  `dashboard_connector.go` newDashboardCreator). Recents data source exists:
+  the local index stores ProjectPath per session
+  (`internal/index/index.go:65`). Priority up.
+- [ ] **Host statusline in the pane (maintainer ask, 2026-07-20).** The
+  runner's `mergeSettings` unconditionally overwrites `statusLine` with its
+  own metrics-tap script (`runner/src/claude-pane-observer.ts:494`), so the
+  user's own Claude Code statusline never shows in-pane. Wrinkle: the host
+  statusline command is a Nix store path
+  (`~/.claude/settings.json` → `/nix/store/.../claude-statusline`) that
+  cannot be copied into the pod — its closure isn't there. Fix direction:
+  the provisioned statusline.js CHAINS a user statusline when one is
+  available in the pod (print its stdout, still POST the metrics; fall back
+  to the built-in minimal string on any failure), delivered either via a
+  designated synced script dir (ConfigInputsSubs pattern,
+  `internal/sync/sync.go:218`) for plain scripts, or flox-installed into the
+  runner env for packaged statuslines (the maintainer's case — see the
+  flox-first policy). Needs a short design pass on the delivery contract;
+  closes the design doc's open "statusline display string" question.
 - [ ] **Tekken-style agent-picker modal** — animations + per-agent
   ascii/ansi portrait.
 - [x] **Per-session git worktree lifecycle — IMPLEMENTED 2026-07-11** (done
