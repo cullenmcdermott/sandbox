@@ -2150,3 +2150,69 @@ cherry-picked. Test-only — no production code.
   degrades cleanly, no panic.
 - Verified `-run Golden -count=3` deterministic + full dashboard package
   green on main; the ExternalPane esc test self-skips in-sandbox as expected.
+
+## 2026-07-21 — opencode-multi-provider-auth: host-harvested per-session seeding (f5a6eb0/93ce61f/4a7f631/683c13a/521839e/ed37667)
+
+Executed the whole openspec change (tasks 1–6) across a six-agent
+tech-lead/builder fan-out; each builder diff was orchestrator-reviewed
+against source and independently re-verified before cherry-pick; `just
+check` green over the integrated spine; `openspec validate` green. Replaces
+the shared-Secret-only opencode credential path (the live
+`CreateContainerConfigError` on omni-prod, where the cluster Secret held
+only the Zen key) with per-session seeding from the host's own opencode
+login, mirroring the codex `codex-auth-json` transport.
+
+- **Groundwork (1.1/1.2, orchestrator):** pinned auth.json schema against
+  the live store (values-redacted) + sst/opencode auth/index.ts @v1.17.7 —
+  entries are a discriminated union (api/oauth/wellknown) with NO
+  last_refresh field, so the merge fingerprints each entry with sha256; and
+  `OPENCODE_AUTH_CONTENT` shadows the file in opencode's `Auth.all()`, so the
+  runner must scrub it. Recorded in the change's design.md.
+- **Client harvest (2.x, f5a6eb0):** `client/opencodeauth.go`
+  `HarvestOpencodeAuth` (XDG-aware path, JSON-object validation, value-free
+  Entries index, opaque JSON bytes; leak-guard test) + `Filter`;
+  `CreateOptions.OpencodeAuthJSON` + `validateOpencodeSeed` fail-closed
+  (`ErrOpencodeProviderNotSeeded`); Spec field; sdktest pins.
+- **k8s transport (3.x, 93ce61f):** `secretKeyOpencodeAuthJSON`; `opencodeEnv`
+  seeded (`OPENCODE_AUTH_JSON` from per-session Secret, not Optional, no
+  provider key per D7) vs fallback (unchanged), `SANDBOX_OPENCODE_PROVIDER`
+  on both via the new shared `session.OpencodeProviderEntryKey` (Zen entry
+  key = "opencode"); `reconcileSecretCredential` label made optional +
+  opencode reconcile line; the seeded↔fallback shape guard
+  (`opencodeSeededShape`) in BOTH re-create branches — the architectural
+  call: opencode had skipped C3, but the seed adds a second shape whose
+  seeded→fallback flip would strip a NOT-Optional SecretKeyRef and brick the
+  next resume. 6 backend tests.
+- **Runner materialization (4.x, 683c13a):** shared `runner/src/agent-auth.ts`
+  (`AuthFs`/`writeAuthFile0600` + opencode's `materializeOpencodeAuth`);
+  per-entry refresh-preserving merge against a `auth.json.seed-hashes`
+  sidecar (unchanged seed entry keeps disk — preserves a pod-side refresh;
+  changed entry wins; disk-only preserved); `assertOpencodeAuthUsable`
+  fail-closed gate; child env scrubs OPENCODE_AUTH_JSON +
+  OPENCODE_AUTH_CONTENT. codex refactored to consume the shared helpers,
+  behavior frozen (its tests ran unmodified). 18 runner tests; codex
+  content-leak self-caught + fixed during the build.
+- **CLI create-UX (5.x, 4a7f631 + 521839e convergence):** `resolveOpencodeSeed`
+  — harvest→seed-all default, `--seed-providers` filter (security lever),
+  `--provider`-in-seed-set validation, `opencode auth login` TTY passthrough
+  + re-harvest-once for a missing provider, non-TTY/corrupt-store fail-closed
+  (no silent shared-Secret fallback when a local store exists), no-store →
+  fallback. Dashboard creator seeds all-local when a store exists (picker
+  deferred). 12 hermetic tests. The local entry-key shim later converged onto
+  `session.OpencodeProviderEntryKey`.
+- **Docs (6.x, ed37667):** README credentials rewrite (primary seeded path,
+  shared Secret reframed as CI/headless fallback), k8s/README rescope,
+  SECURITY egress posture (seeded 0600 auth.json is agent-readable/
+  exfiltratable; --seed-providers narrows the blast radius; FQDN egress
+  cross-ref), backend-conformance "Auth seed (opencode)" contract,
+  session-lifecycle provisioning step, + architecture.md per-session-Secret
+  key-list fix (added opencode-auth-json AND the pre-existing codex-auth-json
+  omission).
+
+Deferred follow-ups filed in TODO §7a: dashboard opencode provider picker
+(today defaults anthropic, no picker → a login lacking anthropic hits the
+fail-closed seed gate at Create); gate `stampOpencodeCredsFreshness` to the
+fallback path (seeded sessions can emit a spurious rotation warning);
+multi-account per provider (design non-goal). LIVE VERIFY on omni-prod
+(multi-provider seed session + fallback session) is maintainer-gated and
+still pending (task 6.4).

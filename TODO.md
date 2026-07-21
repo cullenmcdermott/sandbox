@@ -722,14 +722,15 @@ metrics source for every backend. See the codex plan "Parity bar".
 
 ### 7a. OpenCode auth persistence / validation (2026-07-04 triage)
 
-> **2026-07-20 direction change:** provider credentials move to
-> harvest-from-local-opencode + per-session Secret seeding —
-> `openspec/changes/opencode-multi-provider-auth/` (proposal/design/specs/
-> tasks complete, validated). The shared `opencode-credentials` Secret
-> demotes to explicit fallback; items below that harden the shared-Secret
-> path still apply to that fallback. Trigger: live
-> `CreateContainerConfigError` (cluster Secret has only the Zen key;
-> default provider wants `anthropic-api-key`, backend.go:182).
+> **2026-07-20 direction change — IMPLEMENTED 2026-07-21 (see the checked
+> item below + done log):** provider credentials moved to
+> harvest-from-local-opencode + per-session Secret seeding
+> (`openspec/changes/opencode-multi-provider-auth/`). The shared
+> `opencode-credentials` Secret is now the explicit fallback; items below
+> that harden the shared-Secret path still apply to that fallback. Original
+> trigger (now resolved pending live verify): `CreateContainerConfigError`
+> (cluster Secret has only the Zen key; default provider wanted
+> `anthropic-api-key`).
 
 *(A full task-by-task implementation plan exists at
 `docs/superpowers/plans/2026-07-04-opencode-credential-manager.md` — local-only,
@@ -749,17 +750,32 @@ the connect path. The cross-backend contract these decisions implement
 Secret) is §6's "Unified per-backend credential lifecycle" item — read that
 first.
 
-- [ ] **Implement OpenCode credentials = EXECUTE
-  `openspec/changes/opencode-multi-provider-auth/tasks.md` (supersedes this
-  item's original shape, 2026-07-20).** Do NOT build a `client/cred`-style
-  opencode store or shared-Secret preflight — the accepted design harvests
-  the local opencode auth.json JIT at create into the per-session Secret
-  (codex `codex-auth-json` transport pattern, `backend.go` reconcile at the
-  `secretKeyCodexAuthJSON` branch) with the shared Secret demoted to
-  fallback. The change's proposal/design/specs/tasks are complete and
-  validated; start at tasks.md §1 (two verification tasks gate the merge
-  semantics). Original pointers kept for the fallback path only:
-  `dev/local/opencode-creds.sh`, `client/client.go` create validation.
+- [x] **Implement OpenCode credentials — DONE 2026-07-21** (done log):
+  executed `openspec/changes/opencode-multi-provider-auth/tasks.md` §1-5
+  (docs §6 in the same batch) across seven-agent fan-out —
+  `f5a6eb0`/`93ce61f`/`4a7f631`/`521839e`/`683c13a`. `sandbox opencode`
+  harvests the host's local `opencode auth.json` and seeds it JIT into the
+  per-session Secret (`opencode-auth-json` → `OPENCODE_AUTH_JSON` +
+  `SANDBOX_OPENCODE_PROVIDER`, codex transport pattern); runner materializes
+  it with a per-entry seed-hash refresh-preserving merge + fail-closed gate;
+  seeded↔fallback re-create rejected; shared `opencode-credentials` Secret
+  demoted to fallback. `--seed-providers` narrows the seed; `opencode auth
+  login` passthrough for a missing provider. `just check` green. **Live
+  verify on omni-prod still pending (task 6.4):** multi-provider seed
+  session + fallback session — the original `CreateContainerConfigError`
+  repro. Deferred follow-ups (filed, not blocking):
+  - Dashboard opencode creator seeds ALL local providers but collects no
+    `--provider` (defaults anthropic) and has no per-provider picker — a
+    user whose local login lacks anthropic hits `ErrOpencodeProviderNotSeeded`
+    fail-closed at Create instead of the CLI's login prompt. Add a provider
+    picker to the create overlay (parity with the account picker) OR default
+    the dashboard's opencode provider to the sole/first harvested entry.
+  - `stampOpencodeCredsFreshness` still stamps a shared-Secret provider-key
+    fingerprint for SEEDED sessions too (`internal/k8s/backend.go`), so
+    `warnIfOpencodeCredsRotated` could emit a spurious rotation warning for
+    a seeded session if the shared Secret's key changes — gate stamping to
+    the fallback path.
+  - Multi-*account* per opencode provider (design non-goal) stays deferred.
 - [ ] **Validate OpenCode provider auth before/at connect.** `sandbox auth
   status` only reports local env vars (`internal/authstatus/providers.go:119-149`),
   while connect waits for runner health + `opencode serve` readiness only

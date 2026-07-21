@@ -159,7 +159,7 @@ sequenceDiagram
 
 | Secret | Keys | Owner | Notes |
 |---|---|---|---|
-| `<session-id>-runner` | `runner-token`, `opencode-password`, `ssh-authorized-key`, `anthropic-credential` (account sessions only) | CLI (per session) | created on `claude`, deleted on `destroy`; account-backed sessions get the extra key + a `sandbox.cullen.dev/anthropic-account=<id>` label so rotation/logout can enumerate copies |
+| `<session-id>-runner` | `runner-token`, `opencode-password`, `ssh-authorized-key`, `anthropic-credential` (claude account sessions), `codex-auth-json` (codex account sessions), `opencode-auth-json` (seeded opencode sessions) | CLI (per session) | created on `claude`, deleted on `destroy`; the credential key is written only for the matching backend/mode — account-backed claude/codex sessions also get a `sandbox.cullen.dev/{anthropic,codex}-account=<id>` label so rotation/logout can enumerate copies (opencode's seed key is not account-scoped) |
 | `anthropic-credentials` | `api-key` (OAuth token), `console-api-key` | operator (shared) | provisioned out-of-band; referenced **optionally**; fallback when no account is chosen |
 
 **Local (`~/.local/share/sandbox/`):**
