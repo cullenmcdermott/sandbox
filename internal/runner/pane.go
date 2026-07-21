@@ -54,6 +54,21 @@ type PaneStream struct {
 
 	// frame is the remainder of the binary frame Read is currently draining.
 	frame io.Reader
+
+	// done is closed exactly once (via closeOnce) on the Close path; the
+	// SANDBOX_TRACE RTT pinger goroutine exits on it (pane_rtt.go).
+	done      chan struct{}
+	closeOnce sync.Once
+
+	// traceID is the connect-flow correlation id (Client.SetTraceID) stamped
+	// into the RTT summary line; "" prints as "-".
+	traceID string
+	// rtt holds the RTT probe's samples; nil unless SANDBOX_TRACE armed the
+	// probe at attach time (pane_rtt.go).
+	rtt *rttRing
+	// pingerDone is closed by the pinger goroutine as it exits (nil when the
+	// probe is off), letting tests assert no goroutine outlives Close.
+	pingerDone chan struct{}
 }
 
 // AttachPane dials the session's pane WebSocket on the runner base URL (the
@@ -85,12 +100,15 @@ func (c *Client) AttachPane(ctx context.Context, ref session.Ref, cols, rows int
 		}
 		return nil, fmt.Errorf("runner pane attach: %w", err)
 	}
-	ps := &PaneStream{conn: conn}
+	ps := &PaneStream{conn: conn, done: make(chan struct{}), traceID: c.traceID}
 	if cols > 0 && rows > 0 {
 		if rerr := ps.Resize(cols, rows); rerr != nil {
 			_ = conn.Close()
 			return nil, fmt.Errorf("runner pane attach: initial resize: %w", rerr)
 		}
+	}
+	if paneTraceEnabled() {
+		ps.startRTTProbe(panePingInterval)
 	}
 	return ps, nil
 }
@@ -156,6 +174,14 @@ func (p *PaneStream) Resize(cols, rows int) error {
 // a clean detach, leaving the child running) and tears the connection down.
 // Safe to call concurrently with a blocked Read, which then returns an error.
 func (p *PaneStream) Close() error {
+	p.closeOnce.Do(func() {
+		if p.done != nil {
+			close(p.done) // stop the RTT pinger (if armed) before teardown
+		}
+		if p.rtt != nil {
+			p.emitRTTSummary()
+		}
+	})
 	// WriteControl is safe concurrently with other writes and readers.
 	_ = p.conn.WriteControl(websocket.CloseMessage,
 		websocket.FormatCloseMessage(websocket.CloseNormalClosure, "detached"),
