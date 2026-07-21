@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -160,6 +161,16 @@ const (
 	// uses.
 	secretKeyClaudeCredentialsJSON  = "claude-credentials-json"
 	secretKeyClaudeOAuthAccountJSON = "claude-oauth-account-json"
+
+	// secretKeyExtraSecretEnvPrefix prefixes the per-session Secret keys holding
+	// operator-supplied secret env values (Spec.ExtraSecretEnv, part B). Each entry
+	// is written as "extra-secret-env-<NAME>" — <NAME> is a validated env var name,
+	// whose chars ([A-Za-z0-9_]) are all legal Secret-key chars, so the composed
+	// key is always valid. buildEnv references it via an Optional SecretKeyRef (so a
+	// re-create that drops a var can't brick a resume), and syncSessionCredential
+	// reconciles the set on re-create. Unlike the credential keys these are NOT
+	// account-scoped and carry no label.
+	secretKeyExtraSecretEnvPrefix = "extra-secret-env-"
 
 	// sshAuthorizedKeyMountPath is where the per-session Secret's SSH public
 	// key is projected into the pod; the entrypoint installs it as the sync
@@ -416,6 +427,14 @@ func (b *Backend) CreateSession(ctx context.Context, spec session.Spec) (_ sessi
 		secret.Data[secretKeyClaudeCredentialsJSON] = spec.ClaudeCredentialsJSON
 		secret.Data[secretKeyClaudeOAuthAccountJSON] = spec.ClaudeOAuthAccountJSON
 		secret.Labels[labelAnthropicAccount] = spec.AnthropicAccountID
+	}
+	// Operator-supplied secret env (Spec.ExtraSecretEnv, part B): each value rides
+	// this per-session Secret under key "extra-secret-env-<NAME>". No label — these
+	// are not account-scoped. buildEnv injects an Optional SecretKeyRef per name;
+	// syncSessionCredential reconciles them on re-create. Names were validated at
+	// the client layer, so the composed keys are always valid Secret keys.
+	for name, value := range spec.ExtraSecretEnv {
+		secret.Data[extraSecretEnvKey(name)] = value
 	}
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
@@ -790,6 +809,12 @@ func (b *Backend) syncSessionCredential(ctx context.Context, spec session.Spec) 
 		// rejected there, so a live pod's NOT-Optional OPENCODE_AUTH_JSON ref is
 		// never left pointing at a stripped key.
 		changed = reconcileSecretCredential(secret, secretKeyOpencodeAuthJSON, "", spec.OpencodeAuthJSON, "") || changed
+		// Operator-supplied secret env (part B): patch changed values, strip keys
+		// no longer in the spec. Unlike the credential strip above this needs NO
+		// shape guard — the buildEnv SecretKeyRefs for these are Optional, so a
+		// stripped key leaves the running pod's env var simply unset rather than
+		// dangling a NOT-Optional ref that would brick the next resume.
+		changed = reconcileExtraSecretEnv(secret, spec.ExtraSecretEnv) || changed
 		if !changed {
 			return nil
 		}
@@ -845,6 +870,42 @@ func reconcileSecretCredential(secret *corev1.Secret, dataKey, labelKey string, 
 				delete(secret.Labels, labelKey)
 				changed = true
 			}
+		}
+	}
+	return changed
+}
+
+// extraSecretEnvKey composes the per-session Secret key for one ExtraSecretEnv
+// name. See secretKeyExtraSecretEnvPrefix.
+func extraSecretEnvKey(name string) string { return secretKeyExtraSecretEnvPrefix + name }
+
+// reconcileExtraSecretEnv makes the Secret's "extra-secret-env-*" keys match
+// spec.ExtraSecretEnv on a re-create: it patches any changed/added value and
+// strips any key whose name is no longer in the spec (so a var the operator
+// removed does not linger). It returns whether it changed anything. Deleting the
+// stripped key is safe with no shape guard because buildEnv references these via
+// Optional SecretKeyRefs — a stripped key just unsets the pod's env var. It never
+// echoes a value. Deleting from secret.Data during range is safe in Go.
+func reconcileExtraSecretEnv(secret *corev1.Secret, extraSecretEnv map[string][]byte) bool {
+	changed := false
+	for name, value := range extraSecretEnv {
+		dataKey := extraSecretEnvKey(name)
+		if string(secret.Data[dataKey]) != string(value) {
+			if secret.Data == nil {
+				secret.Data = map[string][]byte{}
+			}
+			secret.Data[dataKey] = value
+			changed = true
+		}
+	}
+	for dataKey := range secret.Data {
+		name, ok := strings.CutPrefix(dataKey, secretKeyExtraSecretEnvPrefix)
+		if !ok {
+			continue
+		}
+		if _, keep := extraSecretEnv[name]; !keep {
+			delete(secret.Data, dataKey)
+			changed = true
 		}
 	}
 	return changed
@@ -1766,6 +1827,62 @@ func workspacePath(spec session.Spec) string {
 // token if a real x-api-key were also present (see the claude-sdk branch below).
 // For opencode, exactly one provider key (selected by spec.OpencodeProvider) is
 // injected fail-closed from the shared opencode-credentials Secret.
+// reservedEnvNames is the denylist of environment variable names the
+// runner/backend already owns, consulted by IsReservedEnvName to gate the generic
+// env-injection surface (client CreateOptions.ExtraEnv / ExtraSecretEnv, part B).
+// It MUST track the names actually emitted by buildEnv, opencodeEnv, codexEnv, and
+// claudePaneEnv (grep those four when adding a new emitted var): letting an
+// operator override one would shadow the runner's infra/credential env. The
+// SANDBOX_ prefix is handled separately (reservedEnvPrefix) so every SANDBOX_* var
+// is covered without enumerating each. HOME and PATH are not emitted here but are
+// process-fundamental (the container sets them), so they are reserved too.
+var reservedEnvNames = map[string]struct{}{
+	"RUNNER_TOKEN":                    {},
+	"PROJECT_PATH":                    {},
+	"HOME":                            {},
+	"PATH":                            {},
+	"IS_SANDBOX":                      {},
+	"TERMINATION_GRACE_SECONDS":       {},
+	"CLAUDE_CONFIG_DIR":               {},
+	"CLAUDE_CODE_DISABLE_AUTO_MEMORY": {},
+	"XDG_DATA_HOME":                   {},
+	"OPENCODE_CONFIG":                 {},
+	"OPENCODE_PORT":                   {},
+	"OPENCODE_SERVER_USERNAME":        {},
+	"OPENCODE_SERVER_PASSWORD":        {},
+	// Credential env vars across all backends (claude-sdk oauth/api-key, opencode
+	// provider keys + seeded auth.json, codex auth.json + home, claude-pane full
+	// material). Overriding any of these would break auth silently.
+	"ANTHROPIC_API_KEY":         {},
+	"OPENAI_API_KEY":            {},
+	"OPENCODE_API_KEY":          {},
+	"OPENCODE_AUTH_JSON":        {},
+	"CLAUDE_CODE_OAUTH_TOKEN":   {},
+	"CODEX_AUTH_JSON":           {},
+	"CODEX_HOME":                {},
+	"CLAUDE_CREDENTIALS_JSON":   {},
+	"CLAUDE_OAUTH_ACCOUNT_JSON": {},
+}
+
+// reservedEnvPrefix covers every SANDBOX_* var the runner reads (SANDBOX_SESSION_ID,
+// SANDBOX_BACKEND, SANDBOX_PROJECT_ROOT, SANDBOX_MODEL, SANDBOX_OPENCODE_PROVIDER,
+// and the SANDBOX_EXTRA_ENV_NAMES / SANDBOX_EXTRA_SECRET_ENV_NAMES markers) without
+// enumerating each — the whole namespace belongs to the runner.
+const reservedEnvPrefix = "SANDBOX_"
+
+// IsReservedEnvName reports whether name is owned by the runner/backend and so
+// cannot be supplied via CreateOptions.ExtraEnv / ExtraSecretEnv. It is the ONE
+// denylist the client's validateExtraEnv consumes; exported for that cross-package
+// gate (the client validates before any cluster call). See reservedEnvNames /
+// reservedEnvPrefix.
+func IsReservedEnvName(name string) bool {
+	if strings.HasPrefix(name, reservedEnvPrefix) {
+		return true
+	}
+	_, ok := reservedEnvNames[name]
+	return ok
+}
+
 func buildEnv(spec session.Spec, name string) []corev1.EnvVar {
 	env := []corev1.EnvVar{
 		{Name: "CLAUDE_CONFIG_DIR", Value: "/session/state/claude"},
@@ -1806,6 +1923,12 @@ func buildEnv(spec session.Spec, name string) []corev1.EnvVar {
 	if spec.Model != "" {
 		env = append(env, corev1.EnvVar{Name: "SANDBOX_MODEL", Value: spec.Model})
 	}
+
+	// Operator-supplied generic env (part B) is applied to the COMMON list, BEFORE
+	// the backend switch, so every backend's pod receives it. Placed after the
+	// runner/backend-owned vars above — client validation (k8s.IsReservedEnvName)
+	// guarantees no ExtraEnv name shadows one of them, so ordering is cosmetic.
+	env = appendExtraEnv(env, spec, name)
 
 	if spec.Backend == session.BackendOpenCode {
 		return append(env, opencodeEnv(spec, name)...)
@@ -1870,6 +1993,54 @@ func buildEnv(spec session.Spec, name string) []corev1.EnvVar {
 			},
 		},
 	})
+}
+
+// appendExtraEnv appends the operator-supplied generic env (Spec.ExtraEnv /
+// ExtraSecretEnv, part B of docs/design-pod-bootstrap-and-tool-injection.md) to
+// the COMMON env list. ExtraEnv lands as plain {Name,Value} vars; ExtraSecretEnv
+// lands as Optional SecretKeyRef vars into the per-session Secret (key
+// "extra-secret-env-<NAME>") — Optional so a re-create that drops a var can't
+// brick a resume. Both name sets are also published as sorted, comma-joined marker
+// vars (SANDBOX_EXTRA_ENV_NAMES / SANDBOX_EXTRA_SECRET_ENV_NAMES) that the runner
+// reads to know which vars to redact from the event log and admit to the strict
+// claude-pane allowlist. Names are sorted so the pod spec is deterministic
+// (stable across re-creates, diffable in tests). A marker is omitted when its map
+// is empty.
+func appendExtraEnv(env []corev1.EnvVar, spec session.Spec, name string) []corev1.EnvVar {
+	if len(spec.ExtraEnv) > 0 {
+		names := make([]string, 0, len(spec.ExtraEnv))
+		for k := range spec.ExtraEnv {
+			names = append(names, k)
+		}
+		sort.Strings(names)
+		for _, k := range names {
+			env = append(env, corev1.EnvVar{Name: k, Value: spec.ExtraEnv[k]})
+		}
+		env = append(env, corev1.EnvVar{Name: "SANDBOX_EXTRA_ENV_NAMES", Value: strings.Join(names, ",")})
+	}
+	if len(spec.ExtraSecretEnv) > 0 {
+		names := make([]string, 0, len(spec.ExtraSecretEnv))
+		for k := range spec.ExtraSecretEnv {
+			names = append(names, k)
+		}
+		sort.Strings(names)
+		for _, k := range names {
+			env = append(env, corev1.EnvVar{
+				Name: k,
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: sessionSecretName(name)},
+						Key:                  extraSecretEnvKey(k),
+						// Optional: a re-create that drops this var strips the Secret
+						// key, and the still-baked ref must not brick the pod.
+						Optional: boolPtr(true),
+					},
+				},
+			})
+		}
+		env = append(env, corev1.EnvVar{Name: "SANDBOX_EXTRA_SECRET_ENV_NAMES", Value: strings.Join(names, ",")})
+	}
+	return env
 }
 
 // opencodeProviderRef maps a session's selected opencode provider to the env var

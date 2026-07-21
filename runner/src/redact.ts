@@ -28,9 +28,26 @@ function isSecretKey(k: string): boolean {
 // The runner's own secret env values, masked if they appear verbatim in a logged
 // string (e.g. an `echo $RUNNER_TOKEN`-expanded command).
 function runnerSecretValues(): string[] {
-  return ['RUNNER_TOKEN', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENCODE_API_KEY', 'OPENCODE_SERVER_PASSWORD', 'CLAUDE_CODE_OAUTH_TOKEN']
-    .map((k) => process.env[k])
-    .filter((v): v is string => !!v && v.length >= 8);
+  const names = [
+    'RUNNER_TOKEN',
+    'ANTHROPIC_API_KEY',
+    'OPENAI_API_KEY',
+    'OPENCODE_API_KEY',
+    'OPENCODE_SERVER_PASSWORD',
+    'CLAUDE_CODE_OAUTH_TOKEN',
+  ];
+  // Operator-injected secret env (CreateOptions.ExtraSecretEnv, part B) is
+  // DELIBERATELY visible to the agent's child processes so the agent's tools can
+  // use it (e.g. a GitLab/GitHub PAT for git/gh/glab) — but that means it can turn
+  // up verbatim in a tool's output or command. Mask those values too so an
+  // injected credential never lands unredacted in the event log / audit. The
+  // backend publishes exactly which vars are injected via the
+  // SANDBOX_EXTRA_SECRET_ENV_NAMES marker.
+  for (const raw of (process.env.SANDBOX_EXTRA_SECRET_ENV_NAMES ?? '').split(',')) {
+    const n = raw.trim();
+    if (n) names.push(n);
+  }
+  return names.map((k) => process.env[k]).filter((v): v is string => !!v && v.length >= 8);
 }
 
 function redactString(s: string): string {

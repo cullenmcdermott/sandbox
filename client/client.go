@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -458,6 +459,32 @@ type CreateOptions struct {
 	// branch sandbox/<id>, so concurrent sessions on one repo don't cross-feed
 	// edits. See WorktreeMode.
 	Worktree WorktreeMode
+	// ExtraEnv adds plain (non-secret) environment variables to the runner pod —
+	// the generic escape hatch for an operator extending the pod's agent
+	// environment (e.g. a tool's control-endpoint URL) without a bespoke Spec
+	// field per tool (part B of docs/design-pod-bootstrap-and-tool-injection.md).
+	// Each name must be a valid env var name and must NOT collide with a name the
+	// runner/backend owns (the SANDBOX_ prefix, RUNNER_TOKEN, PROJECT_PATH,
+	// HOME/PATH, the credential vars — see k8s.IsReservedEnvName), else Create
+	// fails closed (ErrInvalidExtraEnvName / ErrReservedEnvName). Applied to every
+	// backend. Values are visible to the agent's child processes — do not put
+	// secrets here; use ExtraSecretEnv.
+	ExtraEnv map[string]string
+	// ExtraSecretEnv adds environment variables whose values ride the per-session
+	// Secret and reach the pod only as SecretKeyRefs (never an inline pod-spec
+	// value). Use it for an operator credential the AGENT's tools need — e.g. a
+	// GitLab/GitHub PAT or a Jira API key that the agent's git/gh/glab invocations
+	// consume. Unlike the runner's own infra secrets, these are DELIBERATELY
+	// visible to the agent's child processes (opencode serve / codex app-server /
+	// the claude pane) — that is the whole point — but they are redacted from the
+	// event log/audit and never serialized (json:"-" keeps them out of any
+	// marshaled options). Same name rules as ExtraEnv (ErrReservedEnvName /
+	// ErrInvalidExtraEnvName); a name in BOTH maps is ErrDuplicateExtraEnv; the
+	// summed value bytes are capped (ErrExtraSecretEnvTooLarge) to leave headroom
+	// under the ~1 MiB Secret limit. The SecretKeyRefs are Optional so a re-create
+	// that drops a var cannot brick a resume; values reconcile on re-create.
+	// Create-time-only material.
+	ExtraSecretEnv map[string][]byte `json:"-"`
 }
 
 // Create provisions a new session: it mints an id (unless ID is set), prepares
@@ -514,6 +541,14 @@ func (c *Client) Create(ctx context.Context, opt CreateOptions) (_ *Session, err
 	// account id would provision an unlabeled, unenumerable Secret. Both rejected
 	// before any cluster call.
 	if err := validateCodexAccount(opt.CodexAccountID, opt.CodexAuthJSON); err != nil {
+		return nil, err
+	}
+	// Fail closed on the generic env-injection surface (part B): every ExtraEnv /
+	// ExtraSecretEnv name must be a valid env var name, must not collide with a
+	// name the runner/backend owns, must not appear in both maps, and the summed
+	// secret bytes must fit under the per-session Secret's headroom. Validated
+	// before any cluster call; error paths name only keys, never secret values.
+	if err := validateExtraEnv(opt.ExtraEnv, opt.ExtraSecretEnv); err != nil {
 		return nil, err
 	}
 	runnerImage := opt.RunnerImage
@@ -586,6 +621,8 @@ func (c *Client) Create(ctx context.Context, opt CreateOptions) (_ *Session, err
 		CodexAuthJSON:      opt.CodexAuthJSON,
 		StorageClass:       opt.StorageClass,
 		StorageGiB:         opt.StorageGiB,
+		ExtraEnv:           opt.ExtraEnv,
+		ExtraSecretEnv:     opt.ExtraSecretEnv,
 	}
 	// Credential material branches by backend: claude-pane carries the FULL
 	// Claude Code documents (its only auth path — the inference-scoped token
@@ -906,6 +943,64 @@ func validateCodexAccount(accountID string, authJSON []byte) error {
 		if errs := validation.IsValidLabelValue(accountID); len(errs) > 0 {
 			return fmt.Errorf("%w: %q (%s)", ErrInvalidCodexAccountID, accountID, strings.Join(errs, "; "))
 		}
+	}
+	return nil
+}
+
+// envNameRE is the POSIX-ish environment variable name grammar: a letter or
+// underscore, then letters/digits/underscores. It intentionally excludes the
+// leading-digit, dash, dot, and empty cases that a shell (and the pod spec)
+// would choke on. Compiled once — validateExtraEnv runs it per key.
+var envNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// maxExtraSecretEnvBytes caps the summed value bytes of CreateOptions.ExtraSecretEnv.
+// The values ride the per-session Secret, which Kubernetes caps at ~1 MiB across
+// ALL keys; 512 KiB leaves ample headroom for the runner token, SSH key, and any
+// credential document (anthropic/codex/opencode/claude-pane) that shares the Secret.
+const maxExtraSecretEnvBytes = 512 * 1024
+
+// validateExtraEnv enforces the fail-closed contract for the generic env-injection
+// surface (CreateOptions.ExtraEnv / ExtraSecretEnv, part B). Every key in EITHER
+// map must be a valid env var name and must not collide with a name the
+// runner/backend owns (k8s.IsReservedEnvName — the ONE denylist, kept beside the
+// backend's buildEnv so it tracks the vars actually emitted); a name appearing in
+// BOTH maps is ambiguous (plain value vs Secret source) and rejected; and the
+// summed ExtraSecretEnv value bytes must stay under the per-session Secret's
+// headroom. It never inspects or echoes a value — error paths name only keys and
+// sizes.
+func validateExtraEnv(extraEnv map[string]string, extraSecretEnv map[string][]byte) error {
+	for name := range extraEnv {
+		if err := validateExtraEnvName(name); err != nil {
+			return err
+		}
+	}
+	var total int
+	for name, v := range extraSecretEnv {
+		if err := validateExtraEnvName(name); err != nil {
+			return err
+		}
+		// A name in both maps would resolve to two different sources — reject
+		// rather than silently pick one.
+		if _, dup := extraEnv[name]; dup {
+			return fmt.Errorf("%w: %q", ErrDuplicateExtraEnv, name)
+		}
+		total += len(v)
+	}
+	if total > maxExtraSecretEnvBytes {
+		return fmt.Errorf("%w: %d bytes exceeds the %d-byte limit", ErrExtraSecretEnvTooLarge, total, maxExtraSecretEnvBytes)
+	}
+	return nil
+}
+
+// validateExtraEnvName gates one ExtraEnv/ExtraSecretEnv key: valid env var name,
+// then not reserved. Order matters — the shape check runs first so an empty or
+// malformed name reports ErrInvalidExtraEnvName rather than ErrReservedEnvName.
+func validateExtraEnvName(name string) error {
+	if !envNameRE.MatchString(name) {
+		return fmt.Errorf("%w: %q", ErrInvalidExtraEnvName, name)
+	}
+	if k8s.IsReservedEnvName(name) {
+		return fmt.Errorf("%w: %q", ErrReservedEnvName, name)
 	}
 	return nil
 }

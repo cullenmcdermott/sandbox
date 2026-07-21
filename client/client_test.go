@@ -127,6 +127,72 @@ func TestValidateCodexAccount(t *testing.T) {
 	}
 }
 
+// TestValidateExtraEnv covers the generic env-injection gate (part B): valid
+// names in either map clear it; a reserved name (the SANDBOX_ prefix, RUNNER_TOKEN,
+// or a credential var) is ErrReservedEnvName; a malformed name is
+// ErrInvalidExtraEnvName; a name in BOTH maps is ErrDuplicateExtraEnv; and
+// oversized secret bytes are ErrExtraSecretEnvTooLarge. No error path echoes a
+// secret value.
+func TestValidateExtraEnv(t *testing.T) {
+	const secretVal = "glpat-SUPER-SECRET-VALUE"
+	cases := []struct {
+		name    string
+		plain   map[string]string
+		secret  map[string][]byte
+		wantErr error
+	}{
+		{"both nil", nil, nil, nil},
+		{
+			"valid plain + secret",
+			map[string]string{"TOOL_ENDPOINT": "https://tool.internal"},
+			map[string][]byte{"GITLAB_TOKEN": []byte(secretVal)},
+			nil,
+		},
+		{"reserved SANDBOX_ prefix (plain)", map[string]string{"SANDBOX_X": "v"}, nil, ErrReservedEnvName},
+		{"reserved RUNNER_TOKEN (secret)", nil, map[string][]byte{"RUNNER_TOKEN": []byte(secretVal)}, ErrReservedEnvName},
+		{"reserved credential var (secret)", nil, map[string][]byte{"ANTHROPIC_API_KEY": []byte(secretVal)}, ErrReservedEnvName},
+		{"reserved HOME (plain)", map[string]string{"HOME": "/x"}, nil, ErrReservedEnvName},
+		{"invalid name shape: leading digit", map[string]string{"1BAD": "v"}, nil, ErrInvalidExtraEnvName},
+		{"invalid name shape: dash", map[string]string{"BAD-NAME": "v"}, nil, ErrInvalidExtraEnvName},
+		{"invalid name shape: empty", map[string]string{"": "v"}, nil, ErrInvalidExtraEnvName},
+		{
+			"duplicate across maps",
+			map[string]string{"SHARED": "v"},
+			map[string][]byte{"SHARED": []byte(secretVal)},
+			ErrDuplicateExtraEnv,
+		},
+		{
+			"oversize secret bytes",
+			nil,
+			map[string][]byte{"BIG": make([]byte, maxExtraSecretEnvBytes+1)},
+			ErrExtraSecretEnvTooLarge,
+		},
+		{
+			"at the size cap is allowed",
+			nil,
+			map[string][]byte{"BIG": make([]byte, maxExtraSecretEnvBytes)},
+			nil,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := validateExtraEnv(c.plain, c.secret)
+			if c.wantErr == nil {
+				if err != nil {
+					t.Fatalf("got %v, want nil", err)
+				}
+				return
+			}
+			if !errors.Is(err, c.wantErr) {
+				t.Fatalf("got %v, want %v", err, c.wantErr)
+			}
+			if strings.Contains(err.Error(), secretVal) {
+				t.Fatalf("error message leaked a secret value: %v", err)
+			}
+		})
+	}
+}
+
 // TestSanitizeLabel checks that sanitizeLabel produces values safe to embed in a
 // Kubernetes resource name: uppercase is lowercased, [a-z0-9-] passes through,
 // and every other rune (including multi-byte ones) is replaced by '-'.

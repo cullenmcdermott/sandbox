@@ -242,6 +242,35 @@ test('buildClaudePaneEnv defaults CLAUDE_CONFIG_DIR to the PVC config dir', () =
   assert.equal('LANG' in out, false);
 });
 
+// Part B: operator-injected env (ExtraEnv/ExtraSecretEnv) is DELIBERATELY admitted
+// to the pane agent — the two marker vars name exactly which vars cross the
+// otherwise-strict allowlist. The runner's own secrets are never named, so they
+// stay withheld.
+test('buildClaudePaneEnv admits marker-named ExtraEnv/ExtraSecretEnv but still withholds runner secrets', () => {
+  const env: NodeJS.ProcessEnv = {
+    RUNNER_TOKEN: 'bearer-secret',
+    CLAUDE_CREDENTIALS_JSON: '{"creds":true}',
+    // Operator-injected — named by the markers.
+    TOOL_ENDPOINT: 'https://tool.internal',
+    GITLAB_TOKEN: 'glpat-injected',
+    SANDBOX_EXTRA_ENV_NAMES: 'TOOL_ENDPOINT',
+    SANDBOX_EXTRA_SECRET_ENV_NAMES: 'GITLAB_TOKEN',
+    PATH: '/usr/bin',
+  };
+  const out = buildClaudePaneEnv(env);
+
+  // The operator-declared vars are admitted (the feature).
+  assert.equal(out.TOOL_ENDPOINT, 'https://tool.internal', 'ExtraEnv var admitted to the pane');
+  assert.equal(out.GITLAB_TOKEN, 'glpat-injected', 'ExtraSecretEnv var admitted to the pane');
+
+  // The runner's own secrets are NOT named by the markers, so they stay withheld —
+  // and the marker vars themselves are not leaked into the child.
+  assert.equal('RUNNER_TOKEN' in out, false, 'RUNNER_TOKEN must never reach the pane child');
+  assert.equal('CLAUDE_CREDENTIALS_JSON' in out, false, 'pane credential material stays withheld');
+  assert.equal('SANDBOX_EXTRA_ENV_NAMES' in out, false, 'the marker var is not passed through');
+  assert.equal('SANDBOX_EXTRA_SECRET_ENV_NAMES' in out, false, 'the marker var is not passed through');
+});
+
 // --- single-attacher preemption -------------------------------------------
 
 test('a new attach preempts the previous socket and reroutes output', () => {

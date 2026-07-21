@@ -254,6 +254,27 @@ type Spec struct {
 
 	// StorageGiB is the PVC size. Defaults to 50.
 	StorageGiB int `json:"storageGiB"`
+
+	// ExtraEnv is operator-supplied plain (non-secret) pod environment applied to
+	// every backend (the generic env escape hatch, part B of
+	// docs/design-pod-bootstrap-and-tool-injection.md). Create-time-only: it is
+	// serialized so a re-create reproduces the pod env, but a session is a single
+	// backend so it never carries a credential — secrets belong in ExtraSecretEnv.
+	// Names are validated at the client layer against k8s.IsReservedEnvName.
+	ExtraEnv map[string]string `json:"extraEnv,omitempty"`
+
+	// ExtraSecretEnv is operator-supplied secret pod environment whose VALUES ride
+	// the per-session Secret (key "extra-secret-env-<NAME>") and reach the pod only
+	// as SecretKeyRefs. It is NEVER serialized (json:"-") — like SSHPublicKey,
+	// AnthropicCredential, and CodexAuthJSON it is create-time-only material that
+	// must not land in the local session index or any wire payload. Unlike the
+	// runner's own infra secrets it is DELIBERATELY visible to the agent's child
+	// processes (the injected credential is FOR the agent's tools); it is redacted
+	// from the event log/audit instead. The backend writes each value at
+	// CreateSession, injects an Optional SecretKeyRef per name in buildEnv, and
+	// publishes the sorted name list via SANDBOX_EXTRA_SECRET_ENV_NAMES so the
+	// runner knows which vars to redact + admit to the claude pane.
+	ExtraSecretEnv map[string][]byte `json:"-"`
 }
 
 // Status is the lifecycle state of a remote session.

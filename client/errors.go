@@ -122,6 +122,33 @@ var (
 	// carries no credential material.
 	ErrClaudePaneCredentialMissing = errors.New("sandbox: claude-pane session requires full Claude Code credential material — log in with `claude` on this machine so the host login can be provisioned (CreateOptions.SelectClaudePaneMaterial)")
 
+	// ErrInvalidExtraEnvName is returned by Create when a key in
+	// CreateOptions.ExtraEnv or ExtraSecretEnv is not a valid environment variable
+	// name (^[A-Za-z_][A-Za-z0-9_]*$). Empty or shell-hostile names are rejected
+	// before any cluster call; the error names the offending key (never a value).
+	ErrInvalidExtraEnvName = errors.New("sandbox: invalid environment variable name")
+
+	// ErrReservedEnvName is returned by Create when a key in CreateOptions.ExtraEnv
+	// or ExtraSecretEnv collides with a name the runner/backend already owns (the
+	// SANDBOX_ prefix, RUNNER_TOKEN, PROJECT_PATH, HOME/PATH, and every credential
+	// env var — see k8s.IsReservedEnvName). Injecting one would shadow the runner's
+	// own infra/credential env, so it fails closed here. The error names the
+	// offending key.
+	ErrReservedEnvName = errors.New("sandbox: environment variable name is reserved by the runner")
+
+	// ErrDuplicateExtraEnv is returned by Create when the same name appears in BOTH
+	// CreateOptions.ExtraEnv and ExtraSecretEnv. The two would resolve to different
+	// sources (plain pod value vs per-session Secret), so which wins is ambiguous —
+	// rejected rather than silently picking one. The error names the offending key.
+	ErrDuplicateExtraEnv = errors.New("sandbox: environment variable name is in both ExtraEnv and ExtraSecretEnv")
+
+	// ErrExtraSecretEnvTooLarge is returned by Create when the summed value bytes of
+	// CreateOptions.ExtraSecretEnv exceed the conservative cap. The values ride the
+	// per-session Secret, which Kubernetes caps at ~1 MiB total across ALL keys, so
+	// the cap leaves headroom for the runner token, SSH key, and any credential
+	// document that shares the Secret. The error carries only sizes, no values.
+	ErrExtraSecretEnvTooLarge = errors.New("sandbox: ExtraSecretEnv values exceed the size limit")
+
 	// ErrNotAGitRepo is returned by Create when CreateOptions.Worktree is
 	// WorktreeOn but ProjectPath is not inside a git work tree (or the git binary
 	// is unavailable), so a per-session worktree cannot be created. Under

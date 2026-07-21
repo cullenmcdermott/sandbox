@@ -199,7 +199,19 @@ var _ = client.CreateOptions{
 	StorageClass:           "fast",
 	StorageGiB:             10,
 	Worktree:               client.WorktreeAuto,
+	// Generic env/secret injection (part B): plain pod env + per-session-Secret
+	// secret env. Removing or retyping either field breaks a consumer here first.
+	ExtraEnv:       map[string]string{"TOOL_ENDPOINT": "https://tool.internal"},
+	ExtraSecretEnv: map[string][]byte{"TOOL_TOKEN": []byte("secret")},
 }
+
+// Generic env-injection sentinels a consumer branches on with errors.Is.
+var (
+	_ error = client.ErrInvalidExtraEnvName
+	_ error = client.ErrReservedEnvName
+	_ error = client.ErrDuplicateExtraEnv
+	_ error = client.ErrExtraSecretEnvTooLarge
+)
 
 // OpencodeProvider vocabulary: re-exported so consumers pass a named constant
 // as CreateOptions.OpencodeProvider instead of a raw string. Removing or

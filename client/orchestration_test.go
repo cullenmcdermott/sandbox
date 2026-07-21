@@ -234,6 +234,41 @@ func TestClientCreate(t *testing.T) {
 		}
 	})
 
+	t.Run("valid ExtraEnv/ExtraSecretEnv flow into the spec", func(t *testing.T) {
+		be := newFakeBackend()
+		c, _, _ := fakeClient(t, be)
+		_, err := c.Create(ctx, CreateOptions{
+			ProjectPath:    "/work/repo",
+			ID:             "claude-sdk-extraenv",
+			ExtraEnv:       map[string]string{"TOOL_ENDPOINT": "https://tool.internal"},
+			ExtraSecretEnv: map[string][]byte{"GITLAB_TOKEN": []byte("glpat-secret")},
+		})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if got := be.gotSpec.ExtraEnv["TOOL_ENDPOINT"]; got != "https://tool.internal" {
+			t.Errorf("spec ExtraEnv[TOOL_ENDPOINT] = %q, want the injected endpoint", got)
+		}
+		if got := string(be.gotSpec.ExtraSecretEnv["GITLAB_TOKEN"]); got != "glpat-secret" {
+			t.Errorf("spec ExtraSecretEnv[GITLAB_TOKEN] = %q, want the injected token", got)
+		}
+	})
+
+	t.Run("a reserved env name is rejected before any cluster call", func(t *testing.T) {
+		be := newFakeBackend()
+		c, _, _ := fakeClient(t, be)
+		_, err := c.Create(ctx, CreateOptions{
+			ProjectPath: "/work/repo",
+			ExtraEnv:    map[string]string{"RUNNER_TOKEN": "nope"},
+		})
+		if !errors.Is(err, ErrReservedEnvName) {
+			t.Fatalf("Create with reserved ExtraEnv name: got %v, want ErrReservedEnvName", err)
+		}
+		if len(be.gotRefs["create"]) != 0 {
+			t.Error("CreateSession must not be called when env validation fails")
+		}
+	})
+
 	t.Run("backend create error propagates", func(t *testing.T) {
 		be := newFakeBackend()
 		be.createErr = errors.New("apiserver down")

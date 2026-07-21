@@ -181,6 +181,20 @@ export function buildClaudePaneEnv(env: NodeJS.ProcessEnv = process.env): NodeJS
   for (const k of PANE_ENV_PASSTHROUGH) {
     if (env[k] !== undefined) out[k] = env[k];
   }
+  // Operator-injected env (CreateOptions.ExtraEnv / ExtraSecretEnv, part B) is
+  // DELIBERATELY admitted through the otherwise-strict allowlist: making it
+  // visible to the pane agent IS the feature (the agent's git/gh/glab use the
+  // injected PAT). The two marker vars name exactly which vars to pass through, so
+  // only operator-declared names cross the boundary — the runner's own secrets
+  // (RUNNER_TOKEN, credentials) are never named and stay withheld. (opencode/codex
+  // children receive these automatically via sanitizedExecEnv passthrough; the
+  // pane is the only strict-allowlist child, so it needs this explicit admit.)
+  for (const marker of ['SANDBOX_EXTRA_ENV_NAMES', 'SANDBOX_EXTRA_SECRET_ENV_NAMES']) {
+    for (const raw of (env[marker] ?? '').split(',')) {
+      const n = raw.trim();
+      if (n && env[n] !== undefined) out[n] = env[n];
+    }
+  }
   return out;
 }
 

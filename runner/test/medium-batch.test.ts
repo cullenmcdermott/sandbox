@@ -72,3 +72,28 @@ test('redactSecrets masks camelCase secret keys (V17)', () => {
   assert.equal(r.broken, 'still-fine', 'lowercase "broken" is not a false positive');
   assert.equal(r.monotonic, 'clock', 'lowercase "monotonic" is not a false positive');
 });
+
+// Part B: operator-injected secret env (ExtraSecretEnv) is AGENT-VISIBLE by
+// design, so a PAT can surface verbatim in a tool's output/command. Its value
+// must still be redacted from the event log / audit — the backend names exactly
+// which vars are injected via SANDBOX_EXTRA_SECRET_ENV_NAMES.
+test('redactSecrets masks ExtraSecretEnv values named by SANDBOX_EXTRA_SECRET_ENV_NAMES (part B)', () => {
+  const savedNames = process.env.SANDBOX_EXTRA_SECRET_ENV_NAMES;
+  const savedTok = process.env.GITLAB_TOKEN;
+  try {
+    process.env.SANDBOX_EXTRA_SECRET_ENV_NAMES = 'GITLAB_TOKEN';
+    process.env.GITLAB_TOKEN = 'glpat-INJECTED-PAT-VALUE';
+    const r = redactSecrets({
+      command: 'glab auth login --token glpat-INJECTED-PAT-VALUE',
+      note: 'the token glpat-INJECTED-PAT-VALUE appears again',
+    }) as { command: string; note: string };
+    assert.equal(r.command.includes('glpat-INJECTED-PAT-VALUE'), false, 'injected PAT redacted in command');
+    assert.match(r.command, /--token \[redacted\]/);
+    assert.equal(r.note.includes('glpat-INJECTED-PAT-VALUE'), false, 'injected PAT redacted everywhere it appears');
+  } finally {
+    if (savedNames === undefined) delete process.env.SANDBOX_EXTRA_SECRET_ENV_NAMES;
+    else process.env.SANDBOX_EXTRA_SECRET_ENV_NAMES = savedNames;
+    if (savedTok === undefined) delete process.env.GITLAB_TOKEN;
+    else process.env.GITLAB_TOKEN = savedTok;
+  }
+});
