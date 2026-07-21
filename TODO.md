@@ -975,16 +975,32 @@ naming-break, and Shell items each stand alone.
   adds the worktree root; implement with the worktree Spec-split change.
   `client/sync.go`.
 - [ ] **Pod bootstrap files + generic env/secret injection** (upstream
-  integration request, 2026-07-17): `CreateOptions.ExtraEnv`/`ExtraSecretEnv`
+  integration request 2026-07-17; **maintainer re-raised 2026-07-21 for
+  PATs/API keys — GitLab/GitHub PAT, Jira key — treat as the sign-off
+  signal; confirm the design doc reading then flip its Status and
+  execute**): `CreateOptions.ExtraEnv`/`ExtraSecretEnv`
   (per-session-Secret-backed env escape hatch) then
   `CreateOptions.BootstrapFiles` (operator files materialized in pod `$HOME`
   before the agent starts — NOT in the synced workspace); operator binaries
   stay a derived-`--runner-image` pattern, not SDK surface. Full design +
-  validation rules: `docs/design-pod-bootstrap-and-tool-injection.md`
-  (Status: draft — needs maintainer sign-off). Touch points:
-  `client/client.go` (CreateOptions/validate), `internal/k8s/backend.go`
-  (Secret + buildEnv), runner boot materialize step; sdktest pins in the
-  same change.
+  validation rules: `docs/design-pod-bootstrap-and-tool-injection.md`.
+  Touch points: `client/client.go` (CreateOptions/validate),
+  `internal/k8s/backend.go` (Secret + buildEnv), runner boot materialize
+  step; sdktest pins in the same change. RIDERS added 2026-07-21:
+  (a) ExtraSecretEnv values must join the runner's redaction patterns
+  (`runner/src/redact.ts`) so injected PATs never surface in the event
+  log/audit; (b) each injected secret widens the [S1] exfil blast radius —
+  the SECURITY.md paragraph and the FQDN-egress example must say so (a
+  GitLab PAT in the pod wants gitlab.com in the allowlist, which also
+  opens the exfil path — operator's tradeoff, stated plainly);
+  (c) claude-pane child env allowlist (`claude-pane.ts`) must explicitly
+  admit ExtraEnv/ExtraSecretEnv names or the pane child never sees them —
+  decide default-in vs opt-in flag per var. NOTE the skills half of the
+  maintainer ask is ALREADY BUILT for claude: `ConfigInputsSubs`
+  (`internal/sync/sync.go:218`) one-way-syncs `~/.claude/{skills,agents,
+  commands,hooks}` into the pod, and project-level `.claude/skills` rides
+  the project sync — needs a README section + a live verification, not
+  code.
 
 **2026-07-18 SDK-example review additions** (from auditing
 `client/example_test.go` against the full surface):
@@ -1104,8 +1120,32 @@ naming-break, and Shell items each stand alone.
   `go test ./internal/sync/`. Maintainer follow-up (not blocking): package
   `claude-statusline` into the runner flox env so the PATH branch lights
   up. Closes the design doc's open "statusline display string" question.
-- [ ] **Tekken-style agent-picker modal** — animations + per-agent
-  ascii/ansi portrait.
+- [ ] **Worktree continuity + merge-back UX (maintainer ask, 2026-07-21).**
+  What EXISTS (verify-then-build-on, don't rebuild): destroy is
+  capture-then-remove — dirty WIP is committed to the session's
+  `sandbox/<id>` branch before the worktree is removed
+  (`client/worktree.go` teardownWorktree; `BranchResult.CommitSHA`), so
+  destroying a session never loses work — it survives as a branch in the
+  main repo; `ConvertToBranch` (dashboard `b` modal, title-derived
+  prefill) renames it humanly. The GAPS the maintainer feels: (1) **no
+  continuity** — a new session always gets a fresh worktree from the base
+  branch; there is no "start a session ON branch X" to pick up prior work
+  (incl. a destroyed session's `sandbox/<id>` branch). Fix sketch: extend
+  the `--worktree` flag vocabulary with `continue:<branch>` (and a
+  creator-overlay branch picker fed by `git for-each-ref
+  'refs/heads/sandbox/*'` + converted branches) → `client/worktree.go`
+  creates the worktree from that ref instead of the base; validate the
+  branch isn't checked out elsewhere. (2) **merge-back is undocumented** —
+  the recipe (detach/destroy → `b` convert or `sandbox worktree` →
+  `git merge`/PR from the converted branch) exists but appears nowhere in
+  README/session-lifecycle.md; write it as a short "finishing a session's
+  work" section. (3) **destroy should offer the convert** — when Destroy
+  captures dirty WIP, surface "converted-name?" (the modal exists; wire it
+  into the destroy path) instead of silently leaving `sandbox/<id>`.
+  Tests: worktree_test.go continue-from-branch cases; CLI flag parsing.
+  Run `go test ./client/ ./internal/cli/` (client needs the sandbox
+  disabled). The session↔worktree tie itself is sound — the branch, not
+  the session, is the durable unit; these three make that visible.
 - [x] **Per-session git worktree lifecycle — IMPLEMENTED 2026-07-11** (done
   log; design archived to
   [`docs/archive/worktree-lifecycle-design.md`](docs/archive/worktree-lifecycle-design.md)
