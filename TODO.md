@@ -240,7 +240,8 @@ unified redaction):
   (`claude-pane-observer.ts:449-452`; routes `server.ts:297-311`) → same-
   session fake events / bounded reaper stall. Threat-model note; optionally
   tag observer-originated events.
-- [ ] **[S4] Delete dead `runner/src/grants.ts` (hygiene commit).**
+- [x] **[S4] done 2026-07-20:** grants.ts + its test deleted; the unused
+  `@anthropic-ai/sdk` dep dropped in the same hygiene commit.
 - [ ] **[S5] Set pane WS maxPayload + resize bounds when next touching
   `server.ts:174,119-134` (INFO).**
 - [ ] **[S6] runAsNonRoot deferral stays tracked**
@@ -326,6 +327,16 @@ transcript: workstream **B (transcript depth) is OBSOLETE** — skip it when
 reading the plan doc; the rest apply to surfaces that still exist (dashboard
 modals, session list, feed, theming).
 
+- [ ] **"needs input" label reads as blocked when the agent simply finished
+  (maintainer feedback, first live pane session 2026-07-20).**
+  `internal/tui/dashboard/session.go:41-42` — StatusNeedsInput means "turn
+  finished, awaiting next prompt", but the label (:330) + glyph read like
+  the session is stuck at a picker. Rename the HUMAN-facing label to
+  something calm ("ready" / "your turn"), keeping StatusWaiting as the
+  genuinely-blocked state and its attention float. CAREFUL: the wire string
+  "needs-input" round-trips through snapshot serialization
+  (session.go:470) — keep the serialized form stable or migrate; golden
+  churn expected.
 - [ ] **[L5] Design pass: external panes as floating modals over the
   dashboard (maintainer idea, 2026-07-20).** Render in-pane clients
   (claude/opencode) as floating modals instead of full-screen takeover —
@@ -435,15 +446,12 @@ Outcome at the time: **not happening; invest in §2 instead.**
 [`docs/review-2026-07-20.md`](docs/review-2026-07-20.md) §P; all prior
 E-series SSE fixes verified intact — do-not-regress list in the doc):
 
-- [ ] **[P1] No pane chunk coalescing — one full View() per 32 KB read
-  (HIGH).** `internal/tui/dashboard/external_pane.go:217-248`,
-  `app.go:516-525`: focused = full `emu.Render()` per chunk; minimized =
-  full dashboard View() per chunk. Fix: bounded non-blocking drain of
-  `p.out` in `apply`, one emulator Write per burst (E5 pattern).
-- [ ] **[P2] Runner pane WS has no backpressure cap (HIGH, pod OOM risk).**
-  `runner/src/claude-pane.ts:387-394`: no `bufferedAmount` check, PTY never
-  paused — wedged client grows pod memory unbounded. Fix: E3 parity —
-  close-with-code over ~4 MiB (client reconnects into the ring).
+- [x] **[P1] done 2026-07-20:** bounded non-blocking drain in `apply`
+  (256 chunks / 1 MiB caps), one emulator Write per burst; reader goroutine
+  + O7 grapheme boundary untouched. With [P5] in the same commit.
+- [x] **[P2] done 2026-07-20:** pane WS closes with code 4003 over a 4 MiB
+  `bufferedAmount` cap (E3 parity); client reconnects into the scrollback
+  ring.
 - [ ] **[P3] vt emulator retains a 10k-line scrollback the pane never reads
   (MED).** `external_pane.go:142`. DIRECTION CHANGED 2026-07-20: claude runs
   inline (no alt-screen) and [L7] (§1h) wants wheel-scroll over this exact
@@ -453,9 +461,8 @@ E-series SSE fixes verified intact — do-not-regress list in the doc):
   (MED).** `external_pane.go:297-358` → `internal/runner/pane.go:130-137`;
   stalled forward freezes the dashboard incl. ctrl+] detach. Fix: buffered
   writer goroutine, surface stream error on sustained-full.
-- [ ] **[P5] Replaced pane's reader goroutine can leak on a full channel
-  (LOW).** `app.go:517-518` + `external_pane.go:166-187`; add a done
-  channel select.
+- [x] **[P5] done 2026-07-20** with [P1]: done-channel select in the reader,
+  closeOnce-guarded close.
 - [ ] **[P6] One fresh Node process per observer hook event — PreToolUse on
   every tool call's critical path (MED, measure live cadence first).**
   `runner/src/claude-pane-observer.ts:353-417`. Fix: fire-and-forget POST /
