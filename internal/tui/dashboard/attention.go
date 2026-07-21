@@ -40,7 +40,7 @@ func sortByAttention(sessions []Session, attentionFirst bool) []Session {
 }
 
 // attentionSummary renders the persistent attention count, e.g.
-// "2 waiting · 1 needs input", or "" when nothing needs attention.
+// "2 waiting · 1 ready", or "" when nothing needs attention.
 func attentionSummary(sessions []Session) string {
 	waiting, needs, failed := 0, 0, 0
 	for _, s := range sessions {
@@ -58,7 +58,7 @@ func attentionSummary(sessions []Session) string {
 		parts = append(parts, fmt.Sprintf("%d waiting", waiting))
 	}
 	if needs > 0 {
-		parts = append(parts, fmt.Sprintf("%d needs input", needs))
+		parts = append(parts, fmt.Sprintf("%d ready", needs))
 	}
 	if failed > 0 {
 		parts = append(parts, fmt.Sprintf("%d failed", failed))
@@ -93,7 +93,7 @@ func overflowSummary(hidden []Session) string {
 		parts = append(parts, fmt.Sprintf("%d waiting below", waiting))
 	}
 	if needs > 0 {
-		parts = append(parts, fmt.Sprintf("%d needs input below", needs))
+		parts = append(parts, fmt.Sprintf("%d ready below", needs))
 	}
 	if failed > 0 {
 		parts = append(parts, fmt.Sprintf("%d failed below", failed))

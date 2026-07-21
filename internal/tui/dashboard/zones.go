@@ -224,7 +224,7 @@ func (m *Model) detailTitle(boxW int) string {
 func (m *Model) topBar(w int, c sessionPartition) string {
 	wordmark := theme.GradientText("sandbox", true, theme.Charple, theme.Dolly)
 	// Use attentionSummary for the waiting/needs-input portion (D4): renders
-	// "2 waiting · 1 needs input" or "" when nothing needs attention.
+	// "2 waiting · 1 ready" or "" when nothing needs attention.
 	attnStr := attentionSummary(m.sessions)
 	tallyStr := fmt.Sprintf("%d session%s · %d busy", c.total, plural(c.total), c.busy)
 	if attnStr != "" {

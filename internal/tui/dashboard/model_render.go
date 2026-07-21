@@ -520,7 +520,7 @@ func (m *Model) renderDetailLines(width, height int) []string {
 		case StatusWaiting:
 			note = theme.GlyphWaiting + " waiting for your approval"
 		case StatusNeedsInput:
-			note = theme.GlyphNeedsInput + " waiting for your input"
+			note = theme.GlyphNeedsInput + " ready for your next prompt"
 		case StatusFailed:
 			note = theme.GlyphFailed + " session failed"
 		}

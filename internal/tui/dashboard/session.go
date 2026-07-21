@@ -318,8 +318,11 @@ func (s Session) AgentLabel() string {
 }
 
 // statusLabel is the human status word shown on the list row's sub-line. It
-// favours plain verbs ("working" over "busy", "needs input" over "needs-input")
+// favours plain verbs ("working" over "busy", "ready" over "needs-input")
 // since it is read as prose next to the colored agent glyph, not parsed.
+// NeedsInput deliberately reads "ready", not "needs input": the state means
+// "turn finished, awaiting your next prompt", and "needs input" read as if the
+// session were stuck at a picker (maintainer feedback, 2026-07-20).
 func statusLabel(s SessionStatus) string {
 	switch s {
 	case StatusBusy:
@@ -327,7 +330,7 @@ func statusLabel(s SessionStatus) string {
 	case StatusWaiting:
 		return "waiting"
 	case StatusNeedsInput:
-		return "needs input"
+		return "ready"
 	case StatusIdle:
 		return "idle"
 	case StatusSuspended:

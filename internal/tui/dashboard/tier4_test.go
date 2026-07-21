@@ -263,7 +263,7 @@ func TestAttentionSummary(t *testing.T) {
 			sessionReadModel: sessionReadModel{DashStatus: StatusIdle},
 		}}
 	out := attentionSummary(sessions)
-	if !strings.Contains(out, "2 waiting") || !strings.Contains(out, "1 needs input") || !strings.Contains(out, "1 failed") {
+	if !strings.Contains(out, "2 waiting") || !strings.Contains(out, "1 ready") || !strings.Contains(out, "1 failed") {
 		t.Fatalf("attention summary wrong: %q", out)
 	}
 	if got := attentionSummary([]Session{{
@@ -299,8 +299,8 @@ func TestOverflowSummary(t *testing.T) {
 	if !strings.Contains(out, "1 waiting") {
 		t.Fatalf("overflow summary missing attention rollup: %q", out)
 	}
-	if !strings.Contains(out, "1 needs input") {
-		t.Fatalf("overflow summary missing needs-input rollup: %q", out)
+	if !strings.Contains(out, "1 ready below") {
+		t.Fatalf("overflow summary missing needs-input (ready) rollup: %q", out)
 	}
 	if !strings.Contains(out, "1 failed") {
 		t.Fatalf("overflow summary missing failed rollup: %q", out)
