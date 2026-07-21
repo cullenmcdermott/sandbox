@@ -1902,3 +1902,88 @@ Five builder batches, every diff orchestrator-reviewed, full Go suite +
   `Info{ContextLimit, InputPrice, OutputPrice}`), new doc.go in the
   client/cred voice, dashboard import swaps, sdktest pins. CLAUDE.md +
   docs/architecture.md package tables updated in the same commit.
+
+## 2026-07-21 — six-agent parallel fan-out batch (disjoint TODO items, all same-day)
+
+Six worktree-isolated agents dispatched in parallel on deliberately
+non-overlapping items; every diff reviewed and re-verified on main before
+cherry-pick; one `just check` over the integrated batch (all gates green).
+
+- **§1f [S2] sync credential-filename ignores (e674325):** 12 exact-name
+  patterns appended to the non-overridable `securityIgnores` layer in
+  `internal/sync/sync.go`, three commented groups — plaintext machine
+  logins (`.netrc`, `_netrc`, `.npmrc`, `.git-credentials`), cloud creds
+  (`.aws` whole-dir, `service-account*.json`), SSH private keys
+  (`id_rsa|id_ed25519|id_ecdsa` + `.*` derivatives). `.aws` written
+  without trailing slash to match the existing dir-entry style (broader:
+  also blocks a file of that name). `TestCreateProjectSyncIgnoreLayering`
+  pins each pattern present + positioned after the gitignore layer (no
+  negation can re-enable); README Mutagen bullet notes the defensive
+  exclusion.
+- **§2e needs-input relabel (f3154c9):** display strings only — row label
+  "needs input"→"ready", attention summaries "%d ready"/"%d ready below",
+  detail note "ready for your next prompt". Wire string "needs-input",
+  `StatusNeedsInput`, and `GlyphNeedsInput` (already a calm ❯) untouched;
+  StatusWaiting keeps label + attention float. Goldens unchanged (fixtures
+  never render NeedsInput — verified pre-change goldens contain no "needs"
+  text); TestAttentionSummary/TestOverflowSummary pin the new strings.
+- **§6 C3-codex shape guard (9199e71):** `anthropicEnvShape` renamed
+  `credentialEnvShape`, detection widened to both families
+  (CLAUDE_CODE_OAUTH_TOKEN/ANTHROPIC_API_KEY;
+  CODEX_AUTH_JSON/OPENAI_API_KEY — first match wins, one backend per
+  session so at most one family in a pod template; opencode exempt as
+  before). Both C3 call sites (Secret-AlreadyExists goroutine + Sandbox-
+  AlreadyExists path) now reject codex shape changes before any Secret
+  mutation — closes the resume brick where `syncSessionCredential`
+  stripped `codex-auth-json` under a baked NOT-Optional SecretKeyRef.
+  `TestCreateSessionStripsCodexCredentialOnRecreate` flipped to
+  `TestCreateSessionRejectsCodexAuthShapeChange` (error + Secret/Sandbox
+  fully intact); new `TestCreateSessionSameShapeCodexAccountSwapPatchesSecret`.
+- **§10 [O4][O6][O11][O12] docs (d71c64f):** `sandbox doctor` first in
+  Quickstart + Commands with the two-doctors disambiguation (vs `just
+  doctor` dev-env tool); experimental `sandbox codex` row documenting the
+  real credential contract (per-session ChatGPT-OAuth auth.json is
+  SDK-only; the CLI always uses the shared `openai-api-key` fallback —
+  verified zero CodexAccountID/CodexAuthJSON hits in internal/cli|tui) +
+  degraded-attach caveat; CONTRIBUTING "The `openspec/` references"
+  section (untracked via `.git/info/exclude`, absent from clones by
+  design, durable outcomes land in docs/); gate described identically in
+  README Testing + CONTRIBUTING, matching the Justfile `check` recipe and
+  naming CI's `flox activate -- just check`; recipe list gained
+  sdk-conformance/verify/e2e, `just build` description corrected.
+- **§4 [P4] pane input writer (8f51e83):** input-writer goroutine in
+  `external_pane.go` is the sole UI-side transport writer — 64-entry
+  tagged queue (`paneInput{data, size}`) carries keys/paste/mouse AND
+  resize in UI order (resize routed through the queue: PaneStream.Resize
+  shares writeMu, and geometry must not overtake type-ahead); enqueue is
+  select-with-default, drop-on-full records a first-wins pane error on
+  the existing `p.err` surface; writer holds a local transport ref, exits
+  via the P5 done channel, close()'s transport.Close() unblocks a parked
+  Write (no leak, channel never closed). Emulator reply pump deliberately
+  keeps direct blocking writes (capability replies must never drop;
+  already off the UI loop). Direct-construction test panes (`p.in == nil`)
+  fall back to synchronous writes, preserving existing seams. New tests:
+  stalled-transport keystroke + ctrl+] detach promptness, cross-type
+  ordering, deterministic 65th-write drop; `-race -count=2` green.
+- **§1h [L8a/b] stuck-"working" fix (67d6831):** UserPromptSubmit's busy
+  is provisional — `armBusyConfirm` (default 10s,
+  `SANDBOX_BUSY_CONFIRM_WINDOW_MS` env override, deps-injectable) reverts
+  to idle through the registry `setStatus` path (the standard
+  `session.status_changed` emission) unless
+  MessageDisplay/PreToolUse/PostToolUse/PermissionRequest confirms;
+  activity landing after the window re-asserts busy; revert is
+  status-only (synthetic turn stays open for a late Stop / next-prompt
+  interrupt); timer unref'd + cleared in closeTurn (covers shutdown
+  reset). Stale synthetic busy now RELEASED for real in `recomputeIdle`
+  — setStatus('idle') persists + emits regardless of attachment; reaper
+  eligibility unchanged (idleSince still isDetached-gated on the
+  recursive pass; real runner turns exempt — `syntheticBusyStale` returns
+  false when activeTurns > 0). 5 new confirm-window tests (20ms injected
+  window) + staleness tests upgraded to a real temp sqlite log asserting
+  exactly one emitted idle status event, attached and detached. Part (c)
+  (Esc-interrupt hookprobe) + the dashboard "stalled?" rendering remain
+  open (§1h residual).
+
+Live-verify wanted (next natural session): [L8] — a slash command should
+show "working" for ≤~10s then flip to "ready"; [P4] — typing during a
+network stall must not freeze the dashboard; ctrl+] must detach.

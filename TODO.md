@@ -51,14 +51,15 @@
 > credential failure spawned
 > `openspec/changes/opencode-multi-provider-auth/` (see §7a).
 >
-> **Opus-ready map (updated 2026-07-20 late):** best first picks, in order —
-> §10 [O1]-[O12]/[O15] docs+probe cluster (two PARKED part-done worktrees to
-> finish, see the §10 intro), §1h [L3] feed history + [L7] wheel-scroll
-> (implement WITH §4 [P3] as one change), §4 [P4] input writer, §1f
-> [S1]/[S2]/[S3] security follow-ups, §9 T10 dirPicker + statusline chain
+> **Opus-ready map (updated 2026-07-21 after the six-agent fan-out batch —
+> [S2], [L8a/b], [P4], §2e needs-input relabel, §6 C3-codex, and
+> [O4]/[O6]/[O11]/[O12] all landed; done log):** best first picks, in order —
+> §10 remaining docs+probe cluster [O1]/[O3]/[O5]/[O7]-[O10]/[O14]/[O15]
+> (two PARKED part-done worktrees to finish, see the §10 intro), §1h [L3]
+> feed history + [L7] wheel-scroll (implement WITH §4 [P3] as one change),
+> §1f [S1]/[S3] security follow-ups, §9 T10 dirPicker + statusline chain
 > (execution contracts in the items), §7a = execute
-> `openspec/changes/opencode-multi-provider-auth/tasks.md`, §2e needs-input
-> relabel. Every open item carries pointers + a fix direction + a
+> `openspec/changes/opencode-multi-provider-auth/tasks.md`. Every open item carries pointers + a fix direction + a
 > verification line; if one doesn't, that's a bug in this file. Rules of the
 > road for Opus: (1) run the tests named in the item, not the full gate, per
 > change; run `just check` once per batch (command-sandbox caveats in
@@ -160,37 +161,21 @@ row-model consolidation moved to §2a where it belongs.
   forwarded; offset clamps at history length; wheel with mouse-tracking
   enabled still forwards to the child. Run
   `go test ./internal/tui/dashboard/` + `-race -run 'Pane|External'`.
-- [ ] **[L8] Stuck "working": busy is set optimistically and its only
-  clearers can miss; the staleness release never tells the dashboard
-  (HIGH-visibility, live-diagnosed 2026-07-21 00:04 on
-  claude-pane-df80e6-54d205d0).** Evidence from the pod's events.db:
-  `turn.started` 05:04:16Z with ZERO model activity after (no
-  message/tool/Stop), statusline events at 05:24 — session showed
-  "working" for 20+ min while idle. Mechanism (all confirmed in code):
-  (1) `UserPromptSubmit` → `setStatus('busy')` + turn.started
-  (`claude-pane-observer.ts` case 'UserPromptSubmit') fires for EVERY
-  submission — including slash/local commands and prompts interrupted
-  before the model starts — but busy is cleared ONLY by `closeTurn()`
-  (case 'Stop', or the supervisor crash-abort). No model turn ⇒ no Stop ⇒
-  busy forever. (2) The SYNTHETIC_BUSY_STALE_MS release
-  (`session.ts` `recomputeIdle`/`syntheticBusyStale`) is reaper-only: it
-  flips idle-ELIGIBILITY, requires `isDetached()`, is evaluated lazily
-  (on ingest/clients-changed — no timer), and never mutates
-  `state.status` nor emits `session.status_changed` — the dashboard is
-  never corrected. (3) No Esc-interrupt hook is mapped (Stop is
-  graceful-only). Fix direction, runner-side: (a) provisional busy — on
-  UserPromptSubmit arm a ~10s confirm window; if no model-activity hook
-  (message.*, PreToolUse, PermissionRequest) follows, revert to idle and
-  emit the status event (timer-driven, not ingest-lazy); (b) when
-  synthetic busy goes stale, actually `setStatus('idle')` + emit
-  `session.status_changed` regardless of attachment (keep the reaper
-  side-effect); (c) probe whether claude fires ANY hook on Esc-interrupt
-  (E1 hookprobe method) and map it to `closeTurn('interrupted')`.
-  Dashboard follow-up (separate, needs design): an honest
-  "stalled?" rendering for busy-with-quiet-observer beats a false
-  "working". Tests: observer suite — UserPromptSubmit alone reverts to
-  idle after the window; UserPromptSubmit+message.started stays busy;
-  stale release emits the status event. Run `cd runner && npm test`.
+- [x] **[L8] parts (a)+(b) fixed 2026-07-21** (done log): UserPromptSubmit's
+  busy is now PROVISIONAL — a timer-driven ~10s confirm window
+  (`SANDBOX_BUSY_CONFIRM_WINDOW_MS`, deps-injectable) reverts to idle via
+  the standard `setStatus` path (emits `session.status_changed`) unless
+  model activity (MessageDisplay/PreToolUse/PostToolUse/PermissionRequest)
+  confirms; late activity re-asserts busy; the synthetic turn stays open so
+  a late Stop still completes it. Stale synthetic busy is now RELEASED for
+  real in `recomputeIdle` — status flip + event, attachment-independent;
+  reaper eligibility unchanged (still isDetached-gated; real runner turns
+  exempt via the activeTurns guard in `syntheticBusyStale`).
+- [ ] **[L8 residual] Esc-interrupt probe + honest "stalled?" rendering.**
+  (c) probe whether claude fires ANY hook on Esc-interrupt (E1 hookprobe
+  method) and map it to `closeTurn('interrupted')` — needs a live session.
+  Dashboard follow-up (separate, needs design): an honest "stalled?"
+  rendering for busy-with-quiet-observer beats a false "working".
 - [ ] **[L3] Detached feed opens empty — host event cache has a reader but no
   writer (MED).** `app.go` `openFeed` seeds from `eventCache.LoadEvents` but
   `AppendEvent` has zero production callers (orphaned by a935541);
@@ -236,7 +221,8 @@ row-model consolidation moved to §2a where it belongs.
   armed `/loop`/`queuedPrompt` protected; eviction keeps the warm model;
   Busy rows stamped to watch baseline; lapse toast wording cause-agnostic.
 - [x] **[C3] shape-changing re-create rejected — done 2026-07-09** (done log):
-  desired vs baked pod-template env compared (`anthropicEnvShape`) BEFORE any
+  desired vs baked pod-template env compared (`anthropicEnvShape`, since
+  generalized to `credentialEnvShape` — §6 C3-codex, 2026-07-21) BEFORE any
   Secret mutation; same-shape account swaps still patch in place. Supersedes
   the old strip-on-account-removal behavior (which could brick resume).
 - [x] **[C4-C11] assorted client reliability — done 2026-07-09** (done log):
@@ -316,18 +302,12 @@ unified redaction):
   open-443 wording — extend, don't duplicate). (3) k8s/README.md row for
   the new example. Longer-term scoped credentials + the
   opencode-multi-provider-auth seed filter are separate tracks.
-- [ ] **[S2] Project-sync secret ignores miss credential *filenames* (MED,
-  untouched by the parked worktrees — clean start).**
-  `securityIgnores` in `internal/sync/sync.go` blocks by extension only.
-  Add mutagen ignore patterns (gitignore-like syntax — match how the
-  existing dir entries in that list are written) for: `.netrc`, `_netrc`,
-  `.npmrc`, `.git-credentials`, `.aws/` (whole dir),
-  `service-account*.json`, `id_rsa`, `id_rsa.*`, `id_ed25519`,
-  `id_ed25519.*`, `id_ecdsa`, `id_ecdsa.*` — grouped with a comment per
-  group naming what it protects (existing list's style). Extend the
-  existing securityIgnores test the same way, and add one sentence to the
-  README sync section: the project dir should not contain secret files;
-  these names are excluded defensively. Run `go test ./internal/sync/`.
+- [x] **[S2] done 2026-07-21** (done log): 12 credential-filename patterns
+  (`.netrc`/`_netrc`/`.npmrc`/`.git-credentials`; `.aws` +
+  `service-account*.json`; default SSH private-key names + `.*` derivatives)
+  added to the non-overridable `securityIgnores` layer in
+  `internal/sync/sync.go`, layering test pins presence + position, README
+  Mutagen bullet notes the defensive exclusion.
 - [ ] **[S3] Observer-token telemetry spoofing by the in-pane agent (LOW,
   accept+document).** Token readable under CLAUDE_CONFIG_DIR
   (`claude-pane-observer.ts` token write; routes in `server.ts` before the
@@ -425,21 +405,12 @@ transcript: workstream **B (transcript depth) is OBSOLETE** — skip it when
 reading the plan doc; the rest apply to surfaces that still exist (dashboard
 modals, session list, feed, theming).
 
-- [ ] **"needs input" label reads as blocked when the agent simply finished
-  (maintainer feedback, first live pane session 2026-07-20).**
-  `internal/tui/dashboard/session.go:41-42` — StatusNeedsInput means "turn
-  finished, awaiting next prompt", but the label (:330) + glyph read like
-  the session is stuck at a picker. Rename the HUMAN-facing label to
-  something calm ("ready" / "your turn"), keeping StatusWaiting as the
-  genuinely-blocked state and its attention float. Touch points: the
-  human label fn (`session.go` ~:330 "needs input"), the glyph
-  (`theme.GlyphNeedsInput` — check whether the glyph itself also needs a
-  calmer form), and any status-row/list renderings that embed the word.
-  CAREFUL: the WIRE string "needs-input" (String(), :57) round-trips
-  through snapshot serialization (parse at :470) — do NOT rename it; only
-  the display label. Regenerate goldens
-  (`go test ./internal/tui/dashboard/ -run TestGolden -update`) and eyeball
-  the diff. Run `go test ./internal/tui/dashboard/`.
+- [x] **"needs input" relabel — done 2026-07-21** (done log): display label
+  → "ready" (row label, attention summaries "%d ready"/"%d ready below",
+  detail note "ready for your next prompt"); wire string "needs-input",
+  Status constant, and the already-calm ❯ `GlyphNeedsInput` untouched;
+  goldens unaffected (no fixture renders NeedsInput) — attention tests pin
+  the new strings; StatusWaiting semantics unchanged.
 - [ ] **[L5] Design pass: external panes as floating modals over the
   dashboard (maintainer idea, 2026-07-20).** Render in-pane clients
   (claude/opencode) as floating modals instead of full-screen takeover —
@@ -561,22 +532,15 @@ E-series SSE fixes verified intact — do-not-regress list in the doc):
   wheel-scroll over this exact buffer — so KEEP the scrollback but cap it
   (`SetScrollbackSize(2000)`) and build the [L7] viewer; do NOT
   SetScrollbackSize(1). Execute as one change with [L7] (full sketch there).
-- [ ] **[P4] Pane input is a blocking network write on the UI goroutine
-  (MED).** `handleKey`/`handlePaste`/`handleMouse` in `external_pane.go` →
-  `PaneStream.Write` under `writeMu` (`internal/runner/pane.go`): every
-  keystroke blocks the Bubble Tea loop on `conn.WriteMessage`; a stalled
-  forward freezes the whole dashboard INCLUDING ctrl+] detach. Fix sketch:
-  give the pane an input-writer goroutine owning transport writes — a
-  buffered `chan []byte` (~64 entries), handleKey/etc. do a non-blocking
-  send; on full channel, drop the input and record a pane-level stream
-  error (surfaced like other pane errors) rather than blocking; writer
-  exits on the P5 done channel (already exists post-ea27ab9); close() must
-  drain-or-abandon cleanly. CAUTION: preserve write ordering with resize
-  (`PaneStream.Resize` shares writeMu — route resize through the same
-  channel or document why racing is safe). Tests: fake transport whose
-  Write blocks — UI Update returns promptly and detach works; ordering
-  test (keys arrive in send order); race run green. Run
-  `go test ./internal/tui/dashboard/` + `-race -run 'Pane|External'`.
+- [x] **[P4] done 2026-07-21** (done log): input-writer goroutine is the
+  sole UI-side transport writer — 64-entry tagged queue (`paneInput{data,
+  size}`) carries keys/paste/mouse AND resize in UI order (geometry can't
+  overtake type-ahead); non-blocking enqueue, drop-on-full records a
+  pane-level error on the existing `p.err` surface; writer exits via the
+  P5 done channel, close()'s transport.Close() unblocks a parked Write.
+  Emulator reply pump keeps direct writes (capability replies must never
+  drop). Stalled-transport detach + ordering + drop tests; race suite
+  green.
 - [x] **[P5] done 2026-07-20** with [P1]: done-channel select in the reader,
   closeOnce-guarded close.
 - [ ] **[P6] One fresh Node process per observer hook event — PreToolUse on
@@ -677,16 +641,15 @@ opencode supervisor/external-pane pattern + runner metrics-observer. Backend id
 `codex-app-server` reserved (`internal/session/types.go:63`). Auth =
 ChatGPT-plan OAuth owned by the credential manager.
 
-- [ ] **Codex C3 parity: extend the shape-changing-re-create guard to codex**
-  (from the Phase 1 landing, 2026-07-17): `anthropicEnvShape`
-  (`internal/k8s/backend.go`) only detects the anthropic env vars, so a codex
-  account→accountless re-create is NOT rejected — `syncSessionCredential`
-  strips `codex-auth-json` while a resumed pod's baked NOT-Optional
-  `CODEX_AUTH_JSON` SecretKeyRef still points at the stripped key (pod would
-  fail env resolution on restart). Covered + documented by
-  `TestCreateSessionStripsCodexCredentialOnRecreate`; generalize the shape
-  guard over both credential families like `reconcileSecretCredential` did
-  for the sync side.
+- [x] **Codex C3 parity — done 2026-07-21** (done log): `anthropicEnvShape`
+  → family-neutral `credentialEnvShape` (anthropic
+  CLAUDE_CODE_OAUTH_TOKEN/ANTHROPIC_API_KEY + codex
+  CODEX_AUTH_JSON/OPENAI_API_KEY; opencode still exempt — reconciles via
+  `warnIfOpencodeCredsRotated`); codex shape-changing re-creates now
+  rejected before any Secret mutation (closes the stripped-key resume
+  brick), same-shape account swaps still patch in place — both pinned
+  (`TestCreateSessionRejectsCodexAuthShapeChange`,
+  `TestCreateSessionSameShapeCodexAccountSwapPatchesSecret`).
 - [ ] **CLI-owned credential manager — write side.** Anthropic part DONE
   (multi-account store + Keychain/file backends + `auth
   login/list/logout/default`, public as `client/cred`). Remaining:
@@ -1202,18 +1165,19 @@ do well is recorded there too; fix in roughly this order):
   the existing authstatus test style — no real `security` calls. A start
   exists in the parked worktree (see the block above). Run
   `go test ./internal/authstatus/ ./internal/cli/`.
-- [ ] **[O4] `sandbox doctor` missing from README** (`doctor.go:122-131`;
-  README's `just doctor` is the KIND-env tool) — Quickstart + Commands row.
+- [x] **[O4] done 2026-07-21** (done log): `sandbox doctor` leads the
+  Quickstart + first Commands row; the two doctors (host readiness vs
+  `just doctor` dev-env toolchain) explicitly disambiguated in both spots.
 - [ ] **[O5] Reaper undeployable from shipped k8s/ + silent consequence** —
   apply order omits reaper-rbac (`k8s/README.md:51-55`), `agent-reaper`
   namespace YAML missing (`reaper-rbac.yaml:22`), netpol exception not
   shipped; add the "sessions never auto-suspend" sentence.
-- [ ] **[O6] `sandbox codex` in --help but undocumented** (`root.go:96`).
-  DEFAULT (execute unless the maintainer overrides): add a README Commands
-  row marked **experimental** with the ChatGPT-OAuth `auth.json` credential
-  prereq (contract lives in code comments, `claude_remote.go:89-96`) and a
-  one-line "attach UX is degraded until the codex pane lands" caveat — do
-  NOT hide the command (it works; hiding it regresses codex dogfooding).
+- [x] **[O6] done 2026-07-21** (done log): README Commands row marked
+  **experimental**, documenting BOTH halves of the credential contract
+  honestly — per-session ChatGPT-OAuth auth.json is SDK-only today, the
+  CLI always uses the shared `openai-api-key` fallback (verified: nothing
+  in internal/cli|tui populates CodexAccountID/CodexAuthJSON) — plus the
+  degraded-attach caveat. Command stays visible.
 - [ ] **[O7] k8s/README pre-pane facts** — :44-46 positional prompt, :71
   `sandbox-claude-sdk` label, :100-102 shared anthropic-credentials guidance
   (only consumer is the retired-backend branch, backend.go:1716-1766).
@@ -1223,10 +1187,15 @@ do well is recorded there too; fix in roughly this order):
   session-lifecycle.md** (:153-156, :174-176, :224) — worktrees shipped.
 - [ ] **[O10] dev/local README claude section pre-pane** (:99-121 env token,
   :156 hidden `turn`; no host-login note).
-- [ ] **[O11] openspec/ workflow unexplained** — one CONTRIBUTING paragraph
-  or 5-line openspec/README.md.
-- [ ] **[O12] Gate described three ways** — CONTRIBUTING.md:37-39 vs
-  Justfile:28; README Testing points at neither.
+- [x] **[O11] done 2026-07-21** (done log): CONTRIBUTING "The `openspec/`
+  references" section — states plainly that openspec/ is the maintainer's
+  LOCAL planning workspace, untracked (`.git/info/exclude`), absent from
+  clones by design, and that durable outcomes land in `docs/`.
+- [x] **[O12] done 2026-07-21** (done log): one story everywhere — README
+  Testing + CONTRIBUTING both describe the Justfile `check` recipe's actual
+  ten stages and name CI (`.depot/workflows/ci.yml` runs `just check`
+  verbatim); CONTRIBUTING's recipe list gained sdk-conformance/verify/e2e
+  and `just build`'s description was corrected (whole module).
 - [x] **[O13] done 2026-07-20 with [L1]:** the sentinel and the store-account
   error both carry "log in with `claude` on this machine" remediation.
 - [ ] **[O14] README hero GIF predates the pane UI** — re-record after the
