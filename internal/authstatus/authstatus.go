@@ -39,8 +39,9 @@ type Status struct {
 	Name       string   // "claude", "codex", "opencode", or "opencode/anthropic"
 	Configured bool     // is any usable credential present?
 	Method     Method   // how it authenticates (for leaf statuses)
-	Detail     string   // human note: source env var, token expiry, etc.
+	Detail     string   // human note: credential source, token expiry, etc.
 	Expired    bool     // a credential with a known expiry is past it
+	Degraded   bool     // present, but does not cover the agent's primary interactive flow (renders yellow)
 	Sub        []Status // nested per-provider statuses (opencode)
 }
 
@@ -59,7 +60,7 @@ func (s Status) Level() Level {
 	if !s.Configured || s.Method == MethodNone {
 		return LevelBad
 	}
-	if s.Method == MethodUnknown || s.Expired {
+	if s.Method == MethodUnknown || s.Expired || s.Degraded {
 		return LevelWarn
 	}
 	return LevelOK
@@ -85,11 +86,11 @@ func Report(ctx context.Context, providers ...Provider) []Status {
 }
 
 // DefaultProviders is the standard set: Claude, Codex, OpenCode. home is the
-// user's home dir (for Codex's ~/.codex/auth.json); env is the environment
-// lookup (os.Getenv in production).
+// user's home dir (for Claude's ~/.claude/.credentials.json and Codex's
+// ~/.codex/auth.json); env is the environment lookup (os.Getenv in production).
 func DefaultProviders(env Env, home string) []Provider {
 	return []Provider{
-		ClaudeProvider{Env: env},
+		ClaudeProvider{Env: env, Home: home},
 		CodexProvider{Env: env, Home: home},
 		OpenCodeProvider{Env: env},
 	}

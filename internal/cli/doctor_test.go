@@ -30,13 +30,15 @@ func (f fakeCredStore) SetDefault(string) error        { return errors.New("unus
 func (f fakeCredStore) Default() (string, error)       { return "", nil }
 
 // baseDeps returns a doctorDeps whose cluster config fails to load (so the
-// cluster checks short-circuit without any network) and whose binaries are all
-// present. Tests override individual fields.
+// cluster checks short-circuit without any network), whose binaries are all
+// present, and whose host Claude Code login is present. Tests override
+// individual fields.
 func baseDeps() doctorDeps {
 	return doctorDeps{
 		lookPath:       func(string) (string, error) { return "/usr/bin/x", nil },
 		loadKube:       func() (*rest.Config, string, error) { return nil, "", errors.New("no config") },
 		credStore:      func() (cred.Store, error) { return fakeCredStore{}, nil },
+		claudeLogin:    func() (bool, string) { return true, "Keychain" },
 		namespace:      "agent-sessions",
 		runnerImage:    "runner:test",
 		reaperImage:    "reaper:test",
@@ -98,27 +100,68 @@ func TestDoctor_PresentBinariesPass(t *testing.T) {
 }
 
 func TestDoctor_CredentialStore(t *testing.T) {
-	t.Run("store error", func(t *testing.T) {
+	t.Run("host login present is the pass signal even with no accounts", func(t *testing.T) {
+		d := baseDeps() // login present, zero stored accounts
+		res := runResult(t, d, "credentials")
+		if res.level != levelPass {
+			t.Fatalf("level = %v, want levelPass", res.level)
+		}
+		if !strings.Contains(res.detail, "host Claude Code login (Keychain)") {
+			t.Errorf("detail %q should name the host Claude Code login source", res.detail)
+		}
+	})
+	t.Run("missing host login warns with the claude login remedy", func(t *testing.T) {
 		d := baseDeps()
+		d.claudeLogin = func() (bool, string) { return false, "" }
+		res := runResult(t, d, "credentials")
+		if res.level != levelWarn {
+			t.Fatalf("level = %v, want levelWarn", res.level)
+		}
+		if !strings.Contains(res.remedy, "log in with `claude` on this machine (Max mode)") {
+			t.Errorf("remedy %q should tell the user to log in with `claude`", res.remedy)
+		}
+		if strings.Contains(res.remedy, "shared cluster Secret") {
+			t.Errorf("remedy %q must not reference the nonexistent shared cluster Secret", res.remedy)
+		}
+	})
+	t.Run("missing host login warns even with stored accounts (setup tokens cannot drive the pane)", func(t *testing.T) {
+		d := baseDeps()
+		d.claudeLogin = func() (bool, string) { return false, "" }
+		d.credStore = func() (cred.Store, error) {
+			return fakeCredStore{accounts: []cred.Account{{ID: "a"}}}, nil
+		}
+		if res := runResult(t, d, "credentials"); res.level != levelWarn {
+			t.Fatalf("level = %v, want levelWarn", res.level)
+		}
+	})
+	t.Run("store error without login warns", func(t *testing.T) {
+		d := baseDeps()
+		d.claudeLogin = func() (bool, string) { return false, "" }
 		d.credStore = func() (cred.Store, error) { return nil, errors.New("keychain locked") }
 		if res := runResult(t, d, "credentials"); res.level != levelWarn {
 			t.Fatalf("level = %v, want levelWarn", res.level)
 		}
 	})
-	t.Run("list error", func(t *testing.T) {
+	t.Run("store error with login is informational", func(t *testing.T) {
 		d := baseDeps()
+		d.credStore = func() (cred.Store, error) { return nil, errors.New("keychain locked") }
+		res := runResult(t, d, "credentials")
+		if res.level != levelInfo {
+			t.Fatalf("level = %v, want levelInfo", res.level)
+		}
+		if !strings.Contains(res.detail, "host Claude Code login") {
+			t.Errorf("detail %q should still report the host login", res.detail)
+		}
+	})
+	t.Run("list error without login warns", func(t *testing.T) {
+		d := baseDeps()
+		d.claudeLogin = func() (bool, string) { return false, "" }
 		d.credStore = func() (cred.Store, error) { return fakeCredStore{listErr: errors.New("boom")}, nil }
 		if res := runResult(t, d, "credentials"); res.level != levelWarn {
 			t.Fatalf("level = %v, want levelWarn", res.level)
 		}
 	})
-	t.Run("no accounts is info", func(t *testing.T) {
-		d := baseDeps()
-		if res := runResult(t, d, "credentials"); res.level != levelInfo {
-			t.Fatalf("level = %v, want levelInfo", res.level)
-		}
-	})
-	t.Run("accounts present pass", func(t *testing.T) {
+	t.Run("login and accounts present pass", func(t *testing.T) {
 		d := baseDeps()
 		d.credStore = func() (cred.Store, error) {
 			return fakeCredStore{accounts: []cred.Account{{ID: "a"}, {ID: "b"}}}, nil
@@ -160,10 +203,12 @@ func TestRunDoctor_ExitCodeOnFail(t *testing.T) {
 // can ever reach levelFail — the optional local tooling, credential store, and
 // image checks are advisory (warn/info) and must never gate the exit code.
 func TestDoctor_NonClusterChecksNeverFail(t *testing.T) {
-	// Worst case for the advisory checks: every binary missing, store unreadable.
+	// Worst case for the advisory checks: every binary missing, store
+	// unreadable, no host Claude Code login.
 	d := baseDeps()
 	d.lookPath = func(string) (string, error) { return "", errors.New("not found") }
 	d.credStore = func() (cred.Store, error) { return nil, errors.New("locked") }
+	d.claudeLogin = func() (bool, string) { return false, "" }
 
 	clusterChecks := map[string]bool{"kubeconfig": true, "cluster api": true, "agent-sandbox": true, "namespace": true}
 	checks, _ := newDoctorChecks(d)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 
 	"github.com/cullenmcdermott/sandbox/client"
 	"github.com/cullenmcdermott/sandbox/client/cred"
+	"github.com/cullenmcdermott/sandbox/internal/authstatus"
 	"github.com/cullenmcdermott/sandbox/internal/k8s"
 )
 
@@ -64,6 +66,13 @@ type doctorDeps struct {
 	// credStore opens the multi-account Anthropic store (newCredStore in
 	// production).
 	credStore func() (cred.Store, error)
+	// claudeLogin is the presence-only probe for the host's own Claude Code
+	// login — the PRIMARY claude-pane credential source since
+	// claude-pane-first (client/account.go SelectClaudePaneMaterial →
+	// cred.SystemMaterial). Returns a short source label ("Keychain" /
+	// ".credentials.json") for display; never reads secret bytes
+	// (authstatus.SystemLogin in production).
+	claudeLogin func() (present bool, source string)
 	// namespace is the session namespace to probe (root --namespace, or the
 	// default agent-sessions).
 	namespace string
@@ -87,9 +96,13 @@ func defaultDoctorDeps() doctorDeps {
 		ns = defaultDoctorNamespace
 	}
 	return doctorDeps{
-		lookPath:       exec.LookPath,
-		loadKube:       loadAmbientKubeconfig,
-		credStore:      newCredStore,
+		lookPath:  exec.LookPath,
+		loadKube:  loadAmbientKubeconfig,
+		credStore: newCredStore,
+		claudeLogin: func() (bool, string) {
+			home, _ := os.UserHomeDir()
+			return authstatus.SystemLogin(os.Getenv, home)
+		},
 		namespace:      ns,
 		runnerImage:    client.DefaultRunnerImage,
 		reaperImage:    k8s.DefaultReaperImage,
@@ -270,23 +283,42 @@ func newDoctorChecks(d doctorDeps) ([]doctorCheck, *doctorKube) {
 		{name: "claude", run: func(context.Context) doctorResult {
 			path, err := d.lookPath("claude")
 			if err != nil {
-				return doctorResult{levelWarn, "not found on PATH", "needed for `claude setup-token` subscription auth; install the Claude CLI (host-side only)"}
+				return doctorResult{levelWarn, "not found on PATH", "the host `claude` login is what `sandbox claude` provisions pane sessions from (and `sandbox auth login` shells out to it); install the Claude CLI and log in (Max mode)"}
 			}
 			return doctorResult{levelPass, path, ""}
 		}},
 		{name: "credentials", run: func(context.Context) doctorResult {
+			// The PRIMARY claude credential source since claude-pane-first is
+			// the host's own Claude Code login (presence-only probe — no
+			// secret bytes are read). The multi-account store is secondary:
+			// it holds setup tokens, which the interactive pane cannot use.
+			present, source := d.claudeLogin()
+			login := "no host Claude Code login"
+			if present {
+				login = "host Claude Code login (" + source + ")"
+			}
+			const loginRemedy = "`sandbox claude` provisions pane sessions from the host's Claude Code login — log in with `claude` on this machine (Max mode); stored accounts hold setup tokens the interactive pane cannot use"
+
 			store, err := d.credStore()
+			var accounts []cred.Account
+			if err == nil {
+				accounts, err = store.List()
+			}
 			if err != nil {
-				return doctorResult{levelWarn, "account store unreadable", truncate(err.Error(), 120)}
+				level := levelWarn
+				if present {
+					// The pane path still works; an unreadable secondary
+					// store alone is informational (info still renders the
+					// error text below the line, pass would suppress it).
+					level = levelInfo
+				}
+				return doctorResult{level, login + "  ·  account store unreadable", truncate(err.Error(), 120)}
 			}
-			accounts, err := store.List()
-			if err != nil {
-				return doctorResult{levelWarn, "account store unreadable", truncate(err.Error(), 120)}
+			detail := fmt.Sprintf("%s  ·  %d account(s) stored", login, len(accounts))
+			if !present {
+				return doctorResult{levelWarn, detail, loginRemedy}
 			}
-			if len(accounts) == 0 {
-				return doctorResult{levelInfo, "no Anthropic accounts stored", "add one with `sandbox auth login`, or rely on the shared cluster Secret"}
-			}
-			return doctorResult{levelPass, fmt.Sprintf("%d account(s) stored", len(accounts)), ""}
+			return doctorResult{levelPass, detail, ""}
 		}},
 		{name: "images", run: func(context.Context) doctorResult {
 			return doctorResult{levelInfo, "runner: " + d.runnerImage + "  ·  reaper: " + d.reaperImage, "override per session with --runner-image / --reaper-image"}
