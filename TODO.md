@@ -39,6 +39,18 @@
 > tui-render, tui-input) died on a spend limit — re-running them is a
 > maintainer call.
 >
+> **2026-07-20 pane-first review + first live validation:** three Fable
+> reviewers (perf/security/onboarding) swept the merged claude-pane-first
+> tree and the first live sessions added verified findings — all in
+> [`docs/review-2026-07-20.md`](docs/review-2026-07-20.md) (ids `[P#]`
+> `[S#]` `[O#]` `[L#]`), triaged below into §1h/§1f/§2e/§4/§8/§10. Gate 1.4
+> closed the same evening (main merged 26c55f9, runner+reaper images
+> published). Same-day feasibility study:
+> [`docs/go-runner-rewrite-investigation.md`](docs/go-runner-rewrite-investigation.md)
+> (gated on 2.5/8.2 + soak; §10 carries the watch item). The opencode
+> credential failure spawned
+> `openspec/changes/opencode-multi-provider-auth/` (see §7a).
+>
 > **Opus-ready map:** §1c–§1d residuals, §4, §7a and the §5 GC follow-ups
 > carry pointers + fix direction — pick a cluster and go. (§2a–§2d closed
 > with claude-pane-first, 2026-07-20 — see the §2 closeout.) Drafted,
@@ -87,6 +99,32 @@ row-model consolidation moved to §2a where it belongs.
   `clientLifecycleBackend` adapter; destroy-hook plumbing removed.
 - [x] **TUI suspend/resume don't pause/resume file sync — fixed
   2026-07-18** (done log): same adapter change.
+
+### 1h. claude-pane live-validation bugs (2026-07-20 first sessions; detail in review-2026-07-20.md §L)
+
+- [ ] **[L1] Dashboard account picker (and CLI `--account`) route claude-pane
+  sessions to a non-functional credential path (HIGH).**
+  `internal/tui/dashboard/account_picker.go:181` →
+  `internal/cli/dashboard_connector.go:187` → `client/account.go:148-172`:
+  a stored-account selector provisions a setup-token accessToken-only
+  `.credentials.json` (observed live: 144-byte doc) that interactive claude
+  rejects → "Not logged in · Run /login". Fix: hide/hard-error stored
+  accounts for claude-pane until the store learns full OAuth docs (the 2.1
+  follow-up); fix the `SelectClaudePaneMaterial` doc comment ("degraded" →
+  non-functional for interactive) and `claude_remote.go:209`.
+- [ ] **[L2] Pane replay renders corrupted frames on attach (MED).** Observed
+  garbled/overlapping header. Likely mechanism: scrollback-ring chunk
+  eviction (`runner/src/claude-pane.ts:102-136`) cuts mid-escape-sequence,
+  replay starts without cursor context. Fix direction: force full repaint
+  after replay (resize jiggle) or trim replay to the last clear-screen
+  marker; pin against a live session first.
+- [ ] **[L3] Detached feed opens empty — host event cache has a reader but no
+  writer (MED).** `app.go:588-590` seeds from `eventCache.LoadEvents` but
+  `AppendEvent` has zero production callers (orphaned by a935541);
+  `EventCache`/`indexEventCache`/`CacheWriter`
+  (`internal/cli/sync_support.go:427`) are dead weight. Fix: feed history
+  via SSE replay from seq 0 on feed open + delete the cache, or reconnect
+  the write path.
 
 ### 1c. Rendering / layout residuals (2026-07-04 audit; parents fixed — done log)
 
@@ -167,6 +205,38 @@ there is nothing for a driver to submit.
 Verified findings from the 8-agent handoff sweep; full detail + exploit/scenario
 in [`docs/review-2026-07-07.md`](docs/review-2026-07-07.md) §A/§B (id in brackets).
 
+**2026-07-20 pane-first security review** (trust model + full scenarios in
+[`docs/review-2026-07-20.md`](docs/review-2026-07-20.md) §S; core auth got a
+clean bill — constant-time compare, upgrade-auth ordering, env allowlist,
+unified redaction):
+
+- [ ] **[S1] In-pane agent can exfiltrate the full refresh-capable Max
+  credential over permissive 443 egress (HIGH).** The agent must be able to
+  read `$CLAUDE_CONFIG_DIR/.credentials.json`
+  (`runner/src/claude-config.ts:98-119`, allowlisted dir in
+  `claude-pane.ts:159`) and the example egress
+  (`k8s/networkpolicy-egress-allow.yaml:55-66`) allows all public 443 →
+  prompt injection exfils a credential that outlives the session. Fix: ship
+  a tightened FQDN-allowlist egress example + SECURITY.md statement;
+  longer-term scoped credentials. The opencode-multi-provider-auth seed
+  filter is part of this mitigation.
+- [ ] **[S2] Project-sync secret ignores miss credential *filenames* (MED).**
+  `internal/sync/sync.go:350-368` blocks by extension only — `.netrc`,
+  `.npmrc`, `.git-credentials`, `.aws/credentials`,
+  `service-account*.json`, `id_rsa`/`id_ed25519` sync into the pod. Fix:
+  extend `securityIgnores` + document the expectation.
+- [ ] **[S3] Observer-token telemetry spoofing by the in-pane agent (LOW,
+  accept+document).** Token readable under CLAUDE_CONFIG_DIR
+  (`claude-pane-observer.ts:449-452`; routes `server.ts:297-311`) → same-
+  session fake events / bounded reaper stall. Threat-model note; optionally
+  tag observer-originated events.
+- [ ] **[S4] Delete dead `runner/src/grants.ts` (hygiene commit).**
+- [ ] **[S5] Set pane WS maxPayload + resize bounds when next touching
+  `server.ts:174,119-134` (INFO).**
+- [ ] **[S6] runAsNonRoot deferral stays tracked**
+  (`internal/k8s/backend.go:1572-1582,1667-1673`; PSA baseline permits root,
+  restricted warns).
+
 - [ ] **[A1 residual] `RUNNER_TOKEN` still recoverable via `/proc` — uid
   separation needed to truly close self-approval (MED, adversarial review
   2026-07-08).** The A1 env-strip landed (child spawns + the workspace git
@@ -245,6 +315,14 @@ Retargeted at the dashboard/feed after claude-pane-first deleted the
 transcript: workstream **B (transcript depth) is OBSOLETE** — skip it when
 reading the plan doc; the rest apply to surfaces that still exist (dashboard
 modals, session list, feed, theming).
+
+- [ ] **[L5] Design pass: external panes as floating modals over the
+  dashboard (maintainer idea, 2026-07-20).** Render in-pane clients
+  (claude/opencode) as floating modals instead of full-screen takeover —
+  fleet context stays visible around the agent surface. Needs: sizing/focus
+  semantics, sub-region rendering through the vt emulator, and [P1]
+  coalescing first (dashboard renders around a busy pane). Seam already
+  exists (`pane_transport.go`); detail in review-2026-07-20.md §L5.
 
 - [ ] **A. Dialog stack manager + async grace period + huh for form dialogs**
   — one `Dialog` interface + stack on App replaces ~8 bespoke overlays and 4
@@ -342,6 +420,38 @@ Outcome at the time: **not happening; invest in §2 instead.**
   (web→local only).
 
 ## 4) Performance
+
+**2026-07-20 pane byte-path review** (detail in
+[`docs/review-2026-07-20.md`](docs/review-2026-07-20.md) §P; all prior
+E-series SSE fixes verified intact — do-not-regress list in the doc):
+
+- [ ] **[P1] No pane chunk coalescing — one full View() per 32 KB read
+  (HIGH).** `internal/tui/dashboard/external_pane.go:217-248`,
+  `app.go:516-525`: focused = full `emu.Render()` per chunk; minimized =
+  full dashboard View() per chunk. Fix: bounded non-blocking drain of
+  `p.out` in `apply`, one emulator Write per burst (E5 pattern).
+- [ ] **[P2] Runner pane WS has no backpressure cap (HIGH, pod OOM risk).**
+  `runner/src/claude-pane.ts:387-394`: no `bufferedAmount` check, PTY never
+  paused — wedged client grows pod memory unbounded. Fix: E3 parity —
+  close-with-code over ~4 MiB (client reconnects into the ring).
+- [ ] **[P3] vt emulator retains a 10k-line scrollback the pane never reads
+  (MED).** `external_pane.go:142`; check alt-screen first (moot if claude
+  stays alt-screen), else `SetScrollbackSize(1)`.
+- [ ] **[P4] Pane input is a blocking network write on the UI goroutine
+  (MED).** `external_pane.go:297-358` → `internal/runner/pane.go:130-137`;
+  stalled forward freezes the dashboard incl. ctrl+] detach. Fix: buffered
+  writer goroutine, surface stream error on sustained-full.
+- [ ] **[P5] Replaced pane's reader goroutine can leak on a full channel
+  (LOW).** `app.go:517-518` + `external_pane.go:166-187`; add a done
+  channel select.
+- [ ] **[P6] One fresh Node process per observer hook event — PreToolUse on
+  every tool call's critical path (MED, measure live cadence first).**
+  `runner/src/claude-pane-observer.ts:353-417`. Fix: fire-and-forget POST /
+  FIFO tail / persistent forwarder — but see the Go-runner doc (a runner-
+  binary subcommand solves it structurally); don't over-invest if that
+  lands.
+- [ ] **[P7] Feed streaming O(n²) per message (LOW, only if felt).**
+  `internal/tui/dashboard/feed.go:198-201`.
 
 - [x] **Transcript-renderer perf items — OBSOLETE 2026-07-20**
   (claude-pane-first deleted the custom renderer): warm-preview tail
@@ -510,6 +620,15 @@ metrics source for every backend. See the codex plan "Parity bar".
 
 ### 7a. OpenCode auth persistence / validation (2026-07-04 triage)
 
+> **2026-07-20 direction change:** provider credentials move to
+> harvest-from-local-opencode + per-session Secret seeding —
+> `openspec/changes/opencode-multi-provider-auth/` (proposal/design/specs/
+> tasks complete, validated). The shared `opencode-credentials` Secret
+> demotes to explicit fallback; items below that harden the shared-Secret
+> path still apply to that fallback. Trigger: live
+> `CreateContainerConfigError` (cluster Secret has only the Zen key;
+> default provider wants `anthropic-api-key`, backend.go:182).
+
 *(A full task-by-task implementation plan exists at
 `docs/superpowers/plans/2026-07-04-opencode-credential-manager.md` — local-only,
 gitignored; the decisions below are self-sufficient without it.)*
@@ -666,6 +785,15 @@ Suggested batching: one tui/* PR (Register + palette + Finished + B-tier);
 one client-behavior PR (destroy ordering + DialRunner); the interface,
 naming-break, and Shell items each stand alone.
 
+- [ ] **[L6] Decide: public pane-viewer widget? (2026-07-20).** The pane
+  *transport* is fully public + pinned (`Session.AttachPane`, `PaneStream`
+  w/ Resize, sentinels — `sdktest/surface_test.go:108-128`), but the
+  *presentation* layer (vt emulator wiring, key/paste/mouse encoding,
+  `internal/tui/dashboard/external_pane.go`) is internal; `tui/terminal` is
+  caps/kitty/osc helpers, not a screen widget. External consumers get raw
+  bytes with no viewer. Decide against the parity/importability bar whether
+  to promote a pane-viewer building block or document as deliberately out.
+
 - [x] **Narrow public `client.Backend` interface — done 2026-07-11** (done
   log): 12-method interface (exactly the orchestration call sites),
   `WithBackend` takes it, concrete backend pinned by assertion + sdktest.
@@ -794,6 +922,59 @@ naming-break, and Shell items each stand alone.
   `--no-gpg-sign` by design.
 
 ## 10) Harness / tests / docs / ops
+
+**2026-07-20 onboarding/newcomer review** (full walkthrough narrative in
+[`docs/review-2026-07-20.md`](docs/review-2026-07-20.md) §O — what the docs
+do well is recorded there too; fix in roughly this order):
+
+- [ ] **[O1] `sandbox --help` example broken by pane-first** —
+  `internal/cli/root.go:41` positional prompt vs `cobra.NoArgs`; also stale
+  Long text :37 + package doc :2.
+- [ ] **[O2] Project CLAUDE.md still describes the deleted SDK engine** —
+  :7/:115/:132 (`src/claude.ts` gone)/:149-150; rewrite runner table +
+  lifecycle steps to match architecture.md.
+- [ ] **[O3] `auth status` + `doctor` report pre-pane claude auth** —
+  `internal/authstatus/providers.go:31-36` env-only probe;
+  `internal/cli/doctor.go:287` names a shared Secret that doesn't exist for
+  claude-pane. Add a system-login presence probe (no secret bytes).
+- [ ] **[O4] `sandbox doctor` missing from README** (`doctor.go:122-131`;
+  README's `just doctor` is the KIND-env tool) — Quickstart + Commands row.
+- [ ] **[O5] Reaper undeployable from shipped k8s/ + silent consequence** —
+  apply order omits reaper-rbac (`k8s/README.md:51-55`), `agent-reaper`
+  namespace YAML missing (`reaper-rbac.yaml:22`), netpol exception not
+  shipped; add the "sessions never auto-suspend" sentence.
+- [ ] **[O6] `sandbox codex` in --help but undocumented** (`root.go:96`) —
+  Hidden until the pane lands, or experimental Commands row + credential
+  prereq.
+- [ ] **[O7] k8s/README pre-pane facts** — :44-46 positional prompt, :71
+  `sandbox-claude-sdk` label, :100-102 shared anthropic-credentials guidance
+  (only consumer is the retired-backend branch, backend.go:1716-1766).
+- [ ] **[O8] runner-api.md examples use retired `claude-sdk`** (:43-44, :61,
+  :218) — switch to claude-pane + extend the retired-id note.
+- [ ] **[O9] architecture.md "later wave" worktree hedges contradict
+  session-lifecycle.md** (:153-156, :174-176, :224) — worktrees shipped.
+- [ ] **[O10] dev/local README claude section pre-pane** (:99-121 env token,
+  :156 hidden `turn`; no host-login note).
+- [ ] **[O11] openspec/ workflow unexplained** — one CONTRIBUTING paragraph
+  or 5-line openspec/README.md.
+- [ ] **[O12] Gate described three ways** — CONTRIBUTING.md:37-39 vs
+  Justfile:28; README Testing points at neither.
+- [ ] **[O13] `client/errors.go:113` leaks a Go symbol into CLI output** on
+  the partial-material path (`client/account.go:168`) — add human
+  remediation text (compounds [L1]).
+- [ ] **[O14] README hero GIF predates the pane UI** — re-record after the
+  live pass (was already noted in 7.4; now has an id).
+- [ ] **[O15] Retired-backend residue sweep** — `backend.go:1716`,
+  `internal/session/types.go:53`, `runner/src/session.ts:37`,
+  `client/account.go:69`, `internal/k8sit/local_test.go:44`, stale `--pane`
+  comment `internal/cli/dashboard_connector.go:182`; apply the
+  `agent.ts:66` retired-id comment pattern or delete dead branches.
+- [ ] **Go-runner rewrite watch item** — investigation complete
+  ([`docs/go-runner-rewrite-investigation.md`](docs/go-runner-rewrite-investigation.md)):
+  gated on live gates 2.5/8.2 + soak; pre-work available now: drop the dead
+  `@anthropic-ai/sdk` dep from `runner/package.json` (zero imports), build
+  the language-agnostic runner conformance suite, run the two 30-minute
+  node-necessity verifications (§2 of the doc).
 
 **2026-07-07 test-coverage additions** (two agents; detail in
 [`docs/review-2026-07-07.md`](docs/review-2026-07-07.md) §F, id in brackets):
