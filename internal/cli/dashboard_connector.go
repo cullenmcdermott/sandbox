@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -210,6 +211,22 @@ func newDashboardCreator(c *client.Client, runnerImage, reaperImage string) dash
 			}
 			if aerr := opts.SelectClaudePaneMaterial(store, params.AnthropicAccountID); aerr != nil {
 				return dashboard.CreateResult{}, aerr
+			}
+		case backendName == client.BackendOpenCode:
+			// opencode: minimal parity with `sandbox opencode` — seed ALL of the
+			// host's local opencode login when a store exists (the D4 default). The
+			// dashboard creator collects no provider/seed filter yet, so there is no
+			// per-provider picker here; that's a deferred follow-up. A missing local
+			// login leaves opts empty → the shared-Secret fallback; a corrupt store
+			// surfaces (fail closed), never a silent fallback.
+			material, herr := client.HarvestOpencodeAuth()
+			switch {
+			case errors.Is(herr, client.ErrOpencodeAuthNotFound):
+				// no local login → shared Secret; leave opts untouched
+			case herr != nil:
+				return dashboard.CreateResult{}, herr
+			default:
+				opts.OpencodeAuthJSON = material.JSON
 			}
 		case params.AnthropicAccountID != "":
 			// A picked Anthropic account is resolved to a per-session credential here,

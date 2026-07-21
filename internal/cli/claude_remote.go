@@ -36,7 +36,7 @@ func newClaudeRemoteCmd() *cobra.Command {
 			// positional prompt through (POST /turns 409s) — cobra.NoArgs rejects
 			// stray args. Auth is provisioned from the host's Claude Code login
 			// (Max mode); attach/detach happen through the dashboard pane.
-			return runStartSession(cmd, session.BackendClaudePane, "", runnerImage, reaperImage, nameFlag, modelFlag, accountFlag, worktreeFlag, "")
+			return runStartSession(cmd, session.BackendClaudePane, "", runnerImage, reaperImage, nameFlag, modelFlag, accountFlag, worktreeFlag, "", "")
 		},
 	}
 	cmd.Flags().StringVar(&runnerImage, "runner-image", client.DefaultRunnerImage, "runner container image")
@@ -60,12 +60,13 @@ func newClaudeRemoteCmd() *cobra.Command {
 // has no Anthropic account step, so the account selector is always empty.
 func newOpencodeCmd() *cobra.Command {
 	var (
-		runnerImage  string
-		reaperImage  string
-		nameFlag     string
-		modelFlag    string
-		providerFlag string
-		worktreeFlag string
+		runnerImage       string
+		reaperImage       string
+		nameFlag          string
+		modelFlag         string
+		providerFlag      string
+		seedProvidersFlag string
+		worktreeFlag      string
 	)
 	cmd := &cobra.Command{
 		Use:   "opencode [prompt]",
@@ -74,14 +75,15 @@ func newOpencodeCmd() *cobra.Command {
 			// [V26] Join all positionals so an unquoted multi-word prompt is sent
 			// whole rather than dropping everything after the first word.
 			prompt := strings.Join(args, " ")
-			return runStartSession(cmd, session.BackendOpenCode, prompt, runnerImage, reaperImage, nameFlag, modelFlag, "", worktreeFlag, providerFlag)
+			return runStartSession(cmd, session.BackendOpenCode, prompt, runnerImage, reaperImage, nameFlag, modelFlag, "", worktreeFlag, providerFlag, seedProvidersFlag)
 		},
 	}
 	cmd.Flags().StringVar(&runnerImage, "runner-image", client.DefaultRunnerImage, "runner container image")
 	cmd.Flags().StringVar(&reaperImage, "reaper-image", k8s.DefaultReaperImage, "idle-reaper container image")
 	cmd.Flags().StringVar(&nameFlag, "name", "", "custom display name for the session (overrides the auto title)")
 	cmd.Flags().StringVar(&modelFlag, "model", "", "model id for the session default as provider/model (e.g. anthropic/claude-sonnet-4-5); empty uses the opencode server default")
-	cmd.Flags().StringVar(&providerFlag, "provider", "", "opencode model provider whose API key the pod receives from the shared Secret: anthropic (default), openai, or opencode-zen")
+	cmd.Flags().StringVar(&providerFlag, "provider", "", "opencode model provider the session defaults to: anthropic (default), openai, or opencode-zen")
+	cmd.Flags().StringVar(&seedProvidersFlag, "seed-providers", "", "comma-separated providers (anthropic, openai, opencode-zen) to seed into the session from your local opencode login; empty seeds every provider you're logged into. The security lever for narrowing which credentials leave your machine")
 	cmd.Flags().StringVar(&worktreeFlag, "worktree", "auto", "per-session git worktree isolation: auto (worktree iff the project is a git repo), on (require a git repo), off (never)")
 	return cmd
 }
@@ -108,7 +110,7 @@ func newCodexCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// No initial prompt: codex owns its own input loop.
-			return runStartSession(cmd, session.BackendCodex, "", runnerImage, reaperImage, nameFlag, modelFlag, "", worktreeFlag, "")
+			return runStartSession(cmd, session.BackendCodex, "", runnerImage, reaperImage, nameFlag, modelFlag, "", worktreeFlag, "", "")
 		},
 	}
 	cmd.Flags().StringVar(&runnerImage, "runner-image", client.DefaultRunnerImage, "runner container image")
@@ -165,7 +167,10 @@ func resolveProjectPath() (string, error) {
 // is the raw `--worktree` selector (auto|on|off), validated here. opencodeProvider
 // is the raw `--provider` selector (may be ""); honored only for opencode and
 // validated fail-closed inside client.Create (ErrInvalidOpencodeProvider).
-func runStartSession(cmd *cobra.Command, backendName, prompt, runnerImage, reaperImage, name, model, account, worktree, opencodeProvider string) error {
+// seedProviders is the raw `--seed-providers` filter (may be ""); honored only for
+// opencode, where resolveOpencodeSeed harvests the host's local opencode login and
+// narrows it before the pod ever sees a credential.
+func runStartSession(cmd *cobra.Command, backendName, prompt, runnerImage, reaperImage, name, model, account, worktree, opencodeProvider, seedProviders string) error {
 	worktreeMode, err := parseWorktreeMode(worktree)
 	if err != nil {
 		return err
@@ -207,6 +212,23 @@ func runStartSession(cmd *cobra.Command, backendName, prompt, runnerImage, reape
 		}
 		if aerr := opts.SelectClaudePaneMaterial(store, account); aerr != nil {
 			return aerr
+		}
+	}
+
+	// opencode: harvest the host's own opencode login and seed it per-session
+	// (the new primary path), narrowed by --seed-providers. A nil seed means "no
+	// local login" — leave OpencodeAuthJSON empty so client.Create falls back to
+	// the shared opencode-credentials Secret (D6). Any resolution error (corrupt
+	// store, or a selected provider the user isn't logged into and won't log into
+	// now) is fail-closed here, before any cluster call. client.Create's
+	// validateOpencodeSeed is the final backstop.
+	if backendName == session.BackendOpenCode {
+		seed, serr := resolveOpencodeSeed(ctx, opencodeProvider, seedProviders, cmd.ErrOrStderr())
+		if serr != nil {
+			return serr
+		}
+		if seed != nil {
+			opts.OpencodeAuthJSON = seed
 		}
 	}
 
