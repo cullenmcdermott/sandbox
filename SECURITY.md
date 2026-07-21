@@ -89,6 +89,19 @@ from the pane's Bash therefore ships a credential that **outlives the session**
 example, network egress — the one control that could stop this — doesn't.
 Provenance: [`docs/review-2026-07-20.md`](docs/review-2026-07-20.md) §S [S1].
 
+**And for a seeded opencode session:** the same exposure applies. A
+host-harvested opencode session materializes the seeded provider credential(s)
+as a `0600` `auth.json` inside the pod (`materializeOpencodeAuth`,
+`runner/src/agent-auth.ts`) that the in-pod `opencode` agent **must** read to
+run — so, exactly like the claude-pane credential, it is agent-readable and
+exfiltratable over broad-443, and an OAuth entry (`"type": "oauth"`) carries a
+refresh token that **outlives the session**. Seeding **multiple** providers
+widens the blast radius to every credential in the seed. `--seed-providers`
+(the CLI lever; delivered as the per-session Secret key `opencode-auth-json` /
+`secretKeyOpencodeAuthJSON` in `internal/k8s/backend.go`) is what narrows the
+seed to only the providers a session actually needs. The same FQDN-scoped egress
+policy below is the network-side mitigation.
+
 **Hardening path:** replace the broad-443 example with an FQDN-scoped egress
 policy allowing only the provider/registry hosts your agents actually need.
 [`k8s/networkpolicy-egress-fqdn.yaml.example`](k8s/networkpolicy-egress-fqdn.yaml.example)

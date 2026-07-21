@@ -113,11 +113,16 @@ your cluster or live in the maintainer's private repo:
 - **agent-sandbox controller install** — see the upstream project.
 - **StorageClass / PVC tuning.** The CLI defaults to a 50Gi PVC; the StorageClass is
   overridable per session. Provide one suited to your cluster (RWO is sufficient).
-- **The shared `opencode-credentials` Secret** holding the provider API key for
-  `sandbox opencode` sessions — provision it out-of-band (see the main
-  [`README.md`](../README.md) and [`../docs/architecture.md`](../docs/architecture.md)).
-  The `claude` backend needs **no** shared Secret: `sandbox claude` copies your
-  local Claude Code login into a per-session Secret at create time. The shared
+- **The shared `opencode-credentials` Secret** is a **fallback** for
+  `sandbox opencode` sessions — used only when the CLI host has no local opencode
+  login (e.g. CI/headless). The primary path harvests the host's own `opencode
+  auth login` and seeds it into the session's own per-session Secret, so **no**
+  shared Secret is needed; see the credentials section of the main
+  [`README.md`](../README.md). Provision this fallback Secret out-of-band only for
+  machines with no local opencode login (see
+  [`../docs/architecture.md`](../docs/architecture.md)). Likewise the `claude`
+  backend needs **no** shared Secret: `sandbox claude` copies your local Claude
+  Code login into a per-session Secret at create time. The shared
   `anthropic-credentials` Secret is legacy — its only remaining consumer is the
   retired `claude-sdk` backend branch (`buildEnv` in `internal/k8s/backend.go`),
   so new deployments can skip it.

@@ -64,6 +64,18 @@ D1/D3, `runner/src/claude-pane.ts`):
   CLAUDE_CONFIG_DIR + workspace cwd) — never the runner token or credential
   env vars, because provisioned hooks inherit the child's entire env.
 
+### opencode credential provisioning (host harvest → per-session Secret)
+Like claude-pane, an opencode session boots from a **per-session Secret**, not a
+shared cluster credential. At create, `sandbox opencode` harvests the host's own
+`opencode auth login` store (`auth.json`) and seeds it into the session's own
+Secret under key `opencode-auth-json`, injected to the pod as env
+`OPENCODE_AUTH_JSON`; the runner materializes it back to
+`$XDG_DATA_HOME/opencode/auth.json` (mode `0600`, PVC-persisted, so a pod-side
+token refresh survives suspend/resume). A host with **no** local opencode login
+falls back to the shared `opencode-credentials` Secret. This mirrors codex's
+`codex-auth-json` → `$CODEX_HOME/auth.json` seed; see the credentials section of
+[`../README.md`](../README.md) and [`backend-conformance.md`](backend-conformance.md).
+
 ### Per-session git worktrees (create / convert / destroy)
 For a git project, `sandbox claude` creates the session on its own git worktree
 at `~/.local/share/sandbox/remote-sessions/worktrees/<id>`

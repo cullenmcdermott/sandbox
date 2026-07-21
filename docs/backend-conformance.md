@@ -81,6 +81,40 @@ into the normalized model (`schema/events.json`).
 - [ ] **409 contract (every other backend)** — `POST /turns` and any
       programmatic-control route answer 409 for supervise-only backends.
 
+### Auth seed (opencode)
+
+The opencode auth store is a map of independent per-provider entries with **no**
+`last_refresh` timestamp (unlike codex's whole-file store), so a conformant
+runner must:
+
+- [ ] **Materialize the store** — write the injected `OPENCODE_AUTH_JSON`
+      document (the host-harvested `auth.json` from the per-session Secret) to the
+      on-disk store at `$XDG_DATA_HOME/opencode/auth.json` (mode `0600`); an
+      absent env var touches nothing (the provider-API-key fallback applies)
+      (`materializeOpencodeAuth`, `runner/src/agent-auth.ts`).
+- [ ] **Per-entry refresh-preserving merge** — reconcile PER PROVIDER ENTRY
+      against an `auth.json.seed-hashes` sidecar (the sha256 of each seed entry,
+      since opencode entries carry no timestamp to compare): an **unchanged** seed
+      entry keeps the on-disk entry (a pod-side token refresh survives), a
+      **changed** seed entry (operator reseed, or no recorded hash) wins, and
+      entries present only on disk are preserved.
+- [ ] **Fail-closed gate before serve** — refuse to start `opencode serve`
+      unless the selected provider (`SANDBOX_OPENCODE_PROVIDER`) has an entry in
+      the store **or** its fallback API-key env var is set, surfacing the reason
+      (never the credential) (`assertOpencodeAuthUsable`).
+- [ ] **Child env scrub** — the serve child's env drops both
+      `OPENCODE_AUTH_JSON` and `OPENCODE_AUTH_CONTENT` (opencode's `Auth.all()`
+      prefers `OPENCODE_AUTH_CONTENT` over the on-disk store, so a leak would
+      shadow the materialized store and break refresh persistence).
+- [ ] **Version-pinned opencode** — the runner image pins the opencode CLI
+      (`OPENCODE_VERSION`, `runner/Dockerfile`) to match the host client.
+
+This mirrors codex's `codex-auth-json` → `CODEX_AUTH_JSON` → `$CODEX_HOME/auth.json`
+seed; both backends' materializers consume the shared `AuthFs` +
+`writeAuthFile0600` helpers in `runner/src/agent-auth.ts` (codex keeps its
+whole-file materializer in `codex.ts`; opencode's per-entry `materializeOpencodeAuth`
+lives in `agent-auth.ts`).
+
 ### Idle probe
 
 - [ ] **Pane attach counts as activity** — attached pane clients hold the
