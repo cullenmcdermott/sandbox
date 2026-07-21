@@ -102,6 +102,24 @@ widens the blast radius to every credential in the seed. `--seed-providers`
 seed to only the providers a session actually needs. The same FQDN-scoped egress
 policy below is the network-side mitigation.
 
+**And for `CreateOptions.ExtraSecretEnv` (operator-injected secret env):** the
+same exposure applies, by design. Values ride the per-session Secret
+(`extra-secret-env-<NAME>`, `internal/k8s/backend.go`) and reach the agent's
+child processes as real env vars — `ExtraSecretEnv` is **deliberately
+agent-visible** (unlike the runner's own `RUNNER_TOKEN`/provider keys, which stay
+stripped), because the point of injecting a GitLab/GitHub PAT or a Jira key is
+for the agent's own `git`/`gh`/`glab`/tooling to use it. That means a
+prompt-injected agent can read and exfiltrate it over broad-443 exactly like the
+credentials above, and a long-lived PAT **outlives the session**. Two controls
+apply and one caveat: the values are masked from the event log and audit trail
+(`runner/src/redact.ts` reads the `SANDBOX_EXTRA_SECRET_ENV_NAMES` marker), and
+each injected secret is a deliberate operator choice — inject only what a session
+needs, scope the token minimally (read-only, short-lived), and remember that
+opening the FQDN-egress allowlist for a tool's endpoint (e.g. `gitlab.com`) also
+opens the exfil path for that tool's token. That tradeoff is the operator's to
+make, stated plainly here. The same FQDN-scoped egress policy below is the
+network-side mitigation.
+
 **Hardening path:** replace the broad-443 example with an FQDN-scoped egress
 policy allowing only the provider/registry hosts your agents actually need.
 [`k8s/networkpolicy-egress-fqdn.yaml.example`](k8s/networkpolicy-egress-fqdn.yaml.example)

@@ -950,33 +950,40 @@ naming-break, and Shell items each stand alone.
   (4.10): move `ssh/` INSIDE the state root in the same pre-OSS break that
   adds the worktree root; implement with the worktree Spec-split change.
   `client/sync.go`.
-- [ ] **Pod bootstrap files + generic env/secret injection** (upstream
-  integration request 2026-07-17; **maintainer re-raised 2026-07-21 for
-  PATs/API keys — GitLab/GitHub PAT, Jira key — treat as the sign-off
-  signal; confirm the design doc reading then flip its Status and
-  execute**): `CreateOptions.ExtraEnv`/`ExtraSecretEnv`
-  (per-session-Secret-backed env escape hatch) then
-  `CreateOptions.BootstrapFiles` (operator files materialized in pod `$HOME`
-  before the agent starts — NOT in the synced workspace); operator binaries
-  stay a derived-`--runner-image` pattern, not SDK surface. Full design +
-  validation rules: `docs/design-pod-bootstrap-and-tool-injection.md`.
-  Touch points: `client/client.go` (CreateOptions/validate),
-  `internal/k8s/backend.go` (Secret + buildEnv), runner boot materialize
-  step; sdktest pins in the same change. RIDERS added 2026-07-21:
-  (a) ExtraSecretEnv values must join the runner's redaction patterns
-  (`runner/src/redact.ts`) so injected PATs never surface in the event
-  log/audit; (b) each injected secret widens the [S1] exfil blast radius —
-  the SECURITY.md paragraph and the FQDN-egress example must say so (a
-  GitLab PAT in the pod wants gitlab.com in the allowlist, which also
-  opens the exfil path — operator's tradeoff, stated plainly);
-  (c) claude-pane child env allowlist (`claude-pane.ts`) must explicitly
-  admit ExtraEnv/ExtraSecretEnv names or the pane child never sees them —
-  decide default-in vs opt-in flag per var. NOTE the skills half of the
-  maintainer ask is ALREADY BUILT for claude: `ConfigInputsSubs`
-  (`internal/sync/sync.go:218`) one-way-syncs `~/.claude/{skills,agents,
-  commands,hooks}` into the pod, and project-level `.claude/skills` rides
-  the project sync — needs a README section + a live verification, not
-  code.
+- [~] **Pod bootstrap files + generic env/secret injection** — PART B DONE
+  2026-07-21 (`d6e55fa`, done log); part A + docs remain.
+  - [x] **Part B — `CreateOptions.ExtraEnv`/`ExtraSecretEnv` (d6e55fa):**
+    plain pod env + per-session-Secret-backed secret env; fail-closed
+    validation against the exported `k8s.IsReservedEnvName` denylist
+    (SANDBOX_* prefix + RUNNER_TOKEN/PROJECT_PATH/credential vars),
+    invalid-name/cross-map-dup/512KiB-cap sentinels; Optional SecretKeyRefs
+    (non-bricking) + re-create reconcile; sdktest pins. Riders (a) redaction
+    and (c) pane-allowlist admit done via the `SANDBOX_EXTRA_ENV_NAMES`/
+    `SANDBOX_EXTRA_SECRET_ENV_NAMES` markers. `just check` green.
+    **DECISION FLAGGED FOR MAINTAINER:** ExtraSecretEnv is **agent-visible**
+    (not stripped) — required for the PAT-for-git use case; rationale +
+    revert path in the design doc Status block + SECURITY.md.
+  - [ ] **Part A — `CreateOptions.BootstrapFiles`:** operator files
+    materialized in pod `$HOME`/`/session/state` before the agent starts
+    (NOT the synced workspace); reuses part B's per-session-Secret plumbing +
+    the codex materialize hook (write-if-changed, same seed-precedence as
+    codex). One Secret key per file (`bootstrap-<n>`) + a JSON manifest key
+    for path/mode; summed-size cap at Create (~1 MiB Secret limit). Validate
+    Path resolves outside the workspace and inside $HOME/`/session/state`,
+    fail-closed. `client/client.go` (BootstrapFile type + validate),
+    `internal/k8s/backend.go` (Secret + manifest), runner boot materialize
+    step, sdktest pins.
+  - [ ] **Docs closeout (rider b + skills README):** rider (b) FQDN-egress
+    example — add a commented operator-endpoint block (e.g. gitlab.com) with
+    the "opening egress for a tool also opens its token's exfil path" note
+    (the SECURITY.md prose half landed with d6e55fa). README section for
+    ExtraEnv/ExtraSecretEnv + BootstrapFiles once A lands. Plus the
+    ALREADY-BUILT skills half: `ConfigInputsSubs` (`internal/sync/sync.go`)
+    one-way-syncs `~/.claude/{skills,agents,commands,hooks}` into the pod and
+    project `.claude/skills` rides the project sync — needs a README section
+    + a live verification, not code.
+  - Part C (operator binaries) stays documentation (derived-`--runner-image`
+    pattern; tool-image initContainers only if that proves painful).
 
 **2026-07-18 SDK-example review additions** (from auditing
 `client/example_test.go` against the full surface):

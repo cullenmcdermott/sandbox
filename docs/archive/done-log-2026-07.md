@@ -2216,3 +2216,42 @@ fallback path (seeded sessions can emit a spurious rotation warning);
 multi-account per provider (design non-goal). LIVE VERIFY on omni-prod
 (multi-provider seed session + fallback session) is maintainer-gated and
 still pending (task 6.4).
+
+## 2026-07-21 — §8 pod-bootstrap part B: generic env/secret injection (d6e55fa)
+
+Builder-implemented, orchestrator-reviewed against source and verified
+(`just check` all gates green). Part B of
+docs/design-pod-bootstrap-and-tool-injection.md — the maintainer's
+directly-requested slice (inject a GitLab/GitHub PAT / Jira key into a
+session). Part A (BootstrapFiles) + full docs are tracked next steps.
+
+- **Client (client.go/errors.go):** `CreateOptions.ExtraEnv map[string]string`
+  (plain pod env) + `ExtraSecretEnv map[string][]byte` (json:"-",
+  per-session-Secret-backed). `validateExtraEnv` fail-closed: env-name shape
+  (`^[A-Za-z_][A-Za-z0-9_]*$`), the exported `k8s.IsReservedEnvName` denylist
+  (SANDBOX_ prefix + RUNNER_TOKEN/PROJECT_PATH/HOME/PATH/credential vars),
+  no cross-map duplicate, 512 KiB summed ExtraSecretEnv cap. Sentinels
+  ErrInvalidExtraEnvName/ErrReservedEnvName/ErrDuplicateExtraEnv/
+  ErrExtraSecretEnvTooLarge; sdktest pins.
+- **k8s (backend.go):** exported `IsReservedEnvName`/`reservedEnvNames`
+  beside buildEnv (must track the four env emitters); Secret keys
+  `extra-secret-env-<NAME>`; `appendExtraEnv` on the common path — plain
+  ExtraEnv vars + Optional SecretKeyRefs for ExtraSecretEnv + sorted
+  `SANDBOX_EXTRA_ENV_NAMES`/`SANDBOX_EXTRA_SECRET_ENV_NAMES` markers;
+  `reconcileExtraSecretEnv` in syncSessionCredential (patch changed, strip
+  removed — no shape guard needed, refs are Optional).
+- **Runner:** ExtraSecretEnv is AGENT-VISIBLE (not in RUNNER_SECRET_ENV_KEYS,
+  so opencode/codex see it via sanitizedExecEnv passthrough; claude-pane's
+  strict allowlist admits the marker-named vars). redact.ts masks its values
+  in the event log/audit via the SANDBOX_EXTRA_SECRET_ENV_NAMES marker
+  (rider a). Runner suite 268 pass.
+- **Security posture:** SECURITY.md gained an ExtraSecretEnv paragraph — the
+  injected secret is agent-readable/exfiltratable by design (that's the
+  feature), redacted from logs, and opening FQDN egress for a tool's endpoint
+  also opens its token's exfil path (operator tradeoff, stated plainly).
+
+ARCHITECTURAL DECISION (flagged for maintainer, recorded in the design doc
+Status block): ExtraSecretEnv is agent-visible rather than the draft's
+strip-from-agent default — required for the PAT-for-git use case, and
+consistent with rider (b)'s exfil framing. Revert path (strip-by-default) is
+a one-line allowlist + RUNNER_SECRET_ENV_KEYS change, documented.

@@ -1,8 +1,16 @@
 # Pod bootstrap files, generic env/secret injection, and operator tool binaries
 
-Status: **draft** (design proposal — awaiting maintainer sign-off and feedback
-from the requesting external orchestrator; no code in this repo implements it
-yet).
+Status: **part B implemented 2026-07-21** (commit `d6e55fa`); part A
+(BootstrapFiles) + the full docs closeout are the tracked next steps
+(TODO §8); part C stays documentation. One decision was resolved during
+implementation and **needs maintainer eyes** (see the callout in part B
+below): `ExtraSecretEnv` was made **agent-visible** rather than
+stripped-from-agent, because the maintainer's stated use case (inject a
+GitLab/GitHub PAT / Jira key for the agent's own `git`/`gh` to use) requires
+it, and rider (b)'s "each injected secret widens the *agent's* exfil blast
+radius" framing only holds if the agent can read it. If you disagree, the
+strip-by-default alternative is a one-line change to the runner allowlist +
+`sanitizedExecEnv`.
 
 ## Problem
 
@@ -77,14 +85,25 @@ ExtraSecretEnv map[string][]byte
 - Validation, fail-closed at Create: reject names colliding with the reserved
   runner/backend namespace (`SANDBOX_*`, `RUNNER_TOKEN`, `PROJECT_PATH`, the
   credential vars — one exported denylist, kept beside `buildEnv`).
-- Runner side: `sanitizedExecEnv` already strips runner-infra secrets from
-  agent child processes; injected `ExtraSecretEnv` vars are stripped from
-  agent children by default (they are for pod-level tooling, not the agent's
-  shell — if a tool needs one visible to the agent, it belongs in a bootstrap
-  file the tool reads instead). This keeps the existing "agent Bash can't
-  read infra tokens" property.
+- **Runner side — AS IMPLEMENTED (d6e55fa), a change from this draft's
+  original position; NEEDS MAINTAINER SIGN-OFF.** The draft said
+  `ExtraSecretEnv` is *stripped* from agent children. It is instead
+  **agent-visible**: it is NOT added to `sanitizedExecEnv`'s strip set, so
+  opencode/codex children see it via passthrough, and the claude-pane strict
+  allowlist explicitly admits it (both via the `SANDBOX_EXTRA_ENV_NAMES` /
+  `SANDBOX_EXTRA_SECRET_ENV_NAMES` marker vars `buildEnv` emits). Rationale:
+  the maintainer's use case is injecting a GitLab/GitHub PAT / Jira key for
+  the agent's *own* `git`/`gh`/`glab`, which requires the agent to read it;
+  and rider (b)'s exfil-blast-radius framing only makes sense if the agent
+  can read the secret. The runner's *own* infra secrets (`RUNNER_TOKEN`,
+  provider keys) remain stripped — only operator-declared, marker-named vars
+  cross the boundary. Compensating controls: values are masked from the event
+  log/audit (`runner/src/redact.ts` reads the secret-names marker), and the
+  exfil widening is documented in `SECURITY.md`. If strip-by-default is
+  preferred, revert to withholding the marker-named vars in
+  `buildClaudePaneEnv` + adding them to `RUNNER_SECRET_ENV_KEYS`.
 - Covers: a tool's control-endpoint URL + bearer token without a bespoke Spec
-  field per tool.
+  field per tool; and injected PAT/API keys the agent's tooling consumes.
 
 ### C. Operator tool binaries
 
