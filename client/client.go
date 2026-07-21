@@ -800,22 +800,10 @@ func validateOpencodeProvider(p string) error {
 // Anthropic and OpenAI, but opencode stores its Zen (hosted) credential under
 // the key "opencode" — NOT our wire value "opencode-zen" — so a seed check keyed
 // on the raw wire value would spuriously fail for Zen. internal/k8s mirrors this
-// same mapping when it sets the pod's SANDBOX_OPENCODE_PROVIDER env (added
-// separately). Empty maps to the default (anthropic), matching
-// validateOpencodeProvider's "empty means Anthropic" contract.
+// same mapping when it sets the pod's SANDBOX_OPENCODE_PROVIDER env. Both delegate
+// to session.OpencodeProviderEntryKey so the mapping has ONE source of truth.
 func opencodeAuthEntryKey(provider string) string {
-	switch provider {
-	case "", session.OpencodeProviderAnthropic:
-		return "anthropic"
-	case session.OpencodeProviderOpenAI:
-		return "openai"
-	case session.OpencodeProviderZen:
-		return "opencode"
-	default:
-		// Unreachable in Create (validateOpencodeProvider rejects unknowns first),
-		// but pass the value through rather than silently rewriting it.
-		return provider
-	}
+	return session.OpencodeProviderEntryKey(provider)
 }
 
 // validateOpencodeSeed enforces the fail-closed opencode seed contract: when a

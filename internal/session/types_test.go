@@ -274,3 +274,25 @@ func TestWorkspaceStatusPayloadRoundTrip(t *testing.T) {
 		t.Errorf("round-trip mismatch: got %+v, want %+v", decoded, p)
 	}
 }
+
+// TestOpencodeProviderEntryKey pins the wire-vocabulary → auth.json entry-key
+// mapping: empty and anthropic both map to "anthropic", openai is identity, and
+// Zen maps to opencode's own key "opencode" (NOT the wire value "opencode-zen").
+// An unknown provider passes through unchanged.
+func TestOpencodeProviderEntryKey(t *testing.T) {
+	cases := []struct {
+		provider string
+		want     string
+	}{
+		{"", "anthropic"},
+		{OpencodeProviderAnthropic, "anthropic"},
+		{OpencodeProviderOpenAI, "openai"},
+		{OpencodeProviderZen, "opencode"},
+		{"some-future-provider", "some-future-provider"},
+	}
+	for _, tc := range cases {
+		if got := OpencodeProviderEntryKey(tc.provider); got != tc.want {
+			t.Errorf("OpencodeProviderEntryKey(%q) = %q, want %q", tc.provider, got, tc.want)
+		}
+	}
+}

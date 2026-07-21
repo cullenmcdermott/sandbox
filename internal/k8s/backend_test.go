@@ -1499,3 +1499,311 @@ func TestCreateSessionSameShapeCodexAccountSwapPatchesSecret(t *testing.T) {
 		t.Error("runner-token must be preserved across the credential patch")
 	}
 }
+
+// TestOpencodeEnvSeededAuthJSON (task 3.3): a SEEDED opencode session (non-empty
+// spec.OpencodeAuthJSON) injects OPENCODE_AUTH_JSON as a NOT-Optional SecretKeyRef
+// into the per-session Secret, sets SANDBOX_OPENCODE_PROVIDER to the auth.json
+// ENTRY KEY (opencode's own vocabulary — Zen maps to "opencode", not the wire
+// "opencode-zen"), and injects NO per-provider key env (the materialized auth.json
+// is the whole credential — D7).
+func TestOpencodeEnvSeededAuthJSON(t *testing.T) {
+	spec := session.Spec{
+		Backend:          session.BackendOpenCode,
+		OpencodeProvider: session.OpencodeProviderZen,
+		OpencodeAuthJSON: []byte(`{"opencode":{"type":"api","key":"zen-secret"}}`),
+	}
+	env := buildEnv(spec, "oc")
+
+	auth := envVar(env, "OPENCODE_AUTH_JSON")
+	if auth == nil || auth.ValueFrom == nil || auth.ValueFrom.SecretKeyRef == nil {
+		t.Fatal("OPENCODE_AUTH_JSON should reference a secret key on the seeded path")
+	}
+	ref := auth.ValueFrom.SecretKeyRef
+	if ref.Name != sessionSecretName("oc") {
+		t.Errorf("OPENCODE_AUTH_JSON secret name: got %q, want per-session %q", ref.Name, sessionSecretName("oc"))
+	}
+	if ref.Key != secretKeyOpencodeAuthJSON {
+		t.Errorf("OPENCODE_AUTH_JSON secret key: got %q, want %q", ref.Key, secretKeyOpencodeAuthJSON)
+	}
+	if ref.Optional != nil && *ref.Optional {
+		t.Error("OPENCODE_AUTH_JSON must NOT be Optional on the seeded path (we wrote the key)")
+	}
+	if auth.Value != "" {
+		t.Errorf("OPENCODE_AUTH_JSON must be a SecretKeyRef, never inline (got %q)", auth.Value)
+	}
+	// SANDBOX_OPENCODE_PROVIDER carries the auth.json entry key: Zen → "opencode".
+	if got := envValue(env, "SANDBOX_OPENCODE_PROVIDER"); got != "opencode" {
+		t.Errorf("SANDBOX_OPENCODE_PROVIDER = %q, want %q (Zen entry key)", got, "opencode")
+	}
+	// No provider-key env on the seeded path.
+	for _, k := range []string{"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENCODE_API_KEY"} {
+		if envVar(env, k) != nil {
+			t.Errorf("%s must be absent on the seeded path — the auth.json is the credential", k)
+		}
+	}
+}
+
+// TestOpencodeEnvFallbackSetsProviderMarker (task 3.3): the FALLBACK path (empty
+// seed) is unchanged — the selected provider key from the shared Secret — but now
+// also carries SANDBOX_OPENCODE_PROVIDER (the entry key the runner's fail-closed
+// gate reads on BOTH paths) and no OPENCODE_AUTH_JSON.
+func TestOpencodeEnvFallbackSetsProviderMarker(t *testing.T) {
+	spec := session.Spec{Backend: session.BackendOpenCode, OpencodeProvider: session.OpencodeProviderOpenAI}
+	env := buildEnv(spec, "oc")
+
+	if envVar(env, "OPENCODE_AUTH_JSON") != nil {
+		t.Error("OPENCODE_AUTH_JSON must be absent on the fallback path")
+	}
+	if got := envValue(env, "SANDBOX_OPENCODE_PROVIDER"); got != "openai" {
+		t.Errorf("SANDBOX_OPENCODE_PROVIDER = %q, want %q", got, "openai")
+	}
+	key := envVar(env, "OPENAI_API_KEY")
+	if key == nil || key.ValueFrom == nil || key.ValueFrom.SecretKeyRef == nil {
+		t.Fatal("OPENAI_API_KEY should reference the shared Secret on the fallback path")
+	}
+	if key.ValueFrom.SecretKeyRef.Name != opencodeSecretName {
+		t.Errorf("OPENAI_API_KEY secret name: got %q, want %q", key.ValueFrom.SecretKeyRef.Name, opencodeSecretName)
+	}
+}
+
+// TestCreateSessionSeededOpencodeAuth (task 3.1): a seeded opencode session writes
+// the auth.json to the per-session Secret under opencode-auth-json with NO account
+// label (opencode is single-account), leaves other keys intact, and never inlines
+// the bytes into the Sandbox object.
+func TestCreateSessionSeededOpencodeAuth(t *testing.T) {
+	ctx := context.Background()
+	b := newTestBackend(t)
+
+	const auth = `{"anthropic":{"type":"api","key":"OPENCODE-SEED-BYTES"}}`
+	spec := session.Spec{
+		ID:               "opencode-server-seeded",
+		ProjectPath:      "/tmp",
+		Backend:          session.BackendOpenCode,
+		RunnerImage:      "test:latest",
+		SSHPublicKey:     "ssh-ed25519 AAAAKEY user@host",
+		OpencodeAuthJSON: []byte(auth),
+	}
+	if _, err := b.CreateSession(ctx, spec); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	secret, err := b.core.CoreV1().Secrets("agent-sessions").Get(ctx, sessionSecretName("opencode-server-seeded"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get secret: %v", err)
+	}
+	if string(secret.Data[secretKeyOpencodeAuthJSON]) != auth {
+		t.Errorf("opencode-auth-json: got %q, want %q", secret.Data[secretKeyOpencodeAuthJSON], auth)
+	}
+	if _, ok := secret.Labels[labelAnthropicAccount]; ok {
+		t.Error("seeded opencode Secret must not carry an anthropic account label")
+	}
+	if _, ok := secret.Labels[labelCodexAccount]; ok {
+		t.Error("seeded opencode Secret must not carry a codex account label")
+	}
+	if len(secret.Data[secretKeyRunnerToken]) == 0 {
+		t.Error("runner token should still be set alongside the seed")
+	}
+
+	sb, err := b.agents.AgentsV1alpha1().Sandboxes("agent-sessions").Get(ctx, "opencode-server-seeded", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get sandbox: %v", err)
+	}
+	raw, err := json.Marshal(sb)
+	if err != nil {
+		t.Fatalf("marshal sandbox: %v", err)
+	}
+	if strings.Contains(string(raw), "OPENCODE-SEED-BYTES") {
+		t.Fatal("opencode auth.json bytes leaked into the Sandbox object (must be SecretKeyRef only)")
+	}
+}
+
+// TestCreateSessionNoOpencodeSeed (task 3.1): a fallback opencode session (empty
+// seed) writes neither the opencode-auth-json key nor any account label.
+func TestCreateSessionNoOpencodeSeed(t *testing.T) {
+	ctx := context.Background()
+	b := newTestBackend(t)
+	spec := session.Spec{ID: "opencode-server-noseed", ProjectPath: "/tmp", Backend: session.BackendOpenCode, RunnerImage: "test:latest"}
+	if _, err := b.CreateSession(ctx, spec); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	secret, err := b.core.CoreV1().Secrets("agent-sessions").Get(ctx, sessionSecretName("opencode-server-noseed"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get secret: %v", err)
+	}
+	if _, ok := secret.Data[secretKeyOpencodeAuthJSON]; ok {
+		t.Error("opencode-auth-json key must be absent without a seed")
+	}
+}
+
+// TestCreateSessionSeededOpencodeAuthReconcile (task 3.2): re-creating a seeded
+// opencode session with NEW bytes (same shape) patches opencode-auth-json in place;
+// re-creating with IDENTICAL bytes is a no-op (no Secret Update).
+func TestCreateSessionSeededOpencodeAuthReconcile(t *testing.T) {
+	t.Run("new-bytes-patched", func(t *testing.T) {
+		ctx := context.Background()
+		b := newTestBackend(t)
+		spec := session.Spec{
+			ID:               "opencode-server-reseed",
+			ProjectPath:      "/tmp",
+			Backend:          session.BackendOpenCode,
+			RunnerImage:      "test:latest",
+			SSHPublicKey:     "ssh-ed25519 AAAAKEY user@host",
+			OpencodeAuthJSON: []byte(`{"anthropic":{"key":"OLD"}}`),
+		}
+		if _, err := b.CreateSession(ctx, spec); err != nil {
+			t.Fatalf("first create: %v", err)
+		}
+		before, err := b.core.CoreV1().Secrets("agent-sessions").Get(ctx, sessionSecretName("opencode-server-reseed"), metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("get secret: %v", err)
+		}
+		reseeded := spec
+		reseeded.OpencodeAuthJSON = []byte(`{"anthropic":{"key":"NEW"}}`)
+		if _, err := b.CreateSession(ctx, reseeded); err != nil {
+			t.Fatalf("same-shape re-seed must succeed: %v", err)
+		}
+		after, err := b.core.CoreV1().Secrets("agent-sessions").Get(ctx, sessionSecretName("opencode-server-reseed"), metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("get secret: %v", err)
+		}
+		if string(after.Data[secretKeyOpencodeAuthJSON]) != `{"anthropic":{"key":"NEW"}}` {
+			t.Errorf("re-seed did not patch the seed bytes: got %q", after.Data[secretKeyOpencodeAuthJSON])
+		}
+		if string(after.Data[secretKeyRunnerToken]) != string(before.Data[secretKeyRunnerToken]) {
+			t.Error("runner-token must be preserved across the seed patch")
+		}
+	})
+
+	t.Run("identical-noop", func(t *testing.T) {
+		ctx := context.Background()
+		agents := agentsfake.NewSimpleClientset()
+		core := fake.NewSimpleClientset()
+		b := NewForClients(agents, core, "agent-sessions")
+		spec := session.Spec{
+			ID:               "opencode-server-noop",
+			ProjectPath:      "/tmp",
+			Backend:          session.BackendOpenCode,
+			RunnerImage:      "test:latest",
+			SSHPublicKey:     "ssh-ed25519 AAAAKEY user@host",
+			OpencodeAuthJSON: []byte(`{"anthropic":{"key":"SAME"}}`),
+		}
+		if _, err := b.CreateSession(ctx, spec); err != nil {
+			t.Fatalf("first create: %v", err)
+		}
+		// Count Secret Updates on the identical re-create only (the fresh create's
+		// owner-ref Update happens before this reactor is installed).
+		updates := 0
+		core.PrependReactor("update", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) {
+			updates++
+			return false, nil, nil // count, then fall through to the default handler
+		})
+		if _, err := b.CreateSession(ctx, spec); err != nil {
+			t.Fatalf("identical re-create must succeed: %v", err)
+		}
+		if updates != 0 {
+			t.Errorf("identical re-seed should not Update the Secret, saw %d update(s)", updates)
+		}
+	})
+}
+
+// TestCreateSessionRejectsOpencodeAuthShapeChange (task 3.3): a re-create that
+// FLIPS the opencode auth shape — seeded↔fallback — must be rejected before any
+// Secret mutation, because opencodeEnv baked a NOT-Optional SecretKeyRef for the
+// original shape and stripping/adding it would brick the next resume.
+func TestCreateSessionRejectsOpencodeAuthShapeChange(t *testing.T) {
+	seeded := func(id string) session.Spec {
+		return session.Spec{
+			ID:               session.ID(id),
+			ProjectPath:      "/tmp",
+			Backend:          session.BackendOpenCode,
+			RunnerImage:      "test:latest",
+			SSHPublicKey:     "ssh-ed25519 AAAAKEY user@host",
+			OpencodeAuthJSON: []byte(`{"anthropic":{"key":"SEED"}}`),
+		}
+	}
+	fallback := func(id string) session.Spec {
+		s := seeded(id)
+		s.OpencodeAuthJSON = nil
+		return s
+	}
+
+	t.Run("seeded-to-fallback", func(t *testing.T) {
+		ctx := context.Background()
+		b := newTestBackend(t)
+		if _, err := b.CreateSession(ctx, seeded("opencode-server-s2f")); err != nil {
+			t.Fatalf("first create: %v", err)
+		}
+		_, err := b.CreateSession(ctx, fallback("opencode-server-s2f"))
+		if err == nil {
+			t.Fatal("expected a seeded→fallback re-create to be rejected")
+		}
+		if !strings.Contains(err.Error(), "different opencode auth shape") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		// The rejected call must not have stripped the seed (the guard returns
+		// before syncSessionCredential, and the pre-existing Secret is not rolled back).
+		after, gerr := b.core.CoreV1().Secrets("agent-sessions").Get(ctx, sessionSecretName("opencode-server-s2f"), metav1.GetOptions{})
+		if gerr != nil {
+			t.Fatalf("get secret: %v", gerr)
+		}
+		if string(after.Data[secretKeyOpencodeAuthJSON]) != `{"anthropic":{"key":"SEED"}}` {
+			t.Errorf("rejected seeded→fallback re-create mutated the opencode-auth-json key: got %q", after.Data[secretKeyOpencodeAuthJSON])
+		}
+	})
+
+	t.Run("fallback-to-seeded", func(t *testing.T) {
+		ctx := context.Background()
+		b := newTestBackend(t)
+		if _, err := b.CreateSession(ctx, fallback("opencode-server-f2s")); err != nil {
+			t.Fatalf("first create: %v", err)
+		}
+		_, err := b.CreateSession(ctx, seeded("opencode-server-f2s"))
+		if err == nil {
+			t.Fatal("expected a fallback→seeded re-create to be rejected")
+		}
+		if !strings.Contains(err.Error(), "different opencode auth shape") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+}
+
+// TestCreateSessionOpencodeSameShapeReCreateSucceeds (task 3.3): same-shape
+// re-creates are NOT rejected by the seeded↔fallback guard — seeded→seeded and
+// fallback→fallback both succeed.
+func TestCreateSessionOpencodeSameShapeReCreateSucceeds(t *testing.T) {
+	t.Run("seeded-to-seeded", func(t *testing.T) {
+		ctx := context.Background()
+		b := newTestBackend(t)
+		spec := session.Spec{
+			ID:               "opencode-server-s2s",
+			ProjectPath:      "/tmp",
+			Backend:          session.BackendOpenCode,
+			RunnerImage:      "test:latest",
+			SSHPublicKey:     "ssh-ed25519 AAAAKEY user@host",
+			OpencodeAuthJSON: []byte(`{"anthropic":{"key":"SEED"}}`),
+		}
+		if _, err := b.CreateSession(ctx, spec); err != nil {
+			t.Fatalf("first create: %v", err)
+		}
+		if _, err := b.CreateSession(ctx, spec); err != nil {
+			t.Fatalf("seeded→seeded re-create must succeed: %v", err)
+		}
+	})
+
+	t.Run("fallback-to-fallback", func(t *testing.T) {
+		ctx := context.Background()
+		b := newTestBackend(t)
+		spec := session.Spec{
+			ID:           "opencode-server-f2f",
+			ProjectPath:  "/tmp",
+			Backend:      session.BackendOpenCode,
+			RunnerImage:  "test:latest",
+			SSHPublicKey: "ssh-ed25519 AAAAKEY user@host",
+		}
+		if _, err := b.CreateSession(ctx, spec); err != nil {
+			t.Fatalf("first create: %v", err)
+		}
+		if _, err := b.CreateSession(ctx, spec); err != nil {
+			t.Fatalf("fallback→fallback re-create must succeed: %v", err)
+		}
+	})
+}

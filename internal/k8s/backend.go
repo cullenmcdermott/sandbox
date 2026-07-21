@@ -139,6 +139,16 @@ const (
 	// OPENAI_API_KEY fallback path.
 	secretKeyCodexAuthJSON = "codex-auth-json"
 
+	// secretKeyOpencodeAuthJSON is the key in the per-session Secret holding the
+	// host-harvested opencode auth.json document for a seeded opencode-server
+	// session (mirrors secretKeyCodexAuthJSON). Written only when
+	// spec.OpencodeAuthJSON is non-empty; the opencode buildEnv branch references it
+	// (not Optional — we wrote it) via OPENCODE_AUTH_JSON. Absent for the
+	// shared-Secret (provider-key) fallback path. Unlike the anthropic/codex keys it
+	// is NOT account-scoped — there is no account label on the Secret, because
+	// multi-account opencode is a non-goal (one harvested auth.json per session).
+	secretKeyOpencodeAuthJSON = "opencode-auth-json"
+
 	// secretKeyClaudeCredentialsJSON / secretKeyClaudeOAuthAccountJSON are the keys
 	// in the per-session Secret holding a claude-pane session's FULL Claude Code
 	// OAuth credential ({"claudeAiOauth": {...}}, the .credentials.json shape) and
@@ -389,6 +399,13 @@ func (b *Backend) CreateSession(ctx context.Context, spec session.Spec) (_ sessi
 		secret.Data[secretKeyCodexAuthJSON] = spec.CodexAuthJSON
 		secret.Labels[labelCodexAccount] = spec.CodexAccountID
 	}
+	// Seeded opencode sessions carry the host-harvested auth.json in the
+	// per-session Secret (the shared opencode-credentials provider key is the
+	// no-seed fallback). NO account label — opencode is single-account by design,
+	// so nothing enumerates these by account.
+	if len(spec.OpencodeAuthJSON) > 0 {
+		secret.Data[secretKeyOpencodeAuthJSON] = spec.OpencodeAuthJSON
+	}
 	// Account-backed claude-pane sessions carry the FULL Claude Code OAuth
 	// credential (.credentials.json shape) and the oauthAccount identity in the
 	// per-session Secret; the interactive pane reads them, never the inference-
@@ -464,6 +481,24 @@ func (b *Backend) CreateSession(ctx context.Context, spec session.Spec) (_ sessi
 							name, gotEnv, gotSrc, wantEnv, wantSrc)
 					}
 				}
+			} else {
+				// opencode uses the credentialEnvShape skip above (its fallback shape
+				// varies only by which provider key — warnIfOpencodeCredsRotated covers
+				// that), so it gets a narrower guard here: the SEED added a second shape
+				// (OPENCODE_AUTH_JSON from the per-session Secret, no provider key), and
+				// a seeded↔fallback flip must be rejected BEFORE syncSessionCredential —
+				// otherwise the strip below would remove the NOT-Optional
+				// opencode-auth-json key that the existing pod template still requires,
+				// bricking the next resume. This return is what makes that strip safe.
+				if existingSb, gerr := b.agents.AgentsV1alpha1().Sandboxes(spec.Namespace).Get(gctx, name, metav1.GetOptions{}); gerr == nil {
+					wantSeeded := len(spec.OpencodeAuthJSON) > 0
+					gotSeeded := opencodeSeededShape(existingSb)
+					if wantSeeded != gotSeeded {
+						return fmt.Errorf(
+							"k8s: session %s already exists with a different opencode auth shape (existing: %s; this create wants: %s) — destroy and re-create the session",
+							name, opencodeShapeDesc(gotSeeded), opencodeShapeDesc(wantSeeded))
+					}
+				}
 			}
 			// A re-create must not keep a stale account state: with a credential in
 			// the spec, patch its key + account label onto the existing Secret
@@ -515,6 +550,21 @@ func (b *Backend) CreateSession(ctx context.Context, spec session.Spec) (_ sessi
 		if gerr == nil {
 			sbLive = existing
 			if spec.Backend == session.BackendOpenCode {
+				// Seeded↔fallback shape guard (see the Secret-create branch above): the
+				// existing pod template baked a NOT-Optional SecretKeyRef for whichever
+				// shape it chose (OPENCODE_AUTH_JSON on the seeded path, a provider key on
+				// the fallback path), so a re-create that flips the shape would leave the
+				// running pod's ref dangling. This narrower check is separate from
+				// warnIfOpencodeCredsRotated, which only covers a fallback→fallback
+				// provider-key rotation. Reached when only the Sandbox pre-existed (a
+				// fresh Secret means the Secret-create branch didn't guard).
+				wantSeeded := len(spec.OpencodeAuthJSON) > 0
+				gotSeeded := opencodeSeededShape(existing)
+				if wantSeeded != gotSeeded {
+					return session.Ref{}, fmt.Errorf(
+						"k8s: session %s already exists with a different opencode auth shape (existing: %s; this create wants: %s) — destroy and re-create the session",
+						name, opencodeShapeDesc(gotSeeded), opencodeShapeDesc(wantSeeded))
+				}
 				// The existing Sandbox keeps its original creds stamp, so warn if the
 				// live Secret has since rotated (the running pod still holds the old key).
 				b.warnIfOpencodeCredsRotated(ctx, existing)
@@ -659,20 +709,53 @@ func credentialEnvShape(sb *agentv1alpha1.Sandbox) (envName, secretName string) 
 	return "", ""
 }
 
-// syncSessionCredential reconciles the per-session Secret's account-credential
-// keys and labels with the spec — both the anthropic-credential key/label and the
-// codex-auth-json key/label — leaving every other key (runner-token,
+// opencodeSeededShape reports whether an existing opencode Sandbox's pod template
+// was built on the SEEDED path — true iff it carries an OPENCODE_AUTH_JSON env var
+// (opencodeEnv injects that exactly when spec.OpencodeAuthJSON was non-empty).
+// This is the opencode analogue of credentialEnvShape's SOURCE bit: the seeded
+// shape (auth.json from the per-session Secret, no provider key) and the fallback
+// shape (a provider key from the shared Secret) are the two states a re-create
+// must not silently flip between, because opencodeEnv bakes a NOT-Optional
+// SecretKeyRef for whichever it chose. Scans containers[].Env like
+// credentialEnvShape does.
+func opencodeSeededShape(sb *agentv1alpha1.Sandbox) bool {
+	for i := range sb.Spec.PodTemplate.Spec.Containers {
+		for _, e := range sb.Spec.PodTemplate.Spec.Containers[i].Env {
+			if e.Name == "OPENCODE_AUTH_JSON" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// opencodeShapeDesc renders one of the two opencode auth shapes for the
+// re-create rejection message (see the AlreadyExists branches in CreateSession).
+func opencodeShapeDesc(seeded bool) string {
+	if seeded {
+		return "seeded auth.json"
+	}
+	return "shared-Secret provider key"
+}
+
+// syncSessionCredential reconciles the per-session Secret's credential keys (and,
+// where account-scoped, labels) with the spec — the anthropic-credential
+// key/label, the codex-auth-json key/label, and the opencode-auth-json key (NO
+// label — opencode is single-account) — leaving every other key (runner-token,
 // opencode-password, ssh-authorized-key) untouched. Used by CreateSession when
-// the Secret already exists: with an account credential in the spec it patches
-// the key + label (re-creating a session id with a different account must not
-// keep the old credential); with none it strips any stale key + label, so
-// logout/rotation label enumeration never false-positives on a session that no
-// longer uses an account and no stale credential copy lingers. A session is a
-// single backend, so at most one credential family is non-empty; the other's
-// strip branch is a no-op. Both families reconcile under ONE Get+Update. A no-op
-// Update is skipped when the Secret already matches. Get+Update under
-// RetryOnConflict matches the existing setReplicas/pin idiom. The returned error
-// never carries credential bytes.
+// the Secret already exists: with a credential in the spec it patches the key
+// (re-creating a session id with a different account/seed must not keep the old
+// bytes); with none it strips any stale key + label, so logout/rotation label
+// enumeration never false-positives on a session that no longer uses an account
+// and no stale credential copy lingers. A session is a single backend, so at most
+// one credential family is non-empty; the others' strip branch is a no-op. The
+// opencode-auth-json STRIP (seeded → fallback re-create) is safe ONLY because the
+// caller runs the opencodeSeededShape guard first and rejects a shape flip BEFORE
+// reaching here (see the two AlreadyExists branches) — otherwise stripping the
+// NOT-Optional key would brick the next resume. All families reconcile under ONE
+// Get+Update. A no-op Update is skipped when the Secret already matches. Get+Update
+// under RetryOnConflict matches the existing setReplicas/pin idiom. The returned
+// error never carries credential bytes.
 func (b *Backend) syncSessionCredential(ctx context.Context, spec session.Spec) error {
 	name := sessionSecretName(string(spec.ID))
 	secrets := b.core.CoreV1().Secrets(spec.Namespace)
@@ -701,6 +784,12 @@ func (b *Backend) syncSessionCredential(ctx context.Context, spec session.Spec) 
 		}
 		changed = reconcileSecretCredential(secret, secretKeyAnthropicCredential, labelAnthropicAccount, spec.AnthropicCredential, spec.AnthropicAccountID) || changed
 		changed = reconcileSecretCredential(secret, secretKeyCodexAuthJSON, labelCodexAccount, spec.CodexAuthJSON, spec.CodexAccountID) || changed
+		// opencode seed: no account label (single-account by design). The strip
+		// branch (empty seed) is safe only behind the opencodeSeededShape guard the
+		// AlreadyExists branches run before calling us — a seeded→fallback flip is
+		// rejected there, so a live pod's NOT-Optional OPENCODE_AUTH_JSON ref is
+		// never left pointing at a stripped key.
+		changed = reconcileSecretCredential(secret, secretKeyOpencodeAuthJSON, "", spec.OpencodeAuthJSON, "") || changed
 		if !changed {
 			return nil
 		}
@@ -723,10 +812,12 @@ func (b *Backend) syncSessionCredential(ctx context.Context, spec session.Spec) 
 }
 
 // reconcileSecretCredential patches (credential non-empty) or strips (empty) one
-// account-credential key + account label on a per-session Secret, returning
-// whether it changed anything. Shared by syncSessionCredential across the
-// anthropic and codex credential families so both reconcile with identical
-// patch/strip semantics under one Update. It never echoes the credential bytes.
+// credential key — and, when labelKey != "", one account label — on a per-session
+// Secret, returning whether it changed anything. Shared by syncSessionCredential
+// across the anthropic and codex credential families (both account-scoped, so both
+// pass a labelKey) and the opencode auth.json seed (single-account by design, so
+// it passes labelKey == "" to reconcile only the data key). It never echoes the
+// credential bytes.
 func reconcileSecretCredential(secret *corev1.Secret, dataKey, labelKey string, credential []byte, accountID string) bool {
 	changed := false
 	if len(credential) > 0 {
@@ -737,7 +828,7 @@ func reconcileSecretCredential(secret *corev1.Secret, dataKey, labelKey string, 
 			secret.Data[dataKey] = credential
 			changed = true
 		}
-		if secret.Labels[labelKey] != accountID {
+		if labelKey != "" && secret.Labels[labelKey] != accountID {
 			if secret.Labels == nil {
 				secret.Labels = map[string]string{}
 			}
@@ -749,9 +840,11 @@ func reconcileSecretCredential(secret *corev1.Secret, dataKey, labelKey string, 
 			delete(secret.Data, dataKey)
 			changed = true
 		}
-		if _, ok := secret.Labels[labelKey]; ok {
-			delete(secret.Labels, labelKey)
-			changed = true
+		if labelKey != "" {
+			if _, ok := secret.Labels[labelKey]; ok {
+				delete(secret.Labels, labelKey)
+				changed = true
+			}
 		}
 	}
 	return changed
@@ -1902,22 +1995,35 @@ func (b *Backend) refreshOpencodeCredsStamp(ctx context.Context, sb *agentv1alph
 }
 
 // opencodeEnv returns the env vars specific to opencode-server sessions: the
-// serve basic-auth credentials, the data dir + config path on the PVC, and the
-// SINGLE selected provider's API key.
+// serve basic-auth credentials, the data dir + config path on the PVC, the
+// provider marker, and the SINGLE selected credential — which comes from one of
+// two mutually exclusive SOURCES (the pod template cannot see len(bytes) at
+// resume, so the branch keys off spec.OpencodeAuthJSON at create, mirroring
+// codexEnv):
 //
-// Only the selected provider's key is injected (resolveOpencodeProvider), and its
-// SecretKeyRef is NOT Optional — a fail-closed hardening change from the prior
-// all-providers, all-optional fan-out. If the opencode-credentials Secret is
-// absent, or present but missing the selected key, the kubelet cannot populate
-// the env var and the container never starts: the pod stalls in
-// CreateContainerConfigError with a "couldn't find key <key> in Secret
-// agent-sessions/opencode-credentials" (or "secret ... not found") event, rather
-// than silently starting an agent with no provider credential. The runner still
-// drives opencode config generation off which provider env vars are present
-// (buildOpencodeConfig) — it now sees exactly one.
+//	SEEDED (spec.OpencodeAuthJSON non-empty): the host-harvested auth.json from
+//	  the per-session Secret sessionSecretName(name), key "opencode-auth-json", as
+//	  OPENCODE_AUTH_JSON, NOT Optional — CreateSession wrote the key, so a missing
+//	  key means a provisioning bug that should stall the pod rather than start it
+//	  unauthenticated. The runner materializes it as a FILE at
+//	  $XDG_DATA_HOME/opencode/auth.json. NO provider-key env is injected: the
+//	  materialized auth.json IS the credential, so one file replaces the N
+//	  per-provider env vars (D7) — the same child-env hygiene as claude-pane.
+//	FALLBACK (empty): the SINGLE selected provider's key from the shared
+//	  opencode-credentials Secret (resolveOpencodeProvider), NOT Optional — a
+//	  fail-closed hardening change from the prior all-providers, all-optional
+//	  fan-out. If the Secret is absent, or present but missing the selected key,
+//	  the kubelet cannot populate the env var and the container never starts: the
+//	  pod stalls in CreateContainerConfigError with a "couldn't find key <key> in
+//	  Secret agent-sessions/opencode-credentials" (or "secret ... not found")
+//	  event, rather than silently starting an agent with no provider credential.
+//
+// SANDBOX_OPENCODE_PROVIDER (the auth.json entry key: anthropic|openai|opencode)
+// is set on BOTH paths — the runner's fail-closed gate reads it to know which
+// auth.json entry to require on the seeded path, and which provider env var to
+// require on the fallback path.
 func opencodeEnv(spec session.Spec, name string) []corev1.EnvVar {
-	prov := resolveOpencodeProvider(spec.OpencodeProvider)
-	return []corev1.EnvVar{
+	env := []corev1.EnvVar{
 		{Name: "OPENCODE_PORT", Value: fmt.Sprintf("%d", portOpencode)},
 		{Name: "OPENCODE_SERVER_USERNAME", Value: opencodeServerUsername},
 		{
@@ -1933,17 +2039,36 @@ func opencodeEnv(spec session.Spec, name string) []corev1.EnvVar {
 		// survive suspend/resume (mirrors claude state at /session/state/claude).
 		{Name: "XDG_DATA_HOME", Value: "/session/state/opencode/data"},
 		{Name: "OPENCODE_CONFIG", Value: "/session/state/opencode/opencode.json"},
-		{
-			Name: prov.envName,
+		// The auth.json entry key for the selected provider, read by the runner on
+		// both the seeded and fallback paths (see doc block).
+		{Name: "SANDBOX_OPENCODE_PROVIDER", Value: session.OpencodeProviderEntryKey(spec.OpencodeProvider)},
+	}
+	if len(spec.OpencodeAuthJSON) > 0 {
+		// SEEDED: the materialized auth.json is the whole credential — no
+		// provider-key env (D7).
+		return append(env, corev1.EnvVar{
+			Name: "OPENCODE_AUTH_JSON",
 			ValueFrom: &corev1.EnvVarSource{
 				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: opencodeSecretName},
-					Key:                  prov.secretKey,
-					// NOT Optional: fail closed if the selected provider key is absent.
+					LocalObjectReference: corev1.LocalObjectReference{Name: sessionSecretName(name)},
+					Key:                  secretKeyOpencodeAuthJSON,
+					// NOT Optional: CreateSession wrote the key.
 				},
 			},
-		},
+		})
 	}
+	// FALLBACK: the single selected provider key from the shared Secret.
+	prov := resolveOpencodeProvider(spec.OpencodeProvider)
+	return append(env, corev1.EnvVar{
+		Name: prov.envName,
+		ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: opencodeSecretName},
+				Key:                  prov.secretKey,
+				// NOT Optional: fail closed if the selected provider key is absent.
+			},
+		},
+	})
 }
 
 // codexEnv builds the env for a codex-app-server pod, mirroring opencodeEnv's

@@ -50,6 +50,30 @@ const (
 	OpencodeProviderZen       = "opencode-zen"
 )
 
+// OpencodeProviderEntryKey maps our OpencodeProvider wire vocabulary to the key
+// opencode itself uses for that provider INSIDE auth.json (the map key `opencode
+// auth login` writes). The two agree for Anthropic and OpenAI, but opencode
+// stores its Zen (hosted) credential under the key "opencode" — NOT our wire
+// value "opencode-zen" — so anything keyed on the raw wire value would miss the
+// Zen entry. This is the SINGLE source of truth for that mapping: the client's
+// seed-validation check (opencodeAuthEntryKey) and internal/k8s's
+// SANDBOX_OPENCODE_PROVIDER env both route through it. Empty maps to the default
+// (anthropic), matching the "empty means Anthropic" contract on OpencodeProvider;
+// an unknown value passes through unchanged rather than being silently rewritten
+// (create-time validation rejects unknowns first).
+func OpencodeProviderEntryKey(provider string) string {
+	switch provider {
+	case "", OpencodeProviderAnthropic:
+		return "anthropic"
+	case OpencodeProviderOpenAI:
+		return "openai"
+	case OpencodeProviderZen:
+		return "opencode"
+	default:
+		return provider
+	}
+}
+
 // ID is a sandbox session identifier, e.g. "claude-sdk-7f3a".
 type ID string
 
