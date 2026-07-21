@@ -1391,12 +1391,16 @@ func TestCreateSessionNoCodexCredential(t *testing.T) {
 	}
 }
 
-// TestCreateSessionStripsCodexCredentialOnRecreate: re-creating a codex session id
-// without an account strips the stale codex-auth-json key + label (the codex env
-// shape is not detected by anthropicEnvShape, so unlike the anthropic path the
-// re-create is not rejected — it reconciles via syncSessionCredential). Other keys
-// stay intact.
-func TestCreateSessionStripsCodexCredentialOnRecreate(t *testing.T) {
+// TestCreateSessionRejectsCodexAuthShapeChange guards the C3 re-create contract
+// for the codex family: the pod template baked CODEX_AUTH_JSON as a NOT-Optional
+// SecretKeyRef into the per-session Secret at first create, so an accountless
+// re-create — whose desired shape is OPENAI_API_KEY from the shared
+// opencode-credentials Secret — must be REJECTED before any Secret mutation.
+// The former behavior (strip codex-auth-json and proceed) would brick the next
+// resume: the baked SecretKeyRef still points at the stripped key, so the pod
+// could never resolve its env and start. The existing Secret and Sandbox must
+// be left fully intact by the rejected call.
+func TestCreateSessionRejectsCodexAuthShapeChange(t *testing.T) {
 	ctx := context.Background()
 	b := newTestBackend(t)
 
@@ -1416,26 +1420,82 @@ func TestCreateSessionStripsCodexCredentialOnRecreate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get secret: %v", err)
 	}
-	origToken := before.Data[secretKeyRunnerToken]
 
 	noAccount := withAccount
 	noAccount.CodexAccountID = ""
 	noAccount.CodexAuthJSON = nil
-	if _, err := b.CreateSession(ctx, noAccount); err != nil {
-		t.Fatalf("second create: %v", err)
+	_, err = b.CreateSession(ctx, noAccount)
+	if err == nil {
+		t.Fatal("expected a codex shape-change re-create to be rejected")
+	}
+	if !strings.Contains(err.Error(), "different auth shape") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 
+	// The rejected call must not have mutated the Secret (or rolled anything
+	// back — the session pre-existed).
 	after, err := b.core.CoreV1().Secrets("agent-sessions").Get(ctx, sessionSecretName("codex-app-server-strip"), metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get secret after: %v", err)
 	}
-	if _, ok := after.Data[secretKeyCodexAuthJSON]; ok {
-		t.Error("codex-auth-json key must be stripped on accountless re-create")
+	if string(after.Data[secretKeyCodexAuthJSON]) != `{"tokens":{"access_token":"OLD"}}` {
+		t.Error("rejected re-create mutated the codex-auth-json key")
 	}
-	if _, ok := after.Labels[labelCodexAccount]; ok {
-		t.Error("codex account label must be stripped on accountless re-create")
+	if after.Labels[labelCodexAccount] != "acct-old" {
+		t.Error("rejected re-create mutated the codex account label")
+	}
+	if string(after.Data[secretKeyRunnerToken]) != string(before.Data[secretKeyRunnerToken]) {
+		t.Error("runner-token changed across a rejected re-create")
+	}
+	if _, gerr := b.agents.AgentsV1alpha1().Sandboxes("agent-sessions").Get(ctx, "codex-app-server-strip", metav1.GetOptions{}); gerr != nil {
+		t.Errorf("pre-existing Sandbox must survive the rejected re-create: %v", gerr)
+	}
+}
+
+// TestCreateSessionSameShapeCodexAccountSwapPatchesSecret pins the still-allowed
+// codex re-create: a DIFFERENT account of the SAME shape (both with an auth.json
+// in the per-session Secret, so the baked CODEX_AUTH_JSON SecretKeyRef is
+// unchanged) patches the credential bytes + account label in place — the C3
+// shape gate must not block it.
+func TestCreateSessionSameShapeCodexAccountSwapPatchesSecret(t *testing.T) {
+	ctx := context.Background()
+	b := newTestBackend(t)
+
+	spec := session.Spec{
+		ID:             "codex-app-server-swap",
+		ProjectPath:    "/tmp",
+		Backend:        session.BackendCodex,
+		RunnerImage:    "test:latest",
+		SSHPublicKey:   "ssh-ed25519 AAAAKEY user@host",
+		CodexAccountID: "acct-old",
+		CodexAuthJSON:  []byte(`{"tokens":{"access_token":"OLD"}}`),
+	}
+	if _, err := b.CreateSession(ctx, spec); err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+	before, err := b.core.CoreV1().Secrets("agent-sessions").Get(ctx, sessionSecretName("codex-app-server-swap"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get secret: %v", err)
+	}
+	origToken := before.Data[secretKeyRunnerToken]
+
+	swapped := spec
+	swapped.CodexAccountID = "acct-new"
+	swapped.CodexAuthJSON = []byte(`{"tokens":{"access_token":"NEW"}}`)
+	if _, err := b.CreateSession(ctx, swapped); err != nil {
+		t.Fatalf("same-shape codex account swap must succeed: %v", err)
+	}
+	after, err := b.core.CoreV1().Secrets("agent-sessions").Get(ctx, sessionSecretName("codex-app-server-swap"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get secret: %v", err)
+	}
+	if string(after.Data[secretKeyCodexAuthJSON]) != `{"tokens":{"access_token":"NEW"}}` {
+		t.Error("codex account swap did not patch the credential bytes")
+	}
+	if after.Labels[labelCodexAccount] != "acct-new" {
+		t.Error("codex account swap did not patch the account label")
 	}
 	if string(after.Data[secretKeyRunnerToken]) != string(origToken) {
-		t.Error("runner-token must be preserved across the credential strip")
+		t.Error("runner-token must be preserved across the credential patch")
 	}
 }

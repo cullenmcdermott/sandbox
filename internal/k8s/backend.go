@@ -445,18 +445,19 @@ func (b *Backend) CreateSession(ctx context.Context, spec session.Spec) (_ sessi
 			// prior CreateSession call — the rollback defer must not delete them.
 			secretPreexisted = true
 			// C3: the existing Sandbox's pod template baked the credential env
-			// SHAPE — the env var name (oauth vs api-key) and its source Secret
-			// (per-session vs shared) — at first create, and only a destroy can
-			// change it. A re-create whose shape differs (e.g. an oauth+account
-			// session re-created with a console key, or an account session
-			// re-created accountless) would leave the pod reading the wrong
-			// env/Secret and break auth silently — and stripping/patching the
-			// Secret for it could brick the next resume (the baked SecretKeyRef
-			// is not Optional). Reject BEFORE mutating the Secret.
+			// SHAPE — the env var name (oauth vs api-key, or codex auth.json vs
+			// shared OpenAI key) and its source Secret (per-session vs shared) —
+			// at first create, and only a destroy can change it. A re-create
+			// whose shape differs (e.g. an oauth+account session re-created with
+			// a console key, or an anthropic/codex account session re-created
+			// accountless) would leave the pod reading the wrong env/Secret and
+			// break auth silently — and stripping/patching the Secret for it
+			// could brick the next resume (the baked SecretKeyRef is not
+			// Optional). Reject BEFORE mutating the Secret.
 			if spec.Backend != session.BackendOpenCode {
 				if existingSb, gerr := b.agents.AgentsV1alpha1().Sandboxes(spec.Namespace).Get(gctx, name, metav1.GetOptions{}); gerr == nil {
-					wantEnv, wantSrc := anthropicEnvShape(sb)
-					gotEnv, gotSrc := anthropicEnvShape(existingSb)
+					wantEnv, wantSrc := credentialEnvShape(sb)
+					gotEnv, gotSrc := credentialEnvShape(existingSb)
 					if wantEnv != gotEnv || wantSrc != gotSrc {
 						return fmt.Errorf(
 							"k8s: session %s already exists with a different auth shape (%s from Secret %q; this create wants %s from Secret %q) — destroy and re-create the session, or select a matching account",
@@ -519,13 +520,15 @@ func (b *Backend) CreateSession(ctx context.Context, spec session.Spec) (_ sessi
 				b.warnIfOpencodeCredsRotated(ctx, existing)
 			} else {
 				// C3: the existing pod template baked the credential env SHAPE — the
-				// env var name (oauth vs api-key) and its source Secret (per-session
-				// vs shared) — at first create; the Secret sync above only refreshes
-				// bytes. A re-create that changes the shape (e.g. an oauth session
-				// re-created with a console account) would inject the new credential
-				// under the OLD env var and break auth silently. Reject it loudly.
-				wantEnv, wantSrc := anthropicEnvShape(sb)
-				gotEnv, gotSrc := anthropicEnvShape(existing)
+				// env var name (oauth vs api-key, or codex auth.json vs shared OpenAI
+				// key) and its source Secret (per-session vs shared) — at first
+				// create; the Secret sync above only refreshes bytes. A re-create
+				// that changes the shape (e.g. an oauth session re-created with a
+				// console account, or a codex account session re-created accountless)
+				// would inject the new credential under the OLD env var and break
+				// auth silently. Reject it loudly.
+				wantEnv, wantSrc := credentialEnvShape(sb)
+				gotEnv, gotSrc := credentialEnvShape(existing)
 				if wantEnv != gotEnv || wantSrc != gotSrc {
 					return session.Ref{}, fmt.Errorf(
 						"k8s: session %s already exists with a different auth shape (%s from Secret %q; this create wants %s from Secret %q) — destroy and re-create the session, or select a matching account",
@@ -626,15 +629,25 @@ func (b *Backend) setPVCOwnerRef(ctx context.Context, namespace, name string, ow
 	}
 }
 
-// anthropicEnvShape extracts the Anthropic credential env shape from a Sandbox
-// pod template: the env var name (the credential TYPE — CLAUDE_CODE_OAUTH_TOKEN
-// vs ANTHROPIC_API_KEY) and the Secret it reads from (the SOURCE — per-session
-// vs shared). Zero values when no credential env is present. Used by the C3
-// re-create shape check; see buildEnv for the shape's semantics.
-func anthropicEnvShape(sb *agentv1alpha1.Sandbox) (envName, secretName string) {
+// credentialEnvShape extracts the account-credential env shape from a Sandbox
+// pod template, across both credential families the C3 re-create guard covers
+// (mirroring how reconcileSecretCredential generalizes the Secret-sync side):
+// the env var name (the credential TYPE — CLAUDE_CODE_OAUTH_TOKEN vs
+// ANTHROPIC_API_KEY for the anthropic family, CODEX_AUTH_JSON vs OPENAI_API_KEY
+// for the codex family) and the Secret it reads from (the SOURCE — per-session
+// vs shared). Zero values when no credential env is present. A session is a
+// single backend, so a pod template carries at most one family's env — the
+// first match wins. Used by the C3 re-create shape check; see buildEnv and
+// codexEnv for each shape's semantics. (opencode pods also inject provider env
+// vars like ANTHROPIC_API_KEY/OPENAI_API_KEY, but the C3 guard never runs for
+// opencode — that backend reconciles via warnIfOpencodeCredsRotated instead.)
+func credentialEnvShape(sb *agentv1alpha1.Sandbox) (envName, secretName string) {
 	for i := range sb.Spec.PodTemplate.Spec.Containers {
 		for _, e := range sb.Spec.PodTemplate.Spec.Containers[i].Env {
-			if e.Name != "CLAUDE_CODE_OAUTH_TOKEN" && e.Name != "ANTHROPIC_API_KEY" {
+			switch e.Name {
+			case "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", // anthropic family (claude-sdk)
+				"CODEX_AUTH_JSON", "OPENAI_API_KEY": // codex family (account vs shared fallback)
+			default:
 				continue
 			}
 			if e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil {
