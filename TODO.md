@@ -160,6 +160,37 @@ row-model consolidation moved to §2a where it belongs.
   forwarded; offset clamps at history length; wheel with mouse-tracking
   enabled still forwards to the child. Run
   `go test ./internal/tui/dashboard/` + `-race -run 'Pane|External'`.
+- [ ] **[L8] Stuck "working": busy is set optimistically and its only
+  clearers can miss; the staleness release never tells the dashboard
+  (HIGH-visibility, live-diagnosed 2026-07-21 00:04 on
+  claude-pane-df80e6-54d205d0).** Evidence from the pod's events.db:
+  `turn.started` 05:04:16Z with ZERO model activity after (no
+  message/tool/Stop), statusline events at 05:24 — session showed
+  "working" for 20+ min while idle. Mechanism (all confirmed in code):
+  (1) `UserPromptSubmit` → `setStatus('busy')` + turn.started
+  (`claude-pane-observer.ts` case 'UserPromptSubmit') fires for EVERY
+  submission — including slash/local commands and prompts interrupted
+  before the model starts — but busy is cleared ONLY by `closeTurn()`
+  (case 'Stop', or the supervisor crash-abort). No model turn ⇒ no Stop ⇒
+  busy forever. (2) The SYNTHETIC_BUSY_STALE_MS release
+  (`session.ts` `recomputeIdle`/`syntheticBusyStale`) is reaper-only: it
+  flips idle-ELIGIBILITY, requires `isDetached()`, is evaluated lazily
+  (on ingest/clients-changed — no timer), and never mutates
+  `state.status` nor emits `session.status_changed` — the dashboard is
+  never corrected. (3) No Esc-interrupt hook is mapped (Stop is
+  graceful-only). Fix direction, runner-side: (a) provisional busy — on
+  UserPromptSubmit arm a ~10s confirm window; if no model-activity hook
+  (message.*, PreToolUse, PermissionRequest) follows, revert to idle and
+  emit the status event (timer-driven, not ingest-lazy); (b) when
+  synthetic busy goes stale, actually `setStatus('idle')` + emit
+  `session.status_changed` regardless of attachment (keep the reaper
+  side-effect); (c) probe whether claude fires ANY hook on Esc-interrupt
+  (E1 hookprobe method) and map it to `closeTurn('interrupted')`.
+  Dashboard follow-up (separate, needs design): an honest
+  "stalled?" rendering for busy-with-quiet-observer beats a false
+  "working". Tests: observer suite — UserPromptSubmit alone reverts to
+  idle after the window; UserPromptSubmit+message.started stays busy;
+  stale release emits the status event. Run `cd runner && npm test`.
 - [ ] **[L3] Detached feed opens empty — host event cache has a reader but no
   writer (MED).** `app.go` `openFeed` seeds from `eventCache.LoadEvents` but
   `AppendEvent` has zero production callers (orphaned by a935541);
