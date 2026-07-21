@@ -1113,9 +1113,9 @@ do well is recorded there too; fix in roughly this order):
 - [ ] **[O1] `sandbox --help` example broken by pane-first** —
   `internal/cli/root.go:41` positional prompt vs `cobra.NoArgs`; also stale
   Long text :37 + package doc :2.
-- [ ] **[O2] Project CLAUDE.md still describes the deleted SDK engine** —
-  :7/:115/:132 (`src/claude.ts` gone)/:149-150; rewrite runner table +
-  lifecycle steps to match architecture.md.
+- [x] **[O2] done 2026-07-20 (1dbf495):** CLAUDE.md rewritten for
+  pane-first — intro, runner file table, event-model wording, session
+  lifecycle, and command tree all match architecture.md and the code.
 - [ ] **[O3] `auth status` + `doctor` report pre-pane claude auth** —
   `internal/authstatus/providers.go:31-36` env-only probe;
   `internal/cli/doctor.go:287` names a shared Secret that doesn't exist for
