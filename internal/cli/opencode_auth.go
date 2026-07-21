@@ -198,27 +198,12 @@ func parseSeedProviders(csv string) ([]string, error) {
 }
 
 // opencodeProviderEntryKey maps our OpencodeProvider wire vocabulary to the key
-// opencode itself uses INSIDE auth.json. It agrees with the wire value for
-// Anthropic and OpenAI, but opencode stores its Zen (hosted) credential under the
-// key "opencode" — NOT our wire value "opencode-zen". Empty maps to the default
-// provider ("anthropic"), matching client.validateOpencodeProvider's contract.
-//
-// This duplicates the (unexported) client.opencodeAuthEntryKey deliberately — a
-// session.OpencodeProviderEntryKey helper is landing on a parallel task; converge
-// this onto it once it exists rather than keeping two copies.
+// opencode itself uses INSIDE auth.json (Zen's credential is stored under
+// "opencode", not the wire value "opencode-zen"). It delegates to the shared
+// session.OpencodeProviderEntryKey so the CLI, the client SDK, and the k8s
+// transport all agree on one mapping.
 func opencodeProviderEntryKey(provider string) string {
-	switch provider {
-	case "", session.OpencodeProviderAnthropic:
-		return "anthropic"
-	case session.OpencodeProviderOpenAI:
-		return "openai"
-	case session.OpencodeProviderZen:
-		return "opencode"
-	default:
-		// Unreachable for a validated --provider (client.Create rejects unknowns);
-		// pass the value through rather than silently rewriting it.
-		return provider
-	}
+	return session.OpencodeProviderEntryKey(provider)
 }
 
 // opencodeSeedWireEntryKey maps ONE --seed-providers wire value to its auth.json
