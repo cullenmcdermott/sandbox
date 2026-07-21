@@ -5,13 +5,13 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/cullenmcdermott/sandbox/client"
 	"github.com/cullenmcdermott/sandbox/internal/k8s"
+	"github.com/cullenmcdermott/sandbox/internal/projpath"
 	"github.com/cullenmcdermott/sandbox/internal/session"
 	"github.com/cullenmcdermott/sandbox/internal/tui/dashboard"
 )
@@ -138,16 +138,15 @@ func parseWorktreeMode(s string) (client.WorktreeMode, error) {
 
 // resolveProjectPath returns the absolute, symlink-resolved current working
 // directory — the project path mirrored into the session pod so the SDK's
-// transcript keys stay host-compatible.
+// transcript keys stay host-compatible. The normalization itself lives in
+// internal/projpath so the dashboard's directory picker canonicalizes
+// user-entered paths identically (T10).
 func resolveProjectPath() (string, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return "", fmt.Errorf("get cwd: %w", err)
 	}
-	if p, err := filepath.EvalSymlinks(cwd); err == nil {
-		return p, nil
-	}
-	return cwd, nil
+	return projpath.Canonicalize(cwd)
 }
 
 // runStartSession creates a new remote session for the given backend in the
@@ -253,7 +252,7 @@ func runStartSession(cmd *cobra.Command, backendName, prompt, runnerImage, reape
 			newDashboardCreator(c, runnerImage, reaperImage),
 			dashSess,
 			prompt,
-			dashboard.RunOptions{TitleStore: indexTitleStore{}, SnapshotStore: indexSnapshotStore{}, ObserverConnector: newDashboardObserverConnector(c, reaperImage), SyncProber: dashboardSyncProber(), SyncReaper: dashboardSyncReaper(), IdleTimeout: defaultReaperIdleTimeout, AccountStore: newDashboardAccountStore(), WorktreeOps: newWorktreeOps(c)},
+			dashboard.RunOptions{TitleStore: indexTitleStore{}, SnapshotStore: indexSnapshotStore{}, ObserverConnector: newDashboardObserverConnector(c, reaperImage), SyncProber: dashboardSyncProber(), SyncReaper: dashboardSyncReaper(), IdleTimeout: defaultReaperIdleTimeout, AccountStore: newDashboardAccountStore(), WorktreeOps: newWorktreeOps(c), RecentProjects: indexRecentProjects},
 		)
 	})
 }

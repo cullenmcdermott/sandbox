@@ -90,14 +90,25 @@ func newAccountPickerApp(t *testing.T, store AccountStore) (*App, chan CreatePar
 	return app, ch
 }
 
-// openAccountStage drives `n` → enter(claude) so the app lands on the account
-// stage. It asserts the transition happened.
-func openAccountStage(t *testing.T, app *App) {
+// openBackendStage drives `n` → enter(cwd) through the leading directory stage
+// (T10) so the app lands on the backend stage. It asserts both transitions.
+func openBackendStage(t *testing.T, app *App) {
 	t.Helper()
 	app.Update(createSessionMsg{})
-	if !app.picker.open || app.picker.stage != stageBackend {
-		t.Fatalf("createSessionMsg did not open the backend picker: open=%v stage=%v", app.picker.open, app.picker.stage)
+	if !app.picker.open || app.picker.stage != stageDir {
+		t.Fatalf("createSessionMsg did not open the directory stage: open=%v stage=%v", app.picker.open, app.picker.stage)
 	}
+	app.Update(keyMsg("enter")) // accept cwd (the default row)
+	if app.picker.stage != stageBackend {
+		t.Fatalf("accepting cwd did not enter the backend stage: stage=%v", app.picker.stage)
+	}
+}
+
+// openAccountStage drives `n` → enter(cwd) → enter(claude) so the app lands on
+// the account stage. It asserts the transitions happened.
+func openAccountStage(t *testing.T, app *App) {
+	t.Helper()
+	openBackendStage(t, app)
 	app.Update(keyMsg("enter")) // claude is the default (sel 0)
 	if app.picker.stage != stageAccount {
 		t.Fatalf("selecting claude did not enter the account stage: stage=%v", app.picker.stage)
@@ -127,6 +138,7 @@ func TestAccountPickerZeroAccountsOpensStage(t *testing.T) {
 	app, _ := newAccountPickerApp(t, &fakeAccountStore{accounts: nil})
 
 	app.Update(createSessionMsg{})
+	app.Update(keyMsg("enter")) // accept cwd (directory stage, T10)
 	app.Update(keyMsg("enter")) // claude
 	if !app.picker.open || app.picker.stage != stageAccount {
 		t.Fatalf("zero accounts: overlay should stay on the account stage: open=%v stage=%v", app.picker.open, app.picker.stage)
@@ -157,6 +169,7 @@ func TestAccountPickerZeroAccountsHostLoginParity(t *testing.T) {
 	app, ch := newAccountPickerApp(t, &fakeAccountStore{accounts: nil})
 
 	app.Update(createSessionMsg{})
+	app.Update(keyMsg("enter")) // accept cwd (directory stage, T10)
 	app.Update(keyMsg("enter")) // claude → account stage
 	if app.picker.stage != stageAccount || app.picker.sel != 0 {
 		t.Fatalf("zero accounts: stage=%v sel=%d, want stageAccount sel=0 (host login)", app.picker.stage, app.picker.sel)
@@ -185,6 +198,7 @@ func TestAccountPickerZeroAccountsAddAccountEntersAddFlow(t *testing.T) {
 	app, _ := newAccountPickerApp(t, &fakeAccountStore{accounts: nil})
 
 	app.Update(createSessionMsg{})
+	app.Update(keyMsg("enter")) // accept cwd (directory stage, T10)
 	app.Update(keyMsg("enter")) // claude → account stage
 	// Rows: [host-login(0), add-account(1)]. Move to add account.
 	app.Update(keyMsg("down"))
@@ -305,6 +319,7 @@ func TestAccountPickerListErrorFailsClosed(t *testing.T) {
 	app, ch := newAccountPickerApp(t, store)
 
 	app.Update(createSessionMsg{})
+	app.Update(keyMsg("enter")) // accept cwd (directory stage, T10)
 	app.Update(keyMsg("enter")) // claude
 	if !app.picker.open || app.picker.stage != stageAccount {
 		t.Fatalf("list error: overlay should stay on the account stage: open=%v stage=%v", app.picker.open, app.picker.stage)
@@ -598,7 +613,8 @@ func TestOpencodeSelectionUnchanged(t *testing.T) {
 	store := &fakeAccountStore{accounts: []AccountInfo{{ID: "acct-aaaa", Label: "personal", Type: "console"}}}
 	app, ch := newAccountPickerApp(t, store)
 	app.Update(createSessionMsg{})
-	app.Update(keyMsg("down")) // opencode (sel 1)
+	app.Update(keyMsg("enter")) // accept cwd (directory stage, T10)
+	app.Update(keyMsg("down"))  // opencode (sel 1)
 	app.Update(keyMsg("enter"))
 	if app.picker.open {
 		t.Error("opencode selection should create immediately (no account step)")

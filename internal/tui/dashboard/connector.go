@@ -161,10 +161,18 @@ type CreateParams struct {
 	// either no accounts are stored or the user explicitly chose "cluster
 	// default". Ignored for non-claude backends (opencode has no account step).
 	AnthropicAccountID string
+	// ProjectPath is the host project directory the new session mirrors, chosen
+	// in the create overlay's directory picker (T10) — already ~-expanded and
+	// canonicalized by the picker. Empty means the Creator's default: the
+	// dashboard process's working directory (the pre-picker behavior, and what
+	// the CLI commands always use). The CLI-side Creator re-validates a non-empty
+	// path fail-closed (the directory may have vanished between pick and create).
+	ProjectPath string
 }
 
-// Creator provisions a brand-new session for the dashboard's working directory
-// and returns a live connection ready to attach. Like Connector, it is
+// Creator provisions a brand-new session for the picked project directory
+// (params.ProjectPath, falling back to the dashboard's working directory) and
+// returns a live connection ready to attach. Like Connector, it is
 // implemented in internal/cli and injected into dashboard.Run so the dashboard
 // package never imports cli. It owns ID generation, SSH-key prep, Sandbox/PVC
 // creation, pod start, port-forward, and health-check.

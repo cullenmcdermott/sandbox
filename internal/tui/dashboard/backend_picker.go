@@ -3,10 +3,12 @@ package dashboard
 // backend_picker.go — the new-session backend picker (Mockup: `n` opens a small
 // centered overlay to choose which agent backend a new session runs). It mirrors
 // the ⌃K switcher's interaction model (↑/↓ select, enter confirm, esc cancel)
-// but lives on the App, which owns the Creator. Selecting opencode dispatches
-// createCmd immediately; selecting claude drills into the Anthropic account
-// stage (account_picker.go) when stored accounts exist. esc from the backend
-// stage returns to the dashboard without provisioning.
+// but lives on the App, which owns the Creator. The overlay opens on the
+// project-directory stage (dirpicker.go, T10) and advances here; selecting
+// opencode then dispatches createCmd immediately, while claude drills into the
+// Anthropic account stage (account_picker.go) when stored accounts exist. esc
+// from the backend stage walks back to the directory stage; esc there returns
+// to the dashboard without provisioning.
 
 import (
 	"strings"
@@ -35,15 +37,21 @@ var backendChoices = []backendChoice{
 }
 
 // pickerStage identifies which step of the new-session overlay is active. The
-// overlay is a small state machine: backend → (for claude, when accounts exist)
-// account → add-account type → label → login/console form. esc walks one step
-// back; from the backend stage it closes to the dashboard. See pickerKey for
-// the transitions.
+// overlay is a small state machine: directory → backend → (for claude, when
+// accounts exist) account → add-account type → label → login/console form. esc
+// walks one step back; from the directory stage it closes to the dashboard.
+// See pickerKey for the transitions.
 type pickerStage int
 
 const (
-	// stageBackend is the initial claude/opencode chooser.
-	stageBackend pickerStage = iota
+	// stageDir is the initial project-directory chooser (dirpicker.go, T10):
+	// cwd, recent project paths, and a free-text entry.
+	stageDir pickerStage = iota
+	// stageDirInput is the free-text path entry reached from stageDir's
+	// "other path" row (~-expansion, Tab-completion, must-exist validation).
+	stageDirInput
+	// stageBackend is the claude/opencode chooser.
+	stageBackend
 	// stageAccount is the per-account chooser shown after "claude" when stored
 	// accounts exist (rows: accounts, "cluster default", "＋ add account").
 	stageAccount
@@ -70,6 +78,14 @@ type backendPicker struct {
 	open  bool
 	stage pickerStage
 	sel   int
+
+	// dirRows are the selectable project-directory rows built when the overlay
+	// opens (stageDir, dirpicker.go): cwd, recents, free-text entry.
+	dirRows []dirRow
+	// projectPath is the accepted project directory (canonical form), threaded
+	// into CreateParams.ProjectPath by the beginCreate funnel. "" until the
+	// directory stage accepts a choice.
+	projectPath string
 
 	// accounts is the metadata list loaded when entering stageAccount (no secret
 	// bytes). Populated from the injected AccountStore.
@@ -99,9 +115,12 @@ type backendPicker struct {
 	formErr error
 }
 
-// openBackendPicker shows the picker with the default backend selected.
+// openBackendPicker shows the new-session overlay at its first stage — the
+// project-directory chooser (T10), with the cwd row selected so a plain
+// enter-enter keeps the old cwd flow.
 func (a *App) openBackendPicker() {
-	a.picker = backendPicker{open: true, stage: stageBackend, sel: 0}
+	a.picker = backendPicker{open: true}
+	a.enterDirStage()
 }
 
 // closeBackendPicker hides the picker.
@@ -115,6 +134,10 @@ func (a *App) closeBackendPicker() {
 // before the shared navigation keys.
 func (a *App) pickerKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 	switch a.picker.stage {
+	case stageDir:
+		return a.pickerKeyDir(msg)
+	case stageDirInput:
+		return a.pickerKeyDirInput(msg)
 	case stageBackend:
 		return a.pickerKeyBackend(msg)
 	case stageAccount:
@@ -130,15 +153,15 @@ func (a *App) pickerKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 }
 
 // pickerPaste forwards a bracketed-paste event to the active text field. Only
-// the label and console-key form stages own a text input; other stages have no
-// field to paste into, so paste is a no-op there. Without this route a pasted
+// the path, label, and console-key form stages own a text input; other stages
+// have no field to paste into, so paste is a no-op there. Without this route a pasted
 // console API key (the field whose placeholder literally says "paste your
 // Anthropic Console API key") would be silently dropped — pastes arrive as
 // tea.PasteMsg, never tea.KeyPressMsg, so pickerKey never sees them. bubbles'
 // textinput consumes tea.PasteMsg natively in Update.
 func (a *App) pickerPaste(msg tea.PasteMsg) (tea.Cmd, bool) {
 	switch a.picker.stage {
-	case stageLabelForm, stageConsoleForm:
+	case stageDirInput, stageLabelForm, stageConsoleForm:
 		ti, cmd := a.picker.input.Update(msg)
 		a.picker.input = ti
 		return cmd, true
@@ -146,14 +169,15 @@ func (a *App) pickerPaste(msg tea.PasteMsg) (tea.Cmd, bool) {
 	return nil, false
 }
 
-// pickerKeyBackend handles the initial claude/opencode chooser. Selecting a
-// non-claude backend provisions immediately. Selecting claude transitions to the
-// account picker when stored accounts exist; with no store or zero accounts it
-// keeps today's UX and creates on the shared Secret immediately.
+// pickerKeyBackend handles the claude/opencode chooser. Selecting a non-claude
+// backend provisions immediately. Selecting claude transitions to the account
+// picker when stored accounts exist; with no store or zero accounts it keeps
+// today's UX and creates on the shared Secret immediately. esc walks back to
+// the directory stage (the overlay's first step), not the dashboard.
 func (a *App) pickerKeyBackend(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 	switch msg.String() {
 	case "esc":
-		a.closeBackendPicker()
+		a.enterDirStage()
 		return nil, true
 	case "up", "k":
 		if a.picker.sel > 0 {
@@ -220,6 +244,10 @@ func (a *App) pickerView() tea.View {
 // swaps its body as the user drills in.
 func (a *App) renderPicker() string {
 	switch a.picker.stage {
+	case stageDir:
+		return a.renderDirPicker()
+	case stageDirInput:
+		return a.renderDirInput()
 	case stageAccount:
 		return a.renderAccountPicker()
 	case stageAddType:

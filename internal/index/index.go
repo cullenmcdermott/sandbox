@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -342,6 +343,42 @@ func (i *Index) Delete(id string) error {
 	}
 	dir := filepath.Join(i.root, id)
 	return os.RemoveAll(dir)
+}
+
+// RecentProjects returns the distinct ProjectPaths of indexed sessions,
+// most-recently-active first (LastActivity, falling back to CreatedAt for
+// entries that never recorded activity), capped at limit (limit <= 0 means
+// uncapped). It backs the recents rows of the dashboard create overlay's
+// directory picker (T10). Best-effort: a listing error yields nil — the picker
+// still offers cwd + free-text entry.
+func (i *Index) RecentProjects(limit int) []string {
+	entries, err := i.List()
+	if err != nil {
+		return nil
+	}
+	activity := func(e Entry) time.Time {
+		if !e.LastActivity.IsZero() {
+			return e.LastActivity
+		}
+		return e.CreatedAt
+	}
+	sort.SliceStable(entries, func(a, b int) bool {
+		return activity(entries[a]).After(activity(entries[b]))
+	})
+	seen := make(map[string]bool, len(entries))
+	var out []string
+	for _, e := range entries {
+		p := e.ProjectPath
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	return out
 }
 
 // List returns all local session index entries.

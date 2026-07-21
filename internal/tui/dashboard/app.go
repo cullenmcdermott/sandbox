@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"image/color"
+	"os"
 	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/cullenmcdermott/sandbox/internal/projpath"
 	"github.com/cullenmcdermott/sandbox/internal/session"
 	"github.com/cullenmcdermott/sandbox/tui/terminal"
 	"github.com/cullenmcdermott/sandbox/tui/theme"
@@ -156,6 +158,20 @@ type App struct {
 	// Secret bytes never cross this interface.
 	accountStore AccountStore
 
+	// workDir is the dashboard process's canonical working directory — the
+	// directory picker's leading row and the pre-picker default (T10). ""
+	// when the cwd could not be determined (the picker then leads with recents).
+	workDir string
+
+	// homeDir backs ~-expansion and ~-abbreviation in the directory picker.
+	// "" disables both (paths render and validate in full form).
+	homeDir string
+
+	// recentProjects lists recently used project paths (most-recent-first,
+	// deduped) for the directory picker's recents rows. Injected via
+	// RunOptions.RecentProjects; nil means no recents section.
+	recentProjects func() []string
+
 	// connector is called in a Cmd to establish a live runner connection.
 	// It is set by Run/NewApp; nil means attach is disabled (unit-test mode).
 	connector Connector
@@ -239,12 +255,25 @@ func NewApp(backend Backend, connector Connector, creator Creator) *App {
 	if connector != nil {
 		dash.WithConnector(connector)
 	}
-	return &App{
+	app := &App{
 		screen:    ScreenDashboard,
 		dashboard: dash,
 		connector: connector,
 		creator:   creator,
 	}
+	// Seed the directory picker's environment (T10). Both are best-effort: a
+	// missing cwd drops the leading row, a missing home just disables ~ forms.
+	if wd, err := os.Getwd(); err == nil {
+		if p, cerr := projpath.Canonicalize(wd); cerr == nil {
+			app.workDir = p
+		} else {
+			app.workDir = wd
+		}
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		app.homeDir = home
+	}
+	return app
 }
 
 // RunOptions configures optional behavior for Run/RunAttached.
@@ -293,6 +322,12 @@ type RunOptions struct {
 	// per-session worktree git surface; only branch/message strings cross this
 	// seam (no LLM, no git internals).
 	WorktreeOps WorktreeOps
+
+	// RecentProjects lists recently used project paths (most-recent-first,
+	// deduped) for the create overlay's directory picker (T10). The concrete
+	// impl (internal/cli) reads the local session index; the dashboard never
+	// imports internal/index. nil means the picker offers only cwd + free-text.
+	RecentProjects func() []string
 }
 
 // applyOpts threads RunOptions into the dashboard model.
@@ -326,6 +361,9 @@ func (a *App) applyOpts(opts []RunOptions) {
 	}
 	if opts[0].WorktreeOps != nil {
 		a.dashboard = a.dashboard.WithWorktreeOps(opts[0].WorktreeOps)
+	}
+	if opts[0].RecentProjects != nil {
+		a.recentProjects = opts[0].RecentProjects
 	}
 }
 

@@ -81,6 +81,57 @@ func TestList(t *testing.T) {
 	}
 }
 
+// RecentProjects orders distinct project paths most-recently-active first,
+// dedupes a path shared by several sessions (keeping its most recent slot),
+// skips entries with no path, and honors the cap (T10 — the dashboard directory
+// picker's recents source).
+func TestRecentProjects(t *testing.T) {
+	dir := t.TempDir()
+	idx := New(dir)
+
+	base := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	save := func(id, path string, last time.Time, created time.Time) {
+		t.Helper()
+		if err := idx.Save(id, Entry{
+			SandboxSessionID: id,
+			ProjectPath:      path,
+			LastActivity:     last,
+			CreatedAt:        created,
+		}); err != nil {
+			t.Fatalf("save %s: %v", id, err)
+		}
+	}
+	save("s-old", "/proj/old", base.Add(1*time.Hour), base)
+	save("s-newest", "/proj/newest", base.Add(4*time.Hour), base)
+	// /proj/dup appears twice; the fresher session must define its rank.
+	save("s-dup-old", "/proj/dup", base.Add(2*time.Hour), base)
+	save("s-dup-new", "/proj/dup", base.Add(3*time.Hour), base)
+	// No LastActivity: falls back to CreatedAt (the freshest of all).
+	save("s-created-only", "/proj/created-only", time.Time{}, base.Add(5*time.Hour))
+	// No path at all: skipped.
+	save("s-no-path", "", base.Add(6*time.Hour), base)
+
+	got := idx.RecentProjects(0)
+	want := []string{"/proj/created-only", "/proj/newest", "/proj/dup", "/proj/old"}
+	if len(got) != len(want) {
+		t.Fatalf("RecentProjects = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("RecentProjects[%d] = %q, want %q (full: %v)", i, got[i], want[i], got)
+		}
+	}
+
+	if capped := idx.RecentProjects(2); len(capped) != 2 || capped[0] != want[0] || capped[1] != want[1] {
+		t.Errorf("RecentProjects(2) = %v, want the top two of %v", capped, want)
+	}
+
+	// Empty index: nil, no error path.
+	if got := New(t.TempDir()).RecentProjects(5); got != nil {
+		t.Errorf("empty index RecentProjects = %v, want nil", got)
+	}
+}
+
 func TestListEmpty(t *testing.T) {
 	dir := t.TempDir()
 	idx := New(dir)

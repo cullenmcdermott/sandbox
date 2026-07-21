@@ -3,9 +3,11 @@ package cli
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/cullenmcdermott/sandbox/client"
+	"github.com/cullenmcdermott/sandbox/internal/projpath"
 	"github.com/cullenmcdermott/sandbox/internal/session"
 	"github.com/cullenmcdermott/sandbox/internal/tui/dashboard"
 )
@@ -157,17 +159,35 @@ func newDashboardObserverConnector(c *client.Client, reaperImage string) dashboa
 	}
 }
 
+// creatorProjectPath resolves the project path for a dashboard-created session
+// (T10): the picker's choice when non-empty — re-validated fail-closed here,
+// because the directory may have vanished between pick and create, and because
+// direct dashboard.Creator callers bypass the picker's own validation — else
+// the process cwd, mirroring `sandbox claude`.
+func creatorProjectPath(picked string) (string, error) {
+	if picked == "" {
+		return resolveProjectPath()
+	}
+	home, _ := os.UserHomeDir() // "" just disables ~-expansion
+	p, err := projpath.ValidateDir(picked, home)
+	if err != nil {
+		return "", fmt.Errorf("project path: %w", err)
+	}
+	return p, nil
+}
+
 // newDashboardCreator returns a dashboard.Creator that provisions a brand-new
-// session for the current working directory and connects to it — the `n` (new
-// session) action. It mirrors `sandbox claude` without a prompt, driven entirely
-// through the public client API.
+// session for the picked project directory (falling back to the current working
+// directory) and connects to it — the `n` (new session) action. It mirrors
+// `sandbox claude` without a prompt, driven entirely through the public client
+// API.
 func newDashboardCreator(c *client.Client, runnerImage, reaperImage string) dashboard.Creator {
 	return func(ctx context.Context, params dashboard.CreateParams, onStage func(dashboard.ConnectStage, string)) (dashboard.CreateResult, error) {
 		backendName := params.Backend
 		if backendName == "" {
 			backendName = client.BackendClaudeSDK
 		}
-		projectPath, err := resolveProjectPath()
+		projectPath, err := creatorProjectPath(params.ProjectPath)
 		if err != nil {
 			return dashboard.CreateResult{}, err
 		}

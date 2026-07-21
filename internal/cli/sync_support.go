@@ -27,6 +27,23 @@ func newIndex() (*index.Index, error) {
 	return index.NewDefault()
 }
 
+// recentProjectsCap bounds how many recent project paths the dashboard's
+// directory picker is offered; the picker's free-text row reaches anything
+// older (T10).
+const recentProjectsCap = 8
+
+// indexRecentProjects backs dashboard.RunOptions.RecentProjects: recently used
+// project paths from the local session index, most-recent-first and deduped.
+// Best-effort — any index error yields nil and the picker still offers cwd +
+// free-text entry.
+func indexRecentProjects() []string {
+	idx, err := newIndex()
+	if err != nil {
+		return nil
+	}
+	return idx.RecentProjects(recentProjectsCap)
+}
+
 // syncManager returns a Mutagen sync Manager backed by the mutagen CLI, for the
 // dashboard's read-only health probe, the orphan GC sweep, and the local-only
 // `sandbox sync` operations.

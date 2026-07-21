@@ -100,8 +100,13 @@ var addTypeChoices = []addTypeChoice{
 
 // beginCreate closes the overlay and provisions a session with the given params,
 // mirroring the original backend-picker enter behavior (connecting screen +
-// createCmd). It is the single funnel every "create now" path routes through.
+// createCmd). It is the single funnel every "create now" path routes through,
+// which is where the directory stage's accepted project path (T10) joins the
+// params — no caller has to remember to thread it.
 func (a *App) beginCreate(params CreateParams) tea.Cmd {
+	if params.ProjectPath == "" {
+		params.ProjectPath = a.picker.projectPath
+	}
 	a.closeBackendPicker()
 	a.connectingFor = &Session{Title: "new session"}
 	a.connectErr = nil

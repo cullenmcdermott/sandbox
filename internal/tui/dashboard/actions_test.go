@@ -539,6 +539,7 @@ func TestBackendPickerSelectsBackend(t *testing.T) {
 	if app.screen != ScreenDashboard {
 		t.Errorf("picker should overlay the dashboard, screen = %v", app.screen)
 	}
+	app.Update(keyMsg("enter")) // accept cwd (directory stage, T10) → backend stage
 
 	// Move to the second choice (opencode-server) and confirm.
 	app.Update(keyMsg("down"))

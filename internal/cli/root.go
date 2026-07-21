@@ -85,6 +85,7 @@ func NewRoot() *cobra.Command {
 					IdleTimeout:       defaultReaperIdleTimeout,
 					AccountStore:      newDashboardAccountStore(),
 					WorktreeOps:       newWorktreeOps(c),
+					RecentProjects:    indexRecentProjects,
 				})
 			})
 		},
