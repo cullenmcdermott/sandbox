@@ -224,7 +224,11 @@ Mutagen runs three session groups (see `internal/sync`):
    path the workspace subtree is bind-mounted at, two-way-safe; both endpoints
    are `Spec.WorkspacePath` — the per-session worktree when one exists, else
    the repo root),
-2. **config inputs** — `~/.claude/{skills,agents,commands,hooks}` → pod (one-way), and
+2. **config inputs** — `~/.claude/{skills,agents,commands,hooks,statusline}` →
+   pod (one-way; `statusline/user-statusline` is the host-provided executable
+   the claude pane's provisioned statusline chains to — a sibling of the
+   runner-owned `pane-observer/` dir so host sync can never touch the observer
+   token), and
 3. **transcripts** — pod `/session/state/claude/{projects,todos,tasks}`
    (`CLAUDE_CONFIG_DIR`) → local `~/.claude/{projects,todos,tasks}` (one-way).
 

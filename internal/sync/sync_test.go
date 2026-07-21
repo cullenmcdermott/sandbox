@@ -100,9 +100,9 @@ func TestCreateAll(t *testing.T) {
 		t.Fatal("CreateAll should report created=true when the project session is freshly made")
 	}
 
-	// Should have created: 1 project + 4 config + 3 transcripts = 8 sessions
-	if len(r.calls) != 8 {
-		t.Fatalf("got %d calls, want 8", len(r.calls))
+	// Should have created: 1 project + 5 config + 3 transcripts = 9 sessions
+	if len(r.calls) != 9 {
+		t.Fatalf("got %d calls, want 9", len(r.calls))
 	}
 
 	// First call should be the project sync with two-way-safe
@@ -118,7 +118,7 @@ func TestCreateAll(t *testing.T) {
 	// path must be the alpha (first positional) arg and SSHHost:remote the beta.
 	// A swapped alpha/beta would silently invert push/pull, yet still contain
 	// "one-way-safe" — so assert the endpoint ORDER, not just the mode.
-	for i := 1; i <= 4; i++ {
+	for i := 1; i <= 5; i++ {
 		call := strings.Join(r.calls[i], " ")
 		if !strings.Contains(call, "one-way-safe") {
 			t.Errorf("config sync %d should be one-way-safe: %s", i, call)
@@ -135,7 +135,7 @@ func TestCreateAll(t *testing.T) {
 	// Verify transcript syncs use one-way-safe AND pull remote -> host: here
 	// SSHHost:remote must be the alpha and the local path the beta — the
 	// mirror image of the config direction.
-	for i := 5; i <= 7; i++ {
+	for i := 6; i <= 8; i++ {
 		call := strings.Join(r.calls[i], " ")
 		if !strings.Contains(call, "one-way-safe") {
 			t.Errorf("transcript sync %d should be one-way-safe: %s", i, call)
@@ -298,10 +298,10 @@ func TestCreateProjectNoProjectPath(t *testing.T) {
 	}
 }
 
-// CreateInputs creates the 7 non-load-bearing config/transcript syncs (4+3) and
+// CreateInputs creates the 8 non-load-bearing config/transcript syncs (5+3) and
 // nothing else — never the project sync — so the connect path can run it off the
 // foreground (§5).
-func TestCreateInputsCreatesSeven(t *testing.T) {
+func TestCreateInputsCreatesEight(t *testing.T) {
 	r := &fakeRunner{}
 	m := New(r)
 	spec := Spec{
@@ -328,6 +328,46 @@ func TestCreateInputsCreatesSeven(t *testing.T) {
 		if !strings.Contains(joined, "one-way-safe") {
 			t.Errorf("input sync %d should be one-way-safe: %s", i, joined)
 		}
+	}
+}
+
+// The claude-pane user-statusline chain reads the host-synced script from
+// <RemoteClaude>/statusline/user-statusline (runner/src/claude-pane-observer.ts,
+// STATUSLINE_SCRIPT candidate list), so pin the ConfigInputsSubs entry: the
+// host→remote endpoints and — critically — that it targets the statusline/
+// SIBLING dir, never the runner-owned pane-observer/ dir holding the
+// runner-minted observer token.
+func TestConfigInputsSyncStatuslineEntry(t *testing.T) {
+	r := &fakeRunner{}
+	m := New(r)
+	spec := Spec{
+		SessionID:    "s",
+		HomeDir:      "/Users/cullen",
+		SSHHost:      "sandbox-s",
+		RemoteClaude: "/session/state/claude",
+	}
+	if err := m.CreateInputs(context.Background(), spec); err != nil {
+		t.Fatalf("CreateInputs: %v", err)
+	}
+	found := false
+	for _, call := range r.calls {
+		joined := strings.Join(call, " ")
+		if strings.Contains(joined, "pane-observer") {
+			t.Errorf("no sync may ever target the runner-owned pane-observer/ dir: %s", joined)
+		}
+		if !strings.Contains(joined, "--name=sandbox-s-config-statusline") {
+			continue
+		}
+		found = true
+		if !strings.Contains(joined, "/Users/cullen/.claude/statusline sandbox-s:/session/state/claude/statusline") {
+			t.Errorf("statusline sync endpoints drifted from the runner's candidate path: %s", joined)
+		}
+		if !strings.Contains(joined, "one-way-safe") {
+			t.Errorf("statusline sync must be one-way-safe host→remote: %s", joined)
+		}
+	}
+	if !found {
+		t.Errorf("CreateInputs did not create the config-statusline sync: %v", r.calls)
 	}
 }
 

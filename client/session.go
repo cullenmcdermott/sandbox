@@ -449,7 +449,7 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 		worktreeMissing := worktreeMissingForSync(workspacePath, projectPath)
 
 		// Foreground: only the load-bearing project sync — the one the agent needs
-		// staged before it can work on the repo. The 7 non-load-bearing
+		// staged before it can work on the repo. The 8 non-load-bearing
 		// config/transcript syncs, the bounded first-sync flush, and the idle
 		// reaper all move off the foreground into startBackgroundSync so the
 		// visible prompt is not gated on them (§5). Reuse the SSH key Create
@@ -610,7 +610,7 @@ func protocolVersionWarning(rc *runner.Client) string {
 
 // startBackgroundSync launches Connect's post-health background work off the
 // foreground (§5): the bounded first-sync flush (or a detached reconnect flush),
-// creation of the 7 non-load-bearing config/transcript syncs, and the idle-reaper
+// creation of the 8 non-load-bearing config/transcript syncs, and the idle-reaper
 // ensure. It records the resulting advisory on a syncTask observable via
 // AwaitSync and roots the goroutine at a context closeHandles cancels, so it
 // can't outlive the session. When doSync is false (SSH key or project sync failed

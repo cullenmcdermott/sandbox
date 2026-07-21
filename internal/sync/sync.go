@@ -223,6 +223,17 @@ var ConfigInputsSubs = []struct {
 	{"agents", "agents"},
 	{"commands", "commands"},
 	{"hooks", "hooks"},
+	// The user statusline for the claude pane: the runner's provisioned
+	// statusline script chains to <RemoteClaude>/statusline/user-statusline when
+	// present (runner/src/claude-pane-observer.ts, STATUSLINE_SCRIPT), so a plain
+	// executable at ~/.claude/statusline/user-statusline shows up in-pane.
+	// Deliberately a SIBLING of the runner-owned pane-observer/ dir: that dir
+	// holds the runner-minted observer token (+ helper scripts), and syncing into
+	// it would let host→remote sync interact with runner-written files (one-way-
+	// safe preserves beta-only files, but a same-named host file would conflict
+	// and wedge propagation, and a mode change could clobber). A dir the runner
+	// never writes cannot touch the token by construction.
+	{"statusline", "statusline"},
 }
 
 // TranscriptSubs is the set of ~/.claude subdirectories synced one-way
@@ -239,7 +250,7 @@ var TranscriptSubs = []string{"projects", "todos", "tasks"}
 //
 // The connect path (client) does NOT call CreateAll: it splits it into
 // CreateProject (foreground, load-bearing for the first prompt) and CreateInputs
-// (backgrounded, §5) so the visible prompt is not gated on the 7 non-load-bearing
+// (backgrounded, §5) so the visible prompt is not gated on the 8 non-load-bearing
 // config/transcript sync-create execs. CreateAll remains the single-shot form for
 // callers that want the whole set synchronously.
 func (m *Manager) CreateAll(ctx context.Context, spec Spec) (created bool, err error) {
@@ -270,7 +281,7 @@ func (m *Manager) CreateProject(ctx context.Context, spec Spec) (created bool, e
 }
 
 // CreateInputs creates the config-input (one-way host -> remote) and transcript
-// (one-way remote -> host) sync groups — the 7 non-load-bearing syncs. Split out
+// (one-way remote -> host) sync groups — the 8 non-load-bearing syncs. Split out
 // of CreateAll so the connect path can run it off the foreground (§5). It is
 // idempotent (an existing session is left as-is) and, like CreateAll, surfaces
 // any real create failure so a backgrounding caller can observe it rather than

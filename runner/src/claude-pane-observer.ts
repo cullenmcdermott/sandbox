@@ -458,23 +458,33 @@ setTimeout(() => process.exit(0), 5000);
 `;
 
 const STATUSLINE_SCRIPT = `#!/usr/bin/env node
-// claude-pane statusline: prints the in-pane status string AND forwards the
-// stdin metrics JSON to the runner observer (ctx%, cost, rate limits). The
-// print happens first so a slow runner never delays the statusline render.
+// claude-pane statusline: forwards the stdin metrics JSON to the runner
+// observer (ctx%, cost, rate limits) AND prints the in-pane status string.
+// The metrics POST is initiated FIRST and the process exits only after it
+// settles (with the hard-exit timer as the ceiling), so a slow or broken user
+// statusline can never drop metrics. The fetch is async — initiating it does
+// not delay the render.
+//
+// The printed line CHAINS to a user-provided statusline when one is present
+// (the host's own statusline is typically a host-only binary — e.g. a Nix
+// store path — whose closure isn't in the pod, so it can't be copied; chaining
+// to a synced script or pod-side binary is the substitute). Candidates, first
+// hit wins:
+//   1. pane-observer/user-statusline    (pod-local drop-in, next to this script)
+//   2. ../statusline/user-statusline    (host-synced from ~/.claude/statusline —
+//                                        a SIBLING dir of pane-observer/, so
+//                                        host sync can never touch the token)
+//   3. sandbox-user-statusline on PATH  (a future flox-provided binary)
+// The candidate gets this script's stdin JSON verbatim and ~1s to print the
+// line. Missing/not-executable falls through to the next candidate; nonzero
+// exit, timeout, or empty output falls back to the built-in minimal line.
 const { readFileSync } = require('node:fs');
+const { spawnSync } = require('node:child_process');
 const { join } = require('node:path');
 const chunks = [];
 process.stdin.on('data', (c) => chunks.push(c));
 process.stdin.on('end', () => {
   const raw = Buffer.concat(chunks);
-  let line = 'claude';
-  try {
-    const j = JSON.parse(raw.toString('utf8'));
-    const model = (j.model && j.model.display_name) || 'claude';
-    const pct = j.context_window && j.context_window.used_percentage;
-    line = typeof pct === 'number' ? model + ' · ctx ' + pct + '%' : model;
-  } catch {}
-  process.stdout.write(line);
   let token = '';
   try { token = readFileSync(join(__dirname, 'token'), 'utf8').trim(); } catch {}
   fetch(process.env.SANDBOX_OBSERVER_URL || 'http://127.0.0.1:PORT_PLACEHOLDER/observer/claude/statusline', {
@@ -483,8 +493,35 @@ process.stdin.on('end', () => {
     body: raw,
     signal: AbortSignal.timeout(1500),
   }).catch(() => {}).finally(() => process.exit(0));
+  let line = 'claude';
+  try {
+    const j = JSON.parse(raw.toString('utf8'));
+    const model = (j.model && j.model.display_name) || 'claude';
+    const pct = j.context_window && j.context_window.used_percentage;
+    line = typeof pct === 'number' ? model + ' · ctx ' + pct + '%' : model;
+  } catch {}
+  const t = Number(process.env.SANDBOX_STATUSLINE_TIMEOUT_MS);
+  const timeoutMs = t > 0 ? t : 1000;
+  const candidates = [
+    join(__dirname, 'user-statusline'),
+    join(__dirname, '..', 'statusline', 'user-statusline'),
+    'sandbox-user-statusline',
+  ];
+  for (const cmd of candidates) {
+    let r;
+    try { r = spawnSync(cmd, { input: raw, timeout: timeoutMs, encoding: 'utf8' }); } catch { break; }
+    if (r.error && (r.error.code === 'ENOENT' || r.error.code === 'EACCES')) continue;
+    if (!r.error && r.status === 0) {
+      const out = (r.stdout || '').trimEnd();
+      if (out !== '') line = out;
+    }
+    break; // a candidate that RAN (even unsuccessfully) ends the search
+  }
+  process.stdout.write(line);
 });
-setTimeout(() => process.exit(0), 3000);
+// Hard-exit ceiling: worst case is ~1s of chaining before the event loop (and
+// with it the fetch + its 1.5s abort timer) resumes, so 5s clears it safely.
+setTimeout(() => process.exit(0), 5000);
 `;
 
 /** The hook events the provisioned settings register. Tool-family events carry
