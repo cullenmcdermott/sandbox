@@ -102,16 +102,14 @@ row-model consolidation moved to §2a where it belongs.
 
 ### 1h. claude-pane live-validation bugs (2026-07-20 first sessions; detail in review-2026-07-20.md §L)
 
-- [ ] **[L1] Dashboard account picker (and CLI `--account`) route claude-pane
-  sessions to a non-functional credential path (HIGH).**
-  `internal/tui/dashboard/account_picker.go:181` →
-  `internal/cli/dashboard_connector.go:187` → `client/account.go:148-172`:
-  a stored-account selector provisions a setup-token accessToken-only
-  `.credentials.json` (observed live: 144-byte doc) that interactive claude
-  rejects → "Not logged in · Run /login". Fix: hide/hard-error stored
-  accounts for claude-pane until the store learns full OAuth docs (the 2.1
-  follow-up); fix the `SelectClaudePaneMaterial` doc comment ("degraded" →
-  non-functional for interactive) and `claude_remote.go:209`.
+- [x] **[L1] fixed 2026-07-20 (same night):** fail-closed fullness gate at
+  every layer (`cred.ValidateFullCredential` exported; `UseClaudePaneMaterial`
+  + Create both reject setup-token-shaped credentials with remediation), the
+  picker leads with a "host claude login" row (default, empty id →
+  SystemMaterial) and renders stored accounts inert with the setup-token
+  reason, `--account` help + docs honest. Store-account path self-heals when
+  the store learns full OAuth docs. Also closed [O13] (sentinel remediation
+  text) in the same change.
 - [ ] **[L2] Pane replay renders corrupted frames on attach (MED).** Observed
   garbled/overlapping header. Likely mechanism: scrollback-ring chunk
   eviction (`runner/src/claude-pane.ts:102-136`) cuts mid-escape-sequence,
@@ -959,16 +957,15 @@ do well is recorded there too; fix in roughly this order):
   or 5-line openspec/README.md.
 - [ ] **[O12] Gate described three ways** — CONTRIBUTING.md:37-39 vs
   Justfile:28; README Testing points at neither.
-- [ ] **[O13] `client/errors.go:113` leaks a Go symbol into CLI output** on
-  the partial-material path (`client/account.go:168`) — add human
-  remediation text (compounds [L1]).
+- [x] **[O13] done 2026-07-20 with [L1]:** the sentinel and the store-account
+  error both carry "log in with `claude` on this machine" remediation.
 - [ ] **[O14] README hero GIF predates the pane UI** — re-record after the
   live pass (was already noted in 7.4; now has an id).
 - [ ] **[O15] Retired-backend residue sweep** — `backend.go:1716`,
   `internal/session/types.go:53`, `runner/src/session.ts:37`,
-  `client/account.go:69`, `internal/k8sit/local_test.go:44`, stale `--pane`
-  comment `internal/cli/dashboard_connector.go:182`; apply the
-  `agent.ts:66` retired-id comment pattern or delete dead branches.
+  `client/account.go:69`, `internal/k8sit/local_test.go:44`; apply the
+  `agent.ts:66` retired-id comment pattern or delete dead branches. (The
+  stale `--pane` comment in dashboard_connector.go was rewritten with [L1].)
 - [ ] **Go-runner rewrite watch item** — investigation complete
   ([`docs/go-runner-rewrite-investigation.md`](docs/go-runner-rewrite-investigation.md)):
   gated on live gates 2.5/8.2 + soak; pre-work available now: drop the dead

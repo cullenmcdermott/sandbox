@@ -2,8 +2,15 @@ package dashboard
 
 // account_picker.go — the Anthropic account step of the new-session overlay.
 // After the user picks "claude" in the backend picker, this drives a second
-// overlay stage where they choose which stored Anthropic account the session
-// runs on (or the shared cluster Secret), plus an add-account sub-flow.
+// overlay stage. The first row — and the only one that can create a session
+// today — is the HOST Claude Code login (empty account id → the CLI-side
+// Creator resolves cred.SystemMaterial: the Max-mode source). Stored accounts
+// are listed but INERT: the store holds setup tokens, and interactive claude
+// rejects a setup token outright (the pane boots to a "Not logged in" wall —
+// verified live 2026-07-20), so picking one shows the reason instead of
+// creating a broken session. The rows go live again when the store learns
+// full OAuth documents (recorded follow-up). The add-account sub-flow stays
+// (it feeds `sandbox auth` and the future full-document store).
 //
 // The dashboard stays decoupled from Keychain / client/cred: it only ever
 // sees account METADATA (AccountInfo) and calls injected AccountStore funcs to
@@ -14,6 +21,7 @@ package dashboard
 // retained here beyond the submit call.
 
 import (
+	"fmt"
 	"strings"
 
 	"charm.land/bubbles/v2/textinput"
@@ -102,12 +110,12 @@ func (a *App) beginCreate(params CreateParams) tea.Cmd {
 }
 
 // enterAccountStage is called when the user picks "claude". With no injected
-// store it keeps today's UX and creates immediately on the shared Secret.
-// Otherwise it ALWAYS opens the account picker (TODO §2d, DECIDED 2026-07-07):
-// even with zero stored accounts the stage still shows, offering the "cluster
-// default" row (identical to the old silent skip) and "＋ add account" so a
-// first-time user discovers per-account login instead of being dropped onto the
-// shared Secret invisibly. A store List() error is surfaced (fail closed).
+// store it creates immediately on the host Claude Code login (empty account
+// id — the only working claude-pane source today). Otherwise it ALWAYS opens
+// the account picker (TODO §2d, DECIDED 2026-07-07): even with zero stored
+// accounts the stage still shows, leading with the "host claude login" row
+// and "＋ add account" so a first-time user sees where auth comes from. A
+// store List() error is surfaced (fail closed).
 //
 // This stage is where the row set is decided; it is also the future home of the
 // §6 reauth flow (a re-login entry for an existing account slots in here).
@@ -136,15 +144,17 @@ func (a *App) enterAccountStage() tea.Cmd {
 	return nil
 }
 
-// accountRowCount is the number of selectable rows in the account stage: one per
-// account, then the "cluster default" row, then "＋ add account".
+// accountRowCount is the number of selectable rows in the account stage: the
+// leading "host claude login" row, one per stored account (inert today), then
+// "＋ add account".
 func (a *App) accountRowCount() int {
 	return len(a.picker.accounts) + 2
 }
 
 // pickerKeyAccount handles the account chooser. esc returns to the backend
-// picker (NOT the dashboard). Enter creates on the selected account, on the
-// shared Secret (cluster default), or opens the add-account sub-flow.
+// picker (NOT the dashboard). Enter creates on the host login (row 0), shows
+// the setup-token limitation for a stored account (inert rows — see the file
+// header), or opens the add-account sub-flow.
 func (a *App) pickerKeyAccount(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 	if a.picker.listErr != nil {
 		// Only "esc → back" is available while a list error is shown (fail closed).
@@ -175,14 +185,18 @@ func (a *App) pickerKeyAccount(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 	case "enter":
 		sel := a.picker.sel
 		switch {
-		case sel < len(a.picker.accounts):
-			return a.beginCreate(CreateParams{
-				Backend:            session.BackendClaudePane,
-				AnthropicAccountID: a.picker.accounts[sel].ID,
-			}), true
-		case sel == len(a.picker.accounts):
-			// Cluster default (shared Secret) — an explicit, visible legacy choice.
+		case sel == 0:
+			// Host Claude Code login (Max mode) — empty account id; the CLI-side
+			// Creator resolves cred.SystemMaterial fail-closed.
 			return a.beginCreate(CreateParams{Backend: session.BackendClaudePane}), true
+		case sel <= len(a.picker.accounts):
+			// Inert stored-account row: explain instead of creating a session that
+			// boots to claude's "Not logged in" wall (setup tokens are rejected by
+			// the interactive client; client-side validation would hard-error the
+			// create anyway — this is the friendlier, earlier stop).
+			acct := a.picker.accounts[sel-1]
+			a.picker.loginErr = fmt.Errorf("%q holds a setup token the interactive pane can't use — pick \"host claude login\"", acct.Label)
+			return nil, true
 		default:
 			// ＋ add account
 			a.picker.stage = stageAddType
@@ -364,7 +378,8 @@ func (a *App) finishAccountAdd(id string) tea.Cmd {
 	}
 	a.picker.accounts = accounts
 	a.picker.listErr = nil
-	a.picker.sel = accountIndex(accounts, id)
+	// +1: row 0 is the host-login row; account i renders at row i+1.
+	a.picker.sel = accountIndex(accounts, id) + 1
 	return nil
 }
 
@@ -444,6 +459,27 @@ func pickerRow(mark, label, desc string, selected bool, innerW, labelW int) stri
 	return " " + mark + " " + l + " " + lipgloss.NewStyle().Foreground(theme.TextMuted).Render(d)
 }
 
+// pickerRowInert renders a selectable-but-inactive row: the label and desc stay
+// muted even when selected (only the chevron/background selection affordance
+// appears), signaling "you can land here and read why, but enter won't create".
+// Used for stored-account rows while the store only holds setup tokens.
+func pickerRowInert(mark, label, desc string, selected bool, innerW, labelW int) string {
+	descW := innerW - (2 + labelW + 1)
+	if descW < 8 {
+		descW = 8
+	}
+	if mark == "" {
+		mark = " "
+	}
+	l := lipgloss.NewStyle().Foreground(theme.TextMuted).Render(padRight(truncate(label, labelW), labelW))
+	d := lipgloss.NewStyle().Foreground(theme.TextMuted).Render(truncate(desc, descW))
+	if selected {
+		row := lipgloss.NewStyle().Foreground(theme.Guac).Render(glyphChevron) + mark + " " + l + " " + d
+		return lipgloss.NewStyle().Background(theme.Raised2).Width(innerW).Render(row)
+	}
+	return " " + mark + " " + l + " " + d
+}
+
 // accountTypeTag returns a short muted tag for an account type, used as the
 // per-account glyph column so the kind is identifiable at a glance.
 func accountTypeTag(typ string) string {
@@ -457,10 +493,11 @@ func accountTypeTag(typ string) string {
 	}
 }
 
-// renderAccountPicker builds the account chooser box: one row per stored account
-// (label + type glyph + default marker), a "cluster default (shared Secret)" row,
-// and a trailing "＋ add account" row. A list error replaces the rows with an
-// error and a back hint (fail closed).
+// renderAccountPicker builds the account chooser box: the leading "host claude
+// login" row (the Max-mode default and only working source today), one muted
+// row per stored account (inert — setup tokens; see the file header), and a
+// trailing "＋ add account" row. A list error replaces the rows with an error
+// and a back hint (fail closed).
 func (a *App) renderAccountPicker() string {
 	title := lipgloss.NewStyle().Foreground(theme.Malibu).Bold(true).Render("anthropic account")
 	lines := []string{kit.TitledRule(title, pickerInnerW, theme.Charple, theme.Dolly)}
@@ -478,30 +515,30 @@ func (a *App) renderAccountPicker() string {
 
 	const labelW = 18
 	sel := a.picker.sel
+	// Host Claude Code login — the Max-mode default (empty account id →
+	// cred.SystemMaterial on the CLI side).
+	lines = append(lines, pickerRow(
+		"⌂",
+		"host claude login",
+		"this machine's Claude Code login (Max)",
+		sel == 0,
+		pickerInnerW, labelW,
+	))
 	for i, acct := range a.picker.accounts {
 		marker := ""
 		if acct.Default {
 			marker = "  (default)"
 		}
-		lines = append(lines, pickerRow(
+		lines = append(lines, pickerRowInert(
 			accountTypeTag(acct.Type),
 			acct.Label+marker,
-			acct.Type,
-			i == sel,
+			"setup token — pane needs the host login",
+			sel == i+1,
 			pickerInnerW, labelW,
 		))
 	}
-	// Cluster default (shared Secret) — the visible legacy fallback.
-	clusterIdx := len(a.picker.accounts)
-	lines = append(lines, pickerRow(
-		" ",
-		"cluster default",
-		"shared operator Secret (legacy)",
-		sel == clusterIdx,
-		pickerInnerW, labelW,
-	))
 	// ＋ add account
-	addIdx := clusterIdx + 1
+	addIdx := len(a.picker.accounts) + 1
 	lines = append(lines, pickerRow(
 		"＋",
 		"add account",

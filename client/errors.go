@@ -110,7 +110,7 @@ var (
 	// Populate CreateOptions via SelectClaudePaneMaterial (the system Claude
 	// Code login — the Max-mode source) or UseClaudePaneMaterial. The error
 	// carries no credential material.
-	ErrClaudePaneCredentialMissing = errors.New("sandbox: claude-pane session requires full Claude Code credential material (see CreateOptions.SelectClaudePaneMaterial)")
+	ErrClaudePaneCredentialMissing = errors.New("sandbox: claude-pane session requires full Claude Code credential material — log in with `claude` on this machine so the host login can be provisioned (CreateOptions.SelectClaudePaneMaterial)")
 
 	// ErrNotAGitRepo is returned by Create when CreateOptions.Worktree is
 	// WorktreeOn but ProjectPath is not inside a git work tree (or the git binary

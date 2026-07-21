@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/rest"
 
+	"github.com/cullenmcdermott/sandbox/client/cred"
 	"github.com/cullenmcdermott/sandbox/internal/index"
 	"github.com/cullenmcdermott/sandbox/internal/k8s"
 	"github.com/cullenmcdermott/sandbox/internal/runner"
@@ -799,14 +800,21 @@ func validateAnthropicAccount(accountID string, credential []byte) error {
 // shared-Secret fallback — the interactive pane authenticates only from the
 // materialized credentials file, and the pod template's SecretKeyRefs are
 // non-Optional, so a material-less create would stall the pod in
-// CreateContainerConfigError instead of failing actionably here). The account
-// id is optional metadata (the system-login source has none) but must be a
-// valid Kubernetes label value when set, since it labels the per-session
-// Secret for rotation/logout enumeration. It never inspects or echoes the
-// credential bytes.
+// CreateContainerConfigError instead of failing actionably here). The
+// credential must also be FULL (access + refresh token): interactive claude
+// rejects a partial document outright (the session boots to a "Not logged in"
+// wall — verified live 2026-07-20), and this gate catches callers that set
+// the fields directly instead of going through UseClaudePaneMaterial. The
+// account id is optional metadata (the system-login source has none) but must
+// be a valid Kubernetes label value when set, since it labels the per-session
+// Secret for rotation/logout enumeration. Validation parses but never retains
+// or echoes the credential bytes (cred.ValidateFullCredential's contract).
 func validateClaudePaneMaterial(opt CreateOptions) error {
 	if len(opt.ClaudeCredentialsJSON) == 0 || len(opt.ClaudeOAuthAccountJSON) == 0 {
 		return ErrClaudePaneCredentialMissing
+	}
+	if err := cred.ValidateFullCredential(opt.ClaudeCredentialsJSON); err != nil {
+		return fmt.Errorf("claude-pane credential material: %w", err)
 	}
 	if opt.AnthropicAccountID != "" {
 		if errs := validation.IsValidLabelValue(opt.AnthropicAccountID); len(errs) > 0 {

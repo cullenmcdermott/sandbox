@@ -370,6 +370,19 @@ func TestCreateFailsClosedOnClaudePaneMaterial(t *testing.T) {
 	if !errors.Is(err, client.ErrClaudePaneCredentialMissing) {
 		t.Fatalf("claude-pane with partial material: got %v, want ErrClaudePaneCredentialMissing", err)
 	}
+	// Both documents present but the credential lacks a refresh token (the
+	// setup-token shape): interactive claude rejects such a document at
+	// runtime ("Not logged in" wall), so Create rejects it up front even when
+	// the fields were set directly instead of via UseClaudePaneMaterial.
+	_, err = c.Create(context.Background(), client.CreateOptions{
+		ProjectPath:            "/p",
+		Backend:                client.BackendClaudePane,
+		ClaudeCredentialsJSON:  []byte(`{"claudeAiOauth":{"accessToken":"AT"}}`),
+		ClaudeOAuthAccountJSON: []byte(`{"oauthAccount":{}}`),
+	})
+	if !errors.Is(err, cred.ErrNoFullCredential) {
+		t.Fatalf("claude-pane with a partial credential: got %v, want cred.ErrNoFullCredential", err)
+	}
 }
 
 // TestCreatePlumbsClaudePaneMaterial: the full-material documents flow into the

@@ -116,11 +116,19 @@ func (o *CreateOptions) SelectAnthropicAccount(store cred.Store, selector string
 
 // UseClaudePaneMaterial sets the claude-pane provisioning material on o: the
 // FULL Claude Code OAuth credential and oauthAccount identity documents (see
-// cred.Material). Fail-closed: empty documents are rejected here, not later as
-// a stalled pod. o is mutated only on success.
+// cred.Material). Fail-closed twice over: empty documents are rejected with
+// ErrClaudePaneCredentialMissing, and a present-but-partial credential (no
+// refresh token — e.g. a setup token wrapped in the credentials shape) is
+// rejected with cred.ErrNoFullCredential, because interactive claude refuses
+// such documents and the session would boot to a "Not logged in" wall
+// (observed live 2026-07-20). Rejecting here turns that broken session into a
+// create-time error. o is mutated only on success.
 func (o *CreateOptions) UseClaudePaneMaterial(m cred.Material) error {
 	if len(m.CredentialsJSON) == 0 || len(m.AccountJSON) == 0 {
 		return ErrClaudePaneCredentialMissing
+	}
+	if err := cred.ValidateFullCredential(m.CredentialsJSON); err != nil {
+		return fmt.Errorf("claude-pane credential material: %w", err)
 	}
 	o.ClaudeCredentialsJSON = m.CredentialsJSON
 	o.ClaudeOAuthAccountJSON = m.AccountJSON
@@ -137,11 +145,15 @@ func (o *CreateOptions) UseClaudePaneMaterial(m cred.Material) error {
 //     subscription mode and in-pod refresh. Fail-closed: no system login, or a
 //     partial credential, is a hard error.
 //   - selector != "": resolve id|label against the store and provision that
-//     account's stored material (cred.ProvisionMaterial). DEGRADED mode: the
-//     store holds per-account setup tokens, so the pane runs without
-//     subscription-mode niceties or in-pod refresh until the store learns full
-//     OAuth documents. The account id is recorded (AnthropicAccountID) so the
-//     per-session Secret is labeled for rotation/logout enumeration.
+//     account's stored material (cred.ProvisionMaterial). CURRENTLY ALWAYS A
+//     HARD ERROR: the store holds per-account setup tokens, and interactive
+//     claude rejects a setup token outright (the session boots to a "Not
+//     logged in" wall — NOT a degraded mode; verified live 2026-07-20), so
+//     the material fails UseClaudePaneMaterial's fullness gate. The path
+//     starts working unchanged once the store learns full OAuth documents
+//     (recorded follow-up). On success the account id is recorded
+//     (AnthropicAccountID) so the per-session Secret is labeled for
+//     rotation/logout enumeration.
 //
 // Unlike SelectAnthropicAccount there is NO shared-Secret fallback: a
 // claude-pane session always carries its own full credential material.
@@ -166,6 +178,9 @@ func (o *CreateOptions) SelectClaudePaneMaterial(store cred.Store, selector stri
 		return err
 	}
 	if err := o.UseClaudePaneMaterial(m); err != nil {
+		if errors.Is(err, cred.ErrNoFullCredential) {
+			return fmt.Errorf("account %q holds a setup token, which the interactive claude pane cannot use — log in with `claude` on this machine and create without an account selector: %w", acct.Label, err)
+		}
 		return err
 	}
 	o.AnthropicAccountID = acct.ID

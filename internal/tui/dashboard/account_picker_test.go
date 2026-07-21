@@ -121,7 +121,7 @@ func waitParams(t *testing.T, ch chan CreateParams) CreateParams {
 
 // TestAccountPickerZeroAccountsOpensStage: with no stored accounts, picking claude
 // now ALWAYS enters the account stage (TODO §2d) instead of silently skipping. The
-// stage shows exactly two rows — "cluster default" and "＋ add account" — and no
+// stage shows exactly two rows — "host claude login" and "＋ add account" — and no
 // per-account rows.
 func TestAccountPickerZeroAccountsOpensStage(t *testing.T) {
 	app, _ := newAccountPickerApp(t, &fakeAccountStore{accounts: nil})
@@ -135,45 +135,46 @@ func TestAccountPickerZeroAccountsOpensStage(t *testing.T) {
 		t.Errorf("zero accounts: screen = %v, want ScreenDashboard (no silent create)", app.screen)
 	}
 	if got := app.accountRowCount(); got != 2 {
-		t.Fatalf("zero accounts: row count = %d, want 2 (cluster default + add account)", got)
+		t.Fatalf("zero accounts: row count = %d, want 2 (host login + add account)", got)
 	}
 	if len(app.picker.accounts) != 0 {
 		t.Errorf("zero accounts: account rows = %d, want 0", len(app.picker.accounts))
 	}
 	content := app.View().Content
-	if !strings.Contains(content, "cluster default") {
-		t.Error("zero accounts: the cluster default row is not rendered")
+	if !strings.Contains(content, "host claude login") {
+		t.Error("zero accounts: the host claude login row is not rendered")
 	}
 	if !strings.Contains(content, "add account") {
 		t.Error("zero accounts: the add account row is not rendered")
 	}
 }
 
-// TestAccountPickerZeroAccountsClusterDefaultParity: with zero accounts, selecting
-// the "cluster default" row (sel 0, the first of the two rows) must create on the
-// shared Secret with an empty account id — byte-identical to the old skip path.
-func TestAccountPickerZeroAccountsClusterDefaultParity(t *testing.T) {
+// TestAccountPickerZeroAccountsHostLoginParity: with zero accounts, selecting the
+// "host claude login" row (sel 0, the first of the two rows) must create with an
+// empty account id — the CLI-side Creator resolves the host's Claude Code login
+// (cred.SystemMaterial, Max mode).
+func TestAccountPickerZeroAccountsHostLoginParity(t *testing.T) {
 	app, ch := newAccountPickerApp(t, &fakeAccountStore{accounts: nil})
 
 	app.Update(createSessionMsg{})
 	app.Update(keyMsg("enter")) // claude → account stage
 	if app.picker.stage != stageAccount || app.picker.sel != 0 {
-		t.Fatalf("zero accounts: stage=%v sel=%d, want stageAccount sel=0 (cluster default)", app.picker.stage, app.picker.sel)
+		t.Fatalf("zero accounts: stage=%v sel=%d, want stageAccount sel=0 (host login)", app.picker.stage, app.picker.sel)
 	}
-	// Rows: [cluster-default(0), add-account(1)]. sel 0 is cluster default.
+	// Rows: [host-login(0), add-account(1)]. sel 0 is the host login.
 	_, cmd := app.Update(keyMsg("enter"))
 	if app.picker.open {
-		t.Error("zero accounts: cluster default should have closed the picker and created")
+		t.Error("zero accounts: host login should have closed the picker and created")
 	}
 	if app.screen != ScreenConnecting {
 		t.Errorf("zero accounts: screen = %v, want ScreenConnecting", app.screen)
 	}
 	if cmd == nil {
-		t.Fatal("zero accounts: cluster default returned no create command")
+		t.Fatal("zero accounts: host login returned no create command")
 	}
 	p := waitParams(t, ch)
 	if p.Backend != session.BackendClaudePane || p.AnthropicAccountID != "" {
-		t.Errorf("zero accounts cluster default: params = %+v, want {claude-pane, \"\"}", p)
+		t.Errorf("zero accounts host login: params = %+v, want {claude-pane, \"\"}", p)
 	}
 }
 
@@ -185,7 +186,7 @@ func TestAccountPickerZeroAccountsAddAccountEntersAddFlow(t *testing.T) {
 
 	app.Update(createSessionMsg{})
 	app.Update(keyMsg("enter")) // claude → account stage
-	// Rows: [cluster-default(0), add-account(1)]. Move to add account.
+	// Rows: [host-login(0), add-account(1)]. Move to add account.
 	app.Update(keyMsg("down"))
 	if app.picker.sel != 1 {
 		t.Fatalf("zero accounts: sel=%d, want 1 (add account)", app.picker.sel)
@@ -199,11 +200,11 @@ func TestAccountPickerZeroAccountsAddAccountEntersAddFlow(t *testing.T) {
 	}
 }
 
-// TestAccountPickerNonEmptyRowsUnchanged: pins the non-empty stage layout — the
-// §2d zero-account change must NOT alter it. With N accounts the stage has N+2
-// rows (each account, then cluster default, then add account) and renders every
-// account label plus the two trailing rows.
-func TestAccountPickerNonEmptyRowsUnchanged(t *testing.T) {
+// TestAccountPickerNonEmptyRows: pins the non-empty stage layout. With N stored
+// accounts the stage has N+2 rows (host login first, then each account — inert,
+// rendered with the setup-token reason — then add account) and renders every
+// account label plus the two framing rows.
+func TestAccountPickerNonEmptyRows(t *testing.T) {
 	store := &fakeAccountStore{accounts: []AccountInfo{
 		{ID: "acct-aaaa", Label: "personal", Type: "subscription", Default: true},
 		{ID: "acct-bbbb", Label: "work", Type: "console"},
@@ -212,19 +213,21 @@ func TestAccountPickerNonEmptyRowsUnchanged(t *testing.T) {
 	openAccountStage(t, app)
 
 	if got := app.accountRowCount(); got != 4 {
-		t.Fatalf("non-empty row count = %d, want 4 (2 accounts + cluster default + add account)", got)
+		t.Fatalf("non-empty row count = %d, want 4 (host login + 2 accounts + add account)", got)
 	}
 	content := app.View().Content
-	for _, want := range []string{"personal", "work", "cluster default", "add account"} {
+	for _, want := range []string{"host claude login", "personal", "work", "setup token", "add account"} {
 		if !strings.Contains(content, want) {
-			t.Errorf("non-empty stage missing row %q", want)
+			t.Errorf("non-empty stage missing row/marker %q", want)
 		}
 	}
 }
 
-// TestAccountPickerEnterThreadsAccountID: enter on a stored account threads its
-// id to the Creator.
-func TestAccountPickerEnterThreadsAccountID(t *testing.T) {
+// TestAccountPickerStoredAccountInert: enter on a stored account must NOT create
+// a session — the store holds setup tokens interactive claude rejects (the "Not
+// logged in" wall, live 2026-07-20). Instead the picker stays open and explains,
+// steering to the host-login row.
+func TestAccountPickerStoredAccountInert(t *testing.T) {
 	store := &fakeAccountStore{accounts: []AccountInfo{
 		{ID: "acct-aaaa", Label: "personal", Type: "subscription", Default: true},
 		{ID: "acct-bbbb", Label: "work", Type: "console"},
@@ -232,42 +235,50 @@ func TestAccountPickerEnterThreadsAccountID(t *testing.T) {
 	app, ch := newAccountPickerApp(t, store)
 	openAccountStage(t, app)
 
-	// Move to the second account and confirm.
+	// Rows: [host(0), personal(1), work(2), add(3)]. Move to the second account.
 	app.Update(keyMsg("down"))
-	if app.picker.sel != 1 {
+	app.Update(keyMsg("down"))
+	if app.picker.sel != 2 {
 		t.Fatalf("down did not move account selection: sel=%d", app.picker.sel)
 	}
 	app.Update(keyMsg("enter"))
-	if app.picker.open {
-		t.Error("enter on account did not close the picker")
+	if !app.picker.open || app.picker.stage != stageAccount {
+		t.Fatalf("enter on a stored account must keep the picker open: open=%v stage=%v", app.picker.open, app.picker.stage)
 	}
-	if app.screen != ScreenConnecting {
-		t.Errorf("enter on account: screen = %v, want ScreenConnecting", app.screen)
+	if app.screen != ScreenDashboard {
+		t.Errorf("enter on a stored account: screen = %v, want ScreenDashboard (no create)", app.screen)
 	}
-	p := waitParams(t, ch)
-	if p.Backend != session.BackendClaudePane || p.AnthropicAccountID != "acct-bbbb" {
-		t.Errorf("params = %+v, want {claude-pane, acct-bbbb}", p)
+	select {
+	case p := <-ch:
+		t.Fatalf("enter on a stored account created a session: %+v", p)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if app.picker.loginErr == nil || !strings.Contains(app.picker.loginErr.Error(), "setup token") {
+		t.Fatalf("inert-account notice missing or wrong: %v", app.picker.loginErr)
+	}
+	if !strings.Contains(app.View().Content, "host claude login") {
+		t.Error("the steering target (host claude login) is not visible")
 	}
 }
 
-// TestAccountPickerClusterDefaultThreadsEmptyID: the explicit "cluster default"
-// row (after the account rows) threads an empty account id (legacy shared Secret).
-func TestAccountPickerClusterDefaultThreadsEmptyID(t *testing.T) {
+// TestAccountPickerHostLoginThreadsEmptyID: the leading "host claude login" row
+// threads an empty account id (the CLI side resolves the host's Claude Code
+// login), with stored accounts present.
+func TestAccountPickerHostLoginThreadsEmptyID(t *testing.T) {
 	store := &fakeAccountStore{accounts: []AccountInfo{
 		{ID: "acct-aaaa", Label: "personal", Type: "subscription"},
 	}}
 	app, ch := newAccountPickerApp(t, store)
 	openAccountStage(t, app)
 
-	// Rows: [acct(0), cluster-default(1), add-account(2)]. Select cluster default.
-	app.Update(keyMsg("down"))
-	if app.picker.sel != 1 {
-		t.Fatalf("sel=%d, want 1 (cluster default)", app.picker.sel)
+	// Rows: [host(0), acct(1), add-account(2)]. sel starts on the host row.
+	if app.picker.sel != 0 {
+		t.Fatalf("sel=%d, want 0 (host login is the default row)", app.picker.sel)
 	}
 	app.Update(keyMsg("enter"))
 	p := waitParams(t, ch)
 	if p.Backend != session.BackendClaudePane || p.AnthropicAccountID != "" {
-		t.Errorf("cluster default: params = %+v, want {claude-pane, \"\"}", p)
+		t.Errorf("host login: params = %+v, want {claude-pane, \"\"}", p)
 	}
 }
 
@@ -324,7 +335,7 @@ func TestAddAccountTypeChoiceNavigation(t *testing.T) {
 	app, _ := newAccountPickerApp(t, store)
 	openAccountStage(t, app)
 
-	// Rows: [acct(0), cluster-default(1), add-account(2)].
+	// Rows: [host-login(0), acct(1), add-account(2)].
 	app.Update(keyMsg("down"))
 	app.Update(keyMsg("down"))
 	if app.picker.sel != 2 {
@@ -557,7 +568,8 @@ func TestSubscriptionLoginReturnsAndSelects(t *testing.T) {
 	if app.picker.stage != stageAccount {
 		t.Fatalf("login done: stage=%v, want stageAccount", app.picker.stage)
 	}
-	if got := app.picker.accounts[app.picker.sel].ID; got != "acct-sub-new" {
+	// Row 0 is the host-login row, so account i sits at row i+1.
+	if got := app.picker.accounts[app.picker.sel-1].ID; got != "acct-sub-new" {
 		t.Errorf("login done: selected account = %q, want acct-sub-new", got)
 	}
 }

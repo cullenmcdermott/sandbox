@@ -179,7 +179,11 @@ func newDashboardCreator(c *client.Client, runnerImage, reaperImage string) dash
 		case backendName == client.BackendClaudePane:
 			// claude-pane: full credential material, fail closed (no shared-Secret
 			// fallback exists). An empty picked id selects the host's own Claude
-			// Code login (Max mode) — same semantics as the CLI's --pane flag.
+			// Code login (Max mode) — same semantics as `sandbox claude` without
+			// --account. A stored-account id currently hard-errors inside
+			// SelectClaudePaneMaterial (setup tokens can't drive the interactive
+			// pane); the picker keeps those rows inert, so this is defense in
+			// depth for direct API callers.
 			store, serr := newCredStore()
 			if serr != nil {
 				return dashboard.CreateResult{}, serr

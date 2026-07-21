@@ -15,12 +15,14 @@ import (
 // owned and refreshed by Claude Code.
 const systemKeychainService = "Claude Code-credentials"
 
-// ErrNoFullCredential is returned by SystemMaterial when a credential source is
-// present but does not hold a full OAuth credential (access + refresh token).
-// A claude-pane session needs the full credential to run the interactive client
-// in subscription (Max) mode with in-pod refresh; provisioning a partial
-// credential would silently degrade the session, so this is fail-closed.
-var ErrNoFullCredential = errors.New("cred: system Claude Code login holds no full OAuth credential (accessToken + refreshToken)")
+// ErrNoFullCredential is returned when a credential document is present but
+// does not hold a full OAuth credential (access + refresh token). A claude-pane
+// session needs the full credential to run the interactive client in
+// subscription (Max) mode with in-pod refresh — interactive claude REJECTS
+// partial credentials outright (a setup token wrapped in the credentials shape
+// boots to a "Not logged in" wall, observed live 2026-07-20), so every
+// provisioning path validates fullness fail-closed.
+var ErrNoFullCredential = errors.New("cred: not a full Claude Code OAuth credential (accessToken + refreshToken required)")
 
 // SystemMaterial reads the host's own Claude Code login — the credential and
 // account identity Claude Code itself maintains — as claude-pane provisioning
@@ -57,7 +59,7 @@ func systemMaterial(configDir string, run execRunner, goos string) (Material, er
 	if err != nil {
 		return Material{}, err
 	}
-	if err := validateFullCredential(creds); err != nil {
+	if err := ValidateFullCredential(creds); err != nil {
 		return Material{}, err
 	}
 
@@ -113,11 +115,13 @@ func systemCredentialBytes(dir string, run execRunner, goos string) ([]byte, err
 	return b, nil
 }
 
-// validateFullCredential checks — without retaining or logging the values —
+// ValidateFullCredential checks — without retaining or logging the values —
 // that raw parses as {"claudeAiOauth": {...}} with a non-empty access AND
 // refresh token. Partial credentials (e.g. a setup token wrapped in the
-// credentials shape) are rejected: see ErrNoFullCredential.
-func validateFullCredential(raw []byte) error {
+// credentials shape) are rejected: see ErrNoFullCredential. Exported so every
+// claude-pane provisioning path (SystemMaterial, the client's material setter,
+// external SDK consumers) can apply the same fail-closed gate.
+func ValidateFullCredential(raw []byte) error {
 	var doc struct {
 		ClaudeAiOauth struct {
 			AccessToken  string `json:"accessToken"`

@@ -6,6 +6,7 @@ package client_test
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/cullenmcdermott/sandbox/client"
@@ -149,19 +150,23 @@ func TestSelectAnthropicAccount(t *testing.T) {
 }
 
 // TestUseClaudePaneMaterial: the claude-pane material setter is fail-closed —
-// partial material rejects with the sentinel and leaves the options untouched.
+// missing documents reject with the sentinel, and a present-but-partial
+// credential (no refresh token: the setup-token shape interactive claude
+// rejects at runtime) is caught here as cred.ErrNoFullCredential instead of
+// becoming a session that boots to a "Not logged in" wall.
 func TestUseClaudePaneMaterial(t *testing.T) {
+	const fullCreds = `{"claudeAiOauth":{"accessToken":"at","refreshToken":"rt"}}`
 	t.Run("full material is set", func(t *testing.T) {
 		var opts client.CreateOptions
-		m := cred.Material{CredentialsJSON: []byte(`{"claudeAiOauth":{}}`), AccountJSON: []byte(`{"oauthAccount":{}}`)}
+		m := cred.Material{CredentialsJSON: []byte(fullCreds), AccountJSON: []byte(`{"oauthAccount":{}}`)}
 		if err := opts.UseClaudePaneMaterial(m); err != nil {
 			t.Fatalf("UseClaudePaneMaterial: %v", err)
 		}
-		if string(opts.ClaudeCredentialsJSON) != `{"claudeAiOauth":{}}` || string(opts.ClaudeOAuthAccountJSON) != `{"oauthAccount":{}}` {
+		if string(opts.ClaudeCredentialsJSON) != fullCreds || string(opts.ClaudeOAuthAccountJSON) != `{"oauthAccount":{}}` {
 			t.Error("material not set on options")
 		}
 	})
-	t.Run("partial material is the sentinel", func(t *testing.T) {
+	t.Run("missing material is the sentinel", func(t *testing.T) {
 		var opts client.CreateOptions
 		err := opts.UseClaudePaneMaterial(cred.Material{CredentialsJSON: []byte(`{}`)})
 		if !errors.Is(err, client.ErrClaudePaneCredentialMissing) {
@@ -171,29 +176,46 @@ func TestUseClaudePaneMaterial(t *testing.T) {
 			t.Error("opts must not be mutated on failure")
 		}
 	})
+	t.Run("partial credential (setup-token shape) is rejected", func(t *testing.T) {
+		var opts client.CreateOptions
+		m := cred.Material{
+			CredentialsJSON: []byte(`{"claudeAiOauth":{"accessToken":"sk-ant-oat-TOKEN"}}`),
+			AccountJSON:     []byte(`{"oauthAccount":{}}`),
+		}
+		err := opts.UseClaudePaneMaterial(m)
+		if !errors.Is(err, cred.ErrNoFullCredential) {
+			t.Fatalf("want cred.ErrNoFullCredential, got %v", err)
+		}
+		if opts.ClaudeCredentialsJSON != nil {
+			t.Error("opts must not be mutated on failure")
+		}
+	})
 }
 
-// TestSelectClaudePaneMaterial covers the store-account (degraded) source: an
-// explicit selector resolves to that account's provisioned material and records
-// the account id for Secret labeling; failures are hard errors, never a
-// fallback. (The empty-selector path reads the host's real Claude Code login —
-// cred's own systemMaterial tests cover it with injected seams.)
+// TestSelectClaudePaneMaterial covers the store-account source: today the store
+// holds setup tokens, which interactive claude rejects at runtime (the "Not
+// logged in" wall, verified live 2026-07-20), so an explicit selector is a
+// HARD create-time error with remediation — never a broken session, never a
+// fallback. When the store learns full OAuth documents the same path starts
+// working without further changes. (The empty-selector path reads the host's
+// real Claude Code login — cred's own systemMaterial tests cover it.)
 func TestSelectClaudePaneMaterial(t *testing.T) {
-	t.Run("explicit selector provisions store material", func(t *testing.T) {
+	t.Run("store setup token is a hard error with remediation", func(t *testing.T) {
 		store := cred.NewFileStore(t.TempDir())
 		a := cred.NewAccount("claude.ai", cred.AccountSubscription)
 		if err := store.Add(a, []byte("sk-ant-oat-TOKEN")); err != nil {
 			t.Fatalf("add: %v", err)
 		}
 		var opts client.CreateOptions
-		if err := opts.SelectClaudePaneMaterial(store, "claude.ai"); err != nil {
-			t.Fatalf("SelectClaudePaneMaterial: %v", err)
+		err := opts.SelectClaudePaneMaterial(store, "claude.ai")
+		if !errors.Is(err, cred.ErrNoFullCredential) {
+			t.Fatalf("want cred.ErrNoFullCredential, got %v", err)
 		}
-		if len(opts.ClaudeCredentialsJSON) == 0 || len(opts.ClaudeOAuthAccountJSON) == 0 {
-			t.Error("material not populated from the store account")
+		if !strings.Contains(err.Error(), "setup token") || !strings.Contains(err.Error(), "log in with `claude`") {
+			t.Errorf("error lacks human remediation: %v", err)
 		}
-		if opts.AnthropicAccountID != a.ID {
-			t.Errorf("account id not recorded for Secret labeling: got %q, want %q", opts.AnthropicAccountID, a.ID)
+		if opts.ClaudeCredentialsJSON != nil || opts.AnthropicAccountID != "" {
+			t.Error("opts must not be mutated on failure")
 		}
 		// The claude-sdk token fields must stay untouched — a pane session
 		// never provisions the inference-scoped env-token path.

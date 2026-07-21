@@ -43,7 +43,7 @@ func newClaudeRemoteCmd() *cobra.Command {
 	cmd.Flags().StringVar(&reaperImage, "reaper-image", k8s.DefaultReaperImage, "idle-reaper container image")
 	cmd.Flags().StringVar(&nameFlag, "name", "", "custom display name for the session (overrides the auto title)")
 	cmd.Flags().StringVar(&modelFlag, "model", "", "model id/alias for the session default (e.g. opus, sonnet, haiku); empty uses the account default. Switch in-session with /model")
-	cmd.Flags().StringVar(&accountFlag, "account", "", "stored Anthropic account (id or label from `sandbox auth list`) to run the session on; empty uses your local Claude Code login (Max mode)")
+	cmd.Flags().StringVar(&accountFlag, "account", "", "stored Anthropic account (id or label from `sandbox auth list`); stored accounts hold setup tokens the interactive pane cannot use yet, so this currently errors — omit to use your local Claude Code login (Max mode)")
 	cmd.Flags().StringVar(&worktreeFlag, "worktree", "auto", "per-session git worktree isolation: auto (worktree iff the project is a git repo), on (require a git repo), off (never)")
 	return cmd
 }
