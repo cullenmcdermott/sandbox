@@ -1,11 +1,13 @@
 package dashboard
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -438,5 +440,173 @@ func TestExternalPaneModeCallbacksTrackState(t *testing.T) {
 	// Other modes should still be active.
 	if !p.activeModes[ansi.ModeMouseExtSgr] {
 		t.Fatal("expected ModeMouseExtSgr still enabled")
+	}
+}
+
+// PERF (P1): a burst of chunks already buffered in p.out is consumed by a
+// SINGLE apply call — one Update+View for the whole burst instead of one full
+// render per 32 KB transport read. The coalesced bytes must go through the
+// same grapheme-safe boundary handling as the per-chunk path, so a cluster
+// split across two queued chunks still renders as one cell.
+func TestExternalPaneApplyCoalescesBurst(t *testing.T) {
+	flag := "\U0001F1FA\U0001F1F8" // 🇺🇸 — one cluster, split across two chunks below
+	full := []byte("hello " + flag + " world")
+
+	ref := vt.NewEmulator(40, 1)
+	if _, err := ref.Write(full); err != nil {
+		t.Fatalf("ref write: %v", err)
+	}
+
+	p := &ExternalPane{emu: vt.NewEmulator(40, 1), out: make(chan ptyChunk, 256)}
+	// Queue the burst: the flag's two regional indicators land in different
+	// chunks, so per-chunk feeding without coalescing+carry would split the
+	// cluster into two cells.
+	p.out <- ptyChunk{data: full[6:10], ok: true} // first RI of the flag
+	p.out <- ptyChunk{data: full[10:], ok: true}  // second RI + " world"
+
+	cmd, finished := p.apply(ptyChunk{data: full[:6], ok: true}) // "hello "
+	if finished || cmd == nil {
+		t.Fatal("apply(live burst) should continue the drain")
+	}
+	if len(p.out) != 0 {
+		t.Fatalf("burst not coalesced: %d chunks still queued after one apply (each would cost a full Update+View)", len(p.out))
+	}
+	if got, want := p.emu.Render(), ref.Render(); got != want {
+		t.Fatalf("coalesced burst render mismatch:\n got=%q\nwant=%q", got, want)
+	}
+}
+
+// PERF (P1): the batch drain is bounded so one Update can't absorb unbounded
+// work — at most paneBatchMaxChunks chunks; leftovers stay queued for the next
+// readCmd/apply cycle, in order.
+func TestExternalPaneDrainBatchChunkBound(t *testing.T) {
+	const queued = 300
+	p := &ExternalPane{out: make(chan ptyChunk, queued)}
+	for i := 0; i < queued; i++ {
+		p.out <- ptyChunk{data: []byte{'a'}, ok: true}
+	}
+
+	data, end := p.drainBatch(ptyChunk{data: []byte{'a'}, ok: true})
+	if end != nil {
+		t.Fatalf("unexpected end-of-stream: %+v", end)
+	}
+	if len(data) != paneBatchMaxChunks {
+		t.Fatalf("drained %d bytes, want exactly paneBatchMaxChunks=%d (first + %d drained)", len(data), paneBatchMaxChunks, paneBatchMaxChunks-1)
+	}
+	if left := len(p.out); left != queued-(paneBatchMaxChunks-1) {
+		t.Fatalf("%d chunks left queued, want %d for the next cycle", left, queued-(paneBatchMaxChunks-1))
+	}
+}
+
+// PERF (P1): the byte bound stops the drain once the batch reaches
+// paneBatchMaxBytes (it may overshoot by at most one chunk — the bound is
+// checked before each receive).
+func TestExternalPaneDrainBatchByteBound(t *testing.T) {
+	chunk := func(n int) ptyChunk { return ptyChunk{data: bytes.Repeat([]byte{'a'}, n), ok: true} }
+	p := &ExternalPane{out: make(chan ptyChunk, 8)}
+	p.out <- chunk(300 << 10)
+	p.out <- chunk(300 << 10)
+	p.out <- chunk(300 << 10) // would take the batch to 1.5 MiB — must stay queued
+
+	data, end := p.drainBatch(chunk(600 << 10))
+	if end != nil {
+		t.Fatalf("unexpected end-of-stream: %+v", end)
+	}
+	if len(data) < paneBatchMaxBytes || len(data) > paneBatchMaxBytes+(300<<10) {
+		t.Fatalf("batch = %d bytes, want ~paneBatchMaxBytes=%d (may overshoot by one chunk)", len(data), paneBatchMaxBytes)
+	}
+	if left := len(p.out); left != 1 {
+		t.Fatalf("%d chunks left queued, want 1 (drain must stop at the byte bound)", left)
+	}
+}
+
+// PERF (P1): an end-of-stream marker pulled mid-drain finishes the pane AND
+// still feeds every byte received before it — no output is lost when the
+// stream dies inside a burst.
+func TestExternalPaneApplyBatchEndOfStream(t *testing.T) {
+	wantErr := errors.New("child exited 1")
+	p := &ExternalPane{emu: vt.NewEmulator(40, 1), out: make(chan ptyChunk, 4)}
+	p.out <- ptyChunk{data: []byte("world"), ok: true}
+	p.out <- ptyChunk{ok: false, err: wantErr}
+
+	cmd, finished := p.apply(ptyChunk{data: []byte("hello "), ok: true})
+	if !finished || cmd != nil {
+		t.Fatal("apply should finish when the batch contains the end-of-stream marker")
+	}
+	if !p.exited || !errors.Is(p.err, wantErr) {
+		t.Fatalf("exited=%v err=%v, want exited with the stream-end reason", p.exited, p.err)
+	}
+	if !strings.Contains(p.emu.Render(), "hello world") {
+		t.Fatalf("bytes before the end marker were dropped: %q", p.emu.Render())
+	}
+}
+
+// floodTransport produces output as fast as it is read — never blocking, never
+// ending — until Close, after which Read fails. It drives the reader goroutine
+// into the P5 scenario: output channel full, reader blocked mid-send.
+type floodTransport struct {
+	closed    chan struct{}
+	closeOnce sync.Once
+}
+
+func newFloodTransport() *floodTransport { return &floodTransport{closed: make(chan struct{})} }
+
+func (f *floodTransport) Read(b []byte) (int, error) {
+	select {
+	case <-f.closed:
+		return 0, errors.New("flood transport closed")
+	default:
+	}
+	for i := range b {
+		b[i] = 'x'
+	}
+	return len(b), nil
+}
+
+func (f *floodTransport) Write(b []byte) (int, error) { return len(b), nil }
+func (f *floodTransport) Resize(cols, rows int) error { return nil }
+func (f *floodTransport) Close() error {
+	f.closeOnce.Do(func() { close(f.closed) })
+	return nil
+}
+
+// REGRESSION (P5): close() while the output channel is full must unblock the
+// reader goroutine's pending send so it exits, instead of retaining it (plus up
+// to ~8 MB of buffered chunks) forever. The reader closes p.out on exit, so an
+// eventually-closed channel IS the exit signal; without the done channel this
+// test times out with the reader parked on `p.out <-`.
+func TestExternalPaneReaderExitsOnCloseWithFullChannel(t *testing.T) {
+	tr := newFloodTransport()
+	p := NewExternalPaneTransport(Session{}, "claude", func(cols, rows int) (PaneTransport, error) {
+		return tr, nil
+	}, nil)
+	if cmd := p.Init(); cmd == nil || p.err != nil {
+		t.Fatalf("Init failed: %v", p.err)
+	}
+
+	// Let the flood fill the channel to capacity; nothing consumes it (as after
+	// a pane replacement, where handlePtyOutput drops stale messages without
+	// re-issuing readCmd), so the reader ends up blocked mid-send.
+	deadline := time.Now().Add(5 * time.Second)
+	for len(p.out) < cap(p.out) {
+		if time.Now().After(deadline) {
+			t.Fatalf("output channel never filled: %d/%d", len(p.out), cap(p.out))
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	p.close()
+	p.close() // double-close must be safe (replacement path + finished path)
+
+	timeout := time.After(5 * time.Second)
+	for {
+		select {
+		case _, ok := <-p.out:
+			if !ok {
+				return // reader exited and closed p.out — no leak
+			}
+		case <-timeout:
+			t.Fatal("reader goroutine did not exit after close(): p.out never closed (P5 leak)")
+		}
 	}
 }

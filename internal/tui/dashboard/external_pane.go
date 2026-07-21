@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -62,6 +63,14 @@ type ExternalPane struct {
 	transport PaneTransport
 	out       chan ptyChunk
 
+	// done is closed (exactly once, via closeOnce) in close() so the reader
+	// goroutine's pending channel send unblocks and it exits (P5):
+	// transport.Close() unblocks a blocked Read, but not a send stuck on a full
+	// p.out — without this signal a replaced pane could retain the goroutine
+	// plus up to ~8 MB of buffered chunks for the process lifetime.
+	done      chan struct{}
+	closeOnce sync.Once
+
 	// carry holds a trailing non-ASCII grapheme withheld from the emulator until
 	// the next chunk, so a cluster split across transport reads isn't rendered as
 	// two cells (O7). At most one grapheme cluster (a few bytes).
@@ -79,6 +88,17 @@ type ExternalPane struct {
 
 // minSize keeps the emulator non-degenerate before the first WindowSizeMsg.
 const extDefaultW, extDefaultH = 80, 24
+
+// Chunk-coalescing bounds (P1, mirroring the SSE E5 batch drain): apply
+// non-blockingly drains chunks already buffered in p.out and feeds the
+// concatenation to the emulator as ONE Write, so a transport burst costs one
+// Update+View instead of a full render per 32 KB read. The bounds cap the work
+// (and allocation) a single Update can absorb; anything beyond them is picked
+// up by the next readCmd/apply cycle.
+const (
+	paneBatchMaxChunks = 256
+	paneBatchMaxBytes  = 1 << 20 // 1 MiB
+)
 
 // ptyChunk is one read from the pane transport; ok=false marks end of stream.
 type ptyChunk struct {
@@ -162,15 +182,26 @@ func (p *ExternalPane) Init() tea.Cmd {
 	}
 	p.transport = tr
 	p.out = make(chan ptyChunk, 256)
+	p.done = make(chan struct{})
 
 	go func() {
+		// The reader is the only sender on p.out, so closing it on exit is
+		// always safe — and unblocks any in-flight readCmd, whose synthesized
+		// end-of-stream message the App drops as stale after a replacement.
+		defer close(p.out)
 		buf := make([]byte, 32*1024)
 		for {
 			n, rerr := tr.Read(buf)
 			if n > 0 {
 				cp := make([]byte, n)
 				copy(cp, buf[:n])
-				p.out <- ptyChunk{data: cp, ok: true}
+				select {
+				case p.out <- ptyChunk{data: cp, ok: true}:
+				case <-p.done:
+					// close() ran: nobody will drain p.out again, so bail out
+					// instead of blocking on the send forever (P5).
+					return
+				}
 			}
 			if rerr != nil {
 				// io.EOF is the clean end of stream; anything else is the reason
@@ -179,8 +210,10 @@ func (p *ExternalPane) Init() tea.Cmd {
 				if !errors.Is(rerr, io.EOF) {
 					reason = rerr
 				}
-				p.out <- ptyChunk{ok: false, err: reason}
-				close(p.out)
+				select {
+				case p.out <- ptyChunk{ok: false, err: reason}:
+				case <-p.done:
+				}
 				return
 			}
 		}
@@ -227,25 +260,67 @@ func (p *ExternalPane) readCmd() tea.Cmd {
 
 // apply feeds a transport chunk into the emulator and returns the next read
 // Cmd, or a finished message when the stream has ended. Returns (cmd, finished).
+//
+// After the first (already-received) chunk it non-blockingly drains any
+// further chunks buffered in p.out — bounded by paneBatchMaxChunks /
+// paneBatchMaxBytes — and feeds the concatenation to the emulator as ONE
+// Write (P1): a burst costs one Update+View instead of one full render per
+// 32 KB transport read. The coalesced bytes go through the same feed /
+// safeWriteBoundary path as a single chunk, so grapheme-safe boundary
+// handling (O7) is unchanged. The reader goroutine is untouched: it keeps
+// draining the transport unconditionally so the remote never blocks, even
+// while the pane is minimized.
 func (p *ExternalPane) apply(chunk ptyChunk) (tea.Cmd, bool) {
-	if !chunk.ok {
-		p.exited = true
-		// Flush any held trailing grapheme now that the stream has ended.
-		if p.emu != nil && len(p.carry) > 0 {
-			_, _ = p.emu.Write(p.carry)
-			p.carry = nil
-		}
-		// The transport's stream-end reason (child exit status, preemption) —
-		// nil for a clean EOF, so a deliberate quit doesn't report an error.
-		if chunk.err != nil {
-			p.err = chunk.err
-		}
-		return nil, true
+	data, end := p.drainBatch(chunk)
+	if len(data) > 0 && p.emu != nil {
+		p.feed(data)
 	}
-	if p.emu != nil {
-		p.feed(chunk.data)
+	if end == nil {
+		return p.readCmd(), false
 	}
-	return p.readCmd(), false
+	p.exited = true
+	// Flush any held trailing grapheme now that the stream has ended.
+	if p.emu != nil && len(p.carry) > 0 {
+		_, _ = p.emu.Write(p.carry)
+		p.carry = nil
+	}
+	// The transport's stream-end reason (child exit status, preemption) —
+	// nil for a clean EOF, so a deliberate quit doesn't report an error.
+	if end.err != nil {
+		p.err = end.err
+	}
+	return nil, true
+}
+
+// drainBatch coalesces the first (blocking-received) chunk with any successors
+// already buffered in p.out, without blocking and in arrival order. It returns
+// the concatenated data and, when the stream ended during the batch, the
+// end-of-stream chunk (data still carries everything received before the end,
+// so no output is lost). p.out may be nil on a pane that never dialed (tests);
+// the select's default arm makes that a plain single-chunk apply.
+func (p *ExternalPane) drainBatch(first ptyChunk) (data []byte, end *ptyChunk) {
+	if !first.ok {
+		return nil, &first
+	}
+	data = first.data
+	for chunks := 1; chunks < paneBatchMaxChunks && len(data) < paneBatchMaxBytes; chunks++ {
+		select {
+		case c, ok := <-p.out:
+			if !ok {
+				// Channel closed mid-drain: the reader exited. Its end-of-stream
+				// marker, if any, was consumed before the close, so this reads as
+				// a clean EOF.
+				return data, &ptyChunk{ok: false}
+			}
+			if !c.ok {
+				return data, &c
+			}
+			data = append(data, c.data...)
+		default:
+			return data, nil
+		}
+	}
+	return data, nil
 }
 
 // feed writes transport bytes to the emulator without splitting a grapheme
@@ -374,7 +449,18 @@ func (p *ExternalPane) resize(w, h int) {
 // close tears the pane down for real (stream ended, or replaced by a different
 // session) — NOT on minimize.
 func (p *ExternalPane) close() {
-	// Close the transport first so the reader goroutine's blocked Read returns
+	// Signal the reader goroutine first (P5): transport.Close() below unblocks
+	// a Read in flight, but not a send blocked on a full p.out — after a pane
+	// replacement nobody drains that channel again, so without this signal the
+	// goroutine (plus up to ~8 MB of buffered chunks) would be retained for the
+	// process lifetime. closeOnce makes the double-close (replacement path and
+	// finished path can both run) safe; done is nil on a pane that never dialed.
+	p.closeOnce.Do(func() {
+		if p.done != nil {
+			close(p.done)
+		}
+	})
+	// Close the transport so the reader goroutine's blocked Read returns
 	// and the goroutine exits; the child-process transport also kills + reaps
 	// its child here (O1), and the WS transport performs the closing handshake
 	// (a clean detach — the remote child keeps running).
