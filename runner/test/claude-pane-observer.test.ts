@@ -205,6 +205,85 @@ test('statusline maps usage/rate-limit/model/title with duplicate suppression', 
   assert.deepEqual(started[1].payload, { model: 'claude-sonnet-5', cwd: '' });
 });
 
+// --- provisional busy confirm window (L8a) ----------------------------------
+//
+// UserPromptSubmit fires for EVERY submission — slash/local commands and
+// prompts interrupted before the model starts included — and those never
+// produce a Stop, so the busy it sets is provisional: without model activity
+// inside the confirm window the observer must revert to idle (via setStatus,
+// which is what emits session.status_changed in production). The window is
+// injected tiny via deps.busyConfirmWindowMs so no test sleeps the real ~10s.
+
+const CONFIRM_MS = 20;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** Sleep comfortably past the injected confirm window. */
+const sleepPastWindow = () => sleep(CONFIRM_MS * 5);
+
+test('UserPromptSubmit alone reverts to idle after the confirm window (L8a)', async () => {
+  const { deps, emitted, statuses } = fakeDeps();
+  const core = createPaneObserverCore({ ...deps, busyConfirmWindowMs: CONFIRM_MS });
+
+  core.handleHook({ hook_event_name: 'UserPromptSubmit', prompt: '/help' });
+  assert.deepEqual(statuses, ['busy'], 'busy is set immediately (provisionally)');
+
+  await sleepPastWindow();
+  assert.deepEqual(statuses, ['busy', 'idle'], 'no model activity → reverted to idle');
+  // Status-only revert: the synthetic turn stays open (no terminal event); the
+  // NEXT submission interrupts it exactly like any lost-Stop turn.
+  assert.deepEqual(types(emitted), ['turn.started']);
+  core.handleHook({ hook_event_name: 'UserPromptSubmit', prompt: 'real prompt' });
+  assert.deepEqual(types(emitted), ['turn.started', 'turn.interrupted', 'turn.started']);
+});
+
+test('UserPromptSubmit + message activity within the window stays busy (L8a)', async () => {
+  const { deps, statuses } = fakeDeps();
+  const core = createPaneObserverCore({ ...deps, busyConfirmWindowMs: CONFIRM_MS });
+  core.handleHook({ hook_event_name: 'UserPromptSubmit', prompt: 'do it' });
+  core.handleHook({ hook_event_name: 'MessageDisplay', delta: 'wor', index: 0 });
+  await sleepPastWindow();
+  assert.deepEqual(statuses, ['busy'], 'model activity confirmed the busy — no revert');
+});
+
+test('PreToolUse / PostToolUse / PermissionRequest also confirm the busy (L8a)', async () => {
+  const activities: Array<Record<string, unknown>> = [
+    { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: {}, tool_use_id: 'tu' },
+    { hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_response: 'ok', tool_use_id: 'tu' },
+    { hook_event_name: 'PermissionRequest', tool_name: 'Bash', tool_input: {} },
+  ];
+  for (const activity of activities) {
+    const { deps, statuses } = fakeDeps();
+    const core = createPaneObserverCore({ ...deps, busyConfirmWindowMs: CONFIRM_MS });
+    core.handleHook({ hook_event_name: 'UserPromptSubmit', prompt: 'p' });
+    core.handleHook(activity);
+    await sleepPastWindow();
+    assert.deepEqual(statuses, ['busy'], `${String(activity.hook_event_name)} must cancel the pending revert`);
+  }
+});
+
+test('a turn that ends inside the window cancels the pending revert (L8a)', async () => {
+  const { deps, statuses } = fakeDeps();
+  const core = createPaneObserverCore({ ...deps, busyConfirmWindowMs: CONFIRM_MS });
+  core.handleHook({ hook_event_name: 'UserPromptSubmit', prompt: 'p' });
+  core.handleHook({ hook_event_name: 'Stop', last_assistant_message: 'fast answer' });
+  assert.deepEqual(statuses, ['busy', 'idle']);
+  await sleepPastWindow();
+  assert.deepEqual(statuses, ['busy', 'idle'], 'no duplicate idle after the window');
+});
+
+test('late model activity after a provisional revert re-asserts busy (L8a)', async () => {
+  const { deps, statuses } = fakeDeps();
+  const core = createPaneObserverCore({ ...deps, busyConfirmWindowMs: CONFIRM_MS });
+  core.handleHook({ hook_event_name: 'UserPromptSubmit', prompt: 'slow think' });
+  await sleepPastWindow(); // window expires with no activity → reverted
+  assert.deepEqual(statuses, ['busy', 'idle']);
+  // First visible activity lands AFTER the window (long think / first-token
+  // latency): the turn is real after all — put the session back to busy.
+  core.handleHook({ hook_event_name: 'MessageDisplay', delta: 'finally', index: 0 });
+  assert.deepEqual(statuses, ['busy', 'idle', 'busy']);
+  core.handleHook({ hook_event_name: 'Stop', last_assistant_message: 'finally done' });
+  assert.deepEqual(statuses, ['busy', 'idle', 'busy', 'idle']);
+});
+
 test('summarizeToolResponse prefers stdout/stderr and truncates', () => {
   assert.equal(summarizeToolResponse({ stdout: 'out', stderr: 'err' }), 'out\nerr');
   assert.equal(summarizeToolResponse('plain'), 'plain');

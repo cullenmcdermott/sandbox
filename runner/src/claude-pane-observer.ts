@@ -14,7 +14,14 @@
 //
 // Mapping (hook_event_name → normalized events; sequential single-user turns):
 //
-//   UserPromptSubmit  → turn.started {prompt} (+ status busy, last_turn_id)
+//   UserPromptSubmit  → turn.started {prompt} (+ status busy, last_turn_id).
+//                       The busy is PROVISIONAL: UserPromptSubmit fires for
+//                       every submission — slash/local commands and prompts
+//                       interrupted before the model starts included — and
+//                       those never produce a Stop, so an unconditional busy
+//                       would stick forever (L8a). A confirm timer reverts to
+//                       idle unless model activity (MessageDisplay, PreToolUse,
+//                       PostToolUse, PermissionRequest) lands within the window.
 //   MessageDisplay    → message.started (first delta) + message.delta
 //   PreToolUse        → tool.started (+ audit; resolves a pending permission)
 //   PostToolUse       → tool.completed
@@ -49,6 +56,17 @@ import { CLAUDE_CONFIG_DIR, PORT, type EventType } from './types.js';
  * feed renders one line; the pane shows full output. */
 const TOOL_OUTPUT_MAX = 2048;
 
+/** Default confirm window for the provisional busy set on UserPromptSubmit
+ * (L8a): if no model-activity hook lands within it, the observer reverts the
+ * session to idle through the standard setStatus path (which emits
+ * session.status_changed). ~10s comfortably covers hook-forwarder latency and
+ * a normal time-to-first-activity while still clearing a slash-command /
+ * pre-model-interrupt "working" within seconds, not never. Overridable via
+ * SANDBOX_BUSY_CONFIRM_WINDOW_MS (registryDeps, mirroring session.ts's
+ * loadConfig env pattern) and injectable per-core for tests via
+ * PaneObserverDeps.busyConfirmWindowMs. */
+export const BUSY_CONFIRM_WINDOW_MS = 10_000;
+
 // --- Deps seam (mirrors opencode-observer's ObserverDeps) -------------------
 
 export interface PaneObserverDeps {
@@ -60,6 +78,10 @@ export interface PaneObserverDeps {
   noteObserverEvent?(): void;
   emit(turnId: string | undefined, type: EventType, payload: Record<string, unknown>): void;
   audit(turnId: string, tool: string, input: unknown): void;
+  /** Provisional-busy confirm window in ms (L8a). Defaults to
+   * BUSY_CONFIRM_WINDOW_MS; tests inject a tiny value so they never sleep the
+   * real ~10s. */
+  busyConfirmWindowMs?: number;
 }
 
 export interface PaneObserverCore {
@@ -116,8 +138,59 @@ export function createPaneObserverCore(deps: PaneObserverDeps): PaneObserverCore
   let lastRateLimitJson = '';
   let lastTitle = '';
   let lastModel = '';
+  // Provisional-busy bookkeeping (L8a): the pending revert timer armed on
+  // UserPromptSubmit, and whether it already fired for the open turn (so a
+  // LATE first activity — think/first-token latency past the window — can put
+  // the session back to busy instead of streaming while shown as needs-input).
+  let confirmTimer: ReturnType<typeof setTimeout> | null = null;
+  let busyReverted = false;
+
+  function cancelBusyConfirm(): void {
+    if (confirmTimer !== null) {
+      clearTimeout(confirmTimer);
+      confirmTimer = null;
+    }
+  }
+
+  /** Arm (or re-arm) the provisional-busy confirm window. Timer-driven, not
+   * ingest-lazy: a slash command's UserPromptSubmit may be the LAST hook the
+   * pane ever sends, so waiting for another ingest would never fire. unref'd —
+   * best-effort telemetry must not hold the process open; the shutdown path
+   * (reset → closeTurn) also clears it explicitly. */
+  function armBusyConfirm(): void {
+    cancelBusyConfirm();
+    busyReverted = false;
+    confirmTimer = setTimeout(() => {
+      confirmTimer = null;
+      if (turnId === null) return; // turn already closed (defensive; closeTurn cancels)
+      // No model activity followed the submission (slash/local command, or an
+      // interrupt before the model started): the busy was optimistic. Revert
+      // through the SAME setStatus path every status change uses — the
+      // registry emits session.status_changed so attached dashboards correct
+      // themselves. Status-only on purpose: the synthetic turn stays open so a
+      // late Stop still completes it and the next prompt interrupts it, same
+      // as any lost-terminal turn.
+      busyReverted = true;
+      deps.setStatus('idle');
+    }, deps.busyConfirmWindowMs ?? BUSY_CONFIRM_WINDOW_MS);
+    confirmTimer.unref?.();
+  }
+
+  /** Model activity observed for the open turn: the provisional busy is real.
+   * Cancels the pending revert; if it already fired, re-assert busy (again via
+   * setStatus so the correction is emitted). */
+  function confirmModelActivity(): void {
+    if (turnId === null) return;
+    cancelBusyConfirm();
+    if (busyReverted) {
+      busyReverted = false;
+      deps.setStatus('busy');
+    }
+  }
 
   function closeTurn(kind: 'completed' | 'interrupted', payload: Record<string, unknown>): void {
+    cancelBusyConfirm();
+    busyReverted = false;
     if (turnId === null) return;
     deps.emit(turnId, kind === 'completed' ? 'turn.completed' : 'turn.interrupted', payload);
     turnId = null;
@@ -155,10 +228,13 @@ export function createPaneObserverCore(deps: PaneObserverDeps): PaneObserverCore
         deps.setLastTurn(turnId);
         deps.setStatus('busy');
         deps.emit(turnId, 'turn.started', { prompt: str(payload.prompt) });
+        // L8a: the busy above is provisional until model activity confirms it.
+        armBusyConfirm();
         break;
       }
       case 'MessageDisplay': {
         if (turnId === null) break; // boot noise outside a turn
+        confirmModelActivity();
         const delta = str(payload.delta);
         if (delta === '') break;
         if (!messageOpen) {
@@ -172,6 +248,7 @@ export function createPaneObserverCore(deps: PaneObserverDeps): PaneObserverCore
       case 'PreToolUse': {
         resolvePendingPermission('allow-once');
         if (turnId === null) break;
+        confirmModelActivity();
         const tool = str(payload.tool_name);
         deps.emit(turnId, 'tool.started', {
           tool,
@@ -184,6 +261,7 @@ export function createPaneObserverCore(deps: PaneObserverDeps): PaneObserverCore
       case 'PostToolUse': {
         resolvePendingPermission('allow-once');
         if (turnId === null) break;
+        confirmModelActivity();
         const durationMs = num(payload.duration_ms);
         deps.emit(turnId, 'tool.completed', {
           tool: str(payload.tool_name),
@@ -194,6 +272,7 @@ export function createPaneObserverCore(deps: PaneObserverDeps): PaneObserverCore
         break;
       }
       case 'PermissionRequest': {
+        confirmModelActivity();
         const id = `pane-perm-${++permSeq}`;
         pendingPermission = { id, tool: str(payload.tool_name), input: payload.tool_input };
         deps.emit(turnId ?? undefined, 'permission.requested', {
@@ -312,7 +391,13 @@ export function createPaneObserverCore(deps: PaneObserverDeps): PaneObserverCore
 // --- Registry wiring --------------------------------------------------------
 
 function registryDeps(): PaneObserverDeps {
+  // Optional confirm-window override — same env-config pattern as session.ts's
+  // loadConfig (pod-spec env). Invalid or absent falls back to the default.
+  const rawWindowMs = Number(process.env.SANDBOX_BUSY_CONFIRM_WINDOW_MS ?? '');
   return {
+    ...(Number.isFinite(rawWindowMs) && rawWindowMs > 0
+      ? { busyConfirmWindowMs: rawWindowMs }
+      : {}),
     nextTurnId: () => getRegistry().nextTurnId(),
     setLastTurn: (id) => getRegistry().setLastTurn(id),
     setStatus: (s) => getRegistry().setStatus(s),

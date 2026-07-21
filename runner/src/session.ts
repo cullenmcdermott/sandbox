@@ -75,15 +75,18 @@ function emptyState(cfg: RunnerConfig): SessionState {
  * session that has neither a runner turn nor an SSE client. */
 const EXTERNAL_ACTIVE_WINDOW_MS = 90_000;
 
-/** An observer-set synthetic 'busy' (an interactive opencode turn — no
- * registered runner turn) normally clears when the always-on observer sees
- * `session.idle`. But a wedged mapper or a missed `session.idle` would pin
- * status='busy' forever; since recomputeIdle()/idleStatus() treat a 'busy'
- * status as an active turn, that would block the idle reaper indefinitely. Bound
- * it: once the observer has been quiet for this long, a synthetic busy is
- * considered STALE and — when nothing is attached (isDetached) — the session
- * becomes idle-eligible again. A real runner turn (activeTurns > 0) is never
- * subject to this; it settles deterministically via finishTurn(). */
+/** An observer-set synthetic 'busy' (an interactive turn the observer mirrors —
+ * no registered runner turn) normally clears when the observer sees the turn
+ * end. But a wedged mapper or a missed terminal would pin status='busy'
+ * forever; since recomputeIdle()/idleStatus() treat a 'busy' status as an
+ * active turn, that would block the idle reaper indefinitely. Bound it: once
+ * the observer has been quiet for this long, a synthetic busy is considered
+ * STALE and recomputeIdle RELEASES it for real (L8b) — setStatus('idle'), which
+ * persists and emits `session.status_changed` so attached dashboards stop
+ * showing "working", regardless of attachment. Reaper idle-eligibility is
+ * unchanged: idleSince is still only set when nothing is attached (isDetached).
+ * A real runner turn (activeTurns > 0) is never subject to this; it settles
+ * deterministically via finishTurn(). */
 const SYNTHETIC_BUSY_STALE_MS = 5 * 60_000;
 
 /** A freshly-started runner has no in-flight turns (activeTurns is rebuilt
@@ -351,25 +354,33 @@ class SessionRegistry {
 
   /**
    * Recompute idleSince from the current turn + attached-client state. Idle =
-   * no active turn, no (fresh) synthetic backend turn, AND no attached SSE
-   * clients. A synthetic 'busy' normally blocks idle, but a STALE one does not
-   * (syntheticBusyStale) so a wedged mapper can't pin the pod unreapable. Sets
-   * idleSince on the transition into idle, clears it on any activity. Safe to
-   * call often.
+   * no active turn, no synthetic backend turn, AND no attached SSE clients.
+   * A STALE synthetic 'busy' (syntheticBusyStale — the observer went quiet) is
+   * first RELEASED for real (L8b): status flips to 'idle' through setStatus, so
+   * the standard `session.status_changed` emission corrects every attached
+   * dashboard — previously staleness only flipped reaper idle-eligibility while
+   * the TUI kept showing "working" forever. The release is unconditional on
+   * attachment; the reaper side effect is preserved because setStatus re-enters
+   * recomputeIdle with status 'idle', where the normal computation (still gated
+   * on isDetached) sets idleSince exactly as before. Sets idleSince on the
+   * transition into idle, clears it on any activity. Safe to call often.
    */
   recomputeIdle(): void {
-    const busyBlocksIdle = this.state.status === 'busy' && !this.syntheticBusyStale();
-    const idle = this.activeTurns.size === 0 && !busyBlocksIdle && this.isDetached();
+    if (this.state.status === 'busy' && this.syntheticBusyStale()) {
+      console.warn(
+        `session ${this.state.sandbox_session_id}: synthetic 'busy' went stale ` +
+          `(no observer events for >=${SYNTHETIC_BUSY_STALE_MS}ms); ` +
+          "releasing to 'idle' (emits session.status_changed)",
+      );
+      // Recurses once with status 'idle'; that pass performs the idleSince
+      // bookkeeping below.
+      this.setStatus('idle');
+      return;
+    }
+    // Past the release above, a 'busy' status is fresh (or a real turn) and
+    // blocks idle unconditionally.
+    const idle = this.activeTurns.size === 0 && this.state.status !== 'busy' && this.isDetached();
     if (idle && this.idleSince === null) {
-      // Only reachable with status still 'busy' via the stale-synthetic-busy
-      // release (a normal turn end flips status to 'idle' first); surface it.
-      if (this.state.status === 'busy') {
-        console.warn(
-          `session ${this.state.sandbox_session_id}: synthetic 'busy' went stale ` +
-            `(no opencode observer events for >=${SYNTHETIC_BUSY_STALE_MS}ms) with nothing ` +
-            'attached; releasing to the idle reaper',
-        );
-      }
       this.idleSince = new Date().toISOString();
     } else if (!idle) {
       this.idleSince = null;
