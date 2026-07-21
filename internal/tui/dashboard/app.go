@@ -128,6 +128,14 @@ type App struct {
 	external  *ExternalPane // nil unless attached to an external-pane session
 	feed      *feedModel    // nil unless viewing an external-pane session's activity feed
 
+	// Feed history-fetch state (L3, feed_history.go): gen guards a one-shot
+	// from-zero replay against feeds opened later; while a fetch is in flight,
+	// live tap events buffer in feedPendingLive and re-apply after the seed
+	// (seeding after a live ingest of higher seqs would be seq-dedup-dropped).
+	feedHistoryGen      uint64
+	feedAwaitingHistory bool
+	feedPendingLive     []session.Event
+
 	// lastProgress is the OSC 9;4 tab-progress state last emitted to the terminal.
 	// App.Update compares the live session aggregate against it and emits a tea.Raw
 	// only on a transition, so each state change writes exactly once (and idle goes
@@ -420,6 +428,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case viewFeedMsg:
 		return a.handleViewFeed(msg)
 
+	case feedHistoryMsg:
+		return a.handleFeedHistory(msg)
+
 	case createSessionMsg:
 		// `n` opens the backend picker; provisioning happens when the user
 		// confirms a choice (pickerKey → createCmd). The picker is an overlay
@@ -578,24 +589,28 @@ func (a *App) handleAttach(msg attachMsg) (tea.Model, tea.Cmd) {
 }
 
 // handleViewFeed opens the read-only activity feed for an external-pane session.
-// It builds a fresh feed model, seeds it from the host event cache (history where
-// available), and ensures the background passive stream is live so activity
-// keeps arriving via the event tap. No connection is established and the terminal
-// is not handed over — attaching the pane (enter/a on the feed) does that.
+// It builds a fresh feed model, kicks off a one-shot from-zero replay to seed it
+// with the session's history (L3, feed_history.go), and ensures the background
+// passive stream is live so activity keeps arriving via the event tap. The
+// terminal is not handed over — attaching the pane (enter/a on the feed) does
+// that.
 func (a *App) handleViewFeed(msg viewFeedMsg) (tea.Model, tea.Cmd) {
 	id := msg.sess.ID()
 	f := newFeedModel(session.Ref{ID: id}, msg.sess.DisplayTitle(), ClientLabel(msg.sess.State.Backend))
-	if a.dashboard.eventCache != nil {
-		if events, err := a.dashboard.eventCache.LoadEvents(id); err == nil {
-			f.seed(events)
-		}
-	}
 	f.SetSize(a.width, a.height)
 	a.feed = f
 	a.screen = ScreenFeed
-	// Ensure the background observer stream is live for this session so the feed
-	// receives activity as it happens (idempotent — reconnects if it was cold).
-	return a, a.dashboard.startLiveSSECmd(a.dashboard.sessionByID(id))
+	a.feedHistoryGen++
+	a.feedAwaitingHistory = true
+	a.feedPendingLive = nil
+	// History rides its own one-shot stream; the live tail rides the shared
+	// background observer stream (idempotent — reconnects if it was cold, and
+	// keeps resuming from lastSeq so the dashboard read-model never re-reduces
+	// old events).
+	return a, tea.Batch(
+		a.feedHistoryCmd(msg.sess, a.feedHistoryGen),
+		a.dashboard.startLiveSSECmd(a.dashboard.sessionByID(id)),
+	)
 }
 
 // tapFeed forwards the runner events the dashboard just reduced into the open
@@ -609,7 +624,7 @@ func (a *App) tapFeed(msg tea.Msg) {
 			return
 		}
 		for _, ev := range m.Events {
-			a.feed.ingest(ev)
+			a.feedDeliver(ev)
 		}
 		if m.StreamEnded {
 			a.feed.notice("Connection lost — reconnecting…")
@@ -627,7 +642,7 @@ func (a *App) tapFeed(msg tea.Msg) {
 			a.feed.setConnection(true, false)
 			return
 		}
-		a.feed.ingest(m.Event)
+		a.feedDeliver(m.Event)
 		if a.feed.reconnecting {
 			a.feed.notice("Reconnected")
 			a.feed.setConnection(false, false)
@@ -655,8 +670,10 @@ func (a *App) updateFeedScreen(msg tea.Msg, dashCmd tea.Cmd) (tea.Model, tea.Cmd
 	switch kp.String() {
 	case "esc", "ctrl+]", "q":
 		// Back to the dashboard (the feed holds no resources to release; the row
-		// cursor is still on the session the feed was opened from).
+		// cursor is still on the session the feed was opened from). An in-flight
+		// history fetch becomes a no-op via the gen guard.
 		a.feed = nil
+		a.resetFeedHistory()
 		a.screen = ScreenDashboard
 		return a, dashCmd
 	case "enter", "a":
@@ -664,6 +681,7 @@ func (a *App) updateFeedScreen(msg tea.Msg, dashCmd tea.Cmd) (tea.Model, tea.Cmd
 		// session-directed action). Reuse the standard attach path.
 		sess := a.dashboard.sessionByID(a.feed.ref.ID)
 		a.feed = nil
+		a.resetFeedHistory()
 		return a, tea.Batch(dashCmd, func() tea.Msg { return attachMsg{sess: sess} })
 	case "up", "k":
 		a.feed.scroll(-1)

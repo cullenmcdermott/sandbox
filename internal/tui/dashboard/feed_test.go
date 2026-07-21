@@ -189,14 +189,21 @@ func TestAppViewFeedNavigation(t *testing.T) {
 		t.Run(backend, func(t *testing.T) {
 			sess := Session{State: session.State{ID: session.ID("s-" + backend), Backend: backend}, AutoTitle: "watch me"}
 
-			// v → feed.
+			// v → feed. Opening kicks off the one-shot history fetch (L3), so
+			// the feed is in the awaiting state until its result arrives.
 			app.Update(viewFeedMsg{sess: sess})
 			if app.screen != ScreenFeed || app.feed == nil {
 				t.Fatalf("viewFeedMsg did not open the feed (screen=%v feed=%v)", app.screen, app.feed)
 			}
+			if !app.feedAwaitingHistory {
+				t.Fatal("opening the feed must await the history fetch")
+			}
 			if app.windowTitle() != "watch me" {
 				t.Errorf("feed window title = %q, want the session title", app.windowTitle())
 			}
+
+			// Complete the history handshake (empty history: a fresh session).
+			app.Update(feedHistoryMsg{id: sess.ID(), gen: app.feedHistoryGen, complete: true})
 
 			// A live event on the matching stream reaches the feed via the tap.
 			app.Update(RunnerEventBatchMsg{ID: sess.ID(), Events: []session.Event{
