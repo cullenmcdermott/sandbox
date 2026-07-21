@@ -6,13 +6,17 @@
 //     persistence across a respawn,
 //   - the env allowlist (no runner secret leaks into the child),
 //   - single-attacher preemption (a new attach closes the previous socket 4001,
-//     replays scrollback to the newcomer, and reroutes live output).
+//     replays scrollback to the newcomer, and reroutes live output),
+//   - backpressure eviction (a socket buffered over the P2 cap is closed 4003;
+//     the child keeps running and a reattach replays the ring).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   ScrollbackRing,
   SCROLLBACK_BYTES,
+  CLOSE_BACKPRESSURE,
+  MAX_PANE_CLIENT_BUFFER_BYTES,
   buildClaudePaneEnv,
   claudePaneArgs,
   createClaudePaneSupervisor,
@@ -58,6 +62,8 @@ class FakePty implements PanePty {
 class FakeSocket implements PaneSocket {
   readonly sent: Buffer[] = [];
   closed: { code?: number; reason?: string } | null = null;
+  /** Test-settable stand-in for ws.bufferedAmount (bytes queued, unread). */
+  bufferedAmount = 0;
   send(d: Buffer): void {
     if (this.closed) throw new Error('send after close');
     this.sent.push(d);
@@ -271,6 +277,56 @@ test('a new attach preempts the previous socket and reroutes output', () => {
 
   // Exactly one child spawned across both attaches (resume id was persisted).
   assert.equal(ptys.length, 1);
+});
+
+// --- backpressure eviction (P2) -------------------------------------------
+
+test('a socket buffered over the cap is evicted 4003 on the next send', () => {
+  const { spawn, ptys } = makeSpawner();
+  const sup = createClaudePaneSupervisor({ cwd: '/w', env: {}, persistence: makePersistence('u'), spawn });
+  const s = new FakeSocket();
+  sup.attach(s);
+
+  // Healthy client: output flows.
+  ptys[0].emit(Buffer.from('before'));
+  assert.equal(s.text, 'before');
+
+  // The client stops reading (suspended laptop / wedged port-forward): its
+  // buffered bytes cross the cap, so the NEXT send evicts it instead of
+  // queueing more into pod memory.
+  s.bufferedAmount = MAX_PANE_CLIENT_BUFFER_BYTES + 1;
+  ptys[0].emit(Buffer.from('dropped'));
+  assert.deepEqual(s.closed, {
+    code: CLOSE_BACKPRESSURE,
+    reason: 'pane client not reading (backpressure)',
+  });
+  assert.equal(s.text, 'before', 'the over-cap chunk is not sent to the wedged socket');
+  assert.equal(sup.attached(), false);
+  assert.equal(sup.current(), null);
+  assert.equal(sup.running(), true, 'eviction closes the socket, never the child');
+
+  // Sends after the eviction are no-ops (FakeSocket.send would throw).
+  ptys[0].emit(Buffer.from('later'));
+  assert.equal(s.text, 'before');
+
+  // Recovery path: a reattach replays the ring, which kept accumulating.
+  const b = new FakeSocket();
+  sup.attach(b);
+  assert.equal(b.text, 'beforedroppedlater');
+  assert.equal(ptys.length, 1, 'no respawn — the same child serves the reattach');
+});
+
+test('a socket buffered at or under the cap is not evicted', () => {
+  const { spawn, ptys } = makeSpawner();
+  const sup = createClaudePaneSupervisor({ cwd: '/w', env: {}, persistence: makePersistence('u'), spawn });
+  const s = new FakeSocket();
+  sup.attach(s);
+
+  // Exactly at the cap: the check is strictly-greater-than (E3 parity).
+  s.bufferedAmount = MAX_PANE_CLIENT_BUFFER_BYTES;
+  ptys[0].emit(Buffer.from('still flowing'));
+  assert.equal(s.closed, null);
+  assert.equal(s.text, 'still flowing');
 });
 
 test('write and resize forward to the running child', () => {

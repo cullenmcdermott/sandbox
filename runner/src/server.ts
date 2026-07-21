@@ -142,7 +142,9 @@ function rawToBuffer(data: RawData): Buffer {
 
 /** Adapt a `ws` WebSocket to the supervisor's minimal PaneSocket seam. Sends are
  * always binary frames (raw PTY bytes); send/close are guarded so a closed
- * socket never throws into the supervisor. */
+ * socket never throws into the supervisor. bufferedAmount is passed through so
+ * the supervisor's backpressure eviction (claude-pane.ts P2) sees real buffered
+ * bytes. */
 function paneSocketAdapter(ws: WebSocket): PaneSocket {
   return {
     send(data: Buffer): void {
@@ -158,6 +160,9 @@ function paneSocketAdapter(ws: WebSocket): PaneSocket {
       } catch {
         /* already closed */
       }
+    },
+    get bufferedAmount(): number {
+      return ws.bufferedAmount;
     },
   };
 }

@@ -25,6 +25,9 @@
 //   - Single attacher: a new attach preempts the previous socket (close 4001).
 //     On attach the accumulated scrollback (bounded ring buffer) is replayed as
 //     one binary frame, then live PTY output follows.
+//   - Backpressure: a client that stops reading is evicted (close 4003) once its
+//     send buffer crosses MAX_PANE_CLIENT_BUFFER_BYTES; it reattaches into the
+//     scrollback ring. No PTY pause/resume — close-and-replay is the recovery.
 //
 // The node-pty dependency is required lazily (createRequire) inside the default
 // spawner so importing this module — for unit tests or `tsc --noEmit` — never
@@ -48,6 +51,20 @@ const DEFAULT_ROWS = 24;
 export const CLOSE_REPLACED = 4001;
 /** WebSocket close code used when the interactive child process exits. */
 export const CLOSE_CHILD_EXITED = 4002;
+/** WebSocket close code used when the attached pane is evicted for backpressure
+ * (its send buffer exceeded MAX_PANE_CLIENT_BUFFER_BYTES). */
+export const CLOSE_BACKPRESSURE = 4003;
+
+/** P2: cap on bytes the attached pane socket may have buffered (bufferedAmount)
+ * before safeSend treats the client as wedged and closes it (CLOSE_BACKPRESSURE).
+ * A client that stops reading without closing TCP — a suspended laptop, a wedged
+ * port-forward — otherwise accumulates PTY output in runner RSS at the child's
+ * output rate, unbounded, until the pod OOMs. This mirrors the SSE path's E3 cap
+ * (events.ts MAX_SSE_CLIENT_BUFFER_BYTES, same 4 MiB): far above any healthy
+ * client's transient backlog, so only a genuinely stuck reader trips it. No
+ * PTY pause/resume flow control — recovery is close-and-reattach, replaying the
+ * scrollback ring. */
+export const MAX_PANE_CLIENT_BUFFER_BYTES = 4 * 1024 * 1024;
 
 // --- PTY + socket seams (injectable for tests) ----------------------------
 
@@ -80,6 +97,9 @@ export type PaneSpawner = (opts: PaneSpawnOptions) => PanePty;
 export interface PaneSocket {
   send(data: Buffer): void;
   close(code?: number, reason?: string): void;
+  /** Bytes queued but not yet flushed to the client (ws.bufferedAmount);
+   * drives the P2 backpressure eviction in safeSend. */
+  readonly bufferedAmount: number;
 }
 
 /** Recorded outcome of the interactive child's last exit. */
@@ -385,9 +405,28 @@ class Supervisor implements ClaudePaneSupervisor {
   }
 
   private safeSend(data: Buffer): void {
-    if (!this.socket) return;
+    const socket = this.socket;
+    if (!socket) return;
+    // P2: evict a client that has buffered more than the cap (the WebSocket
+    // analog of events.ts's E3 SSE eviction). Fire-and-forget sends to a reader
+    // that stopped consuming otherwise grow the ws send buffer in pod memory at
+    // PTY output rate; close it instead — the child keeps running, the ring
+    // keeps accumulating, and a reattach replays the scrollback.
+    if (socket.bufferedAmount > MAX_PANE_CLIENT_BUFFER_BYTES) {
+      console.error(
+        `claude-pane: socket buffered ${socket.bufferedAmount}B > ${MAX_PANE_CLIENT_BUFFER_BYTES}B cap; ` +
+          'closing wedged pane (a reattach replays from the scrollback ring)',
+      );
+      this.socket = null;
+      try {
+        socket.close(CLOSE_BACKPRESSURE, 'pane client not reading (backpressure)');
+      } catch {
+        /* already gone */
+      }
+      return;
+    }
     try {
-      this.socket.send(data);
+      socket.send(data);
     } catch {
       /* socket closed between our check and the send — drop it */
     }

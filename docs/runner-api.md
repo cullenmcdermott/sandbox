@@ -260,6 +260,10 @@ upgrade the socket carries the interactive `claude` child's PTY:
   is closed with code **4001**. When the interactive child exits, the attached
   socket is closed with code **4002** (the next attach respawns via
   `--resume`).
+- **Backpressure.** A client that stops reading (its send buffer exceeds a
+  4 MiB cap — the WebSocket analog of the SSE stream's buffered-bytes
+  eviction) is closed with code **4003**. The child keeps running; the client
+  reattaches and catches up from the scrollback replay.
 - Detaching (closing the socket) leaves the child running; an attached pane
   counts as external activity for `GET /sessions/:id/idle`.
 
