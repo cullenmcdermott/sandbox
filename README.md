@@ -91,11 +91,21 @@ working offline or hand off to the local CLI, not as a two-way bridge.
 ## Quickstart
 
 ```bash
+sandbox doctor             # first run: check this host is ready (see below)
 sandbox                    # open the command-center dashboard:
                            # session list, attention routing, attach, create
 sandbox claude             # shortcut: start a NEW Claude session for the
                            # current project and attach to its pane
 ```
+
+On a fresh host, start with `sandbox doctor`: ten quick, offline-friendly
+checks — kubeconfig + context, cluster reachability, the agent-sandbox
+controller, the session namespace, sync tooling (`mutagen`/`ssh`), the host
+`opencode`/`claude` binaries, stored accounts, and the effective runner/reaper
+image refs — each printed as pass/warn/fail with remediation. It exits non-zero
+only on a FAIL (something that blocks session creation); warnings are advisory.
+Not to be confused with `just doctor` (below), which checks the *local dev
+environment's* toolchain, not your cluster readiness.
 
 `sandbox` with no args is the way in: it opens the dashboard, where you create,
 attach to, and route between sessions. `sandbox claude` skips straight to a new
@@ -122,6 +132,12 @@ just dev opencode    # …same, with the OpenCode backend
 See [`dev/local/README.md`](dev/local/README.md) for the full local-dev guide —
 prerequisites, image delivery, and resetting between runs. (Live Claude/OpenCode
 turns still need credentials; the dashboard and session-list views don't.)
+
+Note the two doctors: `just doctor` checks the **local dev-env toolchain**
+(that kind/ctlptl/kubectl/docker etc. resolve from the Flox env and the Docker
+daemon is reachable), while `sandbox doctor` checks a **host's readiness for
+remote sessions** (kubeconfig, cluster, controller, credentials). They are
+different tools for different questions.
 
 ## Prerequisites
 
@@ -253,9 +269,11 @@ cd runner && npm install --ignore-scripts && ./node_modules/.bin/tsc --noEmit
 
 | Command | Description |
 |---|---|
+| `sandbox doctor` | Check this host is ready for remote sessions: kubeconfig + context, cluster API, agent-sandbox controller, session namespace, sync tooling (`mutagen`/`ssh`), host agent binaries, stored accounts, effective image refs — pass/warn/fail with remediation; exits non-zero only on a FAIL. (Different tool from the dev-env `just doctor`) |
 | `sandbox` | Open the command-center dashboard (session list, attention routing, attach) |
 | `sandbox claude` | Start a **new** Claude session for the current project — the real Claude Code TUI running in the pod, attached as a pane (`--model <id\|alias>` sets the session default, or use claude's own `/model` in-pane; `--account` pins a stored account; `--worktree auto\|on\|off` controls per-session git worktree isolation). Interactive-only (no positional prompt). To resume an existing session, use `sandbox attach` |
 | `sandbox opencode [prompt]` | Start a **new** OpenCode-backend session (external `opencode serve` + attach). `--model <provider/model>` sets the session default (e.g. `anthropic/claude-sonnet-4-5`); `--provider anthropic\|openai\|opencode-zen` picks which key the pod receives from the shared Secret |
+| `sandbox codex` | **Experimental.** Start a **new** Codex session (`codex app-server` in the pod). No positional prompt (codex owns its own input loop); `--model` sets the session default. Credential contract: a per-session ChatGPT-OAuth `auth.json` (today only settable via the Go SDK's codex account options), else the shared `openai-api-key` from the `opencode-credentials` Secret (fail-closed) — the CLI currently always uses that fallback. Attach UX is degraded until the codex pane lands: the session creates and health-checks, but the dashboard has no interactive codex pane yet |
 | `sandbox attach <id>` | Reconnect to a running/suspended session and replay history |
 | `sandbox trace <id>` | Replay a session's normalized event timeline (`--json`, `--since`, `--tool` filters) |
 | `sandbox status` | List sessions and their status (`--all` also lists locally-known sessions gone from the cluster) |
@@ -274,10 +292,19 @@ cd runner && npm install --ignore-scripts && ./node_modules/.bin/tsc --noEmit
 
 ## Testing
 
+`just check` is **the** gate — CI runs exactly the same recipe
+(`.depot/workflows/ci.yml` invokes `just check`), so a green run locally means
+a green CI:
+
 ```bash
-go test ./...
-go vet ./...
+just check   # gen (codegen drift) → fmt-check → lint → build → vet → test
+             # → typecheck → sdk-conformance → verify (anti-cheat + race) → e2e
 ```
+
+Individual pieces are their own recipes (`just test`, `just lint`, `just e2e`,
+…) — see [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full list and the local
+caveats (linters skip with a warning when absent; some suites bind localhost
+ports that sandboxed dev environments block).
 
 ## Contributing & support
 

@@ -34,18 +34,26 @@ Run `just` with no arguments to list every recipe.
 just check
 ```
 
-It runs, in order: codegen drift check, `gofmt`, lint, build, `go vet`, the Go and
-runner test suites, the runner typecheck, and the anti-cheat / race checks.
+It runs, in order (the `check` recipe in the `Justfile`): `gen` (event-model
+codegen + drift gate), `fmt-check` (gofmt, no writes), `lint` (golangci-lint +
+eslint), `build`, `vet`, `test` (Go + runner unit tests), `typecheck` (runner
+`tsc --noEmit`), `sdk-conformance` (compiles + tests the public SDK from the
+separate `sdktest` module, exactly as an external consumer imports it),
+`verify` (the anti-cheat + race-twice gate, `scripts/verify.sh`), and `e2e`
+(build-tagged CLI↔runner end-to-end tests).
 
 Individual pieces are also addressable as their own recipes:
 
 ```bash
-just build       # build the sandbox binary
-just test        # Go + runner unit tests
-just lint        # golangci-lint + eslint (CI-enforced; see caveats below)
-just fmt         # gofmt
-just typecheck   # runner tsc --noEmit
-just gen         # regenerate event-model code (see below)
+just build            # build the whole Go module
+just test             # Go + runner unit tests
+just lint             # golangci-lint + eslint (CI-enforced; see caveats below)
+just fmt              # gofmt
+just typecheck        # runner tsc --noEmit
+just gen              # regenerate event-model code (see below)
+just sdk-conformance  # public-SDK conformance via the sdktest module
+just verify           # anti-cheat scan + go test -race, twice (scripts/verify.sh)
+just e2e              # CLI↔runner e2e tests (build tag: e2e)
 ```
 
 ### Test caveat: sandboxed environments bind ports
@@ -88,6 +96,22 @@ validates them against the schema and fails on drift. Scope is event payloads on
 
 See the "Event model" section of [`docs/architecture.md`](docs/architecture.md) for
 the rationale.
+
+## The `openspec/` references
+
+Some tracked files (`TODO.md`, `docs/architecture.md`) point at paths like
+`openspec/changes/<name>/…`. That directory is the maintainer's local OpenSpec
+planning workspace and is **not part of the repository** — a fresh clone does
+not contain it, and that is expected. In that workflow, work large enough to
+need a written plan gets a change directory `openspec/changes/<name>/` holding
+`proposal.md` (why + what changes), `design.md` (decisions), `specs/` (delta
+specs per affected capability), and `tasks.md` (the implementation checklist);
+smaller fixes skip it and land as direct commits tracked in `TODO.md`. When a
+change is implemented, its deltas are folded into the main specs
+(`openspec/specs/`) and the change directory moves to
+`openspec/changes/archive/`. Anything from those artifacts that matters
+durably is reflected into `docs/` (see the docs map in `CLAUDE.md`), so you
+never need `openspec/` to build, review, or contribute.
 
 ## Pull requests
 
