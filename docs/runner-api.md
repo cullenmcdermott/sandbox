@@ -40,11 +40,11 @@ Returns the session state for a single session — the **same body** as
 Returns the runner's `session.json` state:
 ```json
 {
-  "id": "claude-sdk-7f3a",
-  "backend": "claude-sdk",
+  "id": "claude-pane-7f3a",
+  "backend": "claude-pane",
   "projectPath": "/Users/you/git/my-project",
   "activity": "idle",
-  "agentSession": "sdk-session-id",
+  "agentSession": "9a1b2c3d-…-uuid",
   "lastTurnId": "turn-12",
   "activeTurnId": "",
   "lastActivity": "2026-06-18T22:30:00Z",
@@ -57,8 +57,9 @@ Returns the runner's `session.json` state:
 is **distinct** from the k8s lifecycle status (`CREATING`/`RUNNING`/`SUSPENDED`/…),
 which the runner does not report; the Go side keeps the two on separate fields
 (`State.Activity` vs `State.Status`, the D9 one-vocabulary-per-field split).
-`agentSession` is the backend's own resume id — the Claude SDK session UUID for a
-`claude-sdk` session, or the opencode session id — one backend per session ⇒ one
+`agentSession` is the backend's own resume id — the Claude Code session UUID for
+a `claude-pane` session (what the supervisor passes to `claude --resume`), or the
+opencode session id — one backend per session ⇒ one
 resume id. (Both fields were renamed from `status`/`claudeSession` in the §8
 De-Claude break; the CLI and runner ship together, so the wire rename lands on
 both sides at once.)
@@ -143,6 +144,12 @@ new one:
 The first two are the authoritative `turnRejectReason` set (`runner/src/turns.ts`);
 the third is the no-Agent short-circuit in the route itself.
 
+> **Retired backend id.** `claude-sdk` is a retired backend id (claude-pane-first
+> removed the SDK turn engine; see `selectAgent` in `runner/src/agent.ts`): a
+> lingering old `claude-sdk` pod still boots and serves `/status` and `/idle`,
+> but it has no `Agent` either, so `POST /turns` answers the same no-Agent 409
+> rather than crashing.
+
 ### `POST /sessions/:id/turns/:turn_id/interrupt`
 Cancels an active turn. Returns 200 with `{"turnId": "turn-13"}`. Returns 404
 (`{"error": "turn not found or not active"}`) if the turn is not found or no
@@ -215,7 +222,7 @@ Each event is a JSON object:
 {
   "seq": 1842,
   "time": "2026-06-18T22:30:00Z",
-  "sessionId": "claude-sdk-7f3a",
+  "sessionId": "claude-pane-7f3a",
   "turnId": "turn-12",
   "type": "tool.completed",
   "payload": {}

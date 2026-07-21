@@ -1,6 +1,7 @@
 // Package cli implements the sandbox CLI's command tree: it creates and manages
-// Kubernetes-backed remote agent sessions (Claude Agent SDK / OpenCode) and
-// drives the local Bubble Tea dashboard that attaches to them.
+// Kubernetes-backed remote agent sessions (Claude Code in an interactive pane,
+// OpenCode, Codex) and drives the local Bubble Tea dashboard that attaches to
+// them.
 //
 // The CLI is a thin consumer of the public client package: session create /
 // connect / turn / stream / sync all go through github.com/cullenmcdermott/sandbox/client,
@@ -34,11 +35,12 @@ func NewRoot() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "sandbox",
 		Short: "Run AI coding agents in remote Kubernetes sessions",
-		Long: "sandbox runs AI coding agents (Claude Agent SDK / OpenCode) in remote\n" +
-			"Kubernetes sessions with PVC persistence, file sync, and a local TUI.\n\n" +
+		Long: "sandbox runs AI coding agents (Claude Code in an interactive pane, OpenCode,\n" +
+			"Codex) in remote Kubernetes sessions with PVC persistence, file sync, and a\n" +
+			"local TUI.\n\n" +
 			"Run `sandbox` with no arguments to open the command-center dashboard.",
 		Example: "  sandbox                       # open the dashboard\n" +
-			"  sandbox claude \"fix the build\"  # start a session and prompt it\n" +
+			"  sandbox claude                # start a Claude Code session for this project\n" +
 			"  sandbox status                # list sessions\n" +
 			"  sandbox attach <id>           # reconnect to a session",
 		Version: Version,
