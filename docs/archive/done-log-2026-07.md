@@ -1987,3 +1987,36 @@ cherry-pick; one `just check` over the integrated batch (all gates green).
 Live-verify wanted (next natural session): [L8] — a slash command should
 show "working" for ≤~10s then flip to "ready"; [P4] — typing during a
 network stall must not freeze the dashboard; ctrl+] must detach.
+
+## 2026-07-21 — [L3] detached feed history + EventCache deletion (inline, 17735d2 + 79123e7)
+
+- **Feed seeds from a one-shot from-zero replay (17735d2):** new
+  `internal/tui/dashboard/feed_history.go` — on feed open the App runs a
+  ONE-SHOT passive SSE fetch from seq 0 (mirrors startLiveSSECmd's
+  attach-gate yield + connect-slot throttle + §1d C1 close-the-forward
+  contract), collecting until the client-internal `EventStreamLive`
+  replay-complete marker, channel close, or a 15s read bound, keeping a
+  2000-event tail (halve-when-doubled, O(n) overall). Scoped strictly to
+  the fetch: the dashboard read-model stream keeps `after=lastSeq`, so
+  the launch-time notification-flash / usage-double-count that guard
+  exists for cannot return. Ordering hazard solved: the feed dedups by
+  seq, so seeding AFTER live tap ingest would drop the whole history —
+  while the fetch is in flight, tapped events buffer in
+  `feedPendingLive` (cap 1024) and re-apply after the seed (replay-tail
+  overlap dedups). Stale results (feed closed/reopened) dropped by a
+  generation guard; fetch failure degrades to live-only with a calm
+  notice; partial replay seeds what arrived + an "incomplete" notice.
+  Tests: pure collect helper (complete/partial/deadline/tail-cap),
+  seed-then-overlap dedup pin, App-level buffer→seed→flush, stale-gen/
+  wrong-id/no-feed guards, error + incomplete notices;
+  TestAppViewFeedNavigation updated to complete the history handshake.
+- **EventCache surface deleted (79123e7, option A follow-up):** the
+  host-side cache was a reader with no production writer since a935541 —
+  removed `dashboard.EventCache`/`WithEventCache`/`RunOptions.EventCache`
+  + the eventCache field, the cli `indexEventCache` adapter + its three
+  wiring sites (root/commands/claude_remote), and the whole
+  `internal/index/cache.go` (CacheWriter, AppendCachedEvent,
+  LoadCachedEvents, DeleteEventCache, compactCacheTail) + tests
+  (−454 lines). V30 traversal test keeps its Load coverage; legacy
+  on-disk events.ndjson still goes with the session dir on destroy.
+  `just check` green over both commits.

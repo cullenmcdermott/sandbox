@@ -55,9 +55,10 @@
 > [S2], [L8a/b], [P4], §2e needs-input relabel, §6 C3-codex, and
 > [O4]/[O6]/[O11]/[O12] all landed; done log):** best first picks, in order —
 > §10 remaining docs+probe cluster [O1]/[O3]/[O5]/[O7]-[O10]/[O14]/[O15]
-> (two PARKED part-done worktrees to finish, see the §10 intro), §1h [L3]
-> feed history + [L7] wheel-scroll (implement WITH §4 [P3] as one change),
-> §1f [S1]/[S3] security follow-ups, §9 T10 dirPicker + statusline chain
+> (two PARKED part-done worktrees to finish, see the §10 intro), §1h [L7]
+> wheel-scroll (implement WITH §4 [P3] as one change; [L3] feed history
+> landed 2026-07-21), §1f [S1]/[S3] security follow-ups, §9 T10 dirPicker +
+> statusline chain
 > (execution contracts in the items), §7a = execute
 > `openspec/changes/opencode-multi-provider-auth/tasks.md`. Every open item carries pointers + a fix direction + a
 > verification line; if one doesn't, that's a bug in this file. Rules of the
@@ -176,25 +177,14 @@ row-model consolidation moved to §2a where it belongs.
   method) and map it to `closeTurn('interrupted')` — needs a live session.
   Dashboard follow-up (separate, needs design): an honest "stalled?"
   rendering for busy-with-quiet-observer beats a false "working".
-- [ ] **[L3] Detached feed opens empty — host event cache has a reader but no
-  writer (MED).** `app.go` `openFeed` seeds from `eventCache.LoadEvents` but
-  `AppendEvent` has zero production callers (orphaned by a935541);
-  `EventCache`/`WithEventCache` (`internal/tui/dashboard/model.go:425-441`)
-  and `indexEventCache`/`CacheWriter` (`internal/cli/sync_support.go:427`)
-  are dead weight. RECOMMENDED fix (option A): on feed open, request SSE
-  replay from seq 0 instead of `sess.lastSeq` (the runner's SQLite log holds
-  full history and replay is already chunked/bounded — E2 in
-  `runner/src/events.ts`), seed the feed from that replay, THEN delete the
-  whole EventCache surface (interface, WithEventCache, indexEventCache,
-  CacheWriter, and their tests) as a follow-up hygiene commit. Watch out:
-  the `after=lastSeq` behavior exists to prevent launch-time notification
-  flashing/usage double-count on the DASHBOARD path (`model_sse.go` comment
-  near `afterSeq :=`) — scope the from-zero replay to the feed's stream
-  only, not the dashboard read-model stream. Option B (reconnect the cache
-  write path) is NOT recommended: it re-adds a second source of truth.
-  Tests: extend `feed_test.go` seeding cases; a reducer-level test that a
-  feed opened mid-session renders prior prompts/tool lines. Run
-  `go test ./internal/tui/dashboard/`.
+- [x] **[L3] done 2026-07-21** (done log): feed opens seeded from a
+  ONE-SHOT passive SSE replay from seq 0 (`feed_history.go` — attach-gate/
+  connect-slot/C1 discipline, 15s read bound, 2000-event tail cap, gen
+  guard, live-tap buffering so seq-dedup can't drop the seed); the
+  dashboard stream keeps `after=lastSeq`, so the notification-flash guard
+  is untouched. The orphaned EventCache surface (dashboard interface +
+  cli adapter + `internal/index/cache.go`) deleted in the follow-up
+  hygiene commit, per option A.
 
 ### 1c. Rendering / layout residuals (2026-07-04 audit; parents fixed — done log)
 
