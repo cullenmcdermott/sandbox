@@ -2124,3 +2124,29 @@ snap-back; T10 overlay flow; a synced `~/.claude/statusline/user-statusline`
 appearing in-pane; `sandbox doctor`/`auth status` on a machine without the
 host login; [S1] FQDN set via `hubble observe`; [O5] reaper manifests on the
 real cluster.
+
+## 2026-07-21 — golden harness motion/theme/size axes (551cd2c)
+
+Closed 3 of the 4 §10 visual-testing gaps (eyeball harness still open).
+Builder-implemented, orchestrator-reviewed (verified the two load-bearing
+claims independently: Midnight goldens are 100% renames; all four
+mid-motion offset pairs are byte-distinct, not committed-identical), then
+cherry-picked. Test-only — no production code.
+
+- **withMotionRender:** motion ON (clears SANDBOX_REDUCE_MOTION AND NO_COLOR
+  since anim.ReduceMotion reads both), `nowFunc = goldenFixedNow + offset`.
+- **Mid-motion:** TestGoldenRowEnter {start_0ms, mid_90ms, settled_200ms}
+  pins the row fade-in (beta title fg TextDim→mid-blend→TextBody across the
+  180ms window); TestGoldenStatusFlash {peak_0ms, mid_150ms, settled_350ms}
+  pins the status-change bg pulse (Page→0.4-toward-accent→faint→none across
+  300ms). The goldens ARE the frames — a static way to review animation.
+- **Theme axis:** TestGoldenDashboard/TestGoldenFeed fan out over the whole
+  registry (Midnight/Daylight/Ember) as subtests via theme.Cycle/ByName/
+  ApplyTheme with t.Cleanup restore; old un-suffixed goldens became the
+  /Midnight subtests (pure rename, byte-identical). TestGoldenConfirmDialog
+  left Midnight-only per scope.
+- **Size axis:** TestGoldenDashboardNarrow/TestGoldenFeedNarrow at 60×20 —
+  dashboard drops the side detail pane to one column, feed truncates paths;
+  degrades cleanly, no panic.
+- Verified `-run Golden -count=3` deterministic + full dashboard package
+  green on main; the ExternalPane esc test self-skips in-sandbox as expected.

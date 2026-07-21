@@ -1249,28 +1249,21 @@ do well is recorded there too; fix in roughly this order):
   output formats consistent); the §1d observer-cap model remains absent
   from `docs/architecture.md` (doc drift, 2026-07-06 harness audit).
 
-- [ ] **Visual-testing gaps (2026-07-13 review; re-scoped 2026-07-20 after
-  claude-pane-first deleted the transcript surfaces) — static goldens are
-  strong, motion/theme/size axes are not.** The golden harness
-  (`internal/tui/dashboard/golden_test.go:30`) deliberately pins
-  `SANDBOX_REDUCE_MOTION=1`, so every committed frame is the settled
-  end-state; the transition catalog (`internal/tui/dashboard/transitions.go`)
-  is only value-tested (`tui/anim/transition_test.go`). Sub-items:
-  - [ ] *Mid-motion golden frames:* with motion forced ON and the injected
-    `nowFunc` stepped through fixed offsets (0, ½-window, past-end of
-    `rowEnterDur`/`statusFlashDur`), golden the rendered frame at each step —
-    pins the row fade and status flash (`transitions.go`) as reviewable frame
-    sequences. All inputs are already injectable, so this is
-    byte-deterministic; it also gives agents a static way to "see" the
-    animation (the golden files ARE the frames).
-  - [ ] *Theme axis:* goldens render only the default theme
-    (`tui/theme/theme.go:161` — themes[0] Midnight); Daylight is never
-    snapshotted anywhere. Parameterize at least one dashboard + one feed
-    golden per registered theme.
-  - [ ] *Size axis:* every golden is 100×30 (`golden_test.go:53`). `tui/kit`
-    covers narrow degradation per-component (`components_test.go`
-    TestCardDegradesNarrow) but no narrow-terminal golden exists for the
-    composed dashboard/feed frame.
+- [~] **Visual-testing gaps (2026-07-13 review; re-scoped 2026-07-20 after
+  claude-pane-first deleted the transcript surfaces) — motion/theme/size
+  axes CLOSED 2026-07-21 (done log); eyeball harness still open.**
+  - [x] *Mid-motion golden frames — done 2026-07-21* (done log):
+    `withMotionRender` (motion ON, `nowFunc = goldenFixedNow+offset`);
+    `TestGoldenRowEnter` {0,90,200ms} pins the row fade,
+    `TestGoldenStatusFlash` {0,150,350ms} the status pulse — frames
+    verified genuinely distinct + deterministic (`-count=3`).
+  - [x] *Theme axis — done 2026-07-21* (done log): `TestGoldenDashboard`/
+    `TestGoldenFeed` fan out over every registered theme (Midnight/
+    Daylight/Ember) as subtests; Midnight goldens are pure renames of the
+    old un-suffixed files (byte-identical).
+  - [x] *Size axis — done 2026-07-21* (done log):
+    `TestGoldenDashboardNarrow`/`TestGoldenFeedNarrow` pin the degraded
+    60×20 layout (clean degradation, no panic).
   - [ ] *Animation eyeball harness:* no repeatable way to watch dashboard
     motion without a live cluster — `cmd/tuikit-demo` exercises only the
     public `tui/` packages, and `just dev-tui` (justfile:363) needs the kind
