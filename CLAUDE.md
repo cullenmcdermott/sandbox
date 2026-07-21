@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Go CLI (`sandbox`) and TypeScript runner pod that together run AI coding agents (Claude Agent SDK) in Kubernetes Sandbox pods with PVC persistence, port-forwarded HTTP+SSE runner API, a local Bubble Tea TUI, and Mutagen file sync.
+A Go CLI (`sandbox`) and TypeScript runner pod that together run AI coding agents — the real Claude Code TUI in a runner-owned PTY pane (claude-pane), OpenCode (`opencode serve`), and Codex (app-server, phase 1) — in Kubernetes Sandbox pods with PVC persistence, a port-forwarded HTTP+SSE(+WebSocket pane) runner API, a local Bubble Tea dashboard TUI, and Mutagen file sync. The runner supervises each agent process and *observes* its activity into a normalized event log; it does not drive claude turns (the Claude Agent SDK turn engine was deleted by `claude-pane-first`, 2026-07-20 — `POST /turns` survives only as the opencode headless first-turn adapter).
 
 This is the k8s-native successor to a Lima-based local sandbox CLI. The old Lima backend was for local macOS development; this repo targets a remote Kubernetes cluster (agent-sandbox controller).
 
@@ -108,11 +108,11 @@ Module: `github.com/cullenmcdermott/sandbox`
 | `cmd/sandbox` | Binary entry point |
 | `internal/session` | Core types: `Spec`, `State`, `Event` (the event types enumerated in `schema/events.json`), `Backend` and `RunnerClient` interfaces |
 | `internal/k8s` | `Backend` impl using agent-sandbox v1alpha1 clientset: Sandbox/PVC create, suspend (replicas→0), resume, port-forward via client-go SPDY; reaper Job spec |
-| `internal/runner` | HTTP client implementing `RunnerClient`: health, start/interrupt turn, resolve permission, SSE event streaming with `after=<seq>` replay |
+| `internal/runner` | HTTP client implementing `RunnerClient`: health, start/interrupt turn (opencode), SSE event streaming with `after=<seq>` replay, pane WebSocket dial (`pane.go` — 4001 preempt / 4002 child-exit / 4003 backpressure close codes) |
 | `client/models` (public) | Resolves a model's context-window limit + per-million-token pricing; drives the TUI ctx% indicator (`models.Limit(model)`) and is importable by external SDK consumers |
-| `internal/cli` | Cobra command tree: `claude`, `opencode`, `attach`, `status`, `suspend`, `resume`, `cancel`, `destroy`, `shell`, `sync`, `trace`, `rename` |
+| `internal/cli` | Cobra command tree: `claude`, `opencode`, `codex`, `attach`, `status`, `suspend`, `resume`, `cancel`, `destroy`, `shell`, `sync`, `trace`, `rename`, `auth`, `doctor`, `worktree` |
 | `internal/authstatus` | Offline per-agent auth status report (Claude/Codex/OpenCode providers) behind `sandbox auth status` — deliberately internal presentation machinery, not SDK surface |
-| `internal/tui/dashboard` | Bubble Tea v2 command-center: session list, attention routing, transcript, tool cards, permission modal, external (opencode) PTY pane, detach/interrupt keys. App-specific styles/glyphs read `tui/theme` tokens and re-skin via `theme.OnChange` |
+| `internal/tui/dashboard` | Bubble Tea v2 command-center: session list, attention routing, the external agent pane (vt emulator behind the `PaneTransport` seam — child-process PTY for opencode, WebSocket for claude-pane), read-only detached activity feed (`feed.go`), create overlay (backend + account pickers), detach/interrupt keys. App-specific styles/glyphs read `tui/theme` tokens and re-skin via `theme.OnChange` |
 | `tui/` (public) | Reusable, importable TUI building blocks split out of the dashboard: `tui/kit` (widgets), `tui/anim` (transitions/spinner), `tui/list` (scrolling list), `tui/theme` (palette registry, exported semantic color tokens, gradient/spinner/fade helpers, status glyphs). No app coupling — other projects can import these directly |
 | `client/` (public) | The Go SDK: create/connect/suspend/destroy sessions, turns, SSE events, sync — the CLI and TUI dogfood it. New capability goes HERE first, not in `internal/cli` |
 | `client/cred` (public) | Multi-account Anthropic credential store (Keychain/file backends, manifest, token parsing, account→CreateOptions selection) |
@@ -127,29 +127,33 @@ Runs inside the Sandbox pod — one session per pod. Serves HTTP on port 8787, S
 
 | File | Role |
 |---|---|
-| `src/index.ts` | Entrypoint: open event log, load session state, init registry, start server |
-| `src/server.ts` | node:http server with bearer token auth, routes per API contract |
-| `src/claude.ts` | Claude Agent SDK integration: `query()`, hooks (PreToolUse Bash blocking, PostToolUse audit, SessionEnd), `canUseTool` permission flow, SDK message → normalized event mapping |
-| `src/events.ts` | SQLite event log via better-sqlite3; append-before-stream invariant; SSE replay |
-| `src/session.ts` | Session registry, env config, session.json persistence, turn ID generation |
+| `src/index.ts` | Entrypoint: open event log, load session state, init registry per `SANDBOX_BACKEND`, start server; SIGTERM shutdown ordering |
+| `src/server.ts` | node:http server with bearer token auth (constant-time), routes per API contract incl. the pane WebSocket upgrade (`GET /sessions/:id/pane` — auth before session-id probe) and the observer ingestion routes |
+| `src/claude-pane.ts` | claude-pane supervisor: lazy spawn of interactive `claude` under node-pty with a strict env allowlist, `--session-id`/`--resume` chain, 256 KiB scrollback ring, single-attacher preemption (4001), child-exit (4002), 4 MiB send-buffer backpressure close (4003) |
+| `src/claude-pane-observer.ts` | Hook/statusline observer: provisions settings + helper scripts + a scoped observer token into `CLAUDE_CONFIG_DIR`, ingests POSTs → normalized events (turn/message/tool/permission/usage/rate-limit), synthetic busy/idle |
+| `src/claude-config.ts` | Boot materialization of `.credentials.json` + `.claude.json` seed (only-if-absent, refresh-preserving, fail-closed) |
+| `src/opencode.ts` / `src/opencode-observer.ts` / `src/opencode-turn.ts` | `opencode serve` supervisor + SSE observer (via `@opencode-ai/sdk`) + the headless first-turn adapter (the only remaining `POST /turns` consumer) |
+| `src/codex.ts` / `src/codex-observer.ts` | codex app-server supervisor (auth.json seeding) + passive JSON-RPC-over-WS observer |
+| `src/events.ts` | SQLite event log via better-sqlite3; append-before-stream invariant; chunked SSE replay; backpressure cap; redaction via `redact.ts` |
+| `src/session.ts` | Session registry, env config, session.json persistence, turn ID generation, idle clock |
 | `src/audit.ts` | Append-only audit.jsonl log |
-| `src/types.ts` | Normalized event/session types mirroring `internal/session/event.go` |
-| `src/httputil.ts` | Request body reader helper |
-| `Dockerfile` | Multi-stage node:24-slim: build TS, runtime with sshd + sqlite3 |
+| `src/exec.ts` / `src/guards.ts` | `/exec` one-shot shell with sanitized env, process-group kill + the shared bash guard |
+| `src/types.ts` | Normalized event/session types mirroring `internal/session/event.go` (`events.gen.ts` is generated — never hand-edit) |
+| `Dockerfile` | Multi-stage node:24-slim: build TS, runtime with sshd + sqlite3 + the pinned, sha256-verified `claude` binary (both glibc arches) + opencode/codex CLIs |
 
 ### Event model
 
-The Go `internal/session/event.go` and TypeScript `runner/src/types.ts` define identical event types (the set enumerated in `schema/events.json`). The runner maps Claude SDK messages into these normalized events, persists to SQLite, then streams via SSE. The Go CLI's `internal/runner/client.go` consumes the SSE stream and feeds events to the TUI.
+The Go `internal/session/event.go` and TypeScript `runner/src/types.ts` define identical event types (the set enumerated in `schema/events.json`, protocolVersion 3). The runner's per-backend observers (claude hooks/statusline, opencode SSE, codex notifications) map agent activity into these normalized events, persist to SQLite, then stream via SSE. The Go CLI's `internal/runner/client.go` consumes the SSE stream and feeds events to the dashboard read-model and feed.
 
 ### Session lifecycle
 
-1. `sandbox claude` → CLI creates Sandbox CRD + PVC in `agent-sessions` namespace
-2. CLI port-forwards to the pod's port 8787
-3. CLI health-checks the runner, then launches the TUI
-4. User types a prompt → CLI POSTs to `/sessions/:id/turns` → runner calls Claude SDK `query()`
-5. Events stream via SSE → TUI renders transcript, tool cards, permission prompts
-6. User can detach (Ctrl+]) — pod keeps running, PVC persists state
-7. `sandbox attach` → port-forward + SSE replay from last seen seq → TUI catches up
+1. `sandbox claude` → CLI harvests the host's Claude Code login (`cred.SystemMaterial`, Max mode — fail-closed; stored setup-token accounts are rejected for the pane) and creates Sandbox CRD + PVC + per-session Secret in `agent-sessions`
+2. CLI port-forwards to the pod's port 8787; runner materializes credentials/config on boot
+3. CLI health-checks the runner, then launches the dashboard TUI
+4. The dashboard attaches the pane (`GET /sessions/:id/pane` WebSocket over the same forward) → runner lazily spawns interactive `claude` under node-pty → keystrokes/frames stream both ways; the user talks to the real Claude Code TUI
+5. In parallel, provisioned hooks + statusline POST observer events → SSE → session list status/metrics, attention routing, and the detached feed
+6. Detach (Ctrl+]) — the pod-side child keeps running; PVC persists state
+7. `sandbox attach` → port-forward + pane reattach (scrollback-ring replay) + SSE replay from last seen seq
 
 ### Sync
 
