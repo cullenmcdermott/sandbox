@@ -99,6 +99,15 @@ type ExternalPane struct {
 	// MouseMsg (mouse reporting) to the child.
 	activeModes map[ansi.DECMode]bool
 
+	// scrollOffset is how many lines the view is scrolled back into the
+	// emulator's scrollback (L7): 0 renders the live screen; N shifts the
+	// visible window up by N rows, composing the scrollback tail above the top
+	// of the live screen. Wheel events adjust it ONLY while the child has not
+	// enabled mouse tracking (a tracking child gets the wheel forwarded and
+	// scrolls itself); any key press, paste, or new child output snaps back to
+	// 0 so type-ahead and fresh frames always land on the live view.
+	scrollOffset int
+
 	w, h   int
 	exited bool
 	err    error
@@ -117,6 +126,17 @@ const (
 	paneBatchMaxChunks = 256
 	paneBatchMaxBytes  = 1 << 20 // 1 MiB
 )
+
+// paneScrollbackLines caps the vt emulator's retained scrollback (P3): the
+// package default is 10k lines, sized for a full terminal, not an embedded
+// pane. 2000 lines is ample history for the wheel-scroll view (L7) — the only
+// reader — at a fifth of the retention. Do not set this to 1: the scrollback
+// IS the wheel-scroll feature's backing store.
+const paneScrollbackLines = 2000
+
+// paneWheelStep is how many lines one wheel tick moves the scrollback view —
+// the common terminal convention of 3.
+const paneWheelStep = 3
 
 // paneInputQueueCap bounds the input-writer queue (P4). 64 entries is far more
 // input than a user produces in the time a healthy transport takes to drain
@@ -196,6 +216,7 @@ func (p *ExternalPane) emuSize() (cols, rows int) {
 func (p *ExternalPane) Init() tea.Cmd {
 	cols, rows := p.emuSize()
 	p.emu = vt.NewEmulator(cols, rows)
+	p.emu.SetScrollbackSize(paneScrollbackLines)
 	// Track DEC modes set by the child so we know whether to forward PasteMsg
 	// and MouseMsg (O6).
 	p.emu.SetCallbacks(vt.Callbacks{
@@ -333,6 +354,9 @@ func (p *ExternalPane) readCmd() tea.Cmd {
 func (p *ExternalPane) apply(chunk ptyChunk) (tea.Cmd, bool) {
 	data, end := p.drainBatch(chunk)
 	if len(data) > 0 && p.emu != nil {
+		// New child output snaps the scrollback view back to live (L7) BEFORE
+		// the bytes land, so the frame the child just painted is what renders.
+		p.scrollOffset = 0
 		p.feed(data)
 	}
 	if end == nil {
@@ -463,7 +487,10 @@ func (p *ExternalPane) recordInputDrop(kind string) {
 // handleKey encodes a key press to terminal input bytes and queues them for
 // the transport. The universal escape is intercepted by the App before
 // reaching here, so every key delivered to the pane is meant for the child.
+// Any key snaps a scrolled-back view to live (L7) before forwarding, so the
+// child's echo of the keystroke is visible immediately.
 func (p *ExternalPane) handleKey(msg tea.KeyPressMsg) {
+	p.scrollOffset = 0
 	if b := encodeKey(msg); len(b) > 0 {
 		p.send(b)
 	}
@@ -471,8 +498,10 @@ func (p *ExternalPane) handleKey(msg tea.KeyPressMsg) {
 
 // handlePaste forwards pasted text to the child wrapped in bracketed-paste
 // sequences when the child has enabled the mode (O6). One send so the paste
-// travels as a single unit (one frame on a network transport).
+// travels as a single unit (one frame on a network transport). Like a key
+// press, a paste snaps a scrolled-back view to live (L7).
 func (p *ExternalPane) handlePaste(msg tea.PasteMsg) {
+	p.scrollOffset = 0
 	if !p.activeModes[ansi.ModeBracketedPaste] {
 		return
 	}
@@ -495,9 +524,23 @@ func (p *ExternalPane) mouseEnabled() bool {
 	return false
 }
 
-// handleMouse forwards a mouse event to the child encoded as xterm SGR mouse
-// when the child has enabled mouse reporting (O6).
+// handleMouse routes a mouse event: while the child has mouse tracking
+// enabled it is forwarded encoded as xterm SGR mouse (O6) — wheel included,
+// so a tracking child (opencode) scrolls itself. When tracking is OFF, a
+// wheel event instead scrolls our local view over the emulator's scrollback
+// (L7): locally that child (claude runs inline, no tracking) would be
+// scrolled by the terminal's own history, but in the pane the vt emulator is
+// the only history there is. Non-wheel events without tracking stay dropped.
 func (p *ExternalPane) handleMouse(msg tea.MouseMsg) {
+	if wheel, ok := msg.(tea.MouseWheelMsg); ok && !p.mouseEnabled() {
+		switch wheel.Button {
+		case tea.MouseWheelUp:
+			p.scrollBy(paneWheelStep)
+		case tea.MouseWheelDown:
+			p.scrollBy(-paneWheelStep)
+		}
+		return
+	}
 	if !p.mouseEnabled() {
 		return
 	}
@@ -522,6 +565,24 @@ func (p *ExternalPane) handleMouse(msg tea.MouseMsg) {
 	} else {
 		p.send([]byte(ansi.MouseX10(b, m.X, m.Y)))
 	}
+}
+
+// scrollBy adjusts the local scrollback view (L7) by delta lines (positive =
+// deeper into history), clamped to [0, scrollback length]. On the alt screen
+// the wheel is ignored instead: the main-screen scrollback underneath is not
+// what the user is looking at, and terminals likewise show no history there.
+func (p *ExternalPane) scrollBy(delta int) {
+	if p.emu == nil || p.emu.IsAltScreen() {
+		return
+	}
+	off := p.scrollOffset + delta
+	if maxOff := p.emu.ScrollbackLen(); off > maxOff {
+		off = maxOff
+	}
+	if off < 0 {
+		off = 0
+	}
+	p.scrollOffset = off
 }
 
 // resize updates the pane size and propagates it to the emulator and the
@@ -606,15 +667,52 @@ func (p *ExternalPane) close() {
 }
 
 // View renders the emulator screen (h-1 rows) plus the reserved status row.
+// While scrolled back (L7) the body is recomposed from the scrollback tail +
+// the top of the live screen, and the status row carries the return hint.
 func (p *ExternalPane) View() tea.View {
 	body := ""
 	if p.emu != nil {
 		body = p.emu.Render()
+		if p.scrollOffset > 0 {
+			body = p.scrolledBody(body)
+		}
 	}
 	status := p.statusRow()
 	v := tea.NewView(body + "\n" + status)
 	v.AltScreen = true
 	return v
+}
+
+// scrolledBody composes the visible rows for a view scrolled back by
+// scrollOffset lines (L7): the tail of the emulator's scrollback stacked
+// above the top rows of the live screen (already rendered as live). The
+// offset is re-clamped against the current scrollback length — history can
+// shrink between the wheel event and the render (retention cap, clear).
+// Scrollback lines are stored at push-time width, so each is clipped to the
+// current emulator width in case the pane has since narrowed. Both uv.Line
+// .Render and the emulator's full-buffer render close every line style-reset,
+// so stacking the two sources cannot bleed styles across the seam.
+func (p *ExternalPane) scrolledBody(live string) string {
+	sb := p.emu.Scrollback()
+	off := min(p.scrollOffset, sb.Len())
+	p.scrollOffset = off
+	if off == 0 {
+		return live
+	}
+	cols, rows := p.emuSize()
+	liveRows := strings.Split(live, "\n")
+	out := make([]string, 0, rows)
+	start := sb.Len() - off
+	for r := 0; r < rows; r++ {
+		if idx := start + r; idx < sb.Len() {
+			out = append(out, truncate(sb.Line(idx).Render(), cols))
+		} else if li := idx - sb.Len(); li < len(liveRows) {
+			out = append(out, liveRows[li])
+		} else {
+			out = append(out, "")
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 // statusRow is the reserved last line: title · client · model · live status ·
@@ -649,6 +747,12 @@ func (p *ExternalPane) statusRow() string {
 	}
 	left += muted.Render(" · " + strings.Join(segs, " · "))
 	right := kit.Kbd("^]", "dash")
+	if p.scrollOffset > 0 {
+		// Scrolled-back indicator (L7): replaces the detach hint while the view
+		// is over history; any key returns to live (and still reaches the child).
+		right = lipgloss.NewStyle().Foreground(theme.Gold).Bold(true).
+			Render(fmt.Sprintf("↑ %d lines — any key to return", p.scrollOffset))
+	}
 
 	w := p.w
 	if w < 1 {

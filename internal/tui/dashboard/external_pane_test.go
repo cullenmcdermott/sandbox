@@ -424,6 +424,146 @@ func TestExternalPaneHandleMouseIgnoredWhenDisabled(t *testing.T) {
 	}
 }
 
+// scrolledPane builds a direct-construction pane (no transport) whose 3-row
+// emulator has been fed 5 lines, so l1/l2 live in the scrollback and l3-l5 on
+// the live screen — the seed for the L7 wheel-scroll tests.
+func scrolledPane(t *testing.T) *ExternalPane {
+	t.Helper()
+	p := &ExternalPane{emu: vt.NewEmulator(80, 3), activeModes: make(map[ansi.DECMode]bool), w: 80, h: 4}
+	if _, err := p.emu.WriteString("l1\r\nl2\r\nl3\r\nl4\r\nl5"); err != nil {
+		t.Fatalf("seed emulator: %v", err)
+	}
+	if got := p.emu.ScrollbackLen(); got != 2 {
+		t.Fatalf("seed scrollback len = %d, want 2", got)
+	}
+	return p
+}
+
+// L7: with mouse tracking OFF (claude runs inline and never enables it), a
+// wheel-up scrolls the pane's own view over the vt scrollback instead of being
+// dropped: the offset moves (clamped to history), scrollback lines render
+// above the top of the live screen, and the status row shows the return hint.
+func TestExternalPaneWheelScrollsBackWhenTrackingOff(t *testing.T) {
+	p := scrolledPane(t)
+
+	p.handleMouse(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+
+	if p.scrollOffset != 2 {
+		t.Fatalf("scrollOffset = %d, want 2 (one wheel step clamped to the 2-line history)", p.scrollOffset)
+	}
+	content := p.View().Content
+	for _, want := range []string{"l1", "l2", "l3"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("scrolled view missing %q (scrollback tail + top of live screen):\n%s", want, content)
+		}
+	}
+	if strings.Contains(content, "l5") {
+		t.Fatalf("bottom live row must be pushed out of a view scrolled by 2:\n%s", content)
+	}
+	if !strings.Contains(content, "any key to return") {
+		t.Fatalf("status row missing the scrolled-back indicator:\n%s", content)
+	}
+}
+
+// L7: the scroll offset clamps at the scrollback length going up and at zero
+// going down — wheel events can never point the view past the history.
+func TestExternalPaneScrollOffsetClamps(t *testing.T) {
+	p := scrolledPane(t)
+
+	p.handleMouse(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	p.handleMouse(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	if p.scrollOffset != 2 {
+		t.Fatalf("scrollOffset after two wheel-ups = %d, want clamp at history length 2", p.scrollOffset)
+	}
+	p.handleMouse(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
+	if p.scrollOffset != 0 {
+		t.Fatalf("scrollOffset after wheel-down = %d, want clamp at 0", p.scrollOffset)
+	}
+	p.handleMouse(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
+	if p.scrollOffset != 0 {
+		t.Fatalf("scrollOffset after wheel-down at live = %d, want 0", p.scrollOffset)
+	}
+}
+
+// L7: a key press snaps a scrolled-back view to live AND is still forwarded to
+// the child — returning to live must never eat the keystroke.
+func TestExternalPaneKeySnapsBackAndForwards(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer r.Close()
+	defer w.Close()
+
+	p := scrolledPane(t)
+	p.transport = &fakePaneTransport{ReadWriteCloser: w}
+	p.handleMouse(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	if p.scrollOffset == 0 {
+		t.Fatal("precondition: pane should be scrolled back")
+	}
+
+	p.handleKey(tea.KeyPressMsg{Code: 'x', Text: "x"})
+
+	if p.scrollOffset != 0 {
+		t.Fatalf("scrollOffset after key = %d, want 0 (snap back to live)", p.scrollOffset)
+	}
+	buf := make([]byte, 8)
+	n, err := r.Read(buf)
+	if err != nil || string(buf[:n]) != "x" {
+		t.Fatalf("child received %q (%v), want %q — snap-back must not swallow the key", buf[:n], err, "x")
+	}
+}
+
+// L7: while the child has mouse tracking enabled, the wheel is forwarded to it
+// (SGR-encoded) exactly as before — the child scrolls itself; the local
+// scrollback view stays live.
+func TestExternalPaneWheelForwardedWhenTrackingOn(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer r.Close()
+	defer w.Close()
+
+	p := scrolledPane(t)
+	p.transport = &fakePaneTransport{ReadWriteCloser: w}
+	p.activeModes[ansi.ModeMouseNormal] = true
+	p.activeModes[ansi.ModeMouseExtSgr] = true
+
+	p.handleMouse(tea.MouseWheelMsg{X: 5, Y: 10, Button: tea.MouseWheelUp})
+
+	if p.scrollOffset != 0 {
+		t.Fatalf("scrollOffset = %d, want 0 (tracking child owns the wheel)", p.scrollOffset)
+	}
+	buf := make([]byte, 32)
+	n, _ := r.Read(buf)
+	// SGR wheel-up at (5,10): ESC[<64;6;11M (1-based coords).
+	if got, want := string(buf[:n]), "\x1b[<64;6;11M"; got != want {
+		t.Fatalf("forwarded wheel = %q, want %q", got, want)
+	}
+}
+
+// L7: new child output snaps a scrolled-back view to live before the bytes
+// feed the emulator, so the freshly painted frame is what renders.
+func TestExternalPaneOutputSnapsBack(t *testing.T) {
+	p := scrolledPane(t)
+	p.handleMouse(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	if p.scrollOffset == 0 {
+		t.Fatal("precondition: pane should be scrolled back")
+	}
+
+	cmd, finished := p.apply(ptyChunk{data: []byte("l6"), ok: true})
+	if finished || cmd == nil {
+		t.Fatal("apply(live chunk) should continue the drain")
+	}
+	if p.scrollOffset != 0 {
+		t.Fatalf("scrollOffset after child output = %d, want 0 (snap back to live)", p.scrollOffset)
+	}
+	if !strings.Contains(p.View().Content, "l6") {
+		t.Fatalf("view after output should be live and contain the new bytes:\n%s", p.View().Content)
+	}
+}
+
 // The emulator's EnableMode/DisableMode callbacks correctly update the pane's
 // activeModes map (verified by driving mode sequences through the emulator).
 func TestExternalPaneModeCallbacksTrackState(t *testing.T) {
