@@ -59,6 +59,18 @@ kubectl apply -f k8s/networkpolicy-egress-allow.yaml
 the model API and package registries). Apply both — the deny policy alone leaves
 sessions with no network at all.
 
+### Tighter egress: FQDN allowlist (Cilium)
+
+[`networkpolicy-egress-fqdn.yaml.example`](networkpolicy-egress-fqdn.yaml.example)
+is a tightened **replacement** for `networkpolicy-egress-allow.yaml`: a Cilium
+`CiliumNetworkPolicy` using `toFQDNs` to pin egress to the documented Claude Code
+endpoints (plus commented per-backend and registry blocks) instead of all public
+443 — closing the credential-exfiltration channel described in
+[`../SECURITY.md`](../SECURITY.md). It requires an FQDN-aware CNI (e.g. Cilium);
+keep `networkpolicy-default-deny.yaml` applied, and do not apply both egress
+examples at once. Re-verify the host set against a live session
+(`hubble observe`) before enforcing — see the file's header comments.
+
 ## Facts these manifests match
 
 These values are taken from the CLI/runner source (`internal/k8s/backend.go`); keep

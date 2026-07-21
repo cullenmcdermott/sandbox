@@ -1,0 +1,142 @@
+# FQDN-scoped egress allowlist for session pods — the TIGHTENED alternative to
+# networkpolicy-egress-allow.yaml.
+#
+# WHY: the broad example allows TCP 443 to all public IP space, which is an open
+# exfiltration channel — a prompt-injected agent can POST anything it reads
+# (including the session's refresh-capable Claude credential) to any public
+# HTTPS host. This policy pins egress to NAMED hosts instead. See SECURITY.md
+# ("Egress" section) for the threat this closes.
+#
+# REQUIREMENTS AND CAVEATS — read before applying:
+#
+#   * REQUIRES an FQDN-aware CNI. `toFQDNs` is a CiliumNetworkPolicy feature
+#     (apiVersion cilium.io/v2); plain Kubernetes NetworkPolicy has no FQDN
+#     support. On a non-Cilium CNI this file does nothing — use your CNI's
+#     equivalent (e.g. Calico GlobalNetworkPolicy with allowed egress domains)
+#     or fall back to CIDR pinning.
+#
+#   * REPLACES networkpolicy-egress-allow.yaml. Keep
+#     networkpolicy-default-deny.yaml applied (Cilium enforces both k8s
+#     NetworkPolicy and CiliumNetworkPolicy; allows are the union), apply THIS
+#     file, and do NOT apply the broad-443 example — applying both re-opens
+#     public 443 and defeats the point.
+#
+#   * RE-VERIFY THE HOST SET AGAINST A LIVE SESSION BEFORE ENFORCING. This host
+#     list was compiled from Anthropic's documented Claude Code network
+#     requirements (code.claude.com/docs/en/network-config, checked 2026-07-21)
+#     and this repo's backend sources — it has NOT been validated against live
+#     traffic from a session pod. Run a real session with this policy in
+#     audit/observe mode first, e.g.:
+#
+#         hubble observe --namespace agent-sessions --verdict DROPPED -f
+#
+#     and add whatever legitimately-dropped hosts your sessions need. Agent CLI
+#     releases change their endpoints over time; re-check after image bumps.
+#
+#   * DNS caveat: the DNS rule below permits resolution of any name so Cilium's
+#     DNS proxy can populate the FQDN cache. DNS itself remains a (low-bandwidth)
+#     covert channel; to narrow it, replace `matchPattern: "*"` with explicit
+#     `matchName:` entries mirroring the toFQDNs list.
+#
+# The CLI reaches the pod via kubectl port-forward and Mutagen syncs over the
+# forwarded sshd — neither is pod egress, so neither needs a rule here.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: egress-allow-fqdn
+  namespace: agent-sessions
+spec:
+  endpointSelector: {}
+  egress:
+    # 1. DNS to cluster DNS, WITH the dns rules block — mandatory for toFQDNs:
+    #    the Cilium DNS proxy learns name->IP mappings from these lookups and
+    #    uses them to enforce the FQDN rules below. Adjust the selector if your
+    #    cluster DNS is not kube-dns/CoreDNS in kube-system.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: ANY
+          rules:
+            dns:
+              - matchPattern: "*"
+
+    # 2. claude-pane (default backend): Claude Code endpoints, per Anthropic's
+    #    documented network requirements (code.claude.com/docs/en/network-config,
+    #    checked 2026-07-21):
+    #      api.anthropic.com   — inference, WebFetch domain safety check,
+    #                            feature flags
+    #      platform.claude.com — OAuth token exchange/refresh/revocation; the
+    #                            in-pod claude refreshes the materialized
+    #                            .credentials.json itself, so blocking this
+    #                            breaks sessions once the access token expires
+    #      claude.ai           — claude.ai account authentication
+    #
+    #    NOT included (verify against your runner image's pinned claude version
+    #    with hubble before deciding):
+    #      statsig.anthropic.com, *.sentry.io — telemetry/error hosts from
+    #        EARLIER documented requirement sets; absent from the current page,
+    #        which instead lists the optional Datadog intake hosts
+    #        (http-intake.logs.us5.datadoghq.com,
+    #        browser-intake-us5-datadoghq.com). All are telemetry-only:
+    #        blocked = degraded telemetry, not a broken session. Disable
+    #        client-side via CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC.
+    #      downloads.claude.ai, raw.githubusercontent.com — auto-update checks +
+    #        changelog feed; the runner image pins a sha256-verified claude
+    #        binary, so in-pod auto-update is unwanted anyway.
+    - toFQDNs:
+        - matchName: api.anthropic.com
+        - matchName: platform.claude.com
+        - matchName: claude.ai
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+
+    # 3. codex backend (uncomment when running `sandbox codex` sessions):
+    #      api.openai.com  — inference
+    #      chatgpt.com + auth.openai.com — ChatGPT-OAuth token refresh
+    #    (same host set the broad example's comment documents)
+    # - toFQDNs:
+    #     - matchName: api.openai.com
+    #     - matchName: chatgpt.com
+    #     - matchName: auth.openai.com
+    #   toPorts:
+    #     - ports:
+    #         - port: "443"
+    #           protocol: TCP
+
+    # 4. opencode backend (uncomment when running `sandbox opencode` sessions).
+    #    Hosts depend on which provider key the session Secret carries
+    #    (runner/src/opencode.ts wires ANTHROPIC_API_KEY / OPENAI_API_KEY /
+    #    OPENCODE_API_KEY into providers):
+    #      opencode.ai       — opencode Zen gateway (OPENCODE_API_KEY;
+    #                          API base https://opencode.ai/zen/v1)
+    #      api.anthropic.com — ANTHROPIC_API_KEY provider (already allowed above)
+    #      api.openai.com    — OPENAI_API_KEY provider
+    # - toFQDNs:
+    #     - matchName: opencode.ai
+    #     - matchName: api.openai.com
+    #   toPorts:
+    #     - ports:
+    #         - port: "443"
+    #           protocol: TCP
+
+    # 5. Workspace tooling (OPTIONAL — uncomment per need). The broad example
+    #    let agents reach every public package registry; this policy does not.
+    #    Add the registries your projects actually build against, e.g.:
+    # - toFQDNs:
+    #     - matchName: registry.npmjs.org
+    #     - matchName: proxy.golang.org
+    #     - matchName: sum.golang.org
+    #     - matchName: pypi.org
+    #     - matchName: files.pythonhosted.org
+    #     - matchName: github.com
+    #     - matchPattern: "*.githubusercontent.com"
+    #   toPorts:
+    #     - ports:
+    #         - port: "443"
+    #           protocol: TCP

