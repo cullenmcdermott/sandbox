@@ -92,33 +92,51 @@ egress-deny here — a session pod in this local dev env can reach the API serve
 services, and the internet. Network isolation is validated only on a real
 cluster with an enforcing CNI.
 
-## (b) Provider keys
+## (b) Credentials
 
-The two Secrets (both in `agent-sessions`) and their env mappings:
+### Claude — your host login, no cluster Secret
+
+`just dev` (the default, claude) runs the **real Claude Code TUI** in the pod
+(the pane-first `claude-pane` backend). It needs no shared cluster Secret: at
+create time the CLI harvests **your own host Claude Code login**
+(`cred.SystemMaterial` — the macOS Keychain item / `~/.claude/.credentials.json`
+written by logging in with `claude` locally; the Max-mode path) and writes it
+into that session's per-session Secret, which the pod materializes on boot.
+Fail-closed: if the host has no Claude Code login, `sandbox claude` refuses to
+create the session. A pane pod is never given a `CLAUDE_CODE_OAUTH_TOKEN` env
+var — that would force degraded "Claude API" mode.
+
+### OpenCode / legacy provider keys — shared Secrets
+
+The two shared Secrets (both in `agent-sessions`) and their env mappings:
 
 - `opencode-credentials`: `anthropic-api-key`→`ANTHROPIC_API_KEY`,
   `openai-api-key`→`OPENAI_API_KEY`, `opencode-api-key`→`OPENCODE_API_KEY`
-- `anthropic-credentials`: `api-key`→`CLAUDE_CODE_OAUTH_TOKEN`
+- `anthropic-credentials`: `api-key`→`CLAUDE_CODE_OAUTH_TOKEN` — **legacy**:
+  its only consumer is the retired `claude-sdk` backend id (which the
+  integration suite's claude row still creates); the interactive
+  `sandbox claude` flow above never reads it.
 
 The session pod starts before these exist; missing keys just leave the env var
 unset.
 
-### Claude OAuth token — auto-provisioned
+### Legacy Claude OAuth token — auto-provisioned (claude-sdk only)
 
-`just kind-up` (and `just dev`) auto-populates the `anthropic-credentials` Secret
-via `dev/local/claude-creds.sh`, mirroring the External-Secrets-Operator wiring a
-real cluster has. The token is resolved, first hit wins:
+`just kind-up` (and `just dev`) auto-populates the legacy `anthropic-credentials`
+Secret via `dev/local/claude-creds.sh`, mirroring the External-Secrets-Operator
+wiring a real cluster has. The token is resolved, first hit wins:
 
 1. **1Password** — `op read op://k8s-secrets/anthropic-credentials/api-key`
    (override the ref with `SANDBOX_CLAUDE_OP_REF`). Requires the `op` CLI signed in.
 2. **host env** — `$CLAUDE_CODE_OAUTH_TOKEN`.
 
-If neither resolves, the claude backend stays plumbing-only (the pod still starts)
-and you get a warning. Re-provision after rotating the token without a full
-`kind-up` via **`just dev-claude-secret`**; check where your token resolves from
-(redacted) with **`just dev-claude-creds`**. On `flox activate` a non-invasive
-check warns if no token source is available (it never reads the secret, so it
-won't trigger a 1Password unlock prompt).
+If neither resolves you get a warning and the retired `claude-sdk` backend stays
+plumbing-only (pods still start) — the interactive claude TUI is unaffected
+either way. Re-provision after rotating the token without a full `kind-up` via
+**`just dev-claude-secret`**; check where your token resolves from (redacted)
+with **`just dev-claude-creds`**. On `flox activate` a non-invasive check warns
+if no token source is available (it never reads the secret, so it won't trigger
+a 1Password unlock prompt).
 
 ### OpenCode Zen API key — auto-provisioned
 
@@ -152,12 +170,17 @@ The integration tests come in two layers:
 - **Plumbing layer** — needs no provider key. Proves CLI→controller→Sandbox
   CRD→runner pod→port-forward→`/healthz` and the SSE seam are wired correctly
   (the Sandbox reconciles, the pod goes Ready, the runner answers).
-- **Full-turn layer** — requires a valid provider key in `secret.local.yaml`.
-  Drives a real turn through `sandbox turn <id> --prompt …` and asserts an
-  assistant `message.completed` reply and a `turn.completed` event.
+- **Full-turn layer** — drives a real headless turn through the hidden
+  `sandbox turn <id> --prompt …` seam (port-forward → runner token → StartTurn →
+  SSE events) and asserts an assistant `message.completed` reply and a
+  `turn.completed` event. Since claude-pane-first, `opencode-server` is the only
+  backend that accepts runner turns; its default model is free, so this layer
+  costs $0 and needs no key. (The suite's claude row still uses the retired
+  `claude-sdk` id, gated on the legacy `anthropic-credentials` Secret.)
 
-Without keys the plumbing layer still passes; the full-turn layer is skipped (or
-fails fast with a clear "no provider credentials" reason).
+Without keys the plumbing layer still passes; a full-turn case whose credentials
+are missing is skipped (or fails fast with a clear "no provider credentials"
+reason).
 
 ## (d) Its own kubeconfig + context guard
 

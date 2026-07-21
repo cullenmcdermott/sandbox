@@ -66,7 +66,8 @@ D1/D3, `runner/src/claude-pane.ts`):
 
 ### Per-session git worktrees (create / convert / destroy)
 For a git project, `sandbox claude` creates the session on its own git worktree
-at `~/.local/share/sandbox/worktrees/<id>`, on an auto-branch `sandbox/<id>` cut
+at `~/.local/share/sandbox/remote-sessions/worktrees/<id>`
+(`<stateDir>/worktrees/<id>`), on an auto-branch `sandbox/<id>` cut
 from `HEAD` — so two sessions on one repo never cross-feed edits (the worktree,
 not the repo root, is the Mutagen endpoint and pod cwd). `--worktree auto` (the
 default) makes this conditional on the project being a git work tree; `on`

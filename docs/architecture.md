@@ -148,10 +148,10 @@ sequenceDiagram
 /session/state/claude/                CLAUDE_CONFIG_DIR
 /session/workspace/<workspace path>   workspace files in the PVC (legacy /session view)
 <workspace path>                      the same files, bind-mounted at the real host path
-                                      via subPath — this is the cwd handed to the SDK, so
+                                      via subPath — this is the cwd handed to the agent, so
                                       transcripts land in CLAUDE_CONFIG_DIR/projects/<host path>.
-                                      <workspace path> = Spec.WorkspacePath (the repo root
-                                      today; a per-session worktree in a later wave), NOT
+                                      <workspace path> = Spec.WorkspacePath (the per-session
+                                      git worktree when one exists, else the repo root), NOT
                                       the repo-root Spec.ProjectPath used for grouping/display
 ```
 
@@ -172,8 +172,9 @@ remote-sessions/ssh/config            per-session Host aliases (Include'd from ~
                                       keeps every artifact under one root (a best-effort
                                       one-time migration moves it in from the old sibling
                                       location dir(stateDir)/ssh and rewrites the Include)
-remote-sessions/worktrees/<id>/       per-session git worktree (path reserved; created in a
-                                      later wave — see docs/archive/worktree-lifecycle-design.md)
+remote-sessions/worktrees/<id>/       per-session git worktree on branch sandbox/<id>, created
+                                      at session create for git projects (--worktree auto|on —
+                                      see docs/session-lifecycle.md)
 anthropic-accounts.json               Anthropic account metadata + default id (never secret bytes)
 anthropic-secrets/                    per-account 0600 secret files (file backend only; macOS
                                       uses the Keychain, service "sandbox-anthropic")
@@ -221,7 +222,8 @@ Mutagen runs three session groups (see `internal/sync`):
 
 1. **project** — local workspace ⇄ the pod's `<workspace path>` (the real host
    path the workspace subtree is bind-mounted at, two-way-safe; both endpoints
-   are `Spec.WorkspacePath` — the repo root today, a per-session worktree later),
+   are `Spec.WorkspacePath` — the per-session worktree when one exists, else
+   the repo root),
 2. **config inputs** — `~/.claude/{skills,agents,commands,hooks}` → pod (one-way), and
 3. **transcripts** — pod `/session/state/claude/{projects,todos,tasks}`
    (`CLAUDE_CONFIG_DIR`) → local `~/.claude/{projects,todos,tasks}` (one-way).

@@ -187,8 +187,8 @@ func (c *Client) sshConfig() (*syncpkg.SSHConfig, error) {
 // worktreesRoot returns the local root under which per-session git worktrees
 // live: <stateDir>/worktrees, a sibling of the per-session index/key dirs so a
 // WithStateDir consumer keeps everything under one root and reaping has one
-// place to enumerate. Path computation only — nothing creates it yet; a later
-// wave adds the per-session worktree at <worktreesRoot>/<id>.
+// place to enumerate. createWorktree (worktree.go) creates the per-session
+// worktree at <worktreesRoot>/<id>; ReapWorktrees enumerates the same root.
 func (c *Client) worktreesRoot() string {
 	return filepath.Join(c.stateDir, "worktrees")
 }
