@@ -1,0 +1,23 @@
+# Example namespace for the idle-reaper Jobs.
+#
+# This is a STARTING POINT — review and adapt before applying. The reaper runs
+# in its own namespace (`agent-reaper`, see internal/k8s/reaper.go
+# ReaperNamespace) — deliberately NOT `agent-sessions`, because the session
+# namespace's egress NetworkPolicy blocks the Kubernetes API, so a reaper Job
+# there could not issue the suspend. This namespace has NO NetworkPolicy: the
+# reaper needs egress to the API server (suspend) and to session pods on :8787
+# (idle polling); the matching ingress exception on the session side is
+# `networkpolicy-reaper-ingress.yaml`.
+#
+# The reaper pod satisfies the `restricted` PodSecurity profile (non-root,
+# RuntimeDefault seccomp, no privilege escalation, all capabilities dropped —
+# see buildReaperJob in internal/k8s/reaper.go), so enforce `restricted` here.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agent-reaper
+  labels:
+    app.kubernetes.io/part-of: sandbox
+    # PodSecurity Admission (https://kubernetes.io/docs/concepts/security/pod-security-admission/)
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest

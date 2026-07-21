@@ -182,9 +182,12 @@ Images:
 - [x] build/push runner image (`runner/Dockerfile`) to GHCR (`.depot/workflows/build-runner-image.yml`)
 - [x] build/push reaper image (`Dockerfile.reaper`) to GHCR (`.depot/workflows/build-reaper-image.yml`)
 
-Cluster (GitOps — example manifests under `k8s/`):
-- [ ] `agent-reaper` namespace + ServiceAccount
-- [ ] Role in agent-sessions (`sandboxes: get,update` — suspend is
+Cluster (example manifests under `k8s/` — apply per `k8s/README.md`; your real
+cluster wiring, e.g. GitOps, is up to you):
+- [x] `agent-reaper` namespace + ServiceAccount
+      (`k8s/reaper-namespace.yaml`, `k8s/reaper-rbac.yaml`)
+- [x] Role in agent-sessions (`sandboxes: get,update` — suspend is
       `sandboxes.Update`, not patch — plus `pods: list` and `secrets: get`) +
-      RoleBinding to the reaper SA (example: `k8s/reaper-rbac.yaml`)
-- [ ] NetworkPolicy ingress exception on agent-sessions pods for the reaper
+      RoleBinding to the reaper SA (`k8s/reaper-rbac.yaml`)
+- [x] NetworkPolicy ingress exception on agent-sessions pods for the reaper
+      (`k8s/networkpolicy-reaper-ingress.yaml`)

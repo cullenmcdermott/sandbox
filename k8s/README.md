@@ -6,8 +6,9 @@
 > to your cluster (CNI, storage, network ranges, namespaces, PodSecurity policy),
 > and validate it before trusting it.
 
-These manifests cover the **network security boundary** that `sandbox` depends on.
-They do **not** install the controller, RBAC, storage, or the reaper — see
+These manifests cover the **network security boundary** that `sandbox` depends
+on, plus the namespace/RBAC/NetworkPolicy pieces the idle reaper needs. They do
+**not** install the controller or storage — see
 [What's not here](#whats-not-here).
 
 ## Prerequisites
@@ -41,7 +42,8 @@ docker build -f Dockerfile.reaper -t <your-registry>/sandbox-reaper:latest .
 docker push   <your-registry>/sandbox-reaper:latest
 
 # Point the CLI at your images on every session-creating command
-sandbox claude "..." \
+# (`sandbox claude` is interactive-only — it takes no positional prompt)
+sandbox claude \
   --runner-image <your-registry>/sandbox-claude-runner:latest \
   --reaper-image <your-registry>/sandbox-reaper:latest
 ```
@@ -50,14 +52,26 @@ sandbox claude "..." \
 
 ```bash
 kubectl apply -f k8s/namespace.yaml
+kubectl apply -f k8s/reaper-namespace.yaml
+kubectl apply -f k8s/reaper-rbac.yaml
 kubectl apply -f k8s/networkpolicy-default-deny.yaml
 kubectl apply -f k8s/networkpolicy-egress-allow.yaml
+kubectl apply -f k8s/networkpolicy-reaper-ingress.yaml
 ```
 
 `networkpolicy-default-deny.yaml` denies all ingress and egress for the namespace;
 `networkpolicy-egress-allow.yaml` then adds back the minimum egress (DNS + HTTPS to
-the model API and package registries). Apply both — the deny policy alone leaves
-sessions with no network at all.
+the model API and package registries), and `networkpolicy-reaper-ingress.yaml` adds
+back the one ingress path the idle reaper needs (reaper pods → session pods on
+`:8787`). Apply all three — the deny policy alone leaves sessions with no network
+at all.
+
+The reaper pieces (`reaper-namespace.yaml`, `reaper-rbac.yaml`,
+`networkpolicy-reaper-ingress.yaml`) are what let the per-session reaper Jobs the
+CLI creates actually run. **Without them, sessions never auto-suspend**: the CLI
+still creates sessions (it surfaces an "idle reaper not started" warning), but
+idle pods keep running — and consuming resources — until you `sandbox suspend`
+or `sandbox destroy` them yourself.
 
 ### Tighter egress: FQDN allowlist (Cilium)
 
@@ -80,7 +94,7 @@ them in sync if you change defaults:
 |---|---|
 | Session namespace | `agent-sessions` |
 | Session-id label | `sandbox.cullen.dev/session-id: <session-id>` |
-| App label | `app.kubernetes.io/name: sandbox-<backend>` (e.g. `sandbox-claude-sdk`) |
+| App label | `app.kubernetes.io/name: sandbox-<backend>` (e.g. `sandbox-claude-pane`) |
 | Runner HTTP API port | `8787` |
 | `sshd` port (Mutagen sync) | `22` |
 | OpenCode port | `4096` |
@@ -97,18 +111,21 @@ This example intentionally omits parts of a full deployment, because they depend
 your cluster or live in the maintainer's private repo:
 
 - **agent-sandbox controller install** — see the upstream project.
-- **The `agent-reaper` namespace + RBAC.** The idle reaper runs in a *separate*
-  namespace (`agent-reaper`) because the session namespace's egress policy blocks
-  the Kubernetes API; the reaper needs API egress plus a `Role` in `agent-sessions`
-  granting `sandboxes: get,update` (suspend is `sandboxes.Update`, not patch),
-  `pods: list` (to resolve the runner pod IP), and `secrets: get` (the runner
-  bearer token). An example `Role` + `RoleBinding` is in
-  [`reaper-rbac.yaml`](reaper-rbac.yaml); see also
-  [`../docs/session-lifecycle.md`](../docs/session-lifecycle.md).
-- **A NetworkPolicy ingress exception** so the reaper (in `agent-reaper`) can reach
-  the session pod on `:8787` cross-namespace.
 - **StorageClass / PVC tuning.** The CLI defaults to a 50Gi PVC; the StorageClass is
   overridable per session. Provide one suited to your cluster (RWO is sufficient).
-- **Shared credential Secrets** (`anthropic-credentials`, `opencode-credentials`)
-  for the model API token — provision these out-of-band; see
-  [`../docs/architecture.md`](../docs/architecture.md).
+- **The shared `opencode-credentials` Secret** holding the provider API key for
+  `sandbox opencode` sessions — provision it out-of-band (see the main
+  [`README.md`](../README.md) and [`../docs/architecture.md`](../docs/architecture.md)).
+  The `claude` backend needs **no** shared Secret: `sandbox claude` copies your
+  local Claude Code login into a per-session Secret at create time. The shared
+  `anthropic-credentials` Secret is legacy — its only remaining consumer is the
+  retired `claude-sdk` backend branch (`buildEnv` in `internal/k8s/backend.go`),
+  so new deployments can skip it.
+
+(The idle reaper's cluster pieces — the `agent-reaper` namespace, the
+cross-namespace `Role`/`RoleBinding`, and the `:8787` ingress exception — used to
+be on this list; they are now shipped as [`reaper-namespace.yaml`](reaper-namespace.yaml),
+[`reaper-rbac.yaml`](reaper-rbac.yaml), and
+[`networkpolicy-reaper-ingress.yaml`](networkpolicy-reaper-ingress.yaml). See
+[`../docs/session-lifecycle.md`](../docs/session-lifecycle.md) for how the reaper
+works.)
