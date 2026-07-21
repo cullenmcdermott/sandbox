@@ -2020,3 +2020,107 @@ network stall must not freeze the dashboard; ctrl+] must detach.
   (−454 lines). V30 traversal test keeps its Load coverage; legacy
   on-disk events.ndjson still goes with the session dir on destroy.
   `just check` green over both commits.
+
+## 2026-07-21 — seven-agent Fable fan-out batch (6e1ba20..55bc0a2, all unsigned — 1Password agent locked)
+
+Seven worktree-isolated Fable subagents in parallel, orchestrator-reviewed
+and cherry-picked onto main one by one; `just check` green over the
+integrated batch (one anti-cheat catch: the new projpath windows skip needed
+its `// gate-ok:` annotation, amended into the T10 commit).
+
+- **§1f [S1]+[S3] security docs (6e1ba20):**
+  `k8s/networkpolicy-egress-fqdn.yaml.example` — Cilium toFQDNs allowlist.
+  The agent re-verified the host set against Anthropic's CURRENT
+  network-config doc: statsig.anthropic.com/sentry.io are gone from it
+  (documented as legacy/verify-with-hubble; Datadog intake is the current
+  optional telemetry), and `platform.claude.com` was ADDED because the
+  in-pod claude refreshes its own materialized credential — blocking it
+  breaks sessions at token expiry. Commented codex/opencode/registry
+  blocks, mandatory DNS-proxy rule + tunneling caveat, replaces-broad-443
+  header. SECURITY.md: exfil paragraph extending [A3] (must-read
+  credential file + open 443 = credential that outlives the session,
+  symbol-anchored) + the [S3] "observer events are agent-influenceable"
+  threat-model section (same-session spoofing accepted + bounded;
+  cross-session impossible). Host set NOT live-validated.
+- **§1h [L7] + §4 [P3] pane wheel-scroll (e319645):** wheel with child
+  mouse-tracking OFF scrolls a local `scrollOffset` view over the vt
+  scrollback (3 lines/tick, clamp to `ScrollbackLen`, alt-screen ignored);
+  `scrolledBody` stacks the scrollback tail over the live-screen top
+  (width-clipped, style-reset-safe); gold "↑ N lines — any key to return"
+  replaces the detach hint while scrolled; key/paste/new-output snap back
+  to live BEFORE forwarding (P1 drain + P4 queue untouched); tracking
+  children (opencode) still get SGR wheel. [P3]:
+  `SetScrollbackSize(2000)`. Five behavior tests; race suite green.
+- **§4 pane RTT probe (3060b53):** `internal/runner/pane_rtt.go` —
+  SANDBOX_TRACE-gated (env read mirrors client/trace.go's unexported
+  traceEnabled); 5s pinger goroutine (`WriteControl` ping, 8-byte
+  big-endian UnixNano; safe beside the P4 writer per gorilla contract);
+  pong handler samples into a 256-slot mutex ring; `PaneStream` gains
+  done/closeOnce and additive `RTTStats()`; ONE stderr line on Close
+  (`trace: <id> pane.rtt n= p50= p95= max=` — µs rounding; format reserved
+  for the §10 SSE-latency probe). Node ws auto-pongs — zero runner
+  changes. Pure percentile helper + ring/integration/leak tests
+  (pingerDone channel, not goroutine counting); sdktest PaneStream pin
+  intact.
+- **§10 [O3] auth status/doctor host-login probe (5445481):** harvested
+  the parked `agent-a0080936a970d42b6` start (kept the shape; replaced the
+  untestable KeychainPresent seam with `func() (present, ok bool)`, wired
+  the draft's dead Degraded field into Level()→yellow, wrote the missing
+  tests + doctor half). Presence-only probe mirrors `cred.SystemMaterial`
+  exactly: darwin keychain exit-code (no `-w`) is FINAL when `security`
+  exists; credentials-file stat otherwise; `CLAUDE_CONFIG_DIR` exclusive.
+  `auth status` leads with "host Claude Code login"; env vars demoted to
+  headless/Degraded. doctor: new claudeLogin seam, host-login headline,
+  "log in with `claude` on this machine (Max mode)" remedy, shared-Secret
+  wording gone. Live doctor/auth-status runs verified.
+- **§10 O-docs cluster (badb706 [O1,O8], 1e5b474 [O5,O7], 511b98f
+  [O9,O10]):** harvested the parked `agent-aff3123c45acf636a` draft,
+  re-verified every claim against current main. [O1] root --help/Long/
+  package-doc pane-first. [O8] runner-api claude-sdk→claude-pane +
+  extended retired-id note (selectAgent behavior). [O5]
+  `k8s/reaper-namespace.yaml` (agent-reaper, restricted PSS — reaper pod
+  satisfies it per buildReaperJob) + `k8s/networkpolicy-reaper-ingress.yaml`
+  (default-deny DOES block reaper pod-IP :8787 polls; exception scoped to
+  the sandbox-reaper label; port-forward tunnels unaffected) + apply order
+  + "sessions never auto-suspend" sentence; session-lifecycle cluster
+  boxes checked. [O7] k8s/README label/prompt/shared-Secret facts. [O9]
+  architecture.md worktree hedges → shipped behavior; the flagged
+  out-of-scope `client/sync.go` diff was KEPT (2-line comment fix of the
+  same hedge, verified against createWorktree/ReapWorktrees). [O10]
+  dev/local README pane-first (env-token flow relabeled legacy). Reaper
+  manifests reasoned from source, not live-applied. Four new [O15]
+  residues discovered and filed.
+- **§9 T10 working-directory picker (55bc0a2):** directory stage FIRST in
+  the create overlay (cwd row preselected — enter-enter preserved; ≤5
+  recents; free-text row with ~-expansion + Tab completion: unique→`/`,
+  ambiguous→LCP, hidden dirs on `.` partials); new
+  `Index.RecentProjects(limit)` (distinct ProjectPaths,
+  LastActivity-desc) → `indexRecentProjects` (cap 8) → injected
+  `RunOptions.RecentProjects` (dashboard never imports internal/index);
+  `CreateParams.ProjectPath` joins in the beginCreate funnel so every
+  create path inherits it (deep pin through the account stage); CLI-side
+  `creatorProjectPath` re-validates fail-closed; shared normalization
+  extracted to `internal/projpath` (`resolveProjectPath` delegates,
+  behavior-identical); rows validate on enter with inline formErr (deleted
+  recents visible with an explanation). Backend-stage esc now walks back
+  to the dir stage. CLI commands keep pure-cwd semantics.
+- **§9 host statusline chaining (d6b348c):** provisioned statusline script
+  chains, first hit wins: `pane-observer/user-statusline` (pod drop-in) →
+  `../statusline/user-statusline` (host-synced) → `sandbox-user-statusline`
+  on PATH (future flox bin); candidate gets stdin JSON verbatim + ~1s
+  (`SANDBOX_STATUSLINE_TIMEOUT_MS`); ENOENT/EACCES falls through,
+  ran-but-nonzero/timeout/empty → builtin; metrics POST initiated FIRST,
+  exit still gated on it (spawnSync blocks the loop, so stdout always
+  precedes the fetch's exit); hard-exit 3s→5s. ConfigInputsSubs gains
+  `{statusline, statusline}` — a SIBLING of runner-owned `pane-observer/`
+  chosen so host→remote sync can never conflict with the runner-minted
+  token (pinned: no sync arg may target pane-observer/); counts 7→8
+  corrected through client/session.go + sync.go comments. Runner tests
+  execute the REAL provisioned script against a capture server (7 cases);
+  architecture.md config-inputs list updated.
+
+Live-verify wanted (next natural session): [L7] trackpad scroll feel +
+snap-back; T10 overlay flow; a synced `~/.claude/statusline/user-statusline`
+appearing in-pane; `sandbox doctor`/`auth status` on a machine without the
+host login; [S1] FQDN set via `hubble observe`; [O5] reaper manifests on the
+real cluster.

@@ -51,26 +51,27 @@
 > credential failure spawned
 > `openspec/changes/opencode-multi-provider-auth/` (see §7a).
 >
-> **Opus-ready map (updated 2026-07-21 after the six-agent fan-out batch —
-> [S2], [L8a/b], [P4], §2e needs-input relabel, §6 C3-codex, and
-> [O4]/[O6]/[O11]/[O12] all landed; done log):** best first picks, in order —
-> §10 remaining docs+probe cluster [O1]/[O3]/[O5]/[O7]-[O10]/[O14]/[O15]
-> (two PARKED part-done worktrees to finish, see the §10 intro), §1h [L7]
-> wheel-scroll (implement WITH §4 [P3] as one change; [L3] feed history
-> landed 2026-07-21), §1f [S1]/[S3] security follow-ups, §9 T10 dirPicker +
-> statusline chain
-> (execution contracts in the items), §7a = execute
-> `openspec/changes/opencode-multi-provider-auth/tasks.md`. Every open item carries pointers + a fix direction + a
-> verification line; if one doesn't, that's a bug in this file. Rules of the
-> road for Opus: (1) run the tests named in the item, not the full gate, per
-> change; run `just check` once per batch (command-sandbox caveats in
-> CLAUDE.md); (2) line numbers drift — anchor by symbol name and re-`rg`
-> before editing; (3) never touch `openspec/` structure, `*.gen.*` files, or
-> memory. Drafted, awaiting maintainer sign-off: §7b package-manager ADR, §8
-> pod-bootstrap design, §2e plan-doc workstreams (A-G). Maintainer-decision
-> gated: §8 [L6], §2e [L5] floating-modal design. Needs the live cluster or
-> the maintainer's eyeball: [L2] repro, claude-pane-first gates 8.2/8.3, §5
-> Spegel, §6 codex live spike, §7c verify sweeps.
+> **Opus-ready map (updated 2026-07-21 after the seven-agent Fable fan-out
+> batch — [S1]/[S3], [L7]+[P3], the pane RTT probe, [O1]/[O3]/[O5]/
+> [O7]-[O10] incl. both parked-worktree harvests, §9 T10 dirPicker, and the
+> §9 statusline chain all landed; done log):** best first picks, in order —
+> §7a = execute `openspec/changes/opencode-multi-provider-auth/tasks.md`,
+> §8 pod-bootstrap (maintainer re-raise 2026-07-21 = the sign-off signal;
+> confirm the design doc then execute), §10 [O15] residue sweep + §7c
+> table-driven CLI smoke (small, related), §9 worktree continuity +
+> merge-back UX, §2e workstreams A/C/D/E. Every open item carries pointers
+> + a fix direction + a verification line; if one doesn't, that's a bug in
+> this file. Rules of the road for Opus: (1) run the tests named in the
+> item, not the full gate, per change; run `just check` once per batch
+> (command-sandbox caveats in CLAUDE.md); (2) line numbers drift — anchor
+> by symbol name and re-`rg` before editing; (3) never touch `openspec/`
+> structure, `*.gen.*` files, or memory. Drafted, awaiting maintainer
+> sign-off: §7b package-manager ADR, §2e plan-doc workstreams (A-G).
+> Maintainer-decision gated: §8 [L6], §2e [L5] floating-modal design.
+> Needs the live cluster or the maintainer's eyeball: [L2] repro,
+> claude-pane-first gates 8.2/8.3, §5 Spegel, §6 codex live spike, §7c
+> verify sweeps, [O14] hero GIF, the [S1] FQDN set hubble-verify, [L7]
+> trackpad feel + T10 overlay feel, live reaper deploy ([O5] manifests).
 
 ## 0) Inbox — human notes, needs triage
 
@@ -139,29 +140,13 @@ row-model consolidation moved to §2a where it belongs.
   helper (jiggle call sequence via the PaneSpawner seam / trim function on
   crafted byte strings) in the runner suite (`cd runner && npm test`);
   final verification is the live reattach.
-- [ ] **[L7] Trackpad/wheel scroll does nothing in the claude pane
-  (2026-07-20 live session). Implement WITH §4 [P3] as one change.** Local
-  claude "scrolling" is the TERMINAL scrolling its own history (claude runs
-  inline, no alt-screen) — but the pane renders only the vt emulator's live
-  screen, and the emulator's scrollback (10k lines, `vt.NewEmulator` call in
-  `external_pane.go`) is retained yet never exposed. Execution sketch:
-  (1) in `ExternalPane.handleMouse`, when the event is wheel up/down AND the
-  child has not enabled mouse tracking (check what the vt emulator exposes
-  for mode state; if it exposes nothing, gate on "wheel while not forwarded"
-  by asking the emulator — worst case forward-when-tracking-else-local via
-  the modes the key encoder already consults), adjust a new `scrollOffset
-  int` field instead of forwarding; (2) `View()`: when scrollOffset > 0,
-  compose the visible rows from `emu.Scrollback()` tail + top of the live
-  screen (the vt package's Scrollback returns lines — clamp offset to its
-  length), and render a small "↑ N lines — any key to return" indicator in
-  the status row; (3) snap back: any KeyPressMsg, paste, or new output
-  (apply feeding bytes) resets scrollOffset to 0 BEFORE forwarding/writing;
-  (4) [P3]: cap retention via `SetScrollbackSize(2000)` at emulator
-  construction. Tests (`external_pane_test.go` seams exist): wheel-up sets
-  offset and renders scrollback content; keypress snaps to live and IS
-  forwarded; offset clamps at history length; wheel with mouse-tracking
-  enabled still forwards to the child. Run
-  `go test ./internal/tui/dashboard/` + `-race -run 'Pane|External'`.
+- [x] **[L7]+[P3] done 2026-07-21** (done log): wheel with child
+  mouse-tracking OFF scrolls a local view over the vt scrollback (3
+  lines/tick, clamped; alt-screen ignored; "↑ N lines — any key to return"
+  indicator replaces the detach hint); key/paste/new-output snap back to
+  live BEFORE forwarding; tracking children still get SGR wheel. [P3]:
+  scrollback capped at 2000 lines (`SetScrollbackSize`) — the viewer is its
+  only reader. Live trackpad feel still wants a maintainer eyeball.
 - [x] **[L8] parts (a)+(b) fixed 2026-07-21** (done log): UserPromptSubmit's
   busy is now PROVISIONAL — a timer-driven ~10s confirm window
   (`SANDBOX_BUSY_CONFIRM_WINDOW_MS`, deps-injectable) reverts to idle via
@@ -271,43 +256,27 @@ in [`docs/review-2026-07-07.md`](docs/review-2026-07-07.md) §A/§B (id in brack
 clean bill — constant-time compare, upgrade-auth ordering, env allowlist,
 unified redaction):
 
-- [ ] **[S1] In-pane agent can exfiltrate the full refresh-capable Max
-  credential over permissive 443 egress (HIGH).** The agent must be able to
-  read `$CLAUDE_CONFIG_DIR/.credentials.json`
-  (`runner/src/claude-config.ts:98-119`, allowlisted dir in
-  `claude-pane.ts`) and the example egress
-  (`k8s/networkpolicy-egress-allow.yaml:55-66`) allows all public 443 →
-  prompt injection exfils a credential that outlives the session.
-  Deliverables (docs+manifests only, no Go/TS): (1) new
-  `k8s/networkpolicy-egress-fqdn.yaml.example` — Cilium
-  `CiliumNetworkPolicy` with `toFQDNs` allowlisting `api.anthropic.com`,
-  `statsig.anthropic.com`, `sentry.io` (verify the set: run a live session
-  and check `hubble observe`/pod connects, or start from Claude Code's
-  documented endpoints), plus the opencode/codex provider hosts commented
-  per-backend; header comment stating it REQUIRES an FQDN-aware CNI and
-  replaces the broad-443 example. (2) SECURITY.md: a plainly-worded
-  paragraph in the existing egress section that the broad-443 example does
-  NOT contain credential exfiltration and that a claude-pane session hands
-  the agent a refresh-capable credential (cross-ref [A3]'s existing
-  open-443 wording — extend, don't duplicate). (3) k8s/README.md row for
-  the new example. Longer-term scoped credentials + the
-  opencode-multi-provider-auth seed filter are separate tracks.
+- [x] **[S1] done 2026-07-21** (done log):
+  `k8s/networkpolicy-egress-fqdn.yaml.example` (Cilium `toFQDNs`; host set
+  re-verified against the CURRENT Claude Code network-config doc —
+  statsig/sentry are legacy there now, `platform.claude.com` added because
+  the in-pod claude refreshes its own credential; codex/opencode/registry
+  blocks commented per-backend; mandatory DNS-proxy rule with tunneling
+  caveat), SECURITY.md exfil paragraph extending [A3], k8s/README
+  subsection. Host set NOT live-validated — `hubble observe` a session
+  before enforcing. Longer-term scoped credentials + the
+  opencode-multi-provider-auth seed filter remain separate tracks.
 - [x] **[S2] done 2026-07-21** (done log): 12 credential-filename patterns
   (`.netrc`/`_netrc`/`.npmrc`/`.git-credentials`; `.aws` +
   `service-account*.json`; default SSH private-key names + `.*` derivatives)
   added to the non-overridable `securityIgnores` layer in
   `internal/sync/sync.go`, layering test pins presence + position, README
   Mutagen bullet notes the defensive exclusion.
-- [ ] **[S3] Observer-token telemetry spoofing by the in-pane agent (LOW,
-  accept+document).** Token readable under CLAUDE_CONFIG_DIR
-  (`claude-pane-observer.ts` token write; routes in `server.ts` before the
-  global auth gate) → same-session fake events / bounded reaper stall
-  (SYNTHETIC_BUSY_STALE_MS releases after 5 min). Scope: DOCUMENT ONLY —
-  add a short "observer events are agent-influenceable" paragraph to
-  SECURITY.md's threat model (don't over-trust a claude-pane live
-  transcript; cross-session spoofing impossible — token is per-session).
-  The optional origin-tagging of observer events is a maintainer design
-  call — do not implement without sign-off.
+- [x] **[S3] done 2026-07-21** (done log): SECURITY.md threat-model section
+  "Observer events are agent-influenceable (claude-pane)" — same-session
+  spoofing + bounded reaper stall documented as accepted; cross-session
+  impossible (per-session token). Origin-tagging NOT implemented — still a
+  maintainer design call.
 - [x] **[S4] done 2026-07-20:** grants.ts + its test deleted; the unused
   `@anthropic-ai/sdk` dep dropped in the same hygiene commit.
 - [ ] **[S5] Set pane WS maxPayload + resize bounds when next touching
@@ -517,12 +486,8 @@ E-series SSE fixes verified intact — do-not-regress list in the doc):
 - [x] **[P2] done 2026-07-20:** pane WS closes with code 4003 over a 4 MiB
   `bufferedAmount` cap (E3 parity); client reconnects into the scrollback
   ring.
-- [ ] **[P3] vt emulator retains a 10k-line scrollback the pane never reads
-  (MED).** `vt.NewEmulator` call in `external_pane.go`. DIRECTION CHANGED
-  2026-07-20: claude runs inline (no alt-screen) and [L7] (§1h) wants
-  wheel-scroll over this exact buffer — so KEEP the scrollback but cap it
-  (`SetScrollbackSize(2000)`) and build the [L7] viewer; do NOT
-  SetScrollbackSize(1). Execute as one change with [L7] (full sketch there).
+- [x] **[P3] done 2026-07-21 with §1h [L7]** (done log): scrollback kept
+  but capped at 2000 lines; the [L7] wheel viewer is its reader.
 - [x] **[P4] done 2026-07-21** (done log): input-writer goroutine is the
   sole UI-side transport writer — 64-entry tagged queue (`paneInput{data,
   size}`) carries keys/paste/mouse AND resize in UI order (geometry can't
@@ -549,30 +514,14 @@ E-series SSE fixes verified intact — do-not-regress list in the doc):
   with a runner subcommand and would strand that work.
 - [ ] **[P7] Feed streaming O(n²) per message (LOW, only if felt).**
   `internal/tui/dashboard/feed.go:198-201`.
-- [ ] **Pane transport RTT probe — measure BEFORE tuning (2026-07-21
-  transport review; prerequisite for the slow-link item below).** Nothing
-  measures transport RTT on the pane path, so all tuning is guesswork.
-  Self-contained in `internal/runner/pane.go` (`PaneStream`), behind the
-  SANDBOX_TRACE gate — read the env directly, mirroring
-  `client/trace.go:34` `traceEnabled` (the client tracer is unexported in
-  another package; do NOT export it for this). Design (decided): on dial,
-  start a pinger goroutine — every 5s
-  `WriteControl(websocket.PingMessage, <8-byte big-endian nanotime>,
-  deadline)`; WriteControl is concurrency-safe alongside the P4 writer
-  (gorilla contract, already noted at `pane.go:159`). `SetPongHandler`
-  (runs on the reader goroutine) parses the echoed timestamp → RTT sample
-  into a mutex-guarded ring (cap ~256, overwrite oldest). On Close emit
-  ONE stderr summary line (n/p50/p95/max, trace style) and export
-  `RTTStats()` for a future dashboard debug row. The node `ws` server
-  auto-pongs — ZERO runner changes. Pinger must exit via the existing
-  Close path (no goroutine leak; no ticker after Close). Extract the
-  percentile math as a pure helper and unit-test it on crafted samples;
-  integration: extend the existing pane test server (gorilla's default
-  ping handler auto-pongs while the server reads) — samples accumulate,
-  pinger stops on Close. `internal/runner` binds ports: run
-  `go test ./internal/runner/` UNSANDBOXED (CLAUDE.md caveat).
-  Cross-ref: §10 observability residual wants SSE first-event latency —
-  same family, keep the output format consistent.
+- [x] **Pane transport RTT probe — done 2026-07-21** (done log):
+  SANDBOX_TRACE-gated pinger in `internal/runner/pane_rtt.go` (5s
+  WriteControl pings w/ nanotime payload, pong-handler sampling into a
+  256-slot ring, additive `PaneStream.RTTStats()`, ONE stderr line on
+  Close: `trace: <id> pane.rtt n= p50= p95= max=` — the format the §10
+  SSE-latency probe should reuse). Zero runner changes (node `ws`
+  auto-pongs). No live-link numbers yet — the slow-link item below stays
+  gated on what this measures on a real slow link.
 - [ ] **Slow-link mode: pane WS compression + runner output coalescing
   (2026-07-21 transport review; GATED on the RTT probe above showing it
   matters, or a real slow-link use case — on LAN it buys nothing
@@ -1070,67 +1019,29 @@ naming-break, and Shell items each stand alone.
 
 ## 9) Unbuilt features
 
-- [ ] **T10 — working-directory picker** (only unexecuted superpowers plan;
-  `docs/superpowers/plans/2026-06-22-t10-working-dir-picker.md` — NOTE:
-  `docs/superpowers/` is local-only, ignored by the maintainer's global
-  gitignore; the item text here is self-sufficient): dirPicker
-  overlay end-to-end — `dirpicker_path.go` (~-expansion, child listing,
-  longest-common-prefix completion, validation) + overlay struct (open/close,
-  prefill, Tab, recents) + wiring before the backend picker + thread
-  `projectPath` into the Creator. None exists.
-  **Re-raised by the maintainer 2026-07-20 during the first live pane
-  session** — the dashboard creator still hard-cwd's every new session
-  (`internal/cli/claude_remote.go:142` resolveProjectPath ← cwd; used by
-  `dashboard_connector.go` newDashboardCreator). Priority up. Execution
-  sketch (if the local plan file is unavailable, this suffices): (1) new
-  picker stage BEFORE the backend stage in the create overlay
-  (`backend_picker.go` + `account_picker.go` show the stage pattern:
-  stage enum + key handler + render fn), prefilled with cwd; rows = cwd,
-  recent project paths (dedup'd, most-recent-first from the local index —
-  `internal/index/index.go:65` ProjectPath; expose a listing via the
-  existing index API or a small `RecentProjects()` helper), and a free-text
-  path row (textinput, ~-expansion, EvalSymlinks, must-exist validation;
-  reuse resolveProjectPath's normalization); (2) thread the choice as
-  `CreateParams.ProjectPath` (add the field to
-  `internal/tui/dashboard/connector.go` CreateParams) and have
-  `newDashboardCreator` use it when non-empty, else cwd — the CLI commands
-  keep pure-cwd semantics; (3) validation errors render inline like the
-  console-key form's formErr. Tests: picker-stage navigation/threading in
-  the account_picker_test.go style; a connector test that ProjectPath
-  flows to CreateOptions. Run `go test ./internal/tui/dashboard/
-  ./internal/cli/`.
-- [ ] **Host statusline in the pane (maintainer ask, 2026-07-20).** The
-  runner's `mergeSettings` unconditionally overwrites `statusLine` with its
-  own metrics-tap script (`runner/src/claude-pane-observer.ts:494`), so the
-  user's own Claude Code statusline never shows in-pane. Wrinkle: the host
-  statusline command is a Nix store path
-  (`~/.claude/settings.json` → `/nix/store/.../claude-statusline`) that
-  cannot be copied into the pod — its closure isn't there. Fix direction:
-  the provisioned statusline.js CHAINS a user statusline when one is
-  available in the pod (print its stdout, still POST the metrics; fall back
-  to the built-in minimal string on any failure), delivered either via a
-  designated synced script dir (ConfigInputsSubs pattern,
-  `internal/sync/sync.go:218`) for plain scripts, or flox-installed into the
-  runner env for packaged statuslines (the maintainer's case — see the
-  flox-first policy). EXECUTABLE CONTRACT (decided default — implement
-  this; the flox-install route needs no code beyond it): the provisioned
-  statusline script checks for an executable at
-  `$CLAUDE_CONFIG_DIR/pane-observer/user-statusline` OR a
-  `sandbox-user-statusline` on PATH (covers a future flox-provided bin);
-  if found, pipe the SAME stdin JSON to it with a ~1s timeout and print
-  ITS stdout as the in-pane line (still POST the metrics first,
-  fire-and-forget-safe); on missing/failure/timeout, print the built-in
-  minimal string exactly as today. Host side: add `pane-observer/` (or a
-  dedicated `statusline` entry) to ConfigInputsSubs
-  (`internal/sync/sync.go:218`) so a plain script syncs in — but EXCLUDE
-  the runner-owned token file from any host→remote overwrite (check how
-  ConfigInputsSubs paths interact with the runner-written
-  `pane-observer/token` before choosing the dir). Tests: runner suite —
-  user script present→chained output, absent→builtin, failing→builtin;
-  sync sub addition pinned in sync tests. Run `cd runner && npm test` +
-  `go test ./internal/sync/`. Maintainer follow-up (not blocking): package
-  `claude-statusline` into the runner flox env so the PATH branch lights
-  up. Closes the design doc's open "statusline display string" question.
+- [x] **T10 — working-directory picker — done 2026-07-21** (done log):
+  directory stage FIRST in the create overlay (cwd preselected — enter-enter
+  keeps the old muscle memory; ≤5 recents via new
+  `Index.RecentProjects(limit)` injected through `RunOptions.RecentProjects`;
+  free-text row w/ ~-expansion + Tab completion), `CreateParams.ProjectPath`
+  threaded through `beginCreate` so every create path inherits it, CLI-side
+  Creator re-validates fail-closed (`creatorProjectPath`); shared
+  normalization extracted to `internal/projpath` (resolveProjectPath
+  delegates, behavior-identical). CLI commands keep pure-cwd semantics.
+  Live overlay feel wants a maintainer eyeball.
+- [x] **Host statusline in the pane — done 2026-07-21** (done log): the
+  provisioned statusline script chains, first hit wins:
+  `pane-observer/user-statusline` (pod drop-in) →
+  `../statusline/user-statusline` (host-synced) → `sandbox-user-statusline`
+  on PATH (future flox bin); ~1s timeout
+  (`SANDBOX_STATUSLINE_TIMEOUT_MS`), metrics POST initiated FIRST and exit
+  still gated on it; missing/non-exec falls through, ran-but-failed/empty
+  → builtin. Host side: ConfigInputsSubs gains `statusline/` — a SIBLING
+  of runner-owned `pane-observer/`, so host sync can never touch the
+  observer token (pinned by test). Runner tests execute the real script.
+  - [ ] **Maintainer follow-up (not blocking):** package
+    `claude-statusline` into the runner flox env so the PATH branch lights
+    up; then a live session shows the host statusline in-pane.
 - [ ] **Worktree continuity + merge-back UX (maintainer ask, 2026-07-21).**
   What EXISTS (verify-then-build-on, don't rebuild): destroy is
   capture-then-remove — dirty WIP is committed to the session's
@@ -1178,63 +1089,53 @@ naming-break, and Shell items each stand alone.
 [`docs/review-2026-07-20.md`](docs/review-2026-07-20.md) §O — what the docs
 do well is recorded there too; fix in roughly this order):
 
-> **PARKED PART-DONE WORKTREES (2026-07-20, agents stopped at the spend
-> limit — finish these rather than restarting):**
-> `.claude/worktrees/agent-a0080936a970d42b6` has an [O3] start
-> (`internal/authstatus/{authstatus,providers}.go` modified; doctor.go and
-> the [S2] task NOT started — diff it, keep what's right, finish per the
-> item). `.claude/worktrees/agent-aff3123c45acf636a` has [O1]/[O7]/[O8]
-> mostly drafted + [O9] in progress (root.go, k8s/README.md, runner-api.md,
-> session-lifecycle.md, architecture.md modified; the [O5]
-> reaper-namespace.yaml was NOT yet created) — **WARNING: it also modified
-> `client/sync.go`, which was out of scope; review that diff skeptically
-> and drop it unless clearly justified.** Both worktrees are based on
-> 683bffc; integrate via cherry-pick/apply onto current main, re-verify
-> every doc claim against code, and remove the worktrees when harvested.
+> *(The two 2026-07-20 parked part-done worktrees — [O3] and the
+> [O1]/[O7]/[O8]/[O9] docs draft — were harvested, re-verified against
+> current main, finished, and removed in the 2026-07-21 seven-agent batch;
+> the out-of-scope `client/sync.go` diff turned out to be a legitimate
+> 2-line comment fix of the same [O9] hedge and was kept.)*
 
-- [ ] **[O1] `sandbox --help` example broken by pane-first** —
-  `internal/cli/root.go:41` positional prompt vs `cobra.NoArgs`; also stale
-  Long text :37 + package doc :2.
+- [x] **[O1] done 2026-07-21** (done log): root `--help` example, Long
+  text, and package doc all pane-first (no positional prompt; real backend
+  set named).
 - [x] **[O2] done 2026-07-20 (1dbf495):** CLAUDE.md rewritten for
   pane-first — intro, runner file table, event-model wording, session
   lifecycle, and command tree all match architecture.md and the code.
-- [ ] **[O3] `auth status` + `doctor` report pre-pane claude auth** —
-  `internal/authstatus/providers.go:31-36` env-only probe;
-  `internal/cli/doctor.go:287` names a shared Secret that doesn't exist for
-  claude-pane (client/account.go:146 says so). Probe design: presence-only,
-  NEVER secret bytes — darwin: `security find-generic-password -s "Claude
-  Code-credentials"` WITHOUT `-w` (exit code is the signal); else stat
-  `$CLAUDE_CONFIG_DIR/.credentials.json` → `~/.claude/.credentials.json`
-  (mirror `client/cred/system.go` systemPaths — import if it doesn't drag
-  secret-reading in, else copy with a pointer comment). Report as the
-  PRIMARY claude source ("host Claude Code login"); demote the env checks
-  to secondary/headless wording. Rewrite the doctor remedy to "log in with
-  `claude` on this machine (Max mode)". Tests: injected exec/stat seams in
-  the existing authstatus test style — no real `security` calls. A start
-  exists in the parked worktree (see the block above). Run
-  `go test ./internal/authstatus/ ./internal/cli/`.
+- [x] **[O3] done 2026-07-21** (done log): presence-only host-login probe
+  (darwin keychain exit-code, no `-w`; keychain answer FINAL when
+  `security` exists, mirroring `cred.SystemMaterial` exactly; else
+  credentials-file stat, `CLAUDE_CONFIG_DIR` exclusive) is the PRIMARY
+  claude source in `auth status`; env vars demoted to headless-only and
+  render Degraded/yellow; doctor headline + remedy rewritten ("log in with
+  `claude` on this machine (Max mode)"), shared-Secret wording deleted.
+  Injected exec/stat seams; no real `security` calls in tests.
 - [x] **[O4] done 2026-07-21** (done log): `sandbox doctor` leads the
   Quickstart + first Commands row; the two doctors (host readiness vs
   `just doctor` dev-env toolchain) explicitly disambiguated in both spots.
-- [ ] **[O5] Reaper undeployable from shipped k8s/ + silent consequence** —
-  apply order omits reaper-rbac (`k8s/README.md:51-55`), `agent-reaper`
-  namespace YAML missing (`reaper-rbac.yaml:22`), netpol exception not
-  shipped; add the "sessions never auto-suspend" sentence.
+- [x] **[O5] done 2026-07-21** (done log): `k8s/reaper-namespace.yaml`
+  (restricted PSS) + `k8s/networkpolicy-reaper-ingress.yaml` (agent-reaper
+  → session pods :8787 only) shipped, apply order fixed, "sessions never
+  auto-suspend" consequence stated. NOT applied to a live cluster —
+  restricted-PSS admission + netpol semantics reasoned from source.
 - [x] **[O6] done 2026-07-21** (done log): README Commands row marked
   **experimental**, documenting BOTH halves of the credential contract
   honestly — per-session ChatGPT-OAuth auth.json is SDK-only today, the
   CLI always uses the shared `openai-api-key` fallback (verified: nothing
   in internal/cli|tui populates CodexAccountID/CodexAuthJSON) — plus the
   degraded-attach caveat. Command stays visible.
-- [ ] **[O7] k8s/README pre-pane facts** — :44-46 positional prompt, :71
-  `sandbox-claude-sdk` label, :100-102 shared anthropic-credentials guidance
-  (only consumer is the retired-backend branch, backend.go:1716-1766).
-- [ ] **[O8] runner-api.md examples use retired `claude-sdk`** (:43-44, :61,
-  :218) — switch to claude-pane + extend the retired-id note.
-- [ ] **[O9] architecture.md "later wave" worktree hedges contradict
-  session-lifecycle.md** (:153-156, :174-176, :224) — worktrees shipped.
-- [ ] **[O10] dev/local README claude section pre-pane** (:99-121 env token,
-  :156 hidden `turn`; no host-login note).
+- [x] **[O7] done 2026-07-21** (done log): k8s/README positional prompt,
+  `sandbox-claude-sdk` label, and shared anthropic-credentials guidance
+  all corrected (verified against `labelAppName`/`buildEnv`).
+- [x] **[O8] done 2026-07-21** (done log): runner-api examples claude-sdk
+  → claude-pane; retired-id note extended (what a lingering claude-sdk pod
+  still serves, per `selectAgent`).
+- [x] **[O9] done 2026-07-21** (done log): architecture.md worktree hedges
+  now state shipped behavior; matching 2-line `client/sync.go`
+  worktreesRoot comment fix; session-lifecycle path gained the missing
+  `remote-sessions/` segment.
+- [x] **[O10] done 2026-07-21** (done log): dev/local README claude
+  section pane-first (host-login harvest; env-token flow relabeled legacy
+  claude-sdk-only; hidden `turn` noted).
 - [x] **[O11] done 2026-07-21** (done log): CONTRIBUTING "The `openspec/`
   references" section — states plainly that openspec/ is the maintainer's
   LOCAL planning workspace, untracked (`.git/info/exclude`), absent from
@@ -1253,6 +1154,18 @@ do well is recorded there too; fix in roughly this order):
   `client/account.go:69`, `internal/k8sit/local_test.go:44`; apply the
   `agent.ts:66` retired-id comment pattern or delete dead branches. (The
   stale `--pane` comment in dashboard_connector.go was rewritten with [L1].)
+  **2026-07-21 batch additions (discovered during the O-docs harvest):**
+  `internal/k8sit/local_test.go:66` still drives `BackendClaudeSDK`
+  expecting a real turn (409s post-pane-first when the legacy Secret is
+  present — stale conformance row; fold into the §7c table-driven smoke
+  rework); justfile ~:158-160/:220-224 comments still claim
+  `anthropic-credentials` makes `just dev` claude work; `client.Create`
+  defaults empty `Backend` to the retired `BackendClaudeSDK`
+  (`client/client.go:459` — also mirrored by the dashboard creator's
+  default; decide the new default, likely claude-pane);
+  `internal/session/types.go:53` example id `claude-sdk-7f3a`; SECURITY.md
+  A1-residual section cites the deleted `runner/src/claude.ts` (should
+  point at `opencode.ts`/`codex.ts`).
 - [ ] **Go-runner rewrite watch item** — investigation complete
   ([`docs/go-runner-rewrite-investigation.md`](docs/go-runner-rewrite-investigation.md)):
   gated on live gates 2.5/8.2 + soak; pre-work available now: drop the dead
