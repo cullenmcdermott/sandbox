@@ -51,14 +51,24 @@
 > credential failure spawned
 > `openspec/changes/opencode-multi-provider-auth/` (see §7a).
 >
-> **Opus-ready map:** §1c–§1d residuals, §4, §7a and the §5 GC follow-ups
-> carry pointers + fix direction — pick a cluster and go. (§2a–§2d closed
-> with claude-pane-first, 2026-07-20 — see the §2 closeout.) Drafted,
-> awaiting maintainer sign-off: §7b package-manager ADR, §10 KRO ADR, §9
-> worktree design. Still gated on a maintainer decision: §8 (deliberate
-> design calls). Needs the real cluster or live services: §5 Spegel deploy,
-> §6 codex spike, §7 verify sweeps, parts of §1d, the claude-pane-first live
-> gates (openspec tasks 2.5/8.2/8.3).
+> **Opus-ready map (updated 2026-07-20 late):** best first picks, in order —
+> §10 [O1]-[O12]/[O15] docs+probe cluster (two PARKED part-done worktrees to
+> finish, see the §10 intro), §1h [L3] feed history + [L7] wheel-scroll
+> (implement WITH §4 [P3] as one change), §4 [P4] input writer, §1f
+> [S1]/[S2]/[S3] security follow-ups, §9 T10 dirPicker + statusline chain
+> (execution contracts in the items), §7a = execute
+> `openspec/changes/opencode-multi-provider-auth/tasks.md`, §2e needs-input
+> relabel. Every open item carries pointers + a fix direction + a
+> verification line; if one doesn't, that's a bug in this file. Rules of the
+> road for Opus: (1) run the tests named in the item, not the full gate, per
+> change; run `just check` once per batch (command-sandbox caveats in
+> CLAUDE.md); (2) line numbers drift — anchor by symbol name and re-`rg`
+> before editing; (3) never touch `openspec/` structure, `*.gen.*` files, or
+> memory. Drafted, awaiting maintainer sign-off: §7b package-manager ADR, §8
+> pod-bootstrap design, §2e plan-doc workstreams (A-G). Maintainer-decision
+> gated: §8 [L6], §2e [L5] floating-modal design. Needs the live cluster or
+> the maintainer's eyeball: [L2] repro, claude-pane-first gates 8.2/8.3, §5
+> Spegel, §6 codex live spike, §7c verify sweeps.
 
 ## 0) Inbox — human notes, needs triage
 
@@ -111,30 +121,64 @@ row-model consolidation moved to §2a where it belongs.
   the store learns full OAuth docs. Also closed [O13] (sentinel remediation
   text) in the same change.
 - [ ] **[L2] Pane replay renders corrupted frames on attach (MED).** Observed
-  garbled/overlapping header. Likely mechanism: scrollback-ring chunk
-  eviction (`runner/src/claude-pane.ts:102-136`) cuts mid-escape-sequence,
-  replay starts without cursor context. Fix direction: force full repaint
-  after replay (resize jiggle) or trim replay to the last clear-screen
-  marker; pin against a live session first.
+  garbled/overlapping header ("Claude CodClaude Code") on a live 2026-07-20
+  session. Likely mechanism: scrollback-ring chunk eviction
+  (`ScrollbackRing` in `runner/src/claude-pane.ts`) cuts mid-escape-sequence,
+  so replay starts without cursor context. GATED on a live repro (maintainer):
+  attach → generate >256 KiB of output → detach → reattach; note whether
+  corruption appears on FIRST attach too (would implicate something other
+  than ring eviction). Then pick: (a) runner-side — after sending the replay
+  snapshot, force the child to repaint via a rows±1→rows resize jiggle on
+  the pty (one-liner in the attach path, works regardless of ring cut
+  position; slight flicker), or (b) trim the replay snapshot to start at the
+  last clear-screen/cursor-home sequence (`ESC[2J`/`ESC[H` scan in the ring
+  snapshot — cleaner but misses claude redraws that never clear). Prefer (a)
+  unless the repro shows it flickering badly. Tests: unit-test whichever
+  helper (jiggle call sequence via the PaneSpawner seam / trim function on
+  crafted byte strings) in the runner suite (`cd runner && npm test`);
+  final verification is the live reattach.
 - [ ] **[L7] Trackpad/wheel scroll does nothing in the claude pane
-  (2026-07-20 live session).** Local claude "scrolling" is the TERMINAL
-  scrolling its own history (claude runs inline, no alt-screen) — but the
-  pane renders only the vt emulator's live screen, and the emulator's
-  scrollback (10k lines, `external_pane.go:142`) is retained yet never
-  exposed. Fix direction: wheel events over the pane, when the child hasn't
-  enabled mouse tracking, scroll the emulator scrollback locally (a view
-  offset over `Scrollback()` + live screen, like a real terminal), with any
-  keypress/output snapping back to live. NOTE this INVERTS [P3]'s fix
-  direction (§4): the scrollback must be KEPT and used, not
-  `SetScrollbackSize(1)`-ed — [P3]'s cost concern gets addressed by capping
-  the size (e.g. 2k lines) instead of removing it.
+  (2026-07-20 live session). Implement WITH §4 [P3] as one change.** Local
+  claude "scrolling" is the TERMINAL scrolling its own history (claude runs
+  inline, no alt-screen) — but the pane renders only the vt emulator's live
+  screen, and the emulator's scrollback (10k lines, `vt.NewEmulator` call in
+  `external_pane.go`) is retained yet never exposed. Execution sketch:
+  (1) in `ExternalPane.handleMouse`, when the event is wheel up/down AND the
+  child has not enabled mouse tracking (check what the vt emulator exposes
+  for mode state; if it exposes nothing, gate on "wheel while not forwarded"
+  by asking the emulator — worst case forward-when-tracking-else-local via
+  the modes the key encoder already consults), adjust a new `scrollOffset
+  int` field instead of forwarding; (2) `View()`: when scrollOffset > 0,
+  compose the visible rows from `emu.Scrollback()` tail + top of the live
+  screen (the vt package's Scrollback returns lines — clamp offset to its
+  length), and render a small "↑ N lines — any key to return" indicator in
+  the status row; (3) snap back: any KeyPressMsg, paste, or new output
+  (apply feeding bytes) resets scrollOffset to 0 BEFORE forwarding/writing;
+  (4) [P3]: cap retention via `SetScrollbackSize(2000)` at emulator
+  construction. Tests (`external_pane_test.go` seams exist): wheel-up sets
+  offset and renders scrollback content; keypress snaps to live and IS
+  forwarded; offset clamps at history length; wheel with mouse-tracking
+  enabled still forwards to the child. Run
+  `go test ./internal/tui/dashboard/` + `-race -run 'Pane|External'`.
 - [ ] **[L3] Detached feed opens empty — host event cache has a reader but no
-  writer (MED).** `app.go:588-590` seeds from `eventCache.LoadEvents` but
+  writer (MED).** `app.go` `openFeed` seeds from `eventCache.LoadEvents` but
   `AppendEvent` has zero production callers (orphaned by a935541);
-  `EventCache`/`indexEventCache`/`CacheWriter`
-  (`internal/cli/sync_support.go:427`) are dead weight. Fix: feed history
-  via SSE replay from seq 0 on feed open + delete the cache, or reconnect
-  the write path.
+  `EventCache`/`WithEventCache` (`internal/tui/dashboard/model.go:425-441`)
+  and `indexEventCache`/`CacheWriter` (`internal/cli/sync_support.go:427`)
+  are dead weight. RECOMMENDED fix (option A): on feed open, request SSE
+  replay from seq 0 instead of `sess.lastSeq` (the runner's SQLite log holds
+  full history and replay is already chunked/bounded — E2 in
+  `runner/src/events.ts`), seed the feed from that replay, THEN delete the
+  whole EventCache surface (interface, WithEventCache, indexEventCache,
+  CacheWriter, and their tests) as a follow-up hygiene commit. Watch out:
+  the `after=lastSeq` behavior exists to prevent launch-time notification
+  flashing/usage double-count on the DASHBOARD path (`model_sse.go` comment
+  near `afterSeq :=`) — scope the from-zero replay to the feed's stream
+  only, not the dashboard read-model stream. Option B (reconnect the cache
+  write path) is NOT recommended: it re-adds a second source of truth.
+  Tests: extend `feed_test.go` seeding cases; a reducer-level test that a
+  feed opened mid-session renders prior prompts/tool lines. Run
+  `go test ./internal/tui/dashboard/`.
 
 ### 1c. Rendering / layout residuals (2026-07-04 audit; parents fixed — done log)
 
@@ -224,22 +268,45 @@ unified redaction):
   credential over permissive 443 egress (HIGH).** The agent must be able to
   read `$CLAUDE_CONFIG_DIR/.credentials.json`
   (`runner/src/claude-config.ts:98-119`, allowlisted dir in
-  `claude-pane.ts:159`) and the example egress
+  `claude-pane.ts`) and the example egress
   (`k8s/networkpolicy-egress-allow.yaml:55-66`) allows all public 443 →
-  prompt injection exfils a credential that outlives the session. Fix: ship
-  a tightened FQDN-allowlist egress example + SECURITY.md statement;
-  longer-term scoped credentials. The opencode-multi-provider-auth seed
-  filter is part of this mitigation.
-- [ ] **[S2] Project-sync secret ignores miss credential *filenames* (MED).**
-  `internal/sync/sync.go:350-368` blocks by extension only — `.netrc`,
-  `.npmrc`, `.git-credentials`, `.aws/credentials`,
-  `service-account*.json`, `id_rsa`/`id_ed25519` sync into the pod. Fix:
-  extend `securityIgnores` + document the expectation.
+  prompt injection exfils a credential that outlives the session.
+  Deliverables (docs+manifests only, no Go/TS): (1) new
+  `k8s/networkpolicy-egress-fqdn.yaml.example` — Cilium
+  `CiliumNetworkPolicy` with `toFQDNs` allowlisting `api.anthropic.com`,
+  `statsig.anthropic.com`, `sentry.io` (verify the set: run a live session
+  and check `hubble observe`/pod connects, or start from Claude Code's
+  documented endpoints), plus the opencode/codex provider hosts commented
+  per-backend; header comment stating it REQUIRES an FQDN-aware CNI and
+  replaces the broad-443 example. (2) SECURITY.md: a plainly-worded
+  paragraph in the existing egress section that the broad-443 example does
+  NOT contain credential exfiltration and that a claude-pane session hands
+  the agent a refresh-capable credential (cross-ref [A3]'s existing
+  open-443 wording — extend, don't duplicate). (3) k8s/README.md row for
+  the new example. Longer-term scoped credentials + the
+  opencode-multi-provider-auth seed filter are separate tracks.
+- [ ] **[S2] Project-sync secret ignores miss credential *filenames* (MED,
+  untouched by the parked worktrees — clean start).**
+  `securityIgnores` in `internal/sync/sync.go` blocks by extension only.
+  Add mutagen ignore patterns (gitignore-like syntax — match how the
+  existing dir entries in that list are written) for: `.netrc`, `_netrc`,
+  `.npmrc`, `.git-credentials`, `.aws/` (whole dir),
+  `service-account*.json`, `id_rsa`, `id_rsa.*`, `id_ed25519`,
+  `id_ed25519.*`, `id_ecdsa`, `id_ecdsa.*` — grouped with a comment per
+  group naming what it protects (existing list's style). Extend the
+  existing securityIgnores test the same way, and add one sentence to the
+  README sync section: the project dir should not contain secret files;
+  these names are excluded defensively. Run `go test ./internal/sync/`.
 - [ ] **[S3] Observer-token telemetry spoofing by the in-pane agent (LOW,
   accept+document).** Token readable under CLAUDE_CONFIG_DIR
-  (`claude-pane-observer.ts:449-452`; routes `server.ts:297-311`) → same-
-  session fake events / bounded reaper stall. Threat-model note; optionally
-  tag observer-originated events.
+  (`claude-pane-observer.ts` token write; routes in `server.ts` before the
+  global auth gate) → same-session fake events / bounded reaper stall
+  (SYNTHETIC_BUSY_STALE_MS releases after 5 min). Scope: DOCUMENT ONLY —
+  add a short "observer events are agent-influenceable" paragraph to
+  SECURITY.md's threat model (don't over-trust a claude-pane live
+  transcript; cross-session spoofing impossible — token is per-session).
+  The optional origin-tagging of observer events is a maintainer design
+  call — do not implement without sign-off.
 - [x] **[S4] done 2026-07-20:** grants.ts + its test deleted; the unused
   `@anthropic-ai/sdk` dep dropped in the same hygiene commit.
 - [ ] **[S5] Set pane WS maxPayload + resize bounds when next touching
@@ -333,10 +400,15 @@ modals, session list, feed, theming).
   finished, awaiting next prompt", but the label (:330) + glyph read like
   the session is stuck at a picker. Rename the HUMAN-facing label to
   something calm ("ready" / "your turn"), keeping StatusWaiting as the
-  genuinely-blocked state and its attention float. CAREFUL: the wire string
-  "needs-input" round-trips through snapshot serialization
-  (session.go:470) — keep the serialized form stable or migrate; golden
-  churn expected.
+  genuinely-blocked state and its attention float. Touch points: the
+  human label fn (`session.go` ~:330 "needs input"), the glyph
+  (`theme.GlyphNeedsInput` — check whether the glyph itself also needs a
+  calmer form), and any status-row/list renderings that embed the word.
+  CAREFUL: the WIRE string "needs-input" (String(), :57) round-trips
+  through snapshot serialization (parse at :470) — do NOT rename it; only
+  the display label. Regenerate goldens
+  (`go test ./internal/tui/dashboard/ -run TestGolden -update`) and eyeball
+  the diff. Run `go test ./internal/tui/dashboard/`.
 - [ ] **[L5] Design pass: external panes as floating modals over the
   dashboard (maintainer idea, 2026-07-20).** Render in-pane clients
   (claude/opencode) as floating modals instead of full-screen takeover —
@@ -453,22 +525,42 @@ E-series SSE fixes verified intact — do-not-regress list in the doc):
   `bufferedAmount` cap (E3 parity); client reconnects into the scrollback
   ring.
 - [ ] **[P3] vt emulator retains a 10k-line scrollback the pane never reads
-  (MED).** `external_pane.go:142`. DIRECTION CHANGED 2026-07-20: claude runs
-  inline (no alt-screen) and [L7] (§1h) wants wheel-scroll over this exact
-  buffer — so KEEP the scrollback but cap it smaller (e.g. 2k lines) and
-  implement the [L7] viewer; do NOT SetScrollbackSize(1).
+  (MED).** `vt.NewEmulator` call in `external_pane.go`. DIRECTION CHANGED
+  2026-07-20: claude runs inline (no alt-screen) and [L7] (§1h) wants
+  wheel-scroll over this exact buffer — so KEEP the scrollback but cap it
+  (`SetScrollbackSize(2000)`) and build the [L7] viewer; do NOT
+  SetScrollbackSize(1). Execute as one change with [L7] (full sketch there).
 - [ ] **[P4] Pane input is a blocking network write on the UI goroutine
-  (MED).** `external_pane.go:297-358` → `internal/runner/pane.go:130-137`;
-  stalled forward freezes the dashboard incl. ctrl+] detach. Fix: buffered
-  writer goroutine, surface stream error on sustained-full.
+  (MED).** `handleKey`/`handlePaste`/`handleMouse` in `external_pane.go` →
+  `PaneStream.Write` under `writeMu` (`internal/runner/pane.go`): every
+  keystroke blocks the Bubble Tea loop on `conn.WriteMessage`; a stalled
+  forward freezes the whole dashboard INCLUDING ctrl+] detach. Fix sketch:
+  give the pane an input-writer goroutine owning transport writes — a
+  buffered `chan []byte` (~64 entries), handleKey/etc. do a non-blocking
+  send; on full channel, drop the input and record a pane-level stream
+  error (surfaced like other pane errors) rather than blocking; writer
+  exits on the P5 done channel (already exists post-ea27ab9); close() must
+  drain-or-abandon cleanly. CAUTION: preserve write ordering with resize
+  (`PaneStream.Resize` shares writeMu — route resize through the same
+  channel or document why racing is safe). Tests: fake transport whose
+  Write blocks — UI Update returns promptly and detach works; ordering
+  test (keys arrive in send order); race run green. Run
+  `go test ./internal/tui/dashboard/` + `-race -run 'Pane|External'`.
 - [x] **[P5] done 2026-07-20** with [P1]: done-channel select in the reader,
   closeOnce-guarded close.
 - [ ] **[P6] One fresh Node process per observer hook event — PreToolUse on
   every tool call's critical path (MED, measure live cadence first).**
-  `runner/src/claude-pane-observer.ts:353-417`. Fix: fire-and-forget POST /
-  FIFO tail / persistent forwarder — but see the Go-runner doc (a runner-
-  binary subcommand solves it structurally); don't over-invest if that
-  lands.
+  Helper scripts + PROVISIONED_HOOK_EVENTS in
+  `runner/src/claude-pane-observer.ts`. Measurement recipe (live session,
+  maintainer or cluster access): count observer POSTs per turn — `kubectl
+  logs <pod> | rg -c observer` or add a temporary counter — and time one
+  PreToolUse hook (`time node hook.js < sample.json` in-pod). Only if
+  PreToolUse adds >~100ms per tool call: MINIMAL fix = hook.js fires the
+  POST and exits WITHOUT awaiting the response (drop the `finally(exit)`
+  await chain; best-effort telemetry already) — keep the 3s abort for the
+  statusline which must print. Do NOT build the FIFO/persistent-forwarder
+  variants: the Go-runner rewrite (§10 watch item) replaces the scripts
+  with a runner subcommand and would strand that work.
 - [ ] **[P7] Feed streaming O(n²) per message (LOW, only if felt).**
   `internal/tui/dashboard/feed.go:198-201`.
 
@@ -666,12 +758,17 @@ the connect path. The cross-backend contract these decisions implement
 Secret) is §6's "Unified per-backend credential lifecycle" item — read that
 first.
 
-- [ ] **Implement OpenCode local credential store + JIT Secret reconcile.**
-  Replace the local-dev-only env/1Password path with a `client/cred`-style store
-  and `sandbox opencode` preflight that creates/updates the namespace Secret
-  before session creation when absent/stale. Current provisioning is only
-  `dev/local/opencode-creds.sh:13-21,59-85` via `justfile:146-153,309-319`;
-  session creation only validates generic options in `client/client.go:292-312`.
+- [ ] **Implement OpenCode credentials = EXECUTE
+  `openspec/changes/opencode-multi-provider-auth/tasks.md` (supersedes this
+  item's original shape, 2026-07-20).** Do NOT build a `client/cred`-style
+  opencode store or shared-Secret preflight — the accepted design harvests
+  the local opencode auth.json JIT at create into the per-session Secret
+  (codex `codex-auth-json` transport pattern, `backend.go` reconcile at the
+  `secretKeyCodexAuthJSON` branch) with the shared Secret demoted to
+  fallback. The change's proposal/design/specs/tasks are complete and
+  validated; start at tasks.md §1 (two verification tasks gate the merge
+  semantics). Original pointers kept for the fallback path only:
+  `dev/local/opencode-creds.sh`, `client/client.go` create validation.
 - [ ] **Validate OpenCode provider auth before/at connect.** `sandbox auth
   status` only reports local env vars (`internal/authstatus/providers.go:119-149`),
   while connect waits for runner health + `opencode serve` readiness only
@@ -926,9 +1023,24 @@ naming-break, and Shell items each stand alone.
   **Re-raised by the maintainer 2026-07-20 during the first live pane
   session** — the dashboard creator still hard-cwd's every new session
   (`internal/cli/claude_remote.go:142` resolveProjectPath ← cwd; used by
-  `dashboard_connector.go` newDashboardCreator). Recents data source exists:
-  the local index stores ProjectPath per session
-  (`internal/index/index.go:65`). Priority up.
+  `dashboard_connector.go` newDashboardCreator). Priority up. Execution
+  sketch (if the local plan file is unavailable, this suffices): (1) new
+  picker stage BEFORE the backend stage in the create overlay
+  (`backend_picker.go` + `account_picker.go` show the stage pattern:
+  stage enum + key handler + render fn), prefilled with cwd; rows = cwd,
+  recent project paths (dedup'd, most-recent-first from the local index —
+  `internal/index/index.go:65` ProjectPath; expose a listing via the
+  existing index API or a small `RecentProjects()` helper), and a free-text
+  path row (textinput, ~-expansion, EvalSymlinks, must-exist validation;
+  reuse resolveProjectPath's normalization); (2) thread the choice as
+  `CreateParams.ProjectPath` (add the field to
+  `internal/tui/dashboard/connector.go` CreateParams) and have
+  `newDashboardCreator` use it when non-empty, else cwd — the CLI commands
+  keep pure-cwd semantics; (3) validation errors render inline like the
+  console-key form's formErr. Tests: picker-stage navigation/threading in
+  the account_picker_test.go style; a connector test that ProjectPath
+  flows to CreateOptions. Run `go test ./internal/tui/dashboard/
+  ./internal/cli/`.
 - [ ] **Host statusline in the pane (maintainer ask, 2026-07-20).** The
   runner's `mergeSettings` unconditionally overwrites `statusLine` with its
   own metrics-tap script (`runner/src/claude-pane-observer.ts:494`), so the
@@ -942,8 +1054,25 @@ naming-break, and Shell items each stand alone.
   designated synced script dir (ConfigInputsSubs pattern,
   `internal/sync/sync.go:218`) for plain scripts, or flox-installed into the
   runner env for packaged statuslines (the maintainer's case — see the
-  flox-first policy). Needs a short design pass on the delivery contract;
-  closes the design doc's open "statusline display string" question.
+  flox-first policy). EXECUTABLE CONTRACT (decided default — implement
+  this; the flox-install route needs no code beyond it): the provisioned
+  statusline script checks for an executable at
+  `$CLAUDE_CONFIG_DIR/pane-observer/user-statusline` OR a
+  `sandbox-user-statusline` on PATH (covers a future flox-provided bin);
+  if found, pipe the SAME stdin JSON to it with a ~1s timeout and print
+  ITS stdout as the in-pane line (still POST the metrics first,
+  fire-and-forget-safe); on missing/failure/timeout, print the built-in
+  minimal string exactly as today. Host side: add `pane-observer/` (or a
+  dedicated `statusline` entry) to ConfigInputsSubs
+  (`internal/sync/sync.go:218`) so a plain script syncs in — but EXCLUDE
+  the runner-owned token file from any host→remote overwrite (check how
+  ConfigInputsSubs paths interact with the runner-written
+  `pane-observer/token` before choosing the dir). Tests: runner suite —
+  user script present→chained output, absent→builtin, failing→builtin;
+  sync sub addition pinned in sync tests. Run `cd runner && npm test` +
+  `go test ./internal/sync/`. Maintainer follow-up (not blocking): package
+  `claude-statusline` into the runner flox env so the PATH branch lights
+  up. Closes the design doc's open "statusline display string" question.
 - [ ] **Tekken-style agent-picker modal** — animations + per-agent
   ascii/ansi portrait.
 - [x] **Per-session git worktree lifecycle — IMPLEMENTED 2026-07-11** (done
@@ -967,6 +1096,20 @@ naming-break, and Shell items each stand alone.
 [`docs/review-2026-07-20.md`](docs/review-2026-07-20.md) §O — what the docs
 do well is recorded there too; fix in roughly this order):
 
+> **PARKED PART-DONE WORKTREES (2026-07-20, agents stopped at the spend
+> limit — finish these rather than restarting):**
+> `.claude/worktrees/agent-a0080936a970d42b6` has an [O3] start
+> (`internal/authstatus/{authstatus,providers}.go` modified; doctor.go and
+> the [S2] task NOT started — diff it, keep what's right, finish per the
+> item). `.claude/worktrees/agent-aff3123c45acf636a` has [O1]/[O7]/[O8]
+> mostly drafted + [O9] in progress (root.go, k8s/README.md, runner-api.md,
+> session-lifecycle.md, architecture.md modified; the [O5]
+> reaper-namespace.yaml was NOT yet created) — **WARNING: it also modified
+> `client/sync.go`, which was out of scope; review that diff skeptically
+> and drop it unless clearly justified.** Both worktrees are based on
+> 683bffc; integrate via cherry-pick/apply onto current main, re-verify
+> every doc claim against code, and remove the worktrees when harvested.
+
 - [ ] **[O1] `sandbox --help` example broken by pane-first** —
   `internal/cli/root.go:41` positional prompt vs `cobra.NoArgs`; also stale
   Long text :37 + package doc :2.
@@ -976,16 +1119,30 @@ do well is recorded there too; fix in roughly this order):
 - [ ] **[O3] `auth status` + `doctor` report pre-pane claude auth** —
   `internal/authstatus/providers.go:31-36` env-only probe;
   `internal/cli/doctor.go:287` names a shared Secret that doesn't exist for
-  claude-pane. Add a system-login presence probe (no secret bytes).
+  claude-pane (client/account.go:146 says so). Probe design: presence-only,
+  NEVER secret bytes — darwin: `security find-generic-password -s "Claude
+  Code-credentials"` WITHOUT `-w` (exit code is the signal); else stat
+  `$CLAUDE_CONFIG_DIR/.credentials.json` → `~/.claude/.credentials.json`
+  (mirror `client/cred/system.go` systemPaths — import if it doesn't drag
+  secret-reading in, else copy with a pointer comment). Report as the
+  PRIMARY claude source ("host Claude Code login"); demote the env checks
+  to secondary/headless wording. Rewrite the doctor remedy to "log in with
+  `claude` on this machine (Max mode)". Tests: injected exec/stat seams in
+  the existing authstatus test style — no real `security` calls. A start
+  exists in the parked worktree (see the block above). Run
+  `go test ./internal/authstatus/ ./internal/cli/`.
 - [ ] **[O4] `sandbox doctor` missing from README** (`doctor.go:122-131`;
   README's `just doctor` is the KIND-env tool) — Quickstart + Commands row.
 - [ ] **[O5] Reaper undeployable from shipped k8s/ + silent consequence** —
   apply order omits reaper-rbac (`k8s/README.md:51-55`), `agent-reaper`
   namespace YAML missing (`reaper-rbac.yaml:22`), netpol exception not
   shipped; add the "sessions never auto-suspend" sentence.
-- [ ] **[O6] `sandbox codex` in --help but undocumented** (`root.go:96`) —
-  Hidden until the pane lands, or experimental Commands row + credential
-  prereq.
+- [ ] **[O6] `sandbox codex` in --help but undocumented** (`root.go:96`).
+  DEFAULT (execute unless the maintainer overrides): add a README Commands
+  row marked **experimental** with the ChatGPT-OAuth `auth.json` credential
+  prereq (contract lives in code comments, `claude_remote.go:89-96`) and a
+  one-line "attach UX is degraded until the codex pane lands" caveat — do
+  NOT hide the command (it works; hiding it regresses codex dogfooding).
 - [ ] **[O7] k8s/README pre-pane facts** — :44-46 positional prompt, :71
   `sandbox-claude-sdk` label, :100-102 shared anthropic-credentials guidance
   (only consumer is the retired-backend branch, backend.go:1716-1766).
