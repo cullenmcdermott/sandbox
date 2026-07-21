@@ -157,23 +157,45 @@ func lipglossWidthFirstLine(s string) int {
 	return len([]rune(strings.TrimRight(s, " ")))
 }
 
+// goldenFeedModel seeds a representative feed (prompt + reply + two tools + a
+// calm notice) at the given size so the golden covers a realistic turn.
+func goldenFeedModel(w, h int) *feedModel {
+	m := newFeedModel(session.Ref{ID: "alpha"}, "alpha", "claude")
+	m.SetSize(w, h)
+	m.ingest(feedEvent(1, session.EventTurnStarted, session.TurnStartedPayload{Prompt: "add a health endpoint and run the tests"}))
+	m.ingest(feedEvent(2, session.EventMessageCompleted, session.MessagePayload{Role: "assistant", Content: "I'll add the endpoint and run the suite."}))
+	m.ingest(feedEvent(3, session.EventToolStarted, session.ToolPayload{Tool: "Edit", ToolUseID: "t1", Input: json.RawMessage(`{"file_path":"/work/alpha/server/health.go"}`)}))
+	m.ingest(feedEvent(4, session.EventToolCompleted, session.ToolPayload{Tool: "Edit", ToolUseID: "t1", Output: "updated"}))
+	zero := 0
+	m.ingest(feedEvent(5, session.EventToolStarted, session.ToolPayload{Tool: "Bash", ToolUseID: "t2", Input: json.RawMessage(`{"command":"go test ./..."}`)}))
+	m.ingest(feedEvent(6, session.EventToolCompleted, session.ToolPayload{Tool: "Bash", ToolUseID: "t2", Output: "ok\nok\nok", ExitCode: &zero}))
+	m.ingest(feedEvent(7, session.EventMessageCompleted, session.MessagePayload{Role: "assistant", Content: "Done — the tests pass."}))
+	m.ingest(feedEvent(8, session.EventTurnCompleted, session.TurnCompletedPayload{}))
+	m.bottom()
+	return m
+}
+
 // TestGoldenFeed snapshots a representative feed (prompt + reply + two tools +
-// a calm notice) so unintended visual changes fail. Regenerate with -update.
+// a calm notice) so unintended visual changes fail, fanning out over every
+// REGISTERED theme (the theme axis → testdata/TestGoldenFeed/<Theme>.golden).
+// Regenerate with -update.
 func TestGoldenFeed(t *testing.T) {
+	for _, name := range registeredThemeNames(t) {
+		t.Run(name, func(t *testing.T) {
+			withDeterministicRender(t, func() {
+				useTheme(t, name)
+				golden.RequireEqual(t, []byte(goldenFeedModel(100, 24).View()))
+			})
+		})
+	}
+}
+
+// TestGoldenFeedNarrow pins the feed's degraded 60×20 layout (the size axis):
+// prompts, tool lines, and the notice have to wrap into a cramped viewport. It
+// renders under the default theme; a stable-but-cramped frame is the point.
+func TestGoldenFeedNarrow(t *testing.T) {
 	withDeterministicRender(t, func() {
-		m := newFeedModel(session.Ref{ID: "alpha"}, "alpha", "claude")
-		m.SetSize(100, 24)
-		m.ingest(feedEvent(1, session.EventTurnStarted, session.TurnStartedPayload{Prompt: "add a health endpoint and run the tests"}))
-		m.ingest(feedEvent(2, session.EventMessageCompleted, session.MessagePayload{Role: "assistant", Content: "I'll add the endpoint and run the suite."}))
-		m.ingest(feedEvent(3, session.EventToolStarted, session.ToolPayload{Tool: "Edit", ToolUseID: "t1", Input: json.RawMessage(`{"file_path":"/work/alpha/server/health.go"}`)}))
-		m.ingest(feedEvent(4, session.EventToolCompleted, session.ToolPayload{Tool: "Edit", ToolUseID: "t1", Output: "updated"}))
-		zero := 0
-		m.ingest(feedEvent(5, session.EventToolStarted, session.ToolPayload{Tool: "Bash", ToolUseID: "t2", Input: json.RawMessage(`{"command":"go test ./..."}`)}))
-		m.ingest(feedEvent(6, session.EventToolCompleted, session.ToolPayload{Tool: "Bash", ToolUseID: "t2", Output: "ok\nok\nok", ExitCode: &zero}))
-		m.ingest(feedEvent(7, session.EventMessageCompleted, session.MessagePayload{Role: "assistant", Content: "Done — the tests pass."}))
-		m.ingest(feedEvent(8, session.EventTurnCompleted, session.TurnCompletedPayload{}))
-		m.bottom()
-		golden.RequireEqual(t, []byte(m.View()))
+		golden.RequireEqual(t, []byte(goldenFeedModel(60, 20).View()))
 	})
 }
 
