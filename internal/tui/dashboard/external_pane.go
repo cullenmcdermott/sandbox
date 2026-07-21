@@ -31,13 +31,19 @@ import (
 //
 //	PaneTransport ──Read──▶ reader goroutine ──chan──▶ emulator.Write
 //	                                                        │ Render()
-//	user keys ──KeyPressMsg──▶ encodeKey ──▶ transport.Write ▼
-//	                                                View (rows + status)
+//	user keys ──KeyPressMsg──▶ encodeKey ──chan──▶ input    ▼
+//	                             writer ──▶ transport.Write View (rows + status)
 //
 // The reader goroutine drains the transport into a buffered channel
 // unconditionally, so the remote end never blocks on a full buffer even while
 // the pane is minimized (screen back on the dashboard) — which is what makes
 // re-opening the pane instant rather than a reconnect.
+//
+// The input-writer goroutine owns the UI-side transport writes (P4):
+// handleKey/handlePaste/handleMouse/resize enqueue non-blockingly instead of
+// calling transport.Write on the Bubble Tea goroutine, where a stalled
+// forward (a blocked WebSocket write) would freeze the whole dashboard —
+// including ctrl+] detach.
 type ExternalPane struct {
 	sess Session
 	// label names the embedded client in the status row ("opencode", "claude").
@@ -63,11 +69,23 @@ type ExternalPane struct {
 	transport PaneTransport
 	out       chan ptyChunk
 
-	// done is closed (exactly once, via closeOnce) in close() so the reader
-	// goroutine's pending channel send unblocks and it exits (P5):
+	// in feeds the input-writer goroutine (P4), the sole UI-side transport
+	// writer: keys, paste, mouse, and resize control frames ride this queue in
+	// the order the UI produced them. nil on a pane that never dialed
+	// (direct-construction tests), where send/resize fall back to synchronous
+	// transport calls. The emulator reply pump does NOT ride it: capability
+	// replies must never be dropped (the child blocks awaiting them), and that
+	// goroutine is already off the UI loop — transports serialize concurrent
+	// writers (PaneStream.writeMu / OS PTY write atomicity).
+	in chan paneInput
+
+	// done is closed (exactly once, via closeOnce) in close() so blocked pane
+	// goroutines exit: the reader's pending channel send unblocks (P5) —
 	// transport.Close() unblocks a blocked Read, but not a send stuck on a full
-	// p.out — without this signal a replaced pane could retain the goroutine
-	// plus up to ~8 MB of buffered chunks for the process lifetime.
+	// p.out; without this signal a replaced pane could retain the goroutine
+	// plus up to ~8 MB of buffered chunks for the process lifetime — and the
+	// input writer's select observes it and returns (P4), abandoning anything
+	// still queued for the torn-down transport.
 	done      chan struct{}
 	closeOnce sync.Once
 
@@ -99,6 +117,24 @@ const (
 	paneBatchMaxChunks = 256
 	paneBatchMaxBytes  = 1 << 20 // 1 MiB
 )
+
+// paneInputQueueCap bounds the input-writer queue (P4). 64 entries is far more
+// input than a user produces in the time a healthy transport takes to drain
+// one write; a full queue therefore means the transport has stalled, and the
+// right move is to drop (recording a pane error) rather than block the UI.
+const paneInputQueueCap = 64
+
+// paneInput is one queued transport write: input bytes (key/paste/mouse
+// encodings) or, when size is non-nil, a resize control frame. Resize rides
+// the same queue as keystrokes so geometry and input reach the transport in
+// the order the UI produced them (see resize).
+type paneInput struct {
+	data []byte
+	size *paneSize
+}
+
+// paneSize is a queued resize in emulator geometry (cols × rows).
+type paneSize struct{ cols, rows int }
 
 // ptyChunk is one read from the pane transport; ok=false marks end of stream.
 type ptyChunk struct {
@@ -182,7 +218,31 @@ func (p *ExternalPane) Init() tea.Cmd {
 	}
 	p.transport = tr
 	p.out = make(chan ptyChunk, 256)
+	p.in = make(chan paneInput, paneInputQueueCap)
 	p.done = make(chan struct{})
+
+	// Input writer (P4): the sole consumer of p.in and the only UI-side
+	// transport writer. Write/Resize errors are deliberately ignored, exactly
+	// as the old synchronous handleKey path ignored them: the reader goroutine
+	// is the authority on stream death and surfaces the reason. On close() the
+	// done channel wakes the idle select; a Write blocked mid-stall is
+	// unblocked by close()'s transport.Close(), after which the select observes
+	// done and exits — so the goroutine can neither leak nor write to a nil
+	// transport (it holds tr, not p.transport).
+	go func() {
+		for {
+			select {
+			case <-p.done:
+				return
+			case in := <-p.in:
+				if in.size != nil {
+					_ = tr.Resize(in.size.cols, in.size.rows)
+					continue
+				}
+				_, _ = tr.Write(in.data)
+			}
+		}
+	}()
 
 	go func() {
 		// The reader is the only sender on p.out, so closing it on exit is
@@ -366,26 +426,57 @@ func safeWriteBoundary(b []byte) int {
 	return pos
 }
 
-// handleKey encodes a key press to terminal input bytes and writes them to the
-// transport. The universal escape is intercepted by the App before reaching
-// here, so every key delivered to the pane is meant for the child.
-func (p *ExternalPane) handleKey(msg tea.KeyPressMsg) {
+// send hands input bytes to the input-writer goroutine without blocking the
+// Bubble Tea loop (P4). On a full queue — only possible once the transport has
+// stalled long enough to back up paneInputQueueCap writes — the input is
+// DROPPED and a pane-level error recorded (it rides p.err, the same surface as
+// every other pane stream error: externalPaneFinishedMsg carries it to the
+// dashboard's inline connectErr when the pane ends) rather than blocking the
+// UI, which would freeze the whole dashboard including ctrl+] detach. A pane
+// constructed without Init (tests) has no writer goroutine; it writes
+// synchronously, preserving the old seam. No-op after close() (transport nil).
+func (p *ExternalPane) send(b []byte) {
 	if p.transport == nil {
 		return
 	}
-	if b := encodeKey(msg); len(b) > 0 {
+	if p.in == nil {
 		_, _ = p.transport.Write(b)
+		return
+	}
+	select {
+	case p.in <- paneInput{data: b}:
+	default:
+		p.recordInputDrop("input")
+	}
+}
+
+// recordInputDrop notes that a queued transport write was dropped because the
+// input queue is full (stalled transport). The first drop reason sticks; a
+// later real stream-end reason from apply overwrites it (more diagnostic).
+// Runs only on the Bubble Tea goroutine, like every other p.err writer.
+func (p *ExternalPane) recordInputDrop(kind string) {
+	if p.err == nil {
+		p.err = fmt.Errorf("pane %s dropped: transport stalled (%d writes queued)", kind, paneInputQueueCap)
+	}
+}
+
+// handleKey encodes a key press to terminal input bytes and queues them for
+// the transport. The universal escape is intercepted by the App before
+// reaching here, so every key delivered to the pane is meant for the child.
+func (p *ExternalPane) handleKey(msg tea.KeyPressMsg) {
+	if b := encodeKey(msg); len(b) > 0 {
+		p.send(b)
 	}
 }
 
 // handlePaste forwards pasted text to the child wrapped in bracketed-paste
-// sequences when the child has enabled the mode (O6). One Write so the paste
+// sequences when the child has enabled the mode (O6). One send so the paste
 // travels as a single unit (one frame on a network transport).
 func (p *ExternalPane) handlePaste(msg tea.PasteMsg) {
-	if p.transport == nil || !p.activeModes[ansi.ModeBracketedPaste] {
+	if !p.activeModes[ansi.ModeBracketedPaste] {
 		return
 	}
-	_, _ = p.transport.Write([]byte(ansi.BracketedPasteStart + msg.Content + ansi.BracketedPasteEnd))
+	p.send([]byte(ansi.BracketedPasteStart + msg.Content + ansi.BracketedPasteEnd))
 }
 
 // mouseEnabled returns true if the child has enabled any mouse tracking mode.
@@ -407,7 +498,7 @@ func (p *ExternalPane) mouseEnabled() bool {
 // handleMouse forwards a mouse event to the child encoded as xterm SGR mouse
 // when the child has enabled mouse reporting (O6).
 func (p *ExternalPane) handleMouse(msg tea.MouseMsg) {
-	if p.transport == nil || !p.mouseEnabled() {
+	if !p.mouseEnabled() {
 		return
 	}
 
@@ -427,33 +518,54 @@ func (p *ExternalPane) handleMouse(msg tea.MouseMsg) {
 		m.Mod.Contains(tea.ModCtrl))
 
 	if p.activeModes[ansi.ModeMouseExtSgr] {
-		_, _ = p.transport.Write([]byte(ansi.MouseSgr(b, m.X, m.Y, isRelease)))
+		p.send([]byte(ansi.MouseSgr(b, m.X, m.Y, isRelease)))
 	} else {
-		_, _ = p.transport.Write([]byte(ansi.MouseX10(b, m.X, m.Y)))
+		p.send([]byte(ansi.MouseX10(b, m.X, m.Y)))
 	}
 }
 
 // resize updates the pane size and propagates it to the emulator and the
 // transport (a PTY SIGWINCH locally, a resize control frame over the wire).
+//
+// The transport half rides the input queue rather than calling Resize
+// directly: PaneStream.Resize shares the connection's write path (writeMu)
+// with data writes, so a direct call here would both reintroduce the
+// UI-goroutine block this queue exists to remove (P4) and race ahead of
+// queued keystrokes — geometry overtaking type-ahead reorders what the child
+// sees. Queued, resize and input reach the transport in UI order. A dropped
+// resize (stalled transport) loses that SIGWINCH; the next WindowSizeMsg
+// re-sends the then-current geometry.
 func (p *ExternalPane) resize(w, h int) {
 	p.w, p.h = w, h
 	cols, rows := p.emuSize()
 	if p.emu != nil {
 		p.emu.Resize(cols, rows)
 	}
-	if p.transport != nil {
+	if p.transport == nil {
+		return
+	}
+	if p.in == nil {
+		// No writer goroutine (direct-construction tests): synchronous, as before.
 		_ = p.transport.Resize(cols, rows)
+		return
+	}
+	select {
+	case p.in <- paneInput{size: &paneSize{cols: cols, rows: rows}}:
+	default:
+		p.recordInputDrop("resize")
 	}
 }
 
 // close tears the pane down for real (stream ended, or replaced by a different
 // session) — NOT on minimize.
 func (p *ExternalPane) close() {
-	// Signal the reader goroutine first (P5): transport.Close() below unblocks
-	// a Read in flight, but not a send blocked on a full p.out — after a pane
-	// replacement nobody drains that channel again, so without this signal the
-	// goroutine (plus up to ~8 MB of buffered chunks) would be retained for the
-	// process lifetime. closeOnce makes the double-close (replacement path and
+	// Signal the reader and input-writer goroutines first (P5/P4):
+	// transport.Close() below unblocks a Read or Write in flight, but not the
+	// reader's send blocked on a full p.out — after a pane replacement nobody
+	// drains that channel again, so without this signal the goroutine (plus up
+	// to ~8 MB of buffered chunks) would be retained for the process lifetime.
+	// The input writer abandons anything still queued on p.in and exits via
+	// its done select. closeOnce makes the double-close (replacement path and
 	// finished path can both run) safe; done is nil on a pane that never dialed.
 	p.closeOnce.Do(func() {
 		if p.done != nil {

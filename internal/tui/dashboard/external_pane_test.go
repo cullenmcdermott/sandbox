@@ -3,6 +3,7 @@ package dashboard
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -20,15 +21,26 @@ import (
 
 // fakePaneTransport is a PaneTransport over any ReadWriteCloser (an os.Pipe end
 // in these tests), recording resizes. It stands in for both real transports so
-// input-forwarding behavior is tested at the seam, not against a PTY.
+// input-forwarding behavior is tested at the seam, not against a PTY. The
+// mutex covers resizes: on an Init'd pane the input-writer goroutine calls
+// Resize while the test goroutine inspects.
 type fakePaneTransport struct {
 	io.ReadWriteCloser
+	mu      sync.Mutex
 	resizes [][2]int
 }
 
 func (f *fakePaneTransport) Resize(cols, rows int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.resizes = append(f.resizes, [2]int{cols, rows})
 	return nil
+}
+
+func (f *fakePaneTransport) resizesSnapshot() [][2]int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([][2]int(nil), f.resizes...)
 }
 
 // TestOpencodeAttachCmd pins the argv/env contract of the local opencode
@@ -211,10 +223,19 @@ func TestExternalPaneTransportRoundTrip(t *testing.T) {
 		t.Fatalf("transport received %q (%v), want %q", buf[:n], err, "x")
 	}
 
-	// resize → emulator + transport.
+	// resize → emulator + transport. The transport half rides the input-writer
+	// queue (P4), so poll for its arrival.
 	p.resize(50, 12)
-	if len(tr.resizes) == 0 || tr.resizes[len(tr.resizes)-1] != [2]int{50, 11} {
-		t.Fatalf("transport resizes = %v, want trailing 50x11", tr.resizes)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		rs := tr.resizesSnapshot()
+		if len(rs) > 0 && rs[len(rs)-1] == [2]int{50, 11} {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("transport resizes = %v, want trailing 50x11", rs)
+		}
+		time.Sleep(time.Millisecond)
 	}
 
 	// Stream end with a reason → pane exited with that error.
@@ -568,6 +589,212 @@ func (f *floodTransport) Resize(cols, rows int) error { return nil }
 func (f *floodTransport) Close() error {
 	f.closeOnce.Do(func() { close(f.closed) })
 	return nil
+}
+
+// blockingWriteTransport blocks every Write until Close — the stalled-forward
+// scenario, where conn.WriteMessage parks on a dead TCP window. Read also
+// parks until Close so the reader goroutine stays quiet. writeStarted is
+// closed when the first Write begins, i.e. the input-writer goroutine has
+// consumed that entry and is now stuck inside the transport.
+type blockingWriteTransport struct {
+	closed       chan struct{}
+	closeOnce    sync.Once
+	writeStarted chan struct{}
+	startOnce    sync.Once
+}
+
+func newBlockingWriteTransport() *blockingWriteTransport {
+	return &blockingWriteTransport{closed: make(chan struct{}), writeStarted: make(chan struct{})}
+}
+
+func (b *blockingWriteTransport) Read(p []byte) (int, error) {
+	<-b.closed
+	return 0, errors.New("blocking transport closed")
+}
+
+func (b *blockingWriteTransport) Write(p []byte) (int, error) {
+	b.startOnce.Do(func() { close(b.writeStarted) })
+	<-b.closed
+	return 0, errors.New("blocking transport closed")
+}
+
+func (b *blockingWriteTransport) Resize(cols, rows int) error { return nil }
+
+func (b *blockingWriteTransport) Close() error {
+	b.closeOnce.Do(func() { close(b.closed) })
+	return nil
+}
+
+// REGRESSION (P4): a transport whose Write has stalled must not freeze the
+// Bubble Tea loop — keystrokes enqueue without blocking and ctrl+] detach
+// still works. Before P4, handleKey called transport.Write synchronously on
+// the UI goroutine, so the FIRST keystroke into a stalled forward froze the
+// entire dashboard, detach included.
+func TestAppPaneKeyAndDetachSurviveStalledTransport(t *testing.T) {
+	tr := newBlockingWriteTransport()
+	p := NewExternalPaneTransport(Session{}, "claude", func(cols, rows int) (PaneTransport, error) {
+		return tr, nil
+	}, nil)
+	if cmd := p.Init(); cmd == nil || p.err != nil {
+		t.Fatalf("Init failed: %v", p.err)
+	}
+	app := NewApp(nil, nil, nil)
+	app.dashboard.seeded = true
+	app.external = p
+	app.screen = ScreenExternal
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		app.Update(keyMsg("x")) // the writer consumes this and parks inside Write
+		<-tr.writeStarted
+		app.Update(keyMsg("y"))      // queued behind the stalled write — must not block
+		app.Update(keyMsg("ctrl+]")) // arm the leader
+		app.Update(keyMsg("ctrl+]")) // resolve: detach
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("App.Update blocked on a stalled pane transport (P4): keystroke/detach froze the UI loop")
+	}
+	if app.screen != ScreenDashboard {
+		t.Fatalf("ctrl+] ctrl+] did not detach over a stalled transport: screen=%v", app.screen)
+	}
+
+	// Teardown must be prompt too: close() signals done, and transport.Close()
+	// unblocks the parked Write so the writer goroutine exits (no leak).
+	closed := make(chan struct{})
+	go func() { p.close(); close(closed) }()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("pane close() blocked on a stalled transport")
+	}
+}
+
+// orderRecordingTransport records Writes and Resizes in arrival order; Read
+// parks until Close so the reader goroutine stays quiet.
+type orderRecordingTransport struct {
+	closed    chan struct{}
+	closeOnce sync.Once
+	mu        sync.Mutex
+	ops       []string
+}
+
+func newOrderRecordingTransport() *orderRecordingTransport {
+	return &orderRecordingTransport{closed: make(chan struct{})}
+}
+
+func (o *orderRecordingTransport) Read(p []byte) (int, error) {
+	<-o.closed
+	return 0, errors.New("order transport closed")
+}
+
+func (o *orderRecordingTransport) Write(p []byte) (int, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.ops = append(o.ops, "w:"+string(p))
+	return len(p), nil
+}
+
+func (o *orderRecordingTransport) Resize(cols, rows int) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.ops = append(o.ops, fmt.Sprintf("r:%dx%d", cols, rows))
+	return nil
+}
+
+func (o *orderRecordingTransport) Close() error {
+	o.closeOnce.Do(func() { close(o.closed) })
+	return nil
+}
+
+func (o *orderRecordingTransport) opsSnapshot() []string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]string(nil), o.ops...)
+}
+
+// P4 ordering: keys and resize reach the transport in exactly the order the
+// UI produced them — resize rides the same queue as keystrokes, so geometry
+// can never overtake type-ahead (or vice versa) on the wire.
+func TestExternalPaneInputOrderPreserved(t *testing.T) {
+	tr := newOrderRecordingTransport()
+	p := NewExternalPaneTransport(Session{}, "claude", func(cols, rows int) (PaneTransport, error) {
+		return tr, nil
+	}, nil)
+	p.w, p.h = 40, 10
+	if cmd := p.Init(); cmd == nil || p.err != nil {
+		t.Fatalf("Init failed: %v", p.err)
+	}
+	defer p.close()
+
+	p.handleKey(tea.KeyPressMsg{Code: 'a', Text: "a"})
+	p.handleKey(tea.KeyPressMsg{Code: 'b', Text: "b"})
+	p.resize(50, 12) // → 50x11 after the reserved status row
+	p.handleKey(tea.KeyPressMsg{Code: 'c', Text: "c"})
+
+	want := []string{"w:a", "w:b", "r:50x11", "w:c"}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got := tr.opsSnapshot()
+		if len(got) >= len(want) {
+			for i := range want {
+				if got[i] != want[i] {
+					t.Fatalf("transport op order = %v, want %v", got, want)
+				}
+			}
+			if len(got) > len(want) {
+				t.Fatalf("unexpected extra transport ops: %v", got)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("transport ops = %v, want %v (input writer never drained the queue)", got, want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// P4 drop path: with the writer parked inside a stalled Write and the queue
+// full, further input is DROPPED — recorded as a pane-level error on p.err,
+// the surface externalPaneFinishedMsg reports to the dashboard — instead of
+// blocking the UI goroutine. Filling the queue itself records nothing.
+func TestExternalPaneFullQueueDropsAndRecordsError(t *testing.T) {
+	tr := newBlockingWriteTransport()
+	p := NewExternalPaneTransport(Session{}, "claude", func(cols, rows int) (PaneTransport, error) {
+		return tr, nil
+	}, nil)
+	if cmd := p.Init(); cmd == nil || p.err != nil {
+		t.Fatalf("Init failed: %v", p.err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// First key: consumed by the writer, which parks inside Write.
+		p.handleKey(tea.KeyPressMsg{Code: 'x', Text: "x"})
+		<-tr.writeStarted
+		// The queue is now empty and the writer is stuck, so exactly
+		// paneInputQueueCap more entries fit without dropping.
+		for i := 0; i < paneInputQueueCap; i++ {
+			p.handleKey(tea.KeyPressMsg{Code: 'a', Text: "a"})
+		}
+		if p.err != nil {
+			t.Errorf("filling the queue must not record a drop: %v", p.err)
+		}
+		// One more overflows: dropped and recorded, still without blocking.
+		p.handleKey(tea.KeyPressMsg{Code: 'b', Text: "b"})
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("input send blocked on a full queue (P4): it must drop, not block")
+	}
+	if p.err == nil || !strings.Contains(p.err.Error(), "dropped") {
+		t.Fatalf("full-queue drop not recorded: err = %v", p.err)
+	}
+	p.close()
 }
 
 // REGRESSION (P5): close() while the output channel is full must unblock the
