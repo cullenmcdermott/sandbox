@@ -215,6 +215,26 @@ func TestCreateProjectSyncIgnoreLayering(t *testing.T) {
 	if autoExec < security {
 		t.Errorf("auto-exec ignores should sit in the security layer: autoExec=%d security=%d", autoExec, security)
 	}
+	// Credential filenames (S2) sit in the security layer too — present, and
+	// positioned after the gitignore layer so no negation re-enables them.
+	for _, flag := range []string{
+		"--ignore=.netrc",
+		"--ignore=_netrc",
+		"--ignore=.npmrc",
+		"--ignore=.git-credentials",
+		"--ignore=.aws",
+		"--ignore=service-account*.json",
+		"--ignore=id_rsa",
+		"--ignore=id_rsa.*",
+		"--ignore=id_ed25519",
+		"--ignore=id_ed25519.*",
+		"--ignore=id_ecdsa",
+		"--ignore=id_ecdsa.*",
+	} {
+		if pos := idx(flag); pos < security {
+			t.Errorf("credential ignore %q should sit in the security layer: pos=%d security=%d", flag, pos, security)
+		}
+	}
 	idx("--ignore=*.tfstate") // gitignore pattern passed through verbatim
 
 	// Comment lines never become flags.

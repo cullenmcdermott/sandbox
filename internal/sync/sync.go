@@ -355,6 +355,24 @@ var securityIgnores = []string{
 	"--ignore=*.key",
 	"--ignore=*.p12",
 	"--ignore=*.pfx",
+	// Plaintext machine logins — host, registry, and git-remote credentials
+	// looked up by exact filename (S2).
+	"--ignore=.netrc",
+	"--ignore=_netrc",
+	"--ignore=.npmrc",
+	"--ignore=.git-credentials",
+	// Cloud credentials — the AWS CLI/SDK credential+config directory and
+	// GCP-style service-account key files.
+	"--ignore=.aws",
+	"--ignore=service-account*.json",
+	// SSH private keys under their default names (and derived files, e.g.
+	// id_rsa.old backups).
+	"--ignore=id_rsa",
+	"--ignore=id_rsa.*",
+	"--ignore=id_ed25519",
+	"--ignore=id_ed25519.*",
+	"--ignore=id_ecdsa",
+	"--ignore=id_ecdsa.*",
 	// Files that execute on the HOST without an explicit user action if the
 	// pod agent writes them and two-way sync carries them back: direnv runs
 	// .envrc/.direnv on cd (once allowed), VS Code tasks.json can auto-run on

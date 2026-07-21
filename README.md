@@ -130,7 +130,11 @@ turns still need credentials; the dashboard and session-list views don't.)
   policy live under `k8s/` in this repo; the maintainer's real cluster wiring is
   a separate private deployment.
 - A kubeconfig with access to the `agent-sessions` namespace.
-- [Mutagen](https://mutagen.io/) on your local machine for file sync.
+- [Mutagen](https://mutagen.io/) on your local machine for file sync. The
+  project directory is synced into the pod, so it should not contain secret
+  files — common credential names (`.env*`, `.netrc`, `.npmrc`,
+  `.git-credentials`, `.aws/`, `service-account*.json`, SSH private keys) are
+  excluded from sync defensively.
 - **Claude credentials: your own local login.** The `claude` backend runs the
   real Claude Code binary in the pod, so it authenticates like Claude Code — no
   cluster-wide Secret to provision. By default `sandbox claude` reads **your
