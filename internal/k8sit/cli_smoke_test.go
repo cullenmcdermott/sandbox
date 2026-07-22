@@ -13,13 +13,17 @@ import (
 	"time"
 )
 
-// TestCLISmoke proves the real compiled `sandbox` binary drives a full turn end
-// to end and prints the reply: it builds the binary, then runs
-// `sandbox turn <id> --prompt …` against an opencode session created+started via
-// the shared helper (`sandbox opencode` launches a TUI, so it is never exec'd —
-// the hidden `turn` command is the headless seam: port-forward → runner token →
-// StartTurn → SSE Events → reply on STDOUT). opencode's default model is free, so
-// this asserts a real reply at $0: exit 0 AND non-empty STDOUT.
+// TestCLISmoke proves the real compiled `sandbox` binary drives the CLI→runner
+// turn seam end to end: it builds the binary once, then runs
+// `sandbox turn <id> --prompt …` against a session per backendCases row (`sandbox
+// opencode`/`claude`/`codex` launch a TUI, so they are never exec'd — the hidden
+// `turn` command is the headless seam: port-forward → runner token → StartTurn →
+// SSE Events → reply on STDOUT). Gated on expectRealReply:
+//   - opencode drives runner turns on its free default model ($0), so this asserts
+//     a real reply: exit 0 AND non-empty STDOUT.
+//   - supervise-only backends (claude-pane, codex) reject the runner turn (POST
+//     /turns 409s), so the smoke only asserts the CLI settled the turn — the 409 —
+//     WITHOUT hanging (plumbing-only). This is how claude/codex fill the column.
 func TestCLISmoke(t *testing.T) {
 	if _, err := exec.LookPath("go"); err != nil {
 		t.Skip("go not on PATH; cannot build the sandbox binary") // gate-ok: integration-only, needs go to build the CLI binary

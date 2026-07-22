@@ -40,10 +40,13 @@ const (
 	localNamespace = "agent-sessions"
 	// runnerImage is the locally-built runner image loaded into the KIND node.
 	runnerImage = "sandbox-runner:dev"
-	// claudeCredSecret/claudeCredKey hold the optional Claude OAuth token
-	// (CLAUDE_CODE_OAUTH_TOKEN). The claude-sdk turn test asserts a real reply
-	// only when present; otherwise it degrades to plumbing-only. The opencode
-	// backend needs no key — its default model (opencode/big-pickle) is free.
+	// claudeCredSecret/claudeCredKey hold an optional provider OAuth token
+	// (CLAUDE_CODE_OAUTH_TOKEN). Retained for a keyed turn backend: expectRealReply
+	// gates a real reply on its presence (via claudeKeyPresent) whenever a row sets
+	// needsKey. No current row does — opencode's default model (opencode/big-pickle)
+	// is free and the pane/codex backends are supervise-only — so this key probe is
+	// dormant post-pane-first; it lights up again if a keyed runner-turn backend
+	// returns. The opencode backend needs no key.
 	claudeCredSecret = "anthropic-credentials"
 	claudeCredKey    = "api-key"
 	// turnPrompt is the canonical tiny prompt every backend's live turn sends.
@@ -52,25 +55,47 @@ const (
 
 // backendCase is the single source of truth for the integration conformance
 // suite (Phase A of docs/archive/testing-parity-plan.md): every live test runs the same
-// scenarios for each row, so a new backend (Codex) is onboarded by appending one.
+// scenarios for each row, so a new backend is onboarded by appending one.
+//
+// Post-pane-first, only opencode-server drives turns through the runner (its
+// headless first-turn bridge); claude-pane and codex-app-server are supervise-
+// only — their POST /turns 409s (runner/src/agent.ts selectAgent returns null,
+// server.ts replies 409 "does not accept runner turns"). So drivesRunnerTurns
+// splits the column: the StartTurn-based conformance tests SKIP supervise-only
+// backends, while the CLI smoke still drives them (gated on expectRealReply=false)
+// to prove the CLI→runner seam settles the turn — the 409 — WITHOUT wedging.
 type backendCase struct {
-	name      string // subtest name
-	backend   string // session.Backend* value
-	idTag     string // short DNS-1123-safe session-id fragment
-	turnModel string // model for the turn ("" = the backend's default; opencode's free big-pickle)
-	needsKey  bool   // true if a REAL reply needs a provider secret (claude); opencode is free
+	name              string // subtest name
+	backend           string // session.Backend* value
+	idTag             string // short DNS-1123-safe session-id fragment
+	turnModel         string // model for the turn ("" = the backend's default; opencode's free big-pickle)
+	needsKey          bool   // true if a REAL reply needs a provider secret; opencode is free (moot when !drivesRunnerTurns)
+	drivesRunnerTurns bool   // true if POST /turns is accepted (opencode only, post-pane-first); false = supervise-only
 }
 
 var backendCases = []backendCase{
-	{name: "opencode", backend: session.BackendOpenCode, idTag: "oc", turnModel: "", needsKey: false},
-	{name: "claude", backend: session.BackendClaudeSDK, idTag: "cl", turnModel: "haiku", needsKey: true},
+	{name: "opencode", backend: session.BackendOpenCode, idTag: "oc", turnModel: "", needsKey: false, drivesRunnerTurns: true},
+	// claude-pane and codex are supervise-only: turns run in the interactive pane /
+	// app-server, never through the runner (POST /turns 409s). They fill the CLI-
+	// smoke column (plumbing-only, expectRealReply=false) and are skipped by the
+	// StartTurn-based conformance tests. The claude-pane row REPLACES the retired
+	// claude-sdk row (O15): claude-sdk had a runner turn engine and asserted a real
+	// reply; claude-pane has neither (the SDK turn engine was deleted by
+	// claude-pane-first), so driving it here would only ever 409.
+	{name: "claude-pane", backend: session.BackendClaudePane, idTag: "cp", turnModel: "", needsKey: false, drivesRunnerTurns: false},
+	{name: "codex", backend: session.BackendCodex, idTag: "cx", turnModel: "", needsKey: false, drivesRunnerTurns: false},
 }
 
-// expectRealReply reports whether this backend can complete a real reply in the
-// current environment: opencode always (free model); claude only when its OAuth
-// token Secret is present (else the test asserts plumbing-only).
+// expectRealReply reports whether this backend can complete a real runner-driven
+// reply in the current environment. Supervise-only backends (claude-pane, codex)
+// never do — their POST /turns 409s — so they are always false. opencode always
+// can (free model); a keyed runner-turn backend only when its provider Secret is
+// present (else the test degrades to plumbing-only).
 func (bc backendCase) expectRealReply(t *testing.T, rc *rest.Config) bool {
 	t.Helper()
+	if !bc.drivesRunnerTurns {
+		return false
+	}
 	if !bc.needsKey {
 		return true
 	}

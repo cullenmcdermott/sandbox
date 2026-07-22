@@ -38,6 +38,9 @@ func TestBackendErrorSurface(t *testing.T) {
 	localRestConfig(t)
 	for _, bc := range backendCases {
 		t.Run(bc.name, func(t *testing.T) {
+			if !bc.drivesRunnerTurns {
+				t.Skip("supervise-only backend: no runner turn to drive an error surface through (POST /turns 409s)") // gate-ok: no runner turn path for this backend
+			}
 			be, ref := createReadySession(t, bc.backend, bc.idTag+"-err")
 			client, cleanup := runnerClientForRef(t, be, ref)
 			t.Cleanup(cleanup)
@@ -87,6 +90,9 @@ func TestBackendInterrupt(t *testing.T) {
 	rc := localRestConfig(t)
 	for _, bc := range backendCases {
 		t.Run(bc.name, func(t *testing.T) {
+			if !bc.drivesRunnerTurns {
+				t.Skip("supervise-only backend: no runner turn to interrupt (POST /turns 409s)") // gate-ok: no runner turn path for this backend
+			}
 			if !bc.expectRealReply(t, rc) {
 				t.Skip("plumbing-only backend: no sustained turn to interrupt") // gate-ok: no provider key, turn can't run long enough
 			}
@@ -138,6 +144,9 @@ func TestBackendReconnectReplay(t *testing.T) {
 	localRestConfig(t)
 	for _, bc := range backendCases {
 		t.Run(bc.name, func(t *testing.T) {
+			if !bc.drivesRunnerTurns {
+				t.Skip("supervise-only backend: no runner turn to replay (POST /turns 409s)") // gate-ok: no runner turn path for this backend
+			}
 			be, ref := createReadySession(t, bc.backend, bc.idTag+"-rc")
 			client, cleanup := runnerClientForRef(t, be, ref)
 			t.Cleanup(cleanup)
@@ -229,6 +238,9 @@ func TestBackendLifecycle(t *testing.T) {
 	localRestConfig(t)
 	for _, bc := range backendCases {
 		t.Run(bc.name, func(t *testing.T) {
+			if !bc.drivesRunnerTurns {
+				t.Skip("supervise-only backend: post-resume assertion drives a runner turn (POST /turns 409s)") // gate-ok: no runner turn path for this backend
+			}
 			be, ref := createReadySession(t, bc.backend, bc.idTag+"-life")
 
 			// Suspend → Resume (each bounded; resume waits for the pod to be Ready

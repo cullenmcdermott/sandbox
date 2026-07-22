@@ -13,18 +13,22 @@ import (
 	"github.com/cullenmcdermott/sandbox/internal/session"
 )
 
-// TestBackendTurn drives a REAL one-shot turn through EACH backend end to end
-// (CreateSession → Start → PortForward → runner.StartTurn → SSE Events), table-
-// driven over backendCases so every backend runs the identical scenario — the
-// backend half of the parity matrix (docs/archive/testing-parity-plan.md). opencode goes
-// through its turn adapter (runner/src/opencode-turn.ts) on the free big-pickle
-// model ($0, no key); claude asserts a real reply only when its OAuth token Secret
-// is present, else degrades to plumbing-only. Codex is onboarded by appending a
-// backendCases row.
+// TestBackendTurn drives a REAL one-shot turn through each RUNNER-TURN backend end
+// to end (CreateSession → Start → PortForward → runner.StartTurn → SSE Events),
+// table-driven over backendCases — the backend half of the parity matrix
+// (docs/archive/testing-parity-plan.md). opencode goes through its turn adapter
+// (runner/src/opencode-turn.ts) on the free big-pickle model ($0, no key). The
+// supervise-only backends (claude-pane, codex) are SKIPPED: they don't drive turns
+// through the runner (POST /turns 409s) — the CLI smoke covers their seam instead.
+// A keyed runner-turn backend would assert a real reply only when its Secret is
+// present, else degrade to plumbing-only (assertTurnStarts).
 func TestBackendTurn(t *testing.T) {
 	rc := localRestConfig(t) // context-isolation guard before any cluster mutation
 	for _, bc := range backendCases {
 		t.Run(bc.name, func(t *testing.T) {
+			if !bc.drivesRunnerTurns {
+				t.Skip("supervise-only backend: turns run in the pane/app-server, not through the runner (POST /turns 409s)") // gate-ok: no runner turn path for this backend
+			}
 			expectReply := bc.expectRealReply(t, rc)
 			be, ref := createReadySession(t, bc.backend, bc.idTag)
 
