@@ -39,6 +39,7 @@ survives detach, suspend/resume, and CLI restarts.
 | Pod | `runner/src/claude-pane.ts` | claude-pane supervisor: lazy node-pty spawn of the real `claude` TUI (`--session-id`/`--resume`), scrubbed env allowlist, scrollback ring, child-exit recording |
 | Pod | `runner/src/claude-pane-observer.ts` | Observer: provisioned command hooks + statusline POST to localhost; maps them to normalized turn/message/tool/permission/usage events |
 | Pod | `runner/src/claude-config.ts` | Boot materialization of the pane's auth/state: `.credentials.json`, `.claude.json` seed, settings merge (hooks, statusline, native-sandbox-off), helper scripts |
+| Pod | `runner/src/bootstrap.ts` | Boot materialization of operator `BootstrapFiles` (part A) from the mounted `SANDBOX_BOOTSTRAP_DIR` Secret volume into `$HOME`/`/session/state`, before any agent starts; write-if-changed with a per-file seed-hash sidecar |
 | Pod | `runner/src/guards.ts` | Shared Bash blocklist enforced by `/exec` and the generated opencode guard plugin |
 | Pod | `runner/src/grants.ts` | Session-scoped permission grants (retained for the opencode turn path) |
 | Pod | `runner/src/auth.ts` | Constant-time bearer-token gate for every non-`/healthz` route |
@@ -211,6 +212,17 @@ anthropic-secrets/                    per-account 0600 secret files (file backen
   `OPENAI_API_KEY` / ChatGPT-OAuth `auth.json`), per-session-Secret-backed
   with fail-closed account selection, or the shared operator Secrets as the
   legacy fallback (see `buildEnv` in `internal/k8s/backend.go`).
+- **Operator injection (SDK).** `CreateOptions.ExtraEnv`/`ExtraSecretEnv`
+  (part B) inject plain + Secret-backed env, and `CreateOptions.BootstrapFiles`
+  (part A) inject operator files. Both are create-time-only material
+  (`json:"-"`), validated fail-closed at the client (reserved-name denylist /
+  size cap for env; path-inside-`$HOME`-or-`/session/state`, no `..` escape,
+  256 KiB cap for files). Files ride the per-session Secret as `bootstrap-<n>`
+  keys + a `bootstrap-manifest`, projected read-only as a Secret volume
+  (`SANDBOX_BOOTSTRAP_DIR`); the runner materializes them at boot **before any
+  agent starts** (`bootstrap.ts`, the shared materialize step beside the codex
+  seed), write-if-changed so a restart keeps an agent's in-place edit unless the
+  operator rotated the seed. See `docs/design-pod-bootstrap-and-tool-injection.md`.
 - **Sync auth.** The CLI generates a per-session ed25519 keypair; the public key
   rides in the session Secret and is installed as the pod's `authorized_keys`,
   the private key stays local and is referenced by the ssh-config alias. Mutagen

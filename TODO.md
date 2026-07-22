@@ -950,8 +950,9 @@ naming-break, and Shell items each stand alone.
   (4.10): move `ssh/` INSIDE the state root in the same pre-OSS break that
   adds the worktree root; implement with the worktree Spec-split change.
   `client/sync.go`.
-- [~] **Pod bootstrap files + generic env/secret injection** — PART B DONE
-  2026-07-21 (`d6e55fa`, done log); part A + docs remain.
+- [~] **Pod bootstrap files + generic env/secret injection** — PARTS A+B DONE
+  (B `d6e55fa` 2026-07-21; A 2026-07-22, done log); only the operator-prose
+  README section for env/file injection remains of the docs closeout.
   - [x] **Part B — `CreateOptions.ExtraEnv`/`ExtraSecretEnv` (d6e55fa):**
     plain pod env + per-session-Secret-backed secret env; fail-closed
     validation against the exported `k8s.IsReservedEnvName` denylist
@@ -963,25 +964,29 @@ naming-break, and Shell items each stand alone.
     **DECISION FLAGGED FOR MAINTAINER:** ExtraSecretEnv is **agent-visible**
     (not stripped) — required for the PAT-for-git use case; rationale +
     revert path in the design doc Status block + SECURITY.md.
-  - [ ] **Part A — `CreateOptions.BootstrapFiles`:** operator files
-    materialized in pod `$HOME`/`/session/state` before the agent starts
+  - [x] **Part A — `CreateOptions.BootstrapFiles` (2026-07-22):** operator
+    files materialized in pod `$HOME`/`/session/state` before the agent starts
     (NOT the synced workspace); reuses part B's per-session-Secret plumbing +
-    the codex materialize hook (write-if-changed, same seed-precedence as
-    codex). One Secret key per file (`bootstrap-<n>`) + a JSON manifest key
-    for path/mode; summed-size cap at Create (~1 MiB Secret limit). Validate
-    Path resolves outside the workspace and inside $HOME/`/session/state`,
-    fail-closed. `client/client.go` (BootstrapFile type + validate),
-    `internal/k8s/backend.go` (Secret + manifest), runner boot materialize
-    step, sdktest pins.
-  - [ ] **Docs closeout (rider b + skills README):** rider (b) FQDN-egress
-    example — add a commented operator-endpoint block (e.g. gitlab.com) with
-    the "opening egress for a tool also opens its token's exfil path" note
-    (the SECURITY.md prose half landed with d6e55fa). README section for
-    ExtraEnv/ExtraSecretEnv + BootstrapFiles once A lands. Plus the
-    ALREADY-BUILT skills half: `ConfigInputsSubs` (`internal/sync/sync.go`)
-    one-way-syncs `~/.claude/{skills,agents,commands,hooks}` into the pod and
-    project `.claude/skills` rides the project sync — needs a README section
-    + a live verification, not code.
+    the codex materialize hook (write-if-changed, per-file seed-hash sidecar,
+    same seed-precedence as codex). One Secret key per file (`bootstrap-<n>`) +
+    a `bootstrap-manifest` JSON key for path/mode, projected read-only+Optional
+    as a Secret volume (`SANDBOX_BOOTSTRAP_DIR`); summed-size cap 256 KiB at
+    Create. Fail-closed path validation (absolute/`~/`, `path.Clean`, strictly
+    inside $HOME/`/session/state`, unique, four exported sentinels), re-checked
+    runner-side. `client/client.go`, `internal/k8s/backend.go`,
+    `runner/src/bootstrap.ts` + boot wiring, `sdktest` pins; `just check` green.
+  - [~] **Docs closeout (rider b + skills README):** rider (b) FQDN-egress
+    example DONE (2026-07-22) — commented operator-endpoint block (gitlab.com)
+    with the "opening egress for a tool also opens its token's exfil path" note
+    in `k8s/networkpolicy-egress-fqdn.yaml.example` (the SECURITY.md prose half
+    landed with d6e55fa). Skills half DONE (2026-07-22) — README section for the
+    ALREADY-BUILT `ConfigInputsSubs` (`internal/sync/sync.go`) one-way sync of
+    `~/.claude/{skills,agents,commands,hooks,statusline}` + project `.claude/`
+    on the project sync. **Residual:** a README section for the operator
+    ExtraEnv/ExtraSecretEnv + BootstrapFiles injection surface (SDK/operator
+    audience) — architecture.md + the design doc cover the mechanics; the
+    user-facing README prose is still to write. Plus a live verification of the
+    config sync, not code.
   - Part C (operator binaries) stays documentation (derived-`--runner-image`
     pattern; tool-image initContainers only if that proves painful).
 

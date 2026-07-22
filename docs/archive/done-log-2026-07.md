@@ -2255,3 +2255,38 @@ Status block): ExtraSecretEnv is agent-visible rather than the draft's
 strip-from-agent default — required for the PAT-for-git use case, and
 consistent with rider (b)'s exfil framing. Revert path (strip-by-default) is
 a one-line allowlist + RUNNER_SECRET_ENV_KEYS change, documented.
+
+## 2026-07-22 — §8 pod-bootstrap part A: file injection on Create (e9dee22)
+
+The file-injection half of pod bootstrap (design part A), reusing part B's
+per-session-Secret plumbing plus the codex materialize hook. Additive SDK
+surface; `just check` green.
+
+- **Client:** `CreateOptions.BootstrapFiles []BootstrapFile{Path, Content,
+  Mode}` (Content `json:"-"`, create-time-only). `validateBootstrapFiles` is
+  fail-closed — Path absolute or `~/`-relative, `path.Clean`'d, must resolve
+  STRICTLY below the pod HOME (`/root`) or `/session/state` (never the synced
+  workspace, no `..` escape via the trailing-`/` prefix test); resolved paths
+  unique; summed Content ≤ 256 KiB. Four exported sentinels
+  (`ErrInvalidBootstrapPath` / `ErrBootstrapPathOutsideRoots` /
+  `ErrDuplicateBootstrapPath` / `ErrBootstrapFilesTooLarge`); no error echoes
+  Content.
+- **k8s:** content rides the per-session Secret (`bootstrap-<n>` keys + a
+  `bootstrap-manifest` JSON of `{path,mode}`), projected read-only + Optional as
+  a Secret volume mapping keys→files (`manifest.json` / `<n>`) mounted at
+  `/etc/sandbox-bootstrap`, with `SANDBOX_BOOTSTRAP_DIR` pointing at it.
+  `reconcileBootstrapFiles` re-syncs the `bootstrap-*` keys on re-create (added-
+  file bake caveat documented, mirrors ExtraSecretEnv).
+- **Runner:** `materializeBootstrapFiles()` (`bootstrap.ts`) runs at boot BEFORE
+  any agent (the shared materialize step), write-if-changed with a per-file
+  seed-hash sidecar on the PVC — a restart keeps an agent's in-place edit unless
+  the operator rotated the seed. Re-validates every manifest path against the
+  roots (defense in depth); never logs content. Text content is the supported
+  case; large/binary blobs are out of scope (documented, no URL-fetch variant).
+- **sdktest:** pin the new `BootstrapFile` type, `BootstrapFiles` field, + the
+  four sentinels.
+- **Docs:** design doc Status flipped to parts-A+B-implemented; architecture.md
+  gained a `bootstrap.ts` row + an operator-injection bullet; TODO §8 checks off
+  part A. Rider (b) FQDN-egress example + the skills-sync README section also
+  landed (see the docs commits). Residual: the operator-prose README section for
+  the ExtraEnv/BootstrapFiles injection surface.

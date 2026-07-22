@@ -1,8 +1,10 @@
 # Pod bootstrap files, generic env/secret injection, and operator tool binaries
 
-Status: **part B implemented 2026-07-21** (commit `d6e55fa`); part A
-(BootstrapFiles) + the full docs closeout are the tracked next steps
-(TODO §8); part C stays documentation. One decision was resolved during
+Status: **parts A + B implemented** (part B `d6e55fa`, 2026-07-21; part A
+2026-07-22 — `CreateOptions.BootstrapFiles`, per-session-Secret transport,
+runner boot materialize before any agent starts). The docs closeout is done bar
+the operator-prose README section for env/file injection (TODO §8); part C stays
+documentation. One decision was resolved during
 implementation and **needs maintainer eyes** (see the callout in part B
 below): `ExtraSecretEnv` was made **agent-visible** rather than
 stripped-from-agent, because the maintainer's stated use case (inject a
