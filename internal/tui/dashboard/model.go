@@ -291,6 +291,11 @@ type Model struct {
 	// default in tests) lights up nothing, so output matches today exactly.
 	// See docs/archive/ghostty-terminal-effects.md.
 	caps terminal.Caps
+
+	// tasks is the async action task queue (§C1): in-flight suspend/resume/
+	// destroy actions surfaced in the statusline right segment (spinner +
+	// text → ✓/✗), auto-clearing 2s after settle. The zero value is ready.
+	tasks taskQueue
 }
 
 // New constructs a dashboard Model. backend may be nil (for unit tests that
@@ -491,6 +496,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.animSubFrame%spinnerSubRate == 0 {
 			m.spinnerFrame++
 		}
+		// Drop settled action tasks whose 2s auto-clear window has elapsed, so
+		// the statusline badge disappears and the loop can wind down.
+		m.tasks.prune(nowFunc())
 		if m.anyMotionActive() {
 			return m, m.animCmd()
 		}
@@ -774,10 +782,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.handleConvertResult(msg)
 
 	case actionResultMsg:
+		taskID := msg.action + ":" + string(msg.id)
 		if msg.err != nil {
 			m.actionErr = fmt.Errorf("%s: %w", msg.action, msg.err)
+			m.tasks.fail(taskID, msg.err, nowFunc())
 		} else {
 			m.actionErr = nil
+			m.tasks.finish(taskID, nowFunc())
 		}
 		for i := range m.sessions {
 			if m.sessions[i].ID() == msg.id {
@@ -785,7 +796,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 		}
-		return m, nil
+		// Keep the motion loop alive so the settled task's ✓/✗ auto-clears 2s
+		// later (a no-op if the loop is already running).
+		return m, m.maybeStartAnim()
 
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)

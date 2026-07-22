@@ -72,7 +72,9 @@ func (m *Model) rowMotionActive() bool {
 // false the single tick loop stops scheduling itself.
 func (m *Model) anyMotionActive() bool {
 	m.engine.SetSpinners(m.countStatus(StatusBusy))
-	return m.engine.AnyMotionActive(nowFunc()) || m.rowMotionActive()
+	// A live action task (running or within its 2s auto-clear window) keeps the
+	// loop ticking so its statusline badge animates and eventually clears (§C1).
+	return m.engine.AnyMotionActive(nowFunc()) || m.rowMotionActive() || m.tasks.active(nowFunc())
 }
 
 // maybeStartAnim starts the single gated motion tick loop if motion is active
@@ -305,13 +307,19 @@ func (m *Model) renderSessionRow(s Session, selected bool, width int) string {
 		dotSlot = "  "
 	}
 
-	// Line 1 title fills the space between the glyph and the right-aligned relTime.
-	fixedW := 2 + 2 + 2 + 1 + lipgloss.Width(relTime)
-	titleW := width - fixedW
-	if titleW < 4 {
-		titleW = 4
-	}
-	title := padRight(truncate(s.DisplayTitle(), titleW), titleW)
+	// Line 1 is laid out through the fixed+grow column engine (§C2): fixed
+	// selection-bar / attention-dot / status-glyph / spacer / relTime cells,
+	// with the title column growing to fill the middle (floored at 4 cols). Each
+	// pre-styled cell declares its width so the grow budget is exact; the result
+	// is byte-identical to the previous hand-rolled fixedW/titleW math.
+	line1Inner := layoutColumns(width, []column{
+		{content: bar, width: 2, preStyled: true},
+		{content: dotSlot, width: 2, preStyled: true},
+		{content: glyphRendered, width: 2, preStyled: true},
+		{content: s.DisplayTitle(), grow: true, minWidth: 4, align: alignLeft},
+		{content: " ", width: 1, preStyled: true},
+		{content: relTime, width: lipgloss.Width(relTime), preStyled: true},
+	})
 
 	var rowStyle lipgloss.Style
 	if selected {
@@ -329,7 +337,7 @@ func (m *Model) renderSessionRow(s Session, selected bool, width int) string {
 			rowStyle = rowStyle.Foreground(anim.LerpColor(theme.TextDim, theme.TextBody, e))
 		}
 	}
-	line1 := rowStyle.Render(bar + dotSlot + glyphRendered + title + " " + relTime)
+	line1 := rowStyle.Render(line1Inner)
 
 	// Line 2 (Layout A): the colored agent glyph in the gutter, then the colored
 	// status word, then a dim "·"-joined tail of what-it's-doing / where-it-lives

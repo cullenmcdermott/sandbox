@@ -71,7 +71,10 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.handleConvertKey(msg)
 	default: // dctxList
 		if cmd, handled := dispatchKey(m, m.dashListTable(), msg); handled {
-			return m, cmd
+			// A handled key may have registered an async action task (suspend/
+			// resume); start the motion loop so its statusline spinner animates.
+			// maybeStartAnim is a no-op when nothing is in flight.
+			return m, tea.Batch(cmd, m.maybeStartAnim())
 		}
 		return m, nil
 	}
@@ -83,14 +86,18 @@ func (m *Model) confirmKey(ks string) (tea.Model, tea.Cmd) {
 	switch ks {
 	case "y", "Y":
 		action := m.confirm.action
+		id := m.confirm.id
 		for i := range m.sessions {
-			if m.sessions[i].ID() == m.confirm.id {
+			if m.sessions[i].ID() == id {
 				m.sessions[i].PendingAction = "destroy"
 				break
 			}
 		}
+		title := m.sessionTitle(id)
+		m.tasks.start("destroy:"+string(id), "Destroying "+title+"…", title+" destroyed")
 		m.confirm = nil
-		return m, action
+		// Batch the motion loop so the destroy spinner animates immediately.
+		return m, tea.Batch(action, m.maybeStartAnim())
 	case "n", "N", "esc":
 		for i := range m.sessions {
 			if m.sessions[i].ID() == m.confirm.id {
@@ -357,6 +364,8 @@ func (m *Model) dashListTable() []boundAction[*Model] {
 							break
 						}
 					}
+					m.tasks.start("suspend:"+string(sel.ID()),
+						"Suspending "+sel.DisplayTitle()+"…", sel.DisplayTitle()+" suspended")
 					return m.suspendCmd(session.Ref{ID: sel.ID()}), true
 				}
 				return nil, true
@@ -374,6 +383,8 @@ func (m *Model) dashListTable() []boundAction[*Model] {
 							break
 						}
 					}
+					m.tasks.start("resume:"+string(sel.ID()),
+						"Resuming "+sel.DisplayTitle()+"…", sel.DisplayTitle()+" resumed")
 					return m.resumeCmd(session.Ref{ID: sel.ID()}), true
 				}
 				return nil, true

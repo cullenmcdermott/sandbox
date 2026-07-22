@@ -54,6 +54,18 @@ type confirmPrompt struct {
 	id      session.ID // session being acted upon (for PendingAction)
 }
 
+// sessionTitle returns the display title of the session with the given id, or
+// the raw id when it is not tracked (e.g. it already left the list). Used to
+// label async action tasks in the statusline (§C1).
+func (m *Model) sessionTitle(id session.ID) string {
+	for i := range m.sessions {
+		if m.sessions[i].ID() == id {
+			return m.sessions[i].DisplayTitle()
+		}
+	}
+	return string(id)
+}
+
 // --------------------------------------------------------------------------
 // Action commands
 // --------------------------------------------------------------------------

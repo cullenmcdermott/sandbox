@@ -321,9 +321,18 @@ func (m *Model) bottomBar(w int) string {
 	if n := m.warmCount(); n > 0 {
 		warm = lipgloss.NewStyle().Foreground(theme.Gold).Render(fmt.Sprintf("⚡%d warm", n)) + " "
 	}
+	// Async action task queue (§C1): a spinner + in-flight action text, then a
+	// ✓/✗ result, sits to the LEFT of the warm badge in the right segment and
+	// auto-clears 2s after the last action settles. Empty when nothing is in
+	// flight, so the footer is byte-identical to before when the queue is idle.
+	taskSeg := m.tasks.render(nowFunc(), theme.SpinnerFrame(m.spinnerFrame))
+	if taskSeg != "" {
+		taskSeg += "  "
+	}
+	right := taskSeg + warm
 	// theme.TextMuted (not the recessed theme.TextDim) so the footer keeps contrast
 	// against the surface fill (P11).
-	styled := lipgloss.NewStyle().Foreground(theme.TextMuted).Render(spread(left, warm, w))
+	styled := lipgloss.NewStyle().Foreground(theme.TextMuted).Render(spread(left, right, w))
 	return withBackground(styled, theme.Surface)
 }
 

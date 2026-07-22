@@ -126,6 +126,34 @@ func keyMsg(s string) tea.KeyPressMsg {
 // Session action dispatch
 // --------------------------------------------------------------------------
 
+// actionResultFrom runs a (possibly batched) command and returns the
+// actionResultMsg it produces. Suspend/resume/destroy now batch a motion-tick
+// command alongside the backend action so the statusline task badge and the
+// pending-row spinner animate (§C1); the raw command is therefore a
+// tea.BatchMsg. The backend-action cmd is the first batch element, so iterating
+// in order finds the result without running (and blocking on) the tick cmd.
+func actionResultFrom(t *testing.T, cmd tea.Cmd) actionResultMsg {
+	t.Helper()
+	if cmd == nil {
+		t.Fatal("nil command")
+	}
+	switch msg := cmd().(type) {
+	case actionResultMsg:
+		return msg
+	case tea.BatchMsg:
+		for _, sub := range msg {
+			if sub == nil {
+				continue
+			}
+			if res, ok := sub().(actionResultMsg); ok {
+				return res
+			}
+		}
+	}
+	t.Fatalf("no actionResultMsg from command")
+	return actionResultMsg{}
+}
+
 func TestSuspendActionDispatch(t *testing.T) {
 	fb := &fakeBackend{}
 	m := New(fb)
@@ -138,10 +166,7 @@ func TestSuspendActionDispatch(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("x produced no command")
 	}
-	res, ok := cmd().(actionResultMsg)
-	if !ok {
-		t.Fatalf("want actionResultMsg, got %T", cmd())
-	}
+	res := actionResultFrom(t, cmd)
 	if res.action != "suspend" || res.id != "s1" {
 		t.Errorf("unexpected result: %+v", res)
 	}
@@ -162,8 +187,8 @@ func TestResumeActionDispatch(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("r produced no command")
 	}
-	if res, ok := cmd().(actionResultMsg); !ok || res.action != "resume" {
-		t.Fatalf("want resume actionResultMsg, got %T %+v", cmd(), cmd())
+	if res := actionResultFrom(t, cmd); res.action != "resume" {
+		t.Fatalf("want resume actionResultMsg, got %+v", res)
 	}
 	if len(fb.resumed) != 1 || fb.resumed[0] != "s1" {
 		t.Errorf("Resume not dispatched: %v", fb.resumed)
@@ -245,8 +270,8 @@ func TestConfirmGatesDestroy(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("y did not return the destroy command")
 	}
-	if res, ok := cmd().(actionResultMsg); !ok || res.action != "destroy" {
-		t.Fatalf("want destroy actionResultMsg, got %T %+v", cmd(), cmd())
+	if res := actionResultFrom(t, cmd); res.action != "destroy" {
+		t.Fatalf("want destroy actionResultMsg, got %+v", res)
 	}
 	if len(fb.destroyed) != 1 || fb.destroyed[0] != "s1" {
 		t.Errorf("Destroy not dispatched: %v", fb.destroyed)
