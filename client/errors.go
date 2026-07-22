@@ -149,6 +149,33 @@ var (
 	// document that shares the Secret. The error carries only sizes, no values.
 	ErrExtraSecretEnvTooLarge = errors.New("sandbox: ExtraSecretEnv values exceed the size limit")
 
+	// ErrInvalidBootstrapPath is returned by Create when a CreateOptions.BootstrapFiles
+	// Path is empty or is neither absolute nor "~/"-relative — a shape a bootstrap
+	// file cannot be materialized from. Rejected before any cluster call; the error
+	// names the offending path, never the file content.
+	ErrInvalidBootstrapPath = errors.New("sandbox: invalid bootstrap file path")
+
+	// ErrBootstrapPathOutsideRoots is returned by Create when a BootstrapFiles Path
+	// resolves outside the pod HOME and /session/state — including a ".." traversal
+	// that escapes those roots. Bootstrap files must never land in the synced
+	// workspace (they would sync back to the user's repo) or an arbitrary pod path,
+	// so anything but the two allowed roots fails closed. The error names the
+	// offending path (and where it resolved to), never the file content.
+	ErrBootstrapPathOutsideRoots = errors.New("sandbox: bootstrap file path resolves outside the pod HOME and /session/state")
+
+	// ErrDuplicateBootstrapPath is returned by Create when two BootstrapFiles
+	// resolve to the same absolute pod path — which one wins would be ambiguous and
+	// order-dependent, so it is rejected. The error names the offending path, never
+	// the file content.
+	ErrDuplicateBootstrapPath = errors.New("sandbox: two bootstrap files resolve to the same path")
+
+	// ErrBootstrapFilesTooLarge is returned by Create when the summed Content bytes
+	// of CreateOptions.BootstrapFiles exceed the conservative cap. The content rides
+	// the per-session Secret (Kubernetes ~1 MiB total across ALL keys), so the cap
+	// leaves headroom for ExtraSecretEnv, the runner token, SSH key, and any
+	// credential document that shares the Secret. The error carries only sizes.
+	ErrBootstrapFilesTooLarge = errors.New("sandbox: bootstrap file content exceeds the size limit")
+
 	// ErrNotAGitRepo is returned by Create when CreateOptions.Worktree is
 	// WorktreeOn but ProjectPath is not inside a git work tree (or the git binary
 	// is unavailable), so a per-session worktree cannot be created. Under

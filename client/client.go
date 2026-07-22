@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 	"regexp"
 	"strings"
 	"time"
@@ -42,6 +43,7 @@ type (
 	ExecResult     = session.ExecResult
 	IdleStatus     = session.IdleStatus
 	Capabilities   = session.Capabilities
+	BootstrapFile  = session.BootstrapFile
 )
 
 // RunnerClient is the live connection to a session's in-pod runner: start and
@@ -485,6 +487,25 @@ type CreateOptions struct {
 	// that drops a var cannot brick a resume; values reconcile on re-create.
 	// Create-time-only material.
 	ExtraSecretEnv map[string][]byte `json:"-"`
+	// BootstrapFiles are operator-supplied files materialized in the pod BEFORE
+	// any agent starts (part A of docs/design-pod-bootstrap-and-tool-injection.md)
+	// — the way an operator seeds tool config, a CLAUDE.md, or a skill into the
+	// pod's HOME without a bespoke Spec field per file. Each file's Content rides
+	// the per-session Secret and is projected read-only into the pod; the runner
+	// writes it to its declared Path on boot, write-if-changed so a pod restart
+	// never clobbers an agent's in-place edit unless the operator rotated the seed.
+	// The synced workspace is the WRONG place (it is the user's repo — a file
+	// written there would sync back to the laptop), so each Path is validated
+	// fail-closed at Create: it must be absolute or "~/"-relative and resolve
+	// inside the pod HOME or /session/state (both disjoint from the workspace
+	// bind-mount), with no ".." traversal escape (ErrInvalidBootstrapPath /
+	// ErrBootstrapPathOutsideRoots); duplicate resolved paths are rejected
+	// (ErrDuplicateBootstrapPath); and the summed Content bytes are capped
+	// (ErrBootstrapFilesTooLarge) to leave headroom under the ~1 MiB Secret limit
+	// alongside ExtraSecretEnv. Content never appears in any agent's process env
+	// (it rides a mounted Secret, not an env var). Create-time-only material,
+	// applied to every backend.
+	BootstrapFiles []BootstrapFile `json:"-"`
 }
 
 // Create provisions a new session: it mints an id (unless ID is set), prepares
@@ -549,6 +570,15 @@ func (c *Client) Create(ctx context.Context, opt CreateOptions) (_ *Session, err
 	// secret bytes must fit under the per-session Secret's headroom. Validated
 	// before any cluster call; error paths name only keys, never secret values.
 	if err := validateExtraEnv(opt.ExtraEnv, opt.ExtraSecretEnv); err != nil {
+		return nil, err
+	}
+	// Fail closed on the bootstrap-files surface (part A): every Path must resolve
+	// (absolute or "~/"-relative, no ".." escape) inside the pod HOME or
+	// /session/state — never the synced workspace — resolved paths must be unique,
+	// and the summed Content bytes must fit under the per-session Secret's headroom.
+	// Validated before any cluster call; error paths name only paths/sizes, never
+	// file content.
+	if err := validateBootstrapFiles(opt.BootstrapFiles); err != nil {
 		return nil, err
 	}
 	runnerImage := opt.RunnerImage
@@ -623,6 +653,7 @@ func (c *Client) Create(ctx context.Context, opt CreateOptions) (_ *Session, err
 		StorageGiB:         opt.StorageGiB,
 		ExtraEnv:           opt.ExtraEnv,
 		ExtraSecretEnv:     opt.ExtraSecretEnv,
+		BootstrapFiles:     opt.BootstrapFiles,
 	}
 	// Credential material branches by backend: claude-pane carries the FULL
 	// Claude Code documents (its only auth path — the inference-scoped token
@@ -1003,6 +1034,90 @@ func validateExtraEnvName(name string) error {
 		return fmt.Errorf("%w: %q", ErrReservedEnvName, name)
 	}
 	return nil
+}
+
+// Bootstrap-file path resolution roots. A validated bootstrap path resolves
+// strictly BELOW one of these; both are disjoint from the workspace bind-mount
+// (which lands at the absolute ProjectPath / worktree dir, e.g.
+// /Users/you/git/repo — never under the pod HOME or /session/state), so "inside
+// an allowed root" implies "outside the synced workspace" by construction.
+const (
+	// podHomeDir is the runner pod's $HOME (it runs as root). "~/"-relative paths
+	// expand against it and absolute paths must resolve below it or podStateRoot.
+	// The runner re-derives HOME from its own env and re-validates (defense in
+	// depth), so this constant is the client-side gate, not the sole authority.
+	podHomeDir = "/root"
+	// podStateRoot is the PVC-persisted state dir (survives suspend/resume).
+	// Distinct from /session/workspace (the synced repo), so a bootstrap file
+	// landed here never syncs back to the laptop.
+	podStateRoot = "/session/state"
+)
+
+// maxBootstrapBytes caps the summed Content bytes across all BootstrapFiles. They
+// ride the per-session Secret, which Kubernetes caps at ~1 MiB across ALL keys;
+// 256 KiB leaves room for the 512 KiB ExtraSecretEnv cap plus the runner token,
+// SSH key, and any credential document that shares the Secret.
+const maxBootstrapBytes = 256 * 1024
+
+// validateBootstrapFiles enforces the fail-closed contract for the bootstrap-file
+// surface (CreateOptions.BootstrapFiles, part A). Every Path must resolve inside
+// an allowed pod root (never the synced workspace) with no traversal escape,
+// resolved paths must be unique (two files targeting one path would race), and the
+// summed Content bytes must stay under the per-session Secret's headroom. It never
+// inspects or echoes Content — error paths name only paths and sizes.
+func validateBootstrapFiles(files []BootstrapFile) error {
+	var total int
+	seen := make(map[string]struct{}, len(files))
+	for _, f := range files {
+		resolved, err := resolveBootstrapPath(f.Path)
+		if err != nil {
+			return err
+		}
+		if _, dup := seen[resolved]; dup {
+			return fmt.Errorf("%w: %q resolves to %q", ErrDuplicateBootstrapPath, f.Path, resolved)
+		}
+		seen[resolved] = struct{}{}
+		total += len(f.Content)
+	}
+	if total > maxBootstrapBytes {
+		return fmt.Errorf("%w: %d bytes exceeds the %d-byte limit", ErrBootstrapFilesTooLarge, total, maxBootstrapBytes)
+	}
+	return nil
+}
+
+// resolveBootstrapPath expands a bootstrap Path ("~/"-relative → pod HOME, or
+// absolute), path.Cleans it (which collapses any ".." — a cleaned path that
+// escapes its intended root lands outside the allowed roots and is rejected), and
+// requires the result to sit strictly BELOW the pod HOME or /session/state. It
+// returns the cleaned absolute path (used for duplicate detection) or a
+// fail-closed error naming the offending path (never Content).
+func resolveBootstrapPath(p string) (string, error) {
+	var abs string
+	switch {
+	case p == "~" || strings.HasPrefix(p, "~/"):
+		// "~/foo" → "/root/foo"; a bare "~" → "/root" (rejected below as it is the
+		// root dir itself, not a file path under it).
+		abs = podHomeDir + strings.TrimPrefix(p, "~")
+	case strings.HasPrefix(p, "/"):
+		abs = p
+	case p == "":
+		return "", fmt.Errorf("%w: path is empty", ErrInvalidBootstrapPath)
+	default:
+		return "", fmt.Errorf("%w: %q must be absolute or \"~/\"-relative", ErrInvalidBootstrapPath, p)
+	}
+	cleaned := path.Clean(abs)
+	if !bootstrapPathWithinRoot(cleaned, podHomeDir) && !bootstrapPathWithinRoot(cleaned, podStateRoot) {
+		return "", fmt.Errorf("%w: %q resolves to %q, outside the pod HOME (%s) and %s",
+			ErrBootstrapPathOutsideRoots, p, cleaned, podHomeDir, podStateRoot)
+	}
+	return cleaned, nil
+}
+
+// bootstrapPathWithinRoot reports whether cleaned sits STRICTLY below root (a file
+// under the directory, never the directory itself). The trailing "/" makes it a
+// true path-prefix test — "/session/statex" is not under "/session/state".
+func bootstrapPathWithinRoot(cleaned, root string) bool {
+	return strings.HasPrefix(cleaned, root+"/")
 }
 
 // sanitizeLabel lowercases and replaces any non-[a-z0-9-] rune with '-' so the

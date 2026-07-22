@@ -203,6 +203,13 @@ var _ = client.CreateOptions{
 	// secret env. Removing or retyping either field breaks a consumer here first.
 	ExtraEnv:       map[string]string{"TOOL_ENDPOINT": "https://tool.internal"},
 	ExtraSecretEnv: map[string][]byte{"TOOL_TOKEN": []byte("secret")},
+	// Bootstrap files (part A): operator files materialized in the pod before the
+	// agent starts. Removing or retyping the field breaks a consumer here first.
+	BootstrapFiles: []client.BootstrapFile{{
+		Path:    "~/.claude/CLAUDE.md",
+		Content: []byte("# guidance"),
+		Mode:    0o644,
+	}},
 }
 
 // Generic env-injection sentinels a consumer branches on with errors.Is.
@@ -211,6 +218,20 @@ var (
 	_ error = client.ErrReservedEnvName
 	_ error = client.ErrDuplicateExtraEnv
 	_ error = client.ErrExtraSecretEnvTooLarge
+)
+
+// BootstrapFile type + its fields (part A): the public alias, a struct-literal
+// field pin, and the fail-closed sentinels a consumer branches on with errors.Is.
+var (
+	_ = client.BootstrapFile{
+		Path:    "~/.config/tool/config.json",
+		Content: []byte("{}"),
+		Mode:    0o600,
+	}
+	_ error = client.ErrInvalidBootstrapPath
+	_ error = client.ErrBootstrapPathOutsideRoots
+	_ error = client.ErrDuplicateBootstrapPath
+	_ error = client.ErrBootstrapFilesTooLarge
 )
 
 // OpencodeProvider vocabulary: re-exported so consumers pass a named constant

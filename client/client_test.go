@@ -193,6 +193,75 @@ func TestValidateExtraEnv(t *testing.T) {
 	}
 }
 
+// TestValidateBootstrapFiles covers the fail-closed bootstrap-file gate (part A):
+// absolute and "~/"-relative paths inside the pod HOME or /session/state clear it;
+// a relative path or a malformed shape is ErrInvalidBootstrapPath; a path that
+// escapes the allowed roots — including a ".." traversal or a workspace path — is
+// ErrBootstrapPathOutsideRoots; two files resolving to one path is
+// ErrDuplicateBootstrapPath; and oversized summed content is
+// ErrBootstrapFilesTooLarge. No error path echoes the file content.
+func TestValidateBootstrapFiles(t *testing.T) {
+	const secretContent = "SUPER-SECRET-FILE-BODY"
+	cases := []struct {
+		name    string
+		files   []BootstrapFile
+		wantErr error
+	}{
+		{"nil", nil, nil},
+		{"absolute in HOME", []BootstrapFile{{Path: "/root/.claude/CLAUDE.md", Content: []byte("x")}}, nil},
+		{"tilde in HOME", []BootstrapFile{{Path: "~/.claude/skills/tool/SKILL.md", Content: []byte("x")}}, nil},
+		{"absolute in state root", []BootstrapFile{{Path: "/session/state/tool/config.json", Content: []byte("x")}}, nil},
+		{"multiple distinct", []BootstrapFile{
+			{Path: "~/.claude/CLAUDE.md", Content: []byte("a")},
+			{Path: "/session/state/tool.cfg", Content: []byte("b")},
+		}, nil},
+
+		{"empty path", []BootstrapFile{{Path: "", Content: []byte("x")}}, ErrInvalidBootstrapPath},
+		{"relative path", []BootstrapFile{{Path: "relative/file", Content: []byte("x")}}, ErrInvalidBootstrapPath},
+
+		{"outside roots: /etc", []BootstrapFile{{Path: "/etc/passwd", Content: []byte("x")}}, ErrBootstrapPathOutsideRoots},
+		{"root dir itself (HOME)", []BootstrapFile{{Path: "/root", Content: []byte("x")}}, ErrBootstrapPathOutsideRoots},
+		{"root dir itself (tilde)", []BootstrapFile{{Path: "~", Content: []byte("x")}}, ErrBootstrapPathOutsideRoots},
+		{"traversal escapes state root", []BootstrapFile{{Path: "/session/state/../workspace/repo/x", Content: []byte("x")}}, ErrBootstrapPathOutsideRoots},
+		{"traversal escapes HOME via tilde", []BootstrapFile{{Path: "~/../../etc/cron.d/x", Content: []byte("x")}}, ErrBootstrapPathOutsideRoots},
+		{"workspace path is outside roots", []BootstrapFile{{Path: "/Users/dev/git/repo/CLAUDE.md", Content: []byte("x")}}, ErrBootstrapPathOutsideRoots},
+		{"session workspace (not state) rejected", []BootstrapFile{{Path: "/session/workspace/repo/x", Content: []byte("x")}}, ErrBootstrapPathOutsideRoots},
+
+		{"duplicate resolved path", []BootstrapFile{
+			{Path: "~/.claude/CLAUDE.md", Content: []byte("a")},
+			{Path: "/root/.claude/CLAUDE.md", Content: []byte("b")},
+		}, ErrDuplicateBootstrapPath},
+		{"duplicate via traversal-normalized path", []BootstrapFile{
+			{Path: "/session/state/a/b", Content: []byte("a")},
+			{Path: "/session/state/a/./b", Content: []byte("b")},
+		}, ErrDuplicateBootstrapPath},
+
+		{"oversize summed content", []BootstrapFile{{Path: "~/big", Content: make([]byte, maxBootstrapBytes+1)}}, ErrBootstrapFilesTooLarge},
+		{"at the size cap is allowed", []BootstrapFile{{Path: "~/big", Content: make([]byte, maxBootstrapBytes)}}, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			// Give the content-leak guard something to detect on the secret-content case.
+			if c.wantErr != nil && len(c.files) > 0 && len(c.files[0].Content) < 64 {
+				c.files[0].Content = []byte(secretContent)
+			}
+			err := validateBootstrapFiles(c.files)
+			if c.wantErr == nil {
+				if err != nil {
+					t.Fatalf("got %v, want nil", err)
+				}
+				return
+			}
+			if !errors.Is(err, c.wantErr) {
+				t.Fatalf("got %v, want %v", err, c.wantErr)
+			}
+			if strings.Contains(err.Error(), secretContent) {
+				t.Fatalf("error message leaked file content: %v", err)
+			}
+		})
+	}
+}
+
 // TestSanitizeLabel checks that sanitizeLabel produces values safe to embed in a
 // Kubernetes resource name: uppercase is lowercased, [a-z0-9-] passes through,
 // and every other rune (including multi-byte ones) is replaced by '-'.

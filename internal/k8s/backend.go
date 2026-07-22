@@ -7,11 +7,13 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -171,6 +173,27 @@ const (
 	// reconciles the set on re-create. Unlike the credential keys these are NOT
 	// account-scoped and carry no label.
 	secretKeyExtraSecretEnvPrefix = "extra-secret-env-"
+
+	// secretKeyBootstrapManifest / secretKeyBootstrapPrefix key the per-session
+	// Secret entries holding operator-supplied bootstrap files (Spec.BootstrapFiles,
+	// part A). The manifest is a JSON array of {path,mode} entries index-aligned
+	// with the content keys "bootstrap-0", "bootstrap-1", …; the runner reads the
+	// manifest + numbered content files from the projected Secret volume and
+	// materializes each before any agent starts. NO account label — not
+	// account-scoped. The manifest key ALSO carries the "bootstrap-" prefix, so the
+	// reconcile/strip pass treats it uniformly with the content keys.
+	secretKeyBootstrapManifest = "bootstrap-manifest"
+	secretKeyBootstrapPrefix   = "bootstrap-"
+
+	// bootstrapVolumeName / bootstrapMountPath / bootstrapManifestFile define how
+	// the bootstrap Secret keys are projected read-only into the pod: a Secret
+	// volume (Optional, so a re-create that drops files can't brick the mount)
+	// mounted at bootstrapMountPath, with the manifest at bootstrapManifestFile and
+	// each content key at its decimal index. The runner reads them at boot via the
+	// SANDBOX_BOOTSTRAP_DIR env marker buildEnv emits.
+	bootstrapVolumeName   = "bootstrap"
+	bootstrapMountPath    = "/etc/sandbox-bootstrap"
+	bootstrapManifestFile = "manifest.json"
 
 	// sshAuthorizedKeyMountPath is where the per-session Secret's SSH public
 	// key is projected into the pod; the entrypoint installs it as the sync
@@ -436,6 +459,12 @@ func (b *Backend) CreateSession(ctx context.Context, spec session.Spec) (_ sessi
 	for name, value := range spec.ExtraSecretEnv {
 		secret.Data[extraSecretEnvKey(name)] = value
 	}
+	// Operator-supplied bootstrap files (Spec.BootstrapFiles, part A): each file's
+	// content rides this per-session Secret under key "bootstrap-<n>", with a JSON
+	// manifest under "bootstrap-manifest" (path/mode per index). No label — not
+	// account-scoped. buildSandbox projects them as a read-only Secret volume;
+	// reconcileBootstrapFiles reconciles the set on re-create.
+	addBootstrapSecretData(secret, spec.BootstrapFiles)
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -815,6 +844,12 @@ func (b *Backend) syncSessionCredential(ctx context.Context, spec session.Spec) 
 		// stripped key leaves the running pod's env var simply unset rather than
 		// dangling a NOT-Optional ref that would brick the next resume.
 		changed = reconcileExtraSecretEnv(secret, spec.ExtraSecretEnv) || changed
+		// Operator-supplied bootstrap files (part A): patch changed content, refresh
+		// the manifest, strip keys for files the spec no longer carries. Like the
+		// ExtraSecretEnv reconcile this needs NO shape guard — the Secret volume that
+		// projects these is Optional, so a stripped key just drops that file from the
+		// mount rather than dangling a required reference.
+		changed = reconcileBootstrapFiles(secret, spec.BootstrapFiles) || changed
 		if !changed {
 			return nil
 		}
@@ -904,6 +939,93 @@ func reconcileExtraSecretEnv(secret *corev1.Secret, extraSecretEnv map[string][]
 			continue
 		}
 		if _, keep := extraSecretEnv[name]; !keep {
+			delete(secret.Data, dataKey)
+			changed = true
+		}
+	}
+	return changed
+}
+
+// bootstrapManifestEntry is one entry in the JSON manifest projected to the pod at
+// bootstrapMountPath/manifest.json. Index-aligned with the "bootstrap-<n>" content
+// keys — it carries ONLY the destination path and mode, never the file content
+// (which rides its own numbered key). The json tags are the wire contract the
+// runner's materialize step parses (runner/src/bootstrap.ts).
+type bootstrapManifestEntry struct {
+	Path string `json:"path"`
+	Mode uint32 `json:"mode,omitempty"`
+}
+
+// bootstrapContentKey is the per-session Secret key holding one bootstrap file's
+// content, keyed by its index in Spec.BootstrapFiles. See secretKeyBootstrapPrefix.
+func bootstrapContentKey(i int) string { return secretKeyBootstrapPrefix + strconv.Itoa(i) }
+
+// bootstrapManifestJSON marshals the {path,mode} manifest for a set of bootstrap
+// files. json.Marshal of a []bootstrapManifestEntry cannot fail (only strings +
+// uint32), so the error is discarded — the callers treat it as impossible.
+func bootstrapManifestJSON(files []session.BootstrapFile) []byte {
+	entries := make([]bootstrapManifestEntry, len(files))
+	for i, f := range files {
+		entries[i] = bootstrapManifestEntry{Path: f.Path, Mode: f.Mode}
+	}
+	b, _ := json.Marshal(entries)
+	return b
+}
+
+// addBootstrapSecretData writes the manifest + per-file content keys for
+// Spec.BootstrapFiles into a freshly-built per-session Secret (CreateSession). A
+// no-op when there are no bootstrap files. The content bytes never leave the
+// Secret (buildSandbox projects them as a mounted volume, not an env value).
+func addBootstrapSecretData(secret *corev1.Secret, files []session.BootstrapFile) {
+	if len(files) == 0 {
+		return
+	}
+	if secret.Data == nil {
+		secret.Data = map[string][]byte{}
+	}
+	for i, f := range files {
+		secret.Data[bootstrapContentKey(i)] = f.Content
+	}
+	secret.Data[secretKeyBootstrapManifest] = bootstrapManifestJSON(files)
+}
+
+// reconcileBootstrapFiles makes the Secret's "bootstrap-*" keys (the manifest +
+// numbered content keys) match spec.BootstrapFiles on a re-create: it patches any
+// changed/added content, refreshes the manifest, and strips any "bootstrap-"-keyed
+// entry not in the desired set (files the operator removed, or trailing indices
+// when the file count shrank). It returns whether it changed anything. Deleting a
+// stripped key is safe with no shape guard because the Secret volume that projects
+// these is Optional — a stripped key just drops that file from the mount. It never
+// echoes content. Deleting from secret.Data during range is safe in Go.
+//
+// Re-create bake caveat (mirrors ExtraSecretEnv env vars): the pod template's
+// bootstrap volume Items are baked at first create, so a re-create that ADDS files
+// beyond the original count updates the Secret here but those new indices are not
+// projected until the pod is recreated (Resume only flips replicas). Reducing or
+// changing existing files reconciles live via the mounted Secret's kubelet sync.
+func reconcileBootstrapFiles(secret *corev1.Secret, files []session.BootstrapFile) bool {
+	desired := map[string][]byte{}
+	if len(files) > 0 {
+		for i, f := range files {
+			desired[bootstrapContentKey(i)] = f.Content
+		}
+		desired[secretKeyBootstrapManifest] = bootstrapManifestJSON(files)
+	}
+	changed := false
+	for k, v := range desired {
+		if string(secret.Data[k]) != string(v) {
+			if secret.Data == nil {
+				secret.Data = map[string][]byte{}
+			}
+			secret.Data[k] = v
+			changed = true
+		}
+	}
+	for dataKey := range secret.Data {
+		if !strings.HasPrefix(dataKey, secretKeyBootstrapPrefix) {
+			continue
+		}
+		if _, keep := desired[dataKey]; !keep {
 			delete(secret.Data, dataKey)
 			changed = true
 		}
@@ -1749,33 +1871,64 @@ func buildSandbox(spec session.Spec) *agentv1alpha1.Sandbox {
 							},
 						},
 					},
-					Volumes: []corev1.Volume{
-						{
-							Name: "session",
-							VolumeSource: corev1.VolumeSource{
-								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-									ClaimName: name,
-								},
-							},
-						},
-						{
-							// Projects the per-session Secret's SSH public key as
-							// a file the entrypoint installs as authorized_keys.
-							Name: "ssh-key",
-							VolumeSource: corev1.VolumeSource{
-								Secret: &corev1.SecretVolumeSource{
-									SecretName: sessionSecretName(name),
-									Items: []corev1.KeyToPath{
-										{Key: secretKeySSHAuthorizedKey, Path: "authorized_key"},
-									},
-								},
-							},
-						},
+					Volumes: runnerVolumes(spec, name),
+				},
+			},
+		},
+	}
+}
+
+// runnerVolumes returns the pod's Volumes: the session PVC, the per-session
+// Secret's SSH public key projected as a file, and — when the session carries
+// operator bootstrap files (part A) — a read-only Secret volume projecting the
+// bootstrap manifest + numbered content keys at bootstrapMountPath. The bootstrap
+// SecretVolumeSource is Optional so a re-create that strips a bootstrap key (a file
+// the operator removed) does not brick the mount, and its Items are baked from
+// spec.BootstrapFiles at create time (see reconcileBootstrapFiles' bake caveat).
+func runnerVolumes(spec session.Spec, name string) []corev1.Volume {
+	volumes := []corev1.Volume{
+		{
+			Name: "session",
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: name,
+				},
+			},
+		},
+		{
+			// Projects the per-session Secret's SSH public key as a file the
+			// entrypoint installs as authorized_keys.
+			Name: "ssh-key",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: sessionSecretName(name),
+					Items: []corev1.KeyToPath{
+						{Key: secretKeySSHAuthorizedKey, Path: "authorized_key"},
 					},
 				},
 			},
 		},
 	}
+	if len(spec.BootstrapFiles) > 0 {
+		items := make([]corev1.KeyToPath, 0, len(spec.BootstrapFiles)+1)
+		items = append(items, corev1.KeyToPath{Key: secretKeyBootstrapManifest, Path: bootstrapManifestFile})
+		for i := range spec.BootstrapFiles {
+			items = append(items, corev1.KeyToPath{Key: bootstrapContentKey(i), Path: strconv.Itoa(i)})
+		}
+		volumes = append(volumes, corev1.Volume{
+			Name: bootstrapVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: sessionSecretName(name),
+					Items:      items,
+					// Optional: a re-create that drops a bootstrap key must not brick
+					// the mount (the still-baked Item is skipped when its key is gone).
+					Optional: boolPtr(true),
+				},
+			},
+		})
+	}
+	return volumes
 }
 
 // runnerVolumeMounts returns the runner container's volume mounts. The session
@@ -1796,6 +1949,16 @@ func runnerVolumeMounts(spec session.Spec) []corev1.VolumeMount {
 	mounts := []corev1.VolumeMount{
 		{Name: "session", MountPath: "/session"},
 		{Name: "ssh-key", MountPath: sshAuthorizedKeyMountPath, ReadOnly: true},
+	}
+	// Operator bootstrap files (part A): the runner reads the manifest + numbered
+	// content files from this read-only mount at boot (SANDBOX_BOOTSTRAP_DIR points
+	// at it) and materializes each to its declared path before any agent starts.
+	if len(spec.BootstrapFiles) > 0 {
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      bootstrapVolumeName,
+			MountPath: bootstrapMountPath,
+			ReadOnly:  true,
+		})
 	}
 	wp := workspacePath(spec)
 	if strings.HasPrefix(wp, "/") && wp != "/" {
@@ -1866,8 +2029,9 @@ var reservedEnvNames = map[string]struct{}{
 
 // reservedEnvPrefix covers every SANDBOX_* var the runner reads (SANDBOX_SESSION_ID,
 // SANDBOX_BACKEND, SANDBOX_PROJECT_ROOT, SANDBOX_MODEL, SANDBOX_OPENCODE_PROVIDER,
-// and the SANDBOX_EXTRA_ENV_NAMES / SANDBOX_EXTRA_SECRET_ENV_NAMES markers) without
-// enumerating each — the whole namespace belongs to the runner.
+// the SANDBOX_EXTRA_ENV_NAMES / SANDBOX_EXTRA_SECRET_ENV_NAMES markers, and the
+// SANDBOX_BOOTSTRAP_DIR bootstrap marker) without enumerating each — the whole
+// namespace belongs to the runner.
 const reservedEnvPrefix = "SANDBOX_"
 
 // IsReservedEnvName reports whether name is owned by the runner/backend and so
@@ -1929,6 +2093,15 @@ func buildEnv(spec session.Spec, name string) []corev1.EnvVar {
 	// runner/backend-owned vars above — client validation (k8s.IsReservedEnvName)
 	// guarantees no ExtraEnv name shadows one of them, so ordering is cosmetic.
 	env = appendExtraEnv(env, spec, name)
+
+	// Operator bootstrap files (part A): a single plain marker naming the mount dir.
+	// Its presence is the runner's signal to read the manifest + numbered files and
+	// materialize them before any agent starts. The value is a fixed path (not
+	// secret) and the content itself never enters any env — it rides the mounted
+	// Secret only, so it can't leak into an agent child's process environment.
+	if len(spec.BootstrapFiles) > 0 {
+		env = append(env, corev1.EnvVar{Name: "SANDBOX_BOOTSTRAP_DIR", Value: bootstrapMountPath})
+	}
 
 	if spec.Backend == session.BackendOpenCode {
 		return append(env, opencodeEnv(spec, name)...)

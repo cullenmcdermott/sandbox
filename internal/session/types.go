@@ -275,6 +275,37 @@ type Spec struct {
 	// publishes the sorted name list via SANDBOX_EXTRA_SECRET_ENV_NAMES so the
 	// runner knows which vars to redact + admit to the claude pane.
 	ExtraSecretEnv map[string][]byte `json:"-"`
+
+	// BootstrapFiles is operator-supplied files materialized in the pod's HOME /
+	// /session/state BEFORE any agent starts (part A of
+	// docs/design-pod-bootstrap-and-tool-injection.md). Each file's Content rides
+	// the per-session Secret (key "bootstrap-<n>", with a "bootstrap-manifest"
+	// JSON key carrying path/mode), projected read-only into the pod as a Secret
+	// volume the runner reads at boot. It is NEVER serialized (json:"-") — like
+	// SSHPublicKey, AnthropicCredential, and ExtraSecretEnv it is create-time-only
+	// material that must not land in the local session index or any wire payload.
+	// Paths are validated at the client layer (fail-closed) to resolve outside the
+	// synced workspace and inside the pod HOME or /session/state.
+	BootstrapFiles []BootstrapFile `json:"-"`
+}
+
+// BootstrapFile is an operator-supplied file materialized in the pod before the
+// agent backend starts (Spec.BootstrapFiles / client.CreateOptions.BootstrapFiles,
+// part A of docs/design-pod-bootstrap-and-tool-injection.md). Its Content rides
+// the per-session Secret (never logged, never serialized into the local index)
+// and the runner writes it to Path on boot, write-if-changed so a pod restart
+// never clobbers an agent's in-place edit unless the operator rotated the seed.
+type BootstrapFile struct {
+	// Path is where the file lands in the pod: absolute, or "~/"-relative to the
+	// pod HOME. Validated at Create (fail-closed) to resolve OUTSIDE the synced
+	// workspace and inside the pod HOME or /session/state — a bootstrap file must
+	// never sync back to the user's repo.
+	Path string `json:"path"`
+	// Content is the file body. Create-time-only material — the parent Spec field
+	// is json:"-", so it never serializes into the index or any wire payload.
+	Content []byte `json:"-"`
+	// Mode is the unix file mode; 0 means 0644 (use 0600 for secrets).
+	Mode uint32 `json:"mode,omitempty"`
 }
 
 // Status is the lifecycle state of a remote session.

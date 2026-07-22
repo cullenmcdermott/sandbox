@@ -20,6 +20,7 @@ import { startClaudePaneSupervisor, type ClaudePaneSupervisor } from './claude-p
 import { materializeClaudePaneConfig } from './claude-config.js';
 import { provisionPaneObserver, startClaudePaneObserver, type PaneObserverCore } from './claude-pane-observer.js';
 import { type PaneObserverHandle } from './server.js';
+import { materializeBootstrapFiles } from './bootstrap.js';
 import { startBootTrace } from './trace.js';
 
 // Seconds before SIGKILL, reported in session.terminating so the TUI can show
@@ -174,6 +175,16 @@ function main(): void {
 
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
+
+  // Operator bootstrap files (part A): materialize any files the operator seeded
+  // into the pod's HOME / /session/state from the mounted Secret BEFORE any agent
+  // backend starts, so the agent finds its tool config / CLAUDE.md / skill already
+  // in place. Applied to every backend; a no-op when the session has none
+  // (SANDBOX_BOOTSTRAP_DIR unset). Write-if-changed with per-file seed
+  // reconciliation, so a restart never clobbers an agent's in-place edit unless the
+  // operator rotated the seed.
+  materializeBootstrapFiles();
+  boot.phase('bootstrap_files');
 
   // opencode-server sessions: the runner stays the control plane and supervises
   // a child `opencode serve`; the local `opencode attach` client drives it. The
