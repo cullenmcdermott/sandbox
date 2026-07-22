@@ -803,6 +803,20 @@ regardless: the activation hook's `go get .`
 (`.flox/env/manifest.toml:54-60`) goes — it mutates go.mod/module cache as a
 side effect of `cd`.
 
+**2026-07-22 — assessed, NOT attempted this session (image left unchanged).**
+The rollout is unverifiable from a laptop: the accepted acceptance gate is a
+Depot build + kind conformance (no Docker/Depot/cluster locally), and this stays
+maintainer-sign-off-gated (§7b is in the "maintainer-decision gated" list up
+top). The runner image (`runner/Dockerfile`) is still `node:24-slim` with no
+flox/nix. The real blocker beyond *building* is runtime: session pods run
+default-deny egress, so `flox activate` / `nix` cannot fetch from a substituter
+at activation — a working in-pod flox needs a pre-seeded store BAKED into the
+image (the ADR's "baked closures first" line), which is also what drives the
+size delta the task wants measured. No low-risk partial exists (the flox CLI is
+inert without nix + a store; installing nix alone still needs egress or a seeded
+`/nix`), so a speculative Dockerfile change would be both unverifiable here and a
+whole-fleet risk if wrong. Deferred to the maintainer-gated Depot spike below.
+
 - [ ] **Spike the flox-base image, then implement the rollout** (items below
   are the ADR's work breakdown, kept for pointers):
   - Runtime bootstrap env/mount seam: extend the common pod env
