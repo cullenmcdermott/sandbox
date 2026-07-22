@@ -176,6 +176,13 @@ var (
 	// credential document that shares the Secret. The error carries only sizes.
 	ErrBootstrapFilesTooLarge = errors.New("sandbox: bootstrap file content exceeds the size limit")
 
+	// ErrInvalidResources is returned by Create when a CreateOptions.Resources
+	// field (CPURequest / MemoryRequest / CPULimit / MemoryLimit) is non-empty but
+	// does not parse as a Kubernetes resource.Quantity ("500m", "2", "512Mi",
+	// "4Gi"). An all-empty Resources is valid and leaves the pod BestEffort. The
+	// error names the offending field and value.
+	ErrInvalidResources = errors.New("sandbox: invalid pod resource quantity")
+
 	// ErrNotAGitRepo is returned by Create when CreateOptions.Worktree is
 	// WorktreeOn but ProjectPath is not inside a git work tree (or the git binary
 	// is unavailable), so a per-session worktree cannot be created. Under

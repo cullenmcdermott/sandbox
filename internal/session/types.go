@@ -287,6 +287,29 @@ type Spec struct {
 	// Paths are validated at the client layer (fail-closed) to resolve outside the
 	// synced workspace and inside the pod HOME or /session/state.
 	BootstrapFiles []BootstrapFile `json:"-"`
+
+	// Resources optionally sizes the runner pod's CPU/memory requests and limits.
+	// The zero value (all fields empty) leaves the pod template with NO requests
+	// or limits — BestEffort QoS. That is the default on purpose: a small single-
+	// node cluster can pack several sessions without a per-pod CPU request capping
+	// the node at one session. Clusters that want sizing set the fields; each is a
+	// Kubernetes quantity string validated at Create (empty field = unset).
+	Resources Resources `json:"resources,omitempty"`
+}
+
+// Resources optionally sizes the runner pod (client.CreateOptions.Resources →
+// Spec.Resources). Each field is a Kubernetes resource.Quantity string; an empty
+// field is omitted from the pod template. All-empty leaves the pod BestEffort
+// (no requests or limits) — the default.
+type Resources struct {
+	// CPURequest is the CPU request (e.g. "500m", "1"); empty = unset.
+	CPURequest string `json:"cpuRequest,omitempty"`
+	// MemoryRequest is the memory request (e.g. "512Mi", "1Gi"); empty = unset.
+	MemoryRequest string `json:"memoryRequest,omitempty"`
+	// CPULimit is the CPU limit (e.g. "2", "4"); empty = unset.
+	CPULimit string `json:"cpuLimit,omitempty"`
+	// MemoryLimit is the memory limit (e.g. "4Gi", "8Gi"); empty = unset.
+	MemoryLimit string `json:"memoryLimit,omitempty"`
 }
 
 // BootstrapFile is an operator-supplied file materialized in the pod before the

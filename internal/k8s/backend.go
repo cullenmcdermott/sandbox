@@ -1744,6 +1744,39 @@ func podStale(pod *corev1.Pod, now time.Time) bool {
 	return false
 }
 
+// buildPodResources maps the optional Spec.Resources onto the runner container's
+// ResourceRequirements. Each set field becomes a request/limit; an all-empty
+// Resources yields an empty ResourceRequirements so the pod runs BestEffort (no
+// requests or limits). BestEffort is the default on purpose: a small single-node
+// cluster can pack several sessions without a per-pod CPU request pinning the
+// node to one session. Values are already validated at Create (client
+// validateResources); ParseQuantity is used here too and a field that somehow
+// fails to parse is skipped rather than panicking.
+func buildPodResources(r session.Resources) corev1.ResourceRequirements {
+	req := corev1.ResourceList{}
+	lim := corev1.ResourceList{}
+	set := func(list corev1.ResourceList, name corev1.ResourceName, val string) {
+		if val == "" {
+			return
+		}
+		if q, err := resource.ParseQuantity(val); err == nil {
+			list[name] = q
+		}
+	}
+	set(req, corev1.ResourceCPU, r.CPURequest)
+	set(req, corev1.ResourceMemory, r.MemoryRequest)
+	set(lim, corev1.ResourceCPU, r.CPULimit)
+	set(lim, corev1.ResourceMemory, r.MemoryLimit)
+	out := corev1.ResourceRequirements{}
+	if len(req) > 0 {
+		out.Requests = req
+	}
+	if len(lim) > 0 {
+		out.Limits = lim
+	}
+	return out
+}
+
 // buildSandbox constructs a Sandbox CR from a session.Spec.
 func buildSandbox(spec session.Spec) *agentv1alpha1.Sandbox {
 	name := string(spec.ID)
@@ -1806,16 +1839,7 @@ func buildSandbox(spec session.Spec) *agentv1alpha1.Sandbox {
 							},
 							Env:          buildEnv(spec, name),
 							VolumeMounts: runnerVolumeMounts(spec),
-							Resources: corev1.ResourceRequirements{
-								Requests: corev1.ResourceList{
-									corev1.ResourceCPU:    resource.MustParse("1"),
-									corev1.ResourceMemory: resource.MustParse("1Gi"),
-								},
-								Limits: corev1.ResourceList{
-									corev1.ResourceCPU:    resource.MustParse("4"),
-									corev1.ResourceMemory: resource.MustParse("8Gi"),
-								},
-							},
+							Resources:    buildPodResources(spec.Resources),
 							// C9: detect a crashed/hung runner. Without probes the
 							// pod is Ready the instant the container starts — before
 							// the runner's HTTP server is listening — and a wedged

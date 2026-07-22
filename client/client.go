@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/rest"
 
@@ -44,6 +45,7 @@ type (
 	IdleStatus     = session.IdleStatus
 	Capabilities   = session.Capabilities
 	BootstrapFile  = session.BootstrapFile
+	Resources      = session.Resources
 )
 
 // RunnerClient is the live connection to a session's in-pod runner: start and
@@ -506,6 +508,14 @@ type CreateOptions struct {
 	// (it rides a mounted Secret, not an env var). Create-time-only material,
 	// applied to every backend.
 	BootstrapFiles []BootstrapFile `json:"-"`
+
+	// Resources optionally sets the runner pod's CPU/memory requests and limits.
+	// The zero value leaves the pod BestEffort (no requests/limits) — the default,
+	// so a small single-node cluster can schedule several sessions without a per-
+	// pod CPU request capping the node. Each field is a Kubernetes quantity string
+	// ("500m", "2", "512Mi", "4Gi"), validated at Create with resource.ParseQuantity
+	// (ErrInvalidResources); an empty field is unset.
+	Resources Resources
 }
 
 // Create provisions a new session: it mints an id (unless ID is set), prepares
@@ -581,6 +591,11 @@ func (c *Client) Create(ctx context.Context, opt CreateOptions) (_ *Session, err
 	if err := validateBootstrapFiles(opt.BootstrapFiles); err != nil {
 		return nil, err
 	}
+	// Optional pod sizing: each non-empty field must parse as a k8s quantity.
+	// Unset (all-empty) is valid and leaves the pod BestEffort.
+	if err := validateResources(opt.Resources); err != nil {
+		return nil, err
+	}
 	runnerImage := opt.RunnerImage
 	if runnerImage == "" {
 		runnerImage = c.runnerImage
@@ -654,6 +669,7 @@ func (c *Client) Create(ctx context.Context, opt CreateOptions) (_ *Session, err
 		ExtraEnv:           opt.ExtraEnv,
 		ExtraSecretEnv:     opt.ExtraSecretEnv,
 		BootstrapFiles:     opt.BootstrapFiles,
+		Resources:          opt.Resources,
 	}
 	// Credential material branches by backend: claude-pane carries the FULL
 	// Claude Code documents (its only auth path — the inference-scoped token
@@ -1118,6 +1134,27 @@ func resolveBootstrapPath(p string) (string, error) {
 // true path-prefix test — "/session/statex" is not under "/session/state".
 func bootstrapPathWithinRoot(cleaned, root string) bool {
 	return strings.HasPrefix(cleaned, root+"/")
+}
+
+// validateResources fail-closes CreateOptions.Resources: every non-empty field
+// must parse as a Kubernetes resource.Quantity ("500m", "2", "512Mi", "4Gi").
+// An all-empty Resources is valid — it leaves the pod BestEffort (no requests or
+// limits). The error (ErrInvalidResources) names the offending field and value.
+func validateResources(r Resources) error {
+	for _, f := range []struct{ name, val string }{
+		{"CPURequest", r.CPURequest},
+		{"MemoryRequest", r.MemoryRequest},
+		{"CPULimit", r.CPULimit},
+		{"MemoryLimit", r.MemoryLimit},
+	} {
+		if f.val == "" {
+			continue
+		}
+		if _, err := resource.ParseQuantity(f.val); err != nil {
+			return fmt.Errorf("%w: %s=%q: %v", ErrInvalidResources, f.name, f.val, err)
+		}
+	}
+	return nil
 }
 
 // sanitizeLabel lowercases and replaces any non-[a-z0-9-] rune with '-' so the

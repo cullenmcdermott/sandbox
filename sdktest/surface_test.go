@@ -210,6 +210,9 @@ var _ = client.CreateOptions{
 		Content: []byte("# guidance"),
 		Mode:    0o644,
 	}},
+	// Optional pod sizing: zero value leaves the pod BestEffort. Removing or
+	// retyping the field breaks a consumer here first.
+	Resources: client.Resources{CPURequest: "500m", MemoryLimit: "4Gi"},
 }
 
 // Generic env-injection sentinels a consumer branches on with errors.Is.
@@ -232,6 +235,18 @@ var (
 	_ error = client.ErrBootstrapPathOutsideRoots
 	_ error = client.ErrDuplicateBootstrapPath
 	_ error = client.ErrBootstrapFilesTooLarge
+)
+
+// Resources type + its fields (optional pod sizing): the public alias, a struct-
+// literal field pin, and the fail-closed sentinel a consumer branches on.
+var (
+	_ = client.Resources{
+		CPURequest:    "500m",
+		MemoryRequest: "512Mi",
+		CPULimit:      "2",
+		MemoryLimit:   "4Gi",
+	}
+	_ error = client.ErrInvalidResources
 )
 
 // OpencodeProvider vocabulary: re-exported so consumers pass a named constant

@@ -262,6 +262,42 @@ func TestValidateBootstrapFiles(t *testing.T) {
 	}
 }
 
+// TestValidateResources covers the fail-closed pod-sizing gate: an all-empty
+// Resources (the BestEffort default) clears it, valid Kubernetes quantities in
+// any field clear it, and a non-empty field that is not a valid quantity is
+// ErrInvalidResources.
+func TestValidateResources(t *testing.T) {
+	cases := []struct {
+		name    string
+		res     Resources
+		wantErr error
+	}{
+		{"zero value (BestEffort)", Resources{}, nil},
+		{"all fields valid", Resources{CPURequest: "500m", MemoryRequest: "512Mi", CPULimit: "2", MemoryLimit: "4Gi"}, nil},
+		{"only requests", Resources{CPURequest: "1", MemoryRequest: "1Gi"}, nil},
+		{"only limits", Resources{CPULimit: "4", MemoryLimit: "8Gi"}, nil},
+
+		{"bad cpu request", Resources{CPURequest: "half-a-cpu"}, ErrInvalidResources},
+		{"bad memory request", Resources{MemoryRequest: "512 megabytes"}, ErrInvalidResources},
+		{"bad cpu limit", Resources{CPULimit: "1.2.3"}, ErrInvalidResources},
+		{"bad memory limit", Resources{MemoryLimit: "4GiB"}, ErrInvalidResources},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := validateResources(c.res)
+			if c.wantErr == nil {
+				if err != nil {
+					t.Fatalf("got %v, want nil", err)
+				}
+				return
+			}
+			if !errors.Is(err, c.wantErr) {
+				t.Fatalf("got %v, want %v", err, c.wantErr)
+			}
+		})
+	}
+}
+
 // TestSanitizeLabel checks that sanitizeLabel produces values safe to embed in a
 // Kubernetes resource name: uppercase is lowercased, [a-z0-9-] passes through,
 // and every other rune (including multi-byte ones) is replaced by '-'.
