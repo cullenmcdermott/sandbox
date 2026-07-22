@@ -140,3 +140,23 @@ spec:
     #     - ports:
     #         - port: "443"
     #           protocol: TCP
+
+    # 6. Operator integrations (EXAMPLE — uncomment per tool you deliberately
+    #    add). When a session needs to reach an external service on your behalf —
+    #    say a self-hosted forge — open ONLY that host, e.g.:
+    #      gitlab.com — git-over-HTTPS + REST/GraphQL API, reached with the
+    #                   operator's GitLab token (PAT / CI job token) that you
+    #                   mount into the pod
+    #    WARNING — opening egress for a tool also opens that tool's token's exfil
+    #    path. This rule is bidirectional at the policy layer: a prompt-injected
+    #    agent that can reach gitlab.com with your token can also POST whatever it
+    #    reads (source, other secrets, that very token) to an attacker-controlled
+    #    project on gitlab.com. Every host you add here is both a capability and a
+    #    new exfil channel — grant the narrowest host set the tool actually needs,
+    #    and prefer short-lived, least-scope tokens so a leak is bounded.
+    # - toFQDNs:
+    #     - matchName: gitlab.com
+    #   toPorts:
+    #     - ports:
+    #         - port: "443"
+    #           protocol: TCP

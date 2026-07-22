@@ -153,30 +153,52 @@ Each verified against code at the cited location:
   broadcast** — so secrets echoed in commands do not land cleartext on the PVC or
   replay to `attach` clients. The same `redactSecrets` gates `audit.jsonl`
   (`runner/src/audit.ts:34`).
-- **PreToolUse Bash blocking.** A runner `PreToolUse` hook
-  (`runner/src/claude.ts:429`, `makePreToolUseBashHook`) runs a shared blocklist
-  (`runner/src/guards.ts` `bashCommandBlocked`) that denies Bash commands
-  reaching for host/cluster/credential surfaces. **Defense-in-depth, not a
-  boundary** — a regex blocklist is bypassable; treat it as noise reduction.
-- **On-disk settings tiers load for SDK turns** (§2b gap 8, 2026-07-13).
-  `settingSources` defaults to `user,project,local`
-  (`runner/src/claude.ts:349`, `resolveSettingSources`), so the synced
-  project's `.claude/` (commands, skills, hooks, CLAUDE.md) and the PVC-staged
-  user config participate in turns. A hook or command a settings file defines
-  runs as a child of the spawned `claude` binary and inherits the stripped
-  agent env (`buildAgentEnv`) — it can no more read `RUNNER_TOKEN` than the
-  Bash tool can, and adds no capability beyond the arbitrary Bash the default
-  bypassPermissions mode already allows. The programmatic guard/audit hooks
-  above apply regardless of settings files. `SANDBOX_SETTING_SOURCES=none`
-  restores full isolation.
+- **Bash-command blocklist (`/exec` + opencode; NOT the claude pane).** A shared
+  blocklist (`runner/src/guards.ts:44`, `bashCommandBlocked`) denies commands
+  reaching for host/cluster/credential surfaces. It gates the `/exec` one-shot
+  shell — refused before spawn (`runner/src/exec.ts:118`), with the attempt
+  tagged in the audit log (`runner/src/server.ts:471`) — and, via a
+  boot-generated in-process plugin that throws in `tool.execute.before`, the
+  opencode backend's own Bash tool (`runner/src/opencode.ts`,
+  `guardrailPluginSource` from `serializeBlockedPatterns`, one source of truth).
+  **It does not gate the interactive `claude` pane child**: the SDK-turn
+  `PreToolUse` blocking hook was deleted with `runner/src/claude.ts`, and the
+  pane observer's `PreToolUse` hook is telemetry-only (it POSTs `tool.started` to
+  `/observer/claude/hook` and always exits 0 — `runner/src/claude-pane-observer.ts`).
+  In the pane the user answers Claude Code's own permission prompts interactively
+  (the runner disables the native command sandbox so those prompts fire —
+  `mergeSettings`, same file). **Defense-in-depth, not a boundary** — a regex
+  blocklist is bypassable and the pane path isn't behind it at all; treat it as
+  noise reduction, not containment.
+- **On-disk settings tiers load natively in the interactive pane.** The pane
+  runs the real Claude Code TUI, which loads its own `user`/`project`/`local`
+  settings tiers, so the synced project's `.claude/` (commands, skills, hooks,
+  CLAUDE.md) and the PVC-staged user config participate in the session. (The
+  SDK-turn `settingSources` / `SANDBOX_SETTING_SOURCES` selector that used to
+  gate this was deleted with `runner/src/claude.ts`; there is no runner-side
+  isolation switch for it anymore.) A hook or command a settings file defines
+  runs as a child of the spawned `claude` binary and inherits the strict
+  allowlist env (`buildClaudePaneEnv`, `runner/src/claude-pane.ts:175`) — it can
+  no more read `RUNNER_TOKEN` than the in-pane Bash tool can. The runner
+  re-merges only its observer hooks + statusline into `settings.json` under
+  `CLAUDE_CONFIG_DIR` each boot (upserted by command path, preserving unrelated
+  user keys — `mergeSettings`, `runner/src/claude-pane-observer.ts`), so its
+  telemetry/audit tap persists alongside — not in place of — the user's own
+  settings-defined hooks.
 - **Append-only audit log.** A `PostToolUse` hook writes `audit.jsonl`
   (`runner/src/audit.ts`), redacted.
-- **Runner-infra env strip for spawned children.** `sanitizedExecEnv`
-  (`runner/src/exec.ts:36`) drops `RUNNER_TOKEN` and the other runner-infra
-  secrets from the env of `/exec`, the SDK `claude` child, workspace git calls,
-  and the `opencode serve` child (`runner/src/claude.ts:93`,
-  `runner/src/opencode.ts:47`). See the A1 residual below for what this does and
-  does not guarantee.
+- **Runner-infra secrets kept out of every child.** Two mechanisms, same goal.
+  The `/exec` shell (with workspace git, which runs through it), the `opencode
+  serve` child, and the `codex app-server` child get `sanitizedExecEnv`
+  (`runner/src/exec.ts:36`) — a denylist that drops `RUNNER_TOKEN` and the
+  provider secrets from an otherwise-inherited env (`runner/src/exec.ts:130`,
+  `runner/src/opencode.ts:48`, `runner/src/codex.ts:141`). The interactive
+  `claude` pane child uses the stricter inverse — a strict ALLOWLIST
+  (`buildClaudePaneEnv`, `runner/src/claude-pane.ts:175`) that passes only
+  `TERM`/`COLORTERM`/`CLAUDE_CONFIG_DIR` plus `PATH`/`HOME`/`LANG` (and any
+  operator-declared `ExtraEnv`/`ExtraSecretEnv`), so `RUNNER_TOKEN` and every
+  credential are withheld from the pane child and any hook it spawns. See the A1
+  residual below for what this does and does not guarantee.
 - **Default-deny ingress + egress allowlist** (`k8s/networkpolicy-default-deny.yaml`
   + `networkpolicy-egress-allow.yaml`) — the network boundary, subject to the
   enforcing-CNI caveat above.
@@ -223,7 +245,8 @@ is unrecoverable — a same-uid process reads it from `/proc`. This is
 child as a non-root uid distinct from the runner, or mount `/proc` with
 `hidepid=2` (pod-spec + Dockerfile work, coordinated with the base-image spike).
 See [`TODO.md`](TODO.md) §1f (`[A1 residual]`); the comments in
-`runner/src/claude.ts` say so at the call site.
+`runner/src/opencode.ts` / `runner/src/codex.ts` (and the shared
+`sanitizedExecEnv` in `runner/src/exec.ts`) say so at the call site.
 
 ### Observer events are agent-influenceable (claude-pane)
 

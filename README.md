@@ -88,6 +88,30 @@ This is a **one-way fork**: local turns run entirely on your laptop and never fl
 back to the sandbox — the pod and its audit log see none of them. Use it to keep
 working offline or hand off to the local CLI, not as a two-way bridge.
 
+### Your skills, agents, commands, and hooks come along
+
+A session pod isn't a blank slate — the Claude Code config you've built up
+locally follows you into it, carried by the same Mutagen sync that stages your
+code. Two paths get it there:
+
+- **Your user-global config** — `~/.claude/skills`, `~/.claude/agents`,
+  `~/.claude/commands`, `~/.claude/hooks`, and `~/.claude/statusline` — syncs
+  **one-way, host → pod** into the in-pod Claude config directory, so the real
+  Claude Code TUI in the pane sees the same skills, subagents, slash commands,
+  hooks, and statusline you use locally. One-way means your laptop is the source
+  of truth: edit these on the host and they propagate into the pod; changes made
+  pod-side are not synced back.
+- **Project-local `.claude/`** — a `.claude/skills` (or `.claude/agents`, etc.)
+  checked into the repo itself needs no special handling: it lives inside your
+  workspace, so it rides the **two-way project sync** along with the rest of the
+  tree, and per-project skills are simply there.
+
+Credentials are never part of this — only config inputs sync (no
+`.credentials.json` / tokens), and the project sync additionally excludes
+secrets by default (`.env`, `*.pem`/`*.key`, `.git-credentials`, `.aws`, …). To
+add a skill mid-session, drop it in `~/.claude/skills` (or the repo's
+`.claude/skills`) and the running sync carries it into the pod.
+
 ## Quickstart
 
 ```bash
