@@ -177,6 +177,14 @@ export function buildClaudePaneEnv(env: NodeJS.ProcessEnv = process.env): NodeJS
     TERM: 'xterm-256color',
     COLORTERM: 'truecolor',
     CLAUDE_CONFIG_DIR: env.CLAUDE_CONFIG_DIR || CLAUDE_CONFIG_DIR,
+    // Asserted unconditionally, NOT a passthrough: the k8s side sets IS_SANDBOX=1
+    // pod-wide (buildEnv) because interactive `claude` refuses to start with
+    // permissions.defaultMode=bypassPermissions as uid 0 unless IS_SANDBOX=1. The
+    // pane's strict allowlist would otherwise drop it, wedging a bypassPermissions
+    // pane at boot. The runner ONLY ever runs inside a network-isolated sandbox pod
+    // (default-deny ingress + egress allowlist), so this is always true regardless
+    // of how the runner was started — stamp it here rather than trust the inherited env.
+    IS_SANDBOX: '1',
   };
   for (const k of PANE_ENV_PASSTHROUGH) {
     if (env[k] !== undefined) out[k] = env[k];

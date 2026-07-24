@@ -213,6 +213,8 @@ test('buildClaudePaneEnv is a strict allowlist and leaks no runner secrets', () 
   assert.equal(out.HOME, '/root');
   assert.equal(out.LANG, 'en_US.UTF-8');
   assert.equal(out.CLAUDE_CONFIG_DIR, '/session/state/claude');
+  // Asserted unconditionally so a bypassPermissions pane starts as uid 0 in-pod.
+  assert.equal(out.IS_SANDBOX, '1');
 
   // NOTHING else — every runner secret must be absent.
   for (const k of [
@@ -230,7 +232,7 @@ test('buildClaudePaneEnv is a strict allowlist and leaks no runner secrets', () 
   // Exactly the allowlisted keys, nothing more.
   assert.deepEqual(
     Object.keys(out).sort(),
-    ['CLAUDE_CONFIG_DIR', 'COLORTERM', 'HOME', 'LANG', 'PATH', 'TERM'],
+    ['CLAUDE_CONFIG_DIR', 'COLORTERM', 'HOME', 'IS_SANDBOX', 'LANG', 'PATH', 'TERM'],
   );
 });
 
