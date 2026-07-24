@@ -31,7 +31,8 @@ func TestCreateProjectStampsContextLabel(t *testing.T) {
 	if _, err := m.CreateProject(context.Background(), spec); err != nil {
 		t.Fatalf("CreateProject: %v", err)
 	}
-	got := strings.Join(r.calls[0], " ")
+	create := createCalls(r.calls)[0] // skip the pre-create existence probe
+	got := strings.Join(create, " ")
 	if !strings.Contains(got, "--label sandbox-context=my-cluster") {
 		t.Errorf("project sync missing context label: %s", got)
 	}
@@ -40,7 +41,7 @@ func TestCreateProjectStampsContextLabel(t *testing.T) {
 		t.Errorf("project sync missing session label: %s", got)
 	}
 	// Endpoints stay the trailing positional args despite the extra label pair.
-	alpha, beta := endpoints(t, r.calls[0])
+	alpha, beta := endpoints(t, create)
 	if alpha != spec.ProjectPath || beta != spec.SSHHost+":"+spec.RemotePath {
 		t.Errorf("context label displaced endpoints: alpha=%q beta=%q", alpha, beta)
 	}
@@ -60,7 +61,7 @@ func TestCreateInputsStampsContextLabel(t *testing.T) {
 	if err := m.CreateInputs(context.Background(), spec); err != nil {
 		t.Fatalf("CreateInputs: %v", err)
 	}
-	for i, call := range r.calls {
+	for i, call := range createCalls(r.calls) {
 		if !strings.Contains(strings.Join(call, " "), "--label sandbox-context=my-cluster") {
 			t.Errorf("input sync %d missing context label: %s", i, strings.Join(call, " "))
 		}
@@ -84,7 +85,7 @@ func TestCreateProjectNoContextLabelWhenUnresolved(t *testing.T) {
 	if _, err := m.CreateProject(context.Background(), spec); err != nil {
 		t.Fatalf("CreateProject: %v", err)
 	}
-	if got := strings.Join(r.calls[0], " "); strings.Contains(got, "sandbox-context=") {
+	if got := strings.Join(createCalls(r.calls)[0], " "); strings.Contains(got, "sandbox-context=") {
 		t.Errorf("no context label should be stamped when the context is unresolved: %s", got)
 	}
 }

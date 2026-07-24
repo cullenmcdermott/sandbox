@@ -277,7 +277,11 @@ func (m *Manager) CreateProject(ctx context.Context, spec Spec) (created bool, e
 	if spec.ProjectPath == "" {
 		return false, nil
 	}
-	return m.createProjectSync(ctx, spec, sessionLabel(spec.SessionID))
+	existing, err := m.sessionSyncsByName(ctx, spec.SessionID)
+	if err != nil {
+		return false, err
+	}
+	return m.createProjectSync(ctx, spec, sessionLabel(spec.SessionID), existing)
 }
 
 // CreateInputs creates the config-input (one-way host -> remote) and transcript
@@ -289,10 +293,24 @@ func (m *Manager) CreateProject(ctx context.Context, spec Spec) (created bool, e
 // the GC and pause/resume/terminate-by-label continue to reach them unchanged.
 func (m *Manager) CreateInputs(ctx context.Context, spec Spec) error {
 	label := sessionLabel(spec.SessionID)
+	// One existence probe up front: idempotence is now a pre-create check, not a
+	// swallowed "already exists" (mutagen never enforced sync-name uniqueness, so
+	// the old guard never fired and every reconnect minted duplicates).
+	existing, err := m.sessionSyncsByName(ctx, spec.SessionID)
+	if err != nil {
+		return err
+	}
 
 	// 1. Config inputs (one-way host -> remote)
 	for _, sub := range ConfigInputsSubs {
 		name := "sandbox-" + spec.SessionID + "-config-" + sub.Local
+		skip, rerr := m.reconcileExisting(ctx, existing[name])
+		if rerr != nil {
+			return fmt.Errorf("sync: reconcile config-%s session: %w", sub.Local, rerr)
+		}
+		if skip {
+			continue
+		}
 		localPath := path.Join(spec.HomeDir, ".claude", sub.Local)
 		remotePath := path.Join(spec.RemoteClaude, sub.Remote)
 		args := []string{
@@ -307,15 +325,20 @@ func (m *Manager) CreateInputs(ctx context.Context, spec Spec) error {
 			localPath, spec.SSHHost+":"+remotePath,
 		)
 		if _, err := m.r.Output(ctx, nil, args...); err != nil {
-			if !isMutagenAlreadyExists(err) {
-				return fmt.Errorf("sync: create config-%s session: %w", sub.Local, err)
-			}
+			return fmt.Errorf("sync: create config-%s session: %w", sub.Local, err)
 		}
 	}
 
 	// 2. Transcripts (one-way remote -> host)
 	for _, sub := range TranscriptSubs {
 		name := "sandbox-" + spec.SessionID + "-transcripts-" + sub
+		skip, rerr := m.reconcileExisting(ctx, existing[name])
+		if rerr != nil {
+			return fmt.Errorf("sync: reconcile transcripts-%s session: %w", sub, rerr)
+		}
+		if skip {
+			continue
+		}
 		localPath := path.Join(spec.HomeDir, ".claude", sub)
 		remotePath := path.Join(spec.RemoteClaude, sub)
 		args := []string{
@@ -330,9 +353,7 @@ func (m *Manager) CreateInputs(ctx context.Context, spec Spec) error {
 			spec.SSHHost+":"+remotePath, localPath,
 		)
 		if _, err := m.r.Output(ctx, nil, args...); err != nil {
-			if !isMutagenAlreadyExists(err) {
-				return fmt.Errorf("sync: create transcripts-%s session: %w", sub, err)
-			}
+			return fmt.Errorf("sync: create transcripts-%s session: %w", sub, err)
 		}
 	}
 
@@ -397,14 +418,27 @@ var securityIgnores = []string{
 }
 
 // createProjectSync creates the two-way-safe project sync for a session.
-// Idempotent: an already-existing session ("session already exists") is left as-is
-// and reported as created=false; only a fresh create reports created=true.
+// Idempotent via a PRE-CREATE existence check (reconcileExisting on the caller's
+// existing-by-name map): an already-created project sync is left as-is and
+// reported as created=false; only a genuinely fresh create reports created=true.
+// A create that reaches mutagen and fails is a real error now (no swallowing) —
+// mutagen never enforced name uniqueness, so a swallowed "already exists" could
+// never have been the reason a create failed.
 //
 // Ignore layering (mutagen resolves later patterns with higher precedence):
 // build trees, then the project root's .gitignore (see gitignoreIgnoreFlags),
 // then the non-overridable security/auto-exec set.
-func (m *Manager) createProjectSync(ctx context.Context, spec Spec, label string) (created bool, err error) {
+func (m *Manager) createProjectSync(ctx context.Context, spec Spec, label string, existing map[string][]SyncSession) (created bool, err error) {
 	projectName := "sandbox-" + spec.SessionID + "-project"
+	// Pre-create existence check: skip (and repair duplicates) before building any
+	// args, so a reconnect neither re-creates nor pays the .gitignore read.
+	skip, rerr := m.reconcileExisting(ctx, existing[projectName])
+	if rerr != nil {
+		return false, rerr
+	}
+	if skip {
+		return false, nil
+	}
 	gitignoreFlags, err := gitignoreIgnoreFlags(spec.ProjectPath)
 	if err != nil {
 		return false, err
@@ -434,13 +468,55 @@ func (m *Manager) createProjectSync(ctx context.Context, spec Spec, label string
 	args = append(args, securityIgnores...)
 	args = append(args, spec.ProjectPath, spec.SSHHost+":"+spec.RemotePath)
 	if _, err := m.r.Output(ctx, nil, args...); err != nil {
-		// C8: use a more specific substring to avoid swallowing unrelated failures.
-		// Mutagen emits "session already exists" for idempotent re-creates → not an
-		// error (a reconnect; the session reconciles on its own, created=false).
-		if !isMutagenAlreadyExists(err) {
-			return false, fmt.Errorf("sync: create project session: %w", err)
+		return false, fmt.Errorf("sync: create project session: %w", err)
+	}
+	return true, nil
+}
+
+// sessionSyncsByName lists THIS session's mutagen syncs (scoped by the
+// sandbox-session label, with the full template so identifiers/names parse) and
+// groups them by sync NAME. It is the input to the create paths' pre-create
+// existence check: mutagen does NOT enforce name uniqueness on `sync create`, so
+// the old swallow-the-"already exists" guard never fired and every reconnect
+// minted another identically-named sync (5–10 duplicates per session observed
+// live). A "no sessions" result (isMutagenNotFound) is an empty map with a nil
+// error — the fresh-create case; any other list error is wrapped.
+func (m *Manager) sessionSyncsByName(ctx context.Context, sessionID string) (map[string][]SyncSession, error) {
+	out, err := m.r.Output(ctx, nil, "sync", "list", "--label-selector="+sessionLabel(sessionID), "--template", syncListTemplate)
+	if err != nil {
+		if isMutagenNotFound(err) {
+			return map[string][]SyncSession{}, nil
 		}
+		return nil, fmt.Errorf("sync: list existing sessions: %w", err)
+	}
+	byName := map[string][]SyncSession{}
+	for _, ss := range parseSyncList(out) {
+		byName[ss.Name] = append(byName[ss.Name], ss)
+	}
+	return byName, nil
+}
+
+// reconcileExisting decides whether a create should be SKIPPED because the named
+// sync already exists, repairing pre-existing duplicates in place. With zero
+// existing syncs it returns (false, nil): the caller proceeds to create. With one
+// or more it returns (true, nil): the caller skips the create — the sync is
+// already registered and reconciles on its own. When MORE than one exists
+// (duplicates the old already-exists path minted, since mutagen never enforced
+// name uniqueness), it first terminates all but the first via
+// TerminateByIdentifier. Keep-first is arbitrary but deterministic; the
+// duplicates were created identically, so any survivor is equivalent.
+func (m *Manager) reconcileExisting(ctx context.Context, existing []SyncSession) (skip bool, err error) {
+	if len(existing) == 0 {
 		return false, nil
+	}
+	if len(existing) > 1 {
+		ids := make([]string, 0, len(existing)-1)
+		for _, ss := range existing[1:] {
+			ids = append(ids, ss.Identifier)
+		}
+		if terr := m.TerminateByIdentifier(ctx, ids...); terr != nil {
+			return false, fmt.Errorf("sync: terminate duplicate syncs: %w", terr)
+		}
 	}
 	return true, nil
 }
@@ -501,10 +577,10 @@ func (m *Manager) ResumeAll(ctx context.Context, sessionID string) error {
 //
 // It heals a sync that still EXISTS but wedged; it does not recreate a fully
 // terminated sync (that needs the connect path's Spec and happens on reconnect).
-// A create re-run is a separate, already-idempotent path: `mutagen sync create`
-// with an existing name reports "session already exists", which CreateAll/
-// CreateProject/CreateInputs swallow as a no-op — so re-running create never
-// errors, and Reconcile adds the resume+flush that actually un-sticks it.
+// A create re-run is a separate, already-idempotent path: CreateAll/CreateProject/
+// CreateInputs do a pre-create existence check (sessionSyncsByName +
+// reconcileExisting) and SKIP a name that already exists — so re-running create
+// never re-mints a sync, and Reconcile adds the resume+flush that un-sticks it.
 func (m *Manager) Reconcile(ctx context.Context, sessionID string) error {
 	if err := m.ResumeAll(ctx, sessionID); err != nil {
 		return err
@@ -640,13 +716,6 @@ func (m *Manager) TerminateByIdentifier(ctx context.Context, identifiers ...stri
 		return nil
 	}
 	return err
-}
-
-// isMutagenAlreadyExists reports whether the mutagen error indicates that a
-// sync session with the given name already exists (idempotent create). Mutagen
-// writes "session already exists" to stderr on duplicate create.
-func isMutagenAlreadyExists(err error) bool {
-	return strings.Contains(err.Error(), "session already exists")
 }
 
 // isMutagenNotFound reports whether a mutagen error means no sessions matched

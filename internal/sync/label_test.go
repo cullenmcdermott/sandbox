@@ -91,7 +91,7 @@ func TestCreateProjectStampsNamespaceLabel(t *testing.T) {
 	if _, err := m.CreateProject(context.Background(), spec); err != nil {
 		t.Fatalf("CreateProject: %v", err)
 	}
-	got := strings.Join(r.calls[0], " ")
+	got := strings.Join(createCalls(r.calls)[0], " ") // skip the pre-create existence probe
 	if !strings.Contains(got, "--label sandbox-namespace=team-b") {
 		t.Errorf("project sync missing namespace label: %s", got)
 	}
@@ -102,8 +102,8 @@ func TestCreateProjectStampsNamespaceLabel(t *testing.T) {
 	if _, err := m2.CreateProject(context.Background(), spec); err != nil {
 		t.Fatalf("CreateProject: %v", err)
 	}
-	if strings.Contains(strings.Join(r2.calls[0], " "), "sandbox-namespace=") {
-		t.Errorf("no namespace label should be stamped when unset: %s", strings.Join(r2.calls[0], " "))
+	if got2 := strings.Join(createCalls(r2.calls)[0], " "); strings.Contains(got2, "sandbox-namespace=") {
+		t.Errorf("no namespace label should be stamped when unset: %s", got2)
 	}
 }
 

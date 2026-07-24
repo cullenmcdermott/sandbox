@@ -293,9 +293,9 @@ func (c *Client) startProjectSync(ctx context.Context, id, workspacePath, privPa
 	}
 	mgr := c.syncManager()
 	// Resume any syncs paused by a prior suspend BEFORE creating: CreateProject/
-	// CreateInputs are idempotent and report "already exists" without un-pausing,
-	// so without this a plain re-attach would leave files frozen with no error.
-	// Best-effort.
+	// CreateInputs are idempotent and SKIP an existing sync (pre-create existence
+	// check) without un-pausing it, so without this a plain re-attach would leave
+	// files frozen with no error. Best-effort.
 	_ = mgr.ResumeAll(ctx, id)
 	created, err = mgr.CreateProject(ctx, spec)
 	return created, spec, err

@@ -30,6 +30,48 @@ type fakeError struct{ msg string }
 
 func (e *fakeError) Error() string { return e.msg }
 
+// probeRunner is a fake Runner that answers the pre-create existence probe
+// (`sync list ... --template`) with canned rows and, independently, can fail
+// `sync create` — so the no-swallow create path and the skip/repair paths are
+// exercisable without a real mutagen daemon. Every call is recorded.
+type probeRunner struct {
+	listOut   string // template-format rows returned for the sync-list probe
+	listErr   error  // error returned for the sync-list probe (e.g. not-found)
+	createErr error  // error returned for every sync-create (no-swallow path)
+	calls     [][]string
+}
+
+func (p *probeRunner) Output(_ context.Context, _ io.Reader, args ...string) ([]byte, error) {
+	p.calls = append(p.calls, args)
+	if len(args) >= 2 && args[0] == "sync" && args[1] == "list" {
+		return []byte(p.listOut), p.listErr
+	}
+	if len(args) >= 2 && args[0] == "sync" && args[1] == "create" {
+		return nil, p.createErr
+	}
+	return nil, nil
+}
+
+// syncRow renders one syncListTemplate line: sessionID|context|identifier|name|
+// status|namespace. Used to seed a probeRunner's existence probe with an
+// already-existing sync (or a duplicate pair).
+func syncRow(sessionID, identifier, name string) string {
+	return sessionID + "|ctx|" + identifier + "|" + name + "|Watching|ns"
+}
+
+// createCalls returns only the `mutagen sync create` invocations, dropping the
+// pre-create `sync list` existence probe (and any `sync terminate` repair) so
+// index-based assertions address creates directly.
+func createCalls(calls [][]string) [][]string {
+	var out [][]string
+	for _, c := range calls {
+		if len(c) >= 2 && c[0] == "sync" && c[1] == "create" {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 func TestStatusUsesLabelSelector(t *testing.T) {
 	r := &fakeRunner{}
 	m := New(r)
@@ -100,13 +142,16 @@ func TestCreateAll(t *testing.T) {
 		t.Fatal("CreateAll should report created=true when the project session is freshly made")
 	}
 
-	// Should have created: 1 project + 5 config + 3 transcripts = 9 sessions
-	if len(r.calls) != 9 {
-		t.Fatalf("got %d calls, want 9", len(r.calls))
+	// Should have created: 1 project + 5 config + 3 transcripts = 9 sessions.
+	// (Each create path also issues a pre-create `sync list` existence probe, so
+	// r.calls carries 2 extra list calls — assert against the creates only.)
+	creates := createCalls(r.calls)
+	if len(creates) != 9 {
+		t.Fatalf("got %d creates, want 9", len(creates))
 	}
 
-	// First call should be the project sync with two-way-safe
-	first := strings.Join(r.calls[0], " ")
+	// First create should be the project sync with two-way-safe
+	first := strings.Join(creates[0], " ")
 	if !strings.Contains(first, "two-way-safe") {
 		t.Errorf("project sync should be two-way-safe: %s", first)
 	}
@@ -119,11 +164,11 @@ func TestCreateAll(t *testing.T) {
 	// A swapped alpha/beta would silently invert push/pull, yet still contain
 	// "one-way-safe" — so assert the endpoint ORDER, not just the mode.
 	for i := 1; i <= 5; i++ {
-		call := strings.Join(r.calls[i], " ")
+		call := strings.Join(creates[i], " ")
 		if !strings.Contains(call, "one-way-safe") {
 			t.Errorf("config sync %d should be one-way-safe: %s", i, call)
 		}
-		alpha, beta := endpoints(t, r.calls[i])
+		alpha, beta := endpoints(t, creates[i])
 		if !strings.HasPrefix(alpha, spec.HomeDir+"/.claude/") {
 			t.Errorf("config sync %d alpha should be a local ~/.claude path (push host->remote), got alpha=%q beta=%q", i, alpha, beta)
 		}
@@ -136,11 +181,11 @@ func TestCreateAll(t *testing.T) {
 	// SSHHost:remote must be the alpha and the local path the beta — the
 	// mirror image of the config direction.
 	for i := 6; i <= 8; i++ {
-		call := strings.Join(r.calls[i], " ")
+		call := strings.Join(creates[i], " ")
 		if !strings.Contains(call, "one-way-safe") {
 			t.Errorf("transcript sync %d should be one-way-safe: %s", i, call)
 		}
-		alpha, beta := endpoints(t, r.calls[i])
+		alpha, beta := endpoints(t, creates[i])
 		if !strings.HasPrefix(alpha, sshHost+":") {
 			t.Errorf("transcript sync %d alpha should be %s:<remote> (pull remote->host), got alpha=%q beta=%q", i, sshHost, alpha, beta)
 		}
@@ -188,7 +233,7 @@ func TestCreateProjectSyncIgnoreLayering(t *testing.T) {
 		t.Fatalf("createAll: %v", err)
 	}
 
-	call := r.calls[0] // project sync is created first
+	call := createCalls(r.calls)[0] // project sync is the first create (after the existence probe)
 	idx := func(flag string) int {
 		for i, a := range call {
 			if a == flag {
@@ -272,10 +317,11 @@ func TestCreateProjectCreatesOnlyProject(t *testing.T) {
 	if !created {
 		t.Fatal("CreateProject should report created=true for a fresh project sync")
 	}
-	if len(r.calls) != 1 {
-		t.Fatalf("CreateProject should issue exactly 1 create, got %d: %v", len(r.calls), r.calls)
+	creates := createCalls(r.calls)
+	if len(creates) != 1 {
+		t.Fatalf("CreateProject should issue exactly 1 create, got %d: %v", len(creates), r.calls)
 	}
-	call := strings.Join(r.calls[0], " ")
+	call := strings.Join(creates[0], " ")
 	if !strings.Contains(call, "two-way-safe") || !strings.Contains(call, "test-session-project") {
 		t.Errorf("CreateProject did not create the two-way-safe project sync: %s", call)
 	}
@@ -315,10 +361,11 @@ func TestCreateInputsCreatesEight(t *testing.T) {
 	if err := m.CreateInputs(context.Background(), spec); err != nil {
 		t.Fatalf("CreateInputs: %v", err)
 	}
-	if len(r.calls) != len(ConfigInputsSubs)+len(TranscriptSubs) {
-		t.Fatalf("CreateInputs should issue %d creates, got %d", len(ConfigInputsSubs)+len(TranscriptSubs), len(r.calls))
+	creates := createCalls(r.calls)
+	if len(creates) != len(ConfigInputsSubs)+len(TranscriptSubs) {
+		t.Fatalf("CreateInputs should issue %d creates, got %d", len(ConfigInputsSubs)+len(TranscriptSubs), len(creates))
 	}
-	for i, call := range r.calls {
+	for i, call := range creates {
 		joined := strings.Join(call, " ")
 		// two-way-safe uniquely identifies the load-bearing project sync; the
 		// inputs are all one-way-safe.
@@ -372,23 +419,164 @@ func TestConfigInputsSyncStatuslineEntry(t *testing.T) {
 }
 
 // CreateInputs surfaces a real create failure (it must not vanish when run in
-// the background) but swallows an idempotent "already exists".
+// the background). Idempotence is now a pre-create existence check, not a
+// swallowed "already exists", so a create that reaches mutagen and fails is a
+// real error — see TestCreateInputsSkipsExistingSyncs for the skip path.
 func TestCreateInputsErrorHandling(t *testing.T) {
 	spec := Spec{SessionID: "s", ProjectPath: t.TempDir(), HomeDir: "/Users/cullen", SSHHost: "sandbox-s", RemoteClaude: "/session/state/claude"}
+	// A failing existence probe surfaces (the list errored, not "no sessions").
 	if err := New(&errorRunner{msg: "connection refused"}).CreateInputs(context.Background(), spec); err == nil {
-		t.Error("CreateInputs should surface a real create error")
+		t.Error("CreateInputs should surface a failing existence probe")
 	}
-	if err := New(&errorRunner{msg: "session already exists"}).CreateInputs(context.Background(), spec); err != nil {
-		t.Errorf("CreateInputs should swallow already-exists, got %v", err)
+	// A fresh probe (empty) followed by a failing create surfaces the create error
+	// — no swallowing of any create failure now.
+	if err := (New(&probeRunner{createErr: &fakeError{msg: "connection refused"}})).CreateInputs(context.Background(), spec); err == nil {
+		t.Error("CreateInputs should surface a real create error (no swallowing)")
+	}
+}
+
+// The create paths run a pre-create existence probe (`sync list
+// --label-selector=<sessionLabel> --template`) BEFORE any create, and it is the
+// FIRST mutagen call — idempotence is now a look-before-you-leap check, not a
+// swallowed "already exists" (mutagen never enforced sync-name uniqueness).
+func TestCreateProjectProbesBeforeCreating(t *testing.T) {
+	r := &probeRunner{} // empty probe → fresh, proceed to create
+	spec := Spec{SessionID: "s", ProjectPath: t.TempDir(), RemotePath: "/session/workspace/proj", HomeDir: "/Users/cullen", SSHHost: "sandbox-s", RemoteClaude: "/session/state/claude"}
+	created, err := New(r).CreateProject(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	if !created {
+		t.Fatal("a fresh name should create (created=true)")
+	}
+	if len(r.calls) < 1 {
+		t.Fatal("CreateProject made no calls")
+	}
+	first := strings.Join(r.calls[0], " ")
+	if !strings.HasPrefix(first, "sync list --label-selector=sandbox-session=s") || !strings.Contains(first, "--template") {
+		t.Errorf("first call should be the label-scoped existence probe, got %q", first)
+	}
+	if len(createCalls(r.calls)) != 1 {
+		t.Errorf("a fresh name should issue exactly one create, got %v", r.calls)
+	}
+}
+
+// An already-listed name is a no-op: CreateProject issues NO `sync create` and
+// reports created=false (the reconnect signal).
+func TestCreateProjectSkipsExistingSync(t *testing.T) {
+	r := &probeRunner{listOut: syncRow("s", "sync_1", "sandbox-s-project")}
+	spec := Spec{SessionID: "s", ProjectPath: t.TempDir(), RemotePath: "/session/workspace/proj", HomeDir: "/Users/cullen", SSHHost: "sandbox-s", RemoteClaude: "/session/state/claude"}
+	created, err := New(r).CreateProject(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	if created {
+		t.Error("an existing project sync should report created=false")
+	}
+	if n := len(createCalls(r.calls)); n != 0 {
+		t.Errorf("an existing name must issue no create, got %d: %v", n, r.calls)
+	}
+}
+
+// Duplicates the old already-exists path minted (mutagen never enforced name
+// uniqueness) are repaired in place: with N>1 rows for a name, CreateProject
+// terminates all but the first (identifiers 2..N) and issues no create.
+func TestCreateProjectRepairsDuplicates(t *testing.T) {
+	r := &probeRunner{listOut: strings.Join([]string{
+		syncRow("s", "sync_1", "sandbox-s-project"),
+		syncRow("s", "sync_2", "sandbox-s-project"),
+		syncRow("s", "sync_3", "sandbox-s-project"),
+	}, "\n")}
+	spec := Spec{SessionID: "s", ProjectPath: t.TempDir(), RemotePath: "/session/workspace/proj", HomeDir: "/Users/cullen", SSHHost: "sandbox-s", RemoteClaude: "/session/state/claude"}
+	created, err := New(r).CreateProject(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	if created {
+		t.Error("duplicates present → skip create, created=false")
+	}
+	if n := len(createCalls(r.calls)); n != 0 {
+		t.Errorf("duplicates must not trigger a create, got %d: %v", n, r.calls)
+	}
+	var term []string
+	for _, c := range r.calls {
+		if len(c) >= 2 && c[0] == "sync" && c[1] == "terminate" {
+			term = c
+		}
+	}
+	if term == nil {
+		t.Fatalf("expected a `sync terminate` of the surplus duplicates, got %v", r.calls)
+	}
+	got := strings.Join(term, " ")
+	if want := "sync terminate sync_2 sync_3"; got != want {
+		t.Errorf("terminate should target the keep-first surplus (2..N): got %q, want %q", got, want)
+	}
+}
+
+// A failing create now surfaces (no swallow) even for the load-bearing project
+// sync: a fresh probe followed by a create error is a real CreateProject error.
+func TestCreateProjectCreateFailureSurfaces(t *testing.T) {
+	r := &probeRunner{createErr: &fakeError{msg: "ssh: handshake failed"}}
+	spec := Spec{SessionID: "s", ProjectPath: t.TempDir(), RemotePath: "/session/workspace/proj", HomeDir: "/Users/cullen", SSHHost: "sandbox-s", RemoteClaude: "/session/state/claude"}
+	if _, err := New(r).CreateProject(context.Background(), spec); err == nil {
+		t.Error("a create failure must surface as an error now")
+	}
+}
+
+// A "no sessions found" existence probe (isMutagenNotFound) is an empty result,
+// not an error — CreateProject proceeds to create the fresh sync.
+func TestCreateProjectNotFoundProbeProceeds(t *testing.T) {
+	r := &probeRunner{listErr: &fakeError{msg: "no sessions found"}}
+	spec := Spec{SessionID: "s", ProjectPath: t.TempDir(), RemotePath: "/session/workspace/proj", HomeDir: "/Users/cullen", SSHHost: "sandbox-s", RemoteClaude: "/session/state/claude"}
+	created, err := New(r).CreateProject(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("a not-found probe should not error: %v", err)
+	}
+	if !created {
+		t.Error("a not-found probe should proceed to create (created=true)")
+	}
+	if len(createCalls(r.calls)) != 1 {
+		t.Errorf("expected one create after a not-found probe, got %v", r.calls)
+	}
+}
+
+// CreateInputs skips every input sync that already exists — with all 8 names
+// listed, it issues zero creates.
+func TestCreateInputsSkipsExistingSyncs(t *testing.T) {
+	var rows []string
+	for _, sub := range ConfigInputsSubs {
+		rows = append(rows, syncRow("s", "sync_c_"+sub.Local, "sandbox-s-config-"+sub.Local))
+	}
+	for _, sub := range TranscriptSubs {
+		rows = append(rows, syncRow("s", "sync_t_"+sub, "sandbox-s-transcripts-"+sub))
+	}
+	r := &probeRunner{listOut: strings.Join(rows, "\n")}
+	spec := Spec{SessionID: "s", ProjectPath: t.TempDir(), HomeDir: "/Users/cullen", SSHHost: "sandbox-s", RemoteClaude: "/session/state/claude"}
+	if err := New(r).CreateInputs(context.Background(), spec); err != nil {
+		t.Fatalf("CreateInputs: %v", err)
+	}
+	if n := len(createCalls(r.calls)); n != 0 {
+		t.Errorf("all inputs already exist → no creates, got %d: %v", n, r.calls)
 	}
 }
 
 func TestCreateAllIdempotent(t *testing.T) {
-	r := &errorRunner{msg: "session already exists"}
+	// Idempotence via the pre-create existence check: seed the probe with every
+	// sync name (project + 5 config + 3 transcript) so a reconnecting CreateAll
+	// skips all creates rather than swallowing "already exists" errors.
+	const id = "test-session"
+	rows := []string{syncRow(id, "sync_p", "sandbox-"+id+"-project")}
+	for _, sub := range ConfigInputsSubs {
+		rows = append(rows, syncRow(id, "sync_c_"+sub.Local, "sandbox-"+id+"-config-"+sub.Local))
+	}
+	for _, sub := range TranscriptSubs {
+		rows = append(rows, syncRow(id, "sync_t_"+sub, "sandbox-"+id+"-transcripts-"+sub))
+	}
+	r := &probeRunner{listOut: strings.Join(rows, "\n")}
 	m := New(r)
 
 	spec := Spec{
-		SessionID:    "test-session",
+		SessionID:    id,
 		ProjectPath:  t.TempDir(),
 		RemotePath:   "/session/workspace/tmp",
 		HomeDir:      "/Users/cullen",
@@ -396,15 +584,18 @@ func TestCreateAllIdempotent(t *testing.T) {
 		RemoteClaude: "/session/state/claude",
 	}
 
-	// "already exists" errors should be swallowed
 	created, err := m.CreateAll(context.Background(), spec)
 	if err != nil {
-		t.Fatalf("createAll should swallow already-exists: %v", err)
+		t.Fatalf("createAll on an existing session should not error: %v", err)
 	}
 	// An already-existing project session is the reconnect signal: created=false
 	// so the caller skips the blocking initial flush.
 	if created {
 		t.Fatal("CreateAll should report created=false when the project session already exists")
+	}
+	// Nothing is re-created — every name was already present.
+	if n := len(createCalls(r.calls)); n != 0 {
+		t.Fatalf("CreateAll should re-create nothing on reconnect, got %d creates: %v", n, r.calls)
 	}
 }
 
