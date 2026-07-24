@@ -67,7 +67,7 @@ func TestRunForwardStopsWhenSessionGone(t *testing.T) {
 	go b.runForward(ctx, podWithSession(sid), 12345, 8080, h, ready)
 
 	select {
-	case <-h.done:
+	case <-h.Done():
 		// Terminated, as required.
 	case <-time.After(2 * time.Second):
 		t.Fatal("runForward kept retrying a destroyed session; it must terminate on a NotFound re-resolve")
@@ -112,7 +112,7 @@ func TestRunForwardKeepsRetryingWhileSessionExists(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	select {
-	case <-h.done:
+	case <-h.Done():
 		t.Fatal("runForward terminated on a transient reschedule gap; it must keep retrying while the Sandbox still exists")
 	default:
 	}
@@ -123,7 +123,7 @@ func TestRunForwardKeepsRetryingWhileSessionExists(t *testing.T) {
 	// Cancel (Close()) is the only intended teardown; the loop must then stop.
 	cancel()
 	select {
-	case <-h.done:
+	case <-h.Done():
 	case <-time.After(time.Second):
 		t.Fatal("runForward did not stop after the handle was closed")
 	}

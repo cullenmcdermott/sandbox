@@ -108,6 +108,43 @@ func (h *fakeForwardHandle) LocalPort() int        { return h.port }
 func (h *fakeForwardHandle) Close() error          { h.closed = true; return nil }
 func (h *fakeForwardHandle) Done() <-chan struct{} { return h.done }
 
+// TestSyncForwardAlive pins the SSH-forward liveness readout a library supervisor
+// uses to detect (and heal) a dead sync transport. handles[1] is the SSH forward
+// by construction (k8s.ForwardSpecs order); an Observer publishes only handles[0].
+func TestSyncForwardAlive(t *testing.T) {
+	// Never connected: no handles → false.
+	s := &Session{}
+	if s.SyncForwardAlive() {
+		t.Error("a never-connected session must report the sync forward not alive")
+	}
+
+	// Observer connection: runner HTTP forward only (len 1, no SSH) → false.
+	httpH := newFakeForwardHandle(1)
+	s.handles = []session.ForwardHandle{httpH}
+	if s.SyncForwardAlive() {
+		t.Error("an observer connection (runner-only forward) has no SSH forward → not alive")
+	}
+
+	// Full connection: [runner HTTP, SSH]; the SSH forward's done is open → alive.
+	sshH := newFakeForwardHandle(2)
+	s.handles = []session.ForwardHandle{httpH, sshH}
+	if !s.SyncForwardAlive() {
+		t.Error("a full connection with a live SSH forward must report alive")
+	}
+
+	// The SSH forward terminates (pod gone for good): done closes → not alive.
+	close(sshH.done)
+	if s.SyncForwardAlive() {
+		t.Error("a terminated SSH forward must report not alive")
+	}
+
+	// After Close (handles cleared) → not alive.
+	s.closeHandles()
+	if s.SyncForwardAlive() {
+		t.Error("a closed session must report the sync forward not alive")
+	}
+}
+
 // TestConnectCloseRaceDoesNotResurrect pins the V9 fix: Close racing an in-flight
 // Connect must NOT leave a live connection or an orphaned background goroutine.
 // We stall Connect inside PortForward, call Close (which bumps the generation),

@@ -214,6 +214,36 @@ func (s *Session) Runner() RunnerClient {
 	return &stagedRunner{RunnerClient: s.runner, s: s}
 }
 
+// SyncForwardAlive reports whether the SSH port-forward backing the mutagen sync
+// transport is still live. Mutagen re-dials the forward on transient drops, but
+// the forward goes TERMINAL when the pod is permanently gone (a Sandbox NotFound
+// on re-resolve — see internal/k8s runForward), and from then on files silently
+// stop syncing with no other signal a library consumer can observe. A supervisor
+// polling session health calls this to tell a dead sync forward apart from a
+// healthy one.
+//
+// It returns false for a session that never Connected, an Observer connection
+// (which forwards only the runner HTTP port — no SSH — so len(handles) < 2), a
+// Closed session (handles cleared), and one whose SSH forward has terminated. By
+// construction (k8s.ForwardSpecs order) handles[1] is the SSH forward whenever a
+// full Connect established one; an Observer publishes only handles[0] (runner
+// HTTP). The healing action is a fresh Connect: it re-forwards on a new local
+// port, rewrites the ssh alias to it, and the existing mutagen syncs reconcile
+// onto the new transport.
+func (s *Session) SyncForwardAlive() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.handles) < 2 {
+		return false
+	}
+	select {
+	case <-s.handles[1].Done():
+		return false
+	default:
+		return true
+	}
+}
+
 // stagedRunner wraps the connected runner client so StartTurn waits for the
 // session's background sync/staging work (AwaitSync) before submitting a turn:
 // Connect no longer blocks on the initial project flush (§5), but a turn must
