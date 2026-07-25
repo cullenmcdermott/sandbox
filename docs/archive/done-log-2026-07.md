@@ -2290,3 +2290,178 @@ surface; `just check` green.
   part A. Rider (b) FQDN-egress example + the skills-sync README section also
   landed (see the docs commits). Residual: the operator-prose README section for
   the ExtraEnv/BootstrapFiles injection surface.
+
+## 2026-07-25 — [O8] pane OSC 52 clipboard relay (maintainer live report)
+
+**Symptom (live, claude-pane):** selecting text in the in-pane Claude Code TUI
+printed its own "sent 2165 chars via OSC 52 · if paste fails, hold Shift while
+selecting for native copy" confirmation, but nothing reached the macOS
+pasteboard — leaving shift-drag native selection (which loses the pane's own
+selection semantics) as the only way to get text out.
+
+**Cause:** `ExternalPane` registered no OSC 52 handler on its vt emulator, so
+the child's `ESC ] 52 ; c ; <base64>` was consumed by the emulator as an
+"unhandled sequence" and never re-emitted to the HOST terminal. A virtual
+terminal has no clipboard of its own — the relay is the app's job, and we
+weren't doing it. Verified against `charmbracelet/x/vt`: no built-in OSC 52
+handling and no `Callbacks` field for it.
+
+**Fix:**
+- `tui/terminal/osc.go` (PUBLIC): new `ParseOSC52(data []byte) (text string,
+  primary, ok bool)` — the parse-side counterpart to the file's emit-side OSC
+  helpers. Takes the whole OSC data field (command number included, as an
+  emulator hands an OSC handler); tolerates unpadded and line-wrapped base64;
+  reports `ok=false` for malformed payloads and for the `?` read query (which
+  can't be answered without an async host round-trip). Pinned in
+  `sdktest/tui_surface_test.go`.
+- `internal/tui/dashboard/external_pane.go`: `Init` registers
+  `p.emu.RegisterOscHandler(52, p.handleOSC52)`; the handler queues onto a new
+  `pendingClip []paneClip`, and `apply()` drains it into `tea.SetClipboard` /
+  `tea.SetPrimaryClipboard` batched ahead of the next `readCmd`. The queue is
+  needed because the emulator's OSC handler runs synchronously inside the
+  `emu.Write` in `feed()` (on the Bubble Tea loop), where it can only stash.
+  The emulator's parser reassembles a sequence across transport reads, so a
+  multi-KB copy split over 32 KB chunks arrives whole.
+- `app.go handlePtyOutput` batches apply's Cmd with `externalPaneFinishedMsg`
+  instead of dropping it, so a copy in the child's FINAL output still lands.
+
+**Applies to every pane backend** (claude-pane, opencode, a future codex pane)
+— the relay sits at the shared `ExternalPane` seam, not in a per-backend path.
+
+**Tests:** `external_pane_osc52_test.go` — Init-level wiring guard (drives a
+fake transport so removing the `RegisterOscHandler` line fails), split-sequence
+reassembly, apply batching alongside the read drain, survival across
+end-of-stream, and handler queueing; `tui/terminal/osc_test.go` covers the
+parse table + wrapped-base64 decode.
+
+**Not done:** clipboard *reads* (`OSC 52 ; c ; ?`) are still dropped rather than
+answered — would need `tea.ReadClipboard` plus an async reply back down the
+transport. No in-pane confirmation note was added: the child prints its own.
+
+## 2026-07-25 — empty-workspace fail-closed + sync honesty (maintainer live reports)
+
+**Symptom (live):** a new session came up with a totally empty workspace and
+the agent started working in it anyway — *"it shouldn't have let it start if
+sync was failing!"*. Separately, the dashboard showed several sessions as sync
+`unknown` with no glyph and no reason.
+
+**Causes, three of them, all in the same blind spot:**
+
+- `internal/sync/manager.go classify()` read a mutagen session stuck in
+  `connecting-alpha`/`connecting-beta` with a nonzero staged-file count as
+  healthy `syncing`. A dropped transport looks exactly like progress if you
+  only read the counter — so the self-heal that watches for a stall never
+  fired, and the status the TUI showed was a lie.
+- `client`'s connect path did not gate on the first-ever sync at all. Added
+  `ErrInitialSyncFailed` + `AwaitSync`, and `stagedRunner.StartTurn` refuses a
+  turn whose workspace never staged.
+- That gate covered the WRONG backend. `StartTurn` is the opencode headless
+  adapter's path; claude-pane never submits a turn through it — the runner
+  spawns the interactive child lazily on the first `GET /sessions/:id/pane`
+  attach, so **the attach** is what starts an agent for a pane session. The
+  reported bug was still fully open on the exact backend it was reported on.
+
+**Fixes:** `Session.AttachPane` (`client/pane.go`) awaits the staging gate and
+refuses with `ErrInitialSyncFailed` — in the SDK, not the CLI adapter, per the
+maintainer's "expose it via the SDK regardless" directive. `mapPaneDial`
+(`internal/cli/dashboard_connector.go`) settles that gate under its own 90s
+budget so the wait is not charged to the 30s dial timeout (a slow-but-healthy
+large repo must not be failed by it), and refuses only on the KNOWN failure —
+a gate that merely runs out of budget falls through to the dial rather than
+stranding a healthy session with no pane. A reconnect is never gated.
+
+**Sync `unknown` was two unrelated situations wearing one label:** the mutagen
+CLI/daemon could not be reached (nothing is known about ANY session), or it
+answered and reported no sync session for this id (a definite answer, and a bad
+one — the files are not moving). `syncProber.probe` now carries the reason in a
+new `SyncHealth.Detail`, threaded through `syncStatusMsg` → `Session.SyncDetail`
+→ the detail pane, and `unknown` finally has a glyph (`?`). It still degrades
+rather than blocking the UI — it just no longer degrades silently.
+
+**Footer counter:** the maintainer read "1 ready" (header) next to "⚡1 warm"
+(footer) as possible duplication. They are genuinely different metrics —
+`attentionSummary` over `StatusNeedsInput` vs `len(m.warmSet)` — so the answer
+is no, but the footer was a bare number labelled with the codebase's internal
+word. Relabelled `⚡N streaming`, which names what is counted. "ready" was left
+alone: f3154c9 chose it deliberately over "needs input" for calmer language.
+
+**Tests:** `client/pane_test.go` (refusal after a failed first sync, plus the
+behavioral counter that a WARNING still proceeds), `internal/cli/
+sync_support_test.go TestProbeErrDetail`, `internal/tui/dashboard/
+sync_detail_render_test.go`, `footer_counters_test.go` (both counts set to 2 —
+the exact case that looked like duplication).
+
+## 2026-07-25 — ctx% divided by the wrong number (maintainer live report)
+
+**Symptom:** the dashboard showed 20% context used for a pane whose own in-pane
+statusline read 100% full. The indicator that exists to warn before a context
+fills never warned.
+
+**Cause:** exactly 5×. models.dev reports a model's MAXIMUM window — 1,000,000
+for the opus tier, confirmed in the maintainer's own
+`~/.local/share/sandbox/models.json` — while Claude Code runs 200,000 unless
+the extended-window beta is requested, which nothing in this repo requests.
+`models.Limit()` answers "what is this model capable of"; a ctx% denominator
+asks "what is it running with".
+
+**Part A — `client/models.EffectiveContextLimit`** (new exported function,
+sdktest-pinned). Clamping inside `Limit()` was tried first and REVERTED: that
+is also the pricing path, and several tests use its 1M value as the marker
+proving the models.dev table was consulted rather than the static fallback
+(`TestCacheHitAfterServerStops`, `TestStaleCacheUsedWhenFetchFails`,
+`TestColdLimitDoesNotBlockOnNetwork`). Clamping there would have kept them
+green while destroying what they discriminate. `Limit` keeps its meaning; the
+dashboard asks the new question. Fail-safe direction: understating headroom is
+visible, overstating it fails silently.
+
+**Part B — the agent's own number, which supersedes the guess.** Claude Code
+publishes `context_window.context_window_size` on every statusline sample.
+`schema/events.json` gains an optional `contextLimitTokens` on `UsagePayload`
+(protocolVersion unchanged — additive optional field); `claude-pane-observer`
+forwards it; `readmodel.go` prefers it over anything the model id implies, so
+denominator and numerator come from the same sample. `size` is accepted as a
+rename hedge. A non-numeric or absent window is OMITTED, not zeroed, so
+opencode/codex keep the model-derived fallback instead of losing the gauge.
+Needs a runner image rebuild to reach live sessions; part A covers them until
+then, and the two agree for every Claude tier anyway.
+
+**Residual:** the part-A clamp keys off family keywords (`claude`/`opus`/
+`sonnet`/`haiku`), the same heuristic `staticFallback` uses for pricing, so a
+non-Anthropic model named e.g. "haiku-*" would be misread. Acceptable while it
+is only a fallback behind part B.
+
+## 2026-07-25 — main was red and the gate could not see it
+
+Found while running the runner suite for the ctx% work: **two tests in
+`runner/test/claude-pane-observer.test.ts` had been throwing `ReferenceError`
+instead of asserting** since d19fd16. Both bypassPermissions provisioning tests
+call `claudePaneArgs` and `paneDefaultPermissionMode` without importing them.
+
+**Why nothing caught it:** `runner/tsconfig.json` includes only
+`src/**/*.ts` — its `rootDir` cannot widen without breaking `dist/`'s layout —
+and `package.json`'s lint script named `src` explicitly. The test tree was
+typechecked and linted by nothing at all, so an unbound identifier survived to
+runtime on green-looking `just typecheck` runs.
+
+**Ruled out:** the `just test` recipe DOES propagate a runner failure. Verified
+empirically with a scratch justfile — the recipe's `if [ -d node_modules ]; …;
+fi` carries `npm test`'s exit status, and CI installs runner deps
+(`.depot/workflows/ci.yml`) so the else-branch warning-skip is a local-only
+hazard. The blind spot was the typecheck side, not the test side.
+
+**Fix:** new `runner/tsconfig.test.json` (extends the build config, drops
+rootDir/outDir, `noEmit`, covers `src/` + `test/`); `just typecheck` runs both
+configs; lint widened to `eslint src test`. Ten pre-existing errors surfaced,
+all benign strictness in test fakes — fs-fake casts needing `as unknown as`, an
+arrow returning `ClientRequest` where `void` was declared, one
+`SessionState`→`Record` cast, one `let` that wanted `const`.
+
+**Also removed:** `runner/statusline/statusline`, an 8.6 MB Mach-O arm64 binary
+committed in d19fd16 next to the source it was built from. The runner image
+compiles its own Linux binary in the Dockerfile's statusline stage; the tracked
+copy only bloated the build context. Gitignored so a local `go build` in that
+directory cannot re-add it. The blob stays in history (a rewrite is not worth
+it for one object).
+
+**`just check` green on main afterwards** — the first run that actually
+exercised the widened typecheck.

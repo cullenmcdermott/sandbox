@@ -1,5 +1,21 @@
 # TODO — backlog
 
+### bugs/ideas to discusss
+* ~~ctx inside the runner session and on the dashboard do not match up~~ —
+  *FIXED 2026-07-25 (done log). Exactly 5×: models.dev reports the opus tier's
+  1M MAXIMUM window, Claude Code runs 200k. Part A clamps the guess
+  (`models.EffectiveContextLimit`); part B carries the agent's own
+  `context_window_size` on `usage.updated` as `contextLimitTokens` and prefers
+  it. **Part B needs a runner image rebuild** — live sessions run part A until
+  they are recreated on a new image. Residual: the part-A clamp keys off family
+  keywords (`claude`/`opus`/`sonnet`/`haiku`), so a non-Anthropic model named
+  "haiku-*" would be misread — acceptable while it is only the fallback.*
+* is auto-compact on? Probably should be.
+* Passing in MCPs and skills
+  * Somewhat related but exposing  endpoints from laptop to agent pods. Could be MCP servers, ssh key socket, etc. Potentially risky so should be careful/explicit before using.
+* What is not exposed through our public sdk. I want an external consumer to be able to reuse all of our tui compnents like building blocks, transitions, modals, etc. Glyphs, information, all that jazz
+* rewrite agent piece into go?
+
 > **How to use this file (agents):** sections are numbered workstreams, ordered
 > roughly bugs → strategy → perf → platform. Every item carries `file:line`
 > pointers and a fix direction — enough to plan without re-discovery. Pick a
@@ -100,6 +116,36 @@ done log.)
   Nix is the preferred install mechanism everywhere in the chain. Triage
   alongside the §7b sign-off.*
 
+### 0b. Loose ends from the 2026-07-25 ctx%/sync batch
+
+- [ ] **Rebuild + publish the runner image so ctx% part B reaches live
+  sessions.** `contextLimitTokens` is emitted by
+  `runner/src/claude-pane-observer.ts` (handleStatusline) but a pod only picks
+  it up on a new image; until then live sessions run the part-A clamp
+  (`client/models.EffectiveContextLimit`). Trigger
+  `.depot/workflows/build-runner-image.yml`, then recreate a session and check
+  the dashboard ctx% against the in-pane statusline — they should now agree
+  exactly rather than approximately. *Maintainer confirmed the rebuild cost is
+  acceptable ("This is fine. As long as it works idc", 2026-07-25).*
+
+- [ ] **`go test ./...` walks into `runner/node_modules`.** The gate's output
+  lists `github.com/cullenmcdermott/sandbox/runner/node_modules/flatted/golang/
+  pkg/flatted [no test files]` — an npm dependency ships a Go package and the
+  root module pattern picks it up. Harmless today (no test files) but it means
+  `./...` is not the set we think it is; a dep that ships a *failing* Go test
+  would fail our gate. Fix direction: exclude via a `go.work`-less approach —
+  simplest is adding `runner/node_modules` to the module's ignore surface, or
+  narrowing the recipes' package pattern. Pointer: `justfile:89` (`test`),
+  `justfile:79` (`build`), `justfile:85` (`vet`).
+
+- [ ] **Is auto-compact on in pane sessions? (maintainer note, untriaged.)**
+  Now answerable with real numbers: `contextLimitTokens` plus the usage
+  counters give the true fill ratio, so a session that *should* have compacted
+  and didn't is now visible rather than inferred. Check what the pane child is
+  configured with (`runner/src/claude-pane.ts` env allowlist +
+  `CLAUDE_CONFIG_DIR` settings seeded by `claude-pane-observer.ts`
+  `provisionPaneObserver`) before deciding whether to seed a default.
+
 ### 0a. Live-dogfood reports (2026-07-15) — ALL RESOLVED same day (done log)
 
 All five maintainer reports fixed + landed: user-block wrap, wrap-aware
@@ -170,6 +216,17 @@ row-model consolidation moved to §2a where it belongs.
   method) and map it to `closeTurn('interrupted')` — needs a live session.
   Dashboard follow-up (separate, needs design): an honest "stalled?"
   rendering for busy-with-quiet-observer beats a false "working".
+- [x] **[L9] done 2026-07-25** (done log): in-pane copy reaches the host
+  clipboard. The vt emulator swallowed the child's OSC 52 as an "unhandled
+  sequence", so Claude Code's "sent N chars via OSC 52" confirmation was a
+  lie and shift-drag native selection was the only way out. `Init` now
+  registers an OSC 52 handler that queues onto `pendingClip`; `apply()`
+  drains it into `tea.SetClipboard` batched with the next read (and
+  `handlePtyOutput` batches it with the finished message so a copy in the
+  child's final output still lands). Parse lives in the PUBLIC
+  `terminal.ParseOSC52` (sdktest-pinned). Applies to every pane backend.
+  Residual: clipboard *reads* (`OSC 52 ; c ; ?`) are still dropped — an
+  answer needs `tea.ReadClipboard` plus an async reply down the transport.
 - [x] **[L3] done 2026-07-21** (done log): feed opens seeded from a
   ONE-SHOT passive SSE replay from seq 0 (`feed_history.go` — attach-gate/
   connect-slot/C1 discipline, 15s read bound, 2000-event tail cap, gen
