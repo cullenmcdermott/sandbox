@@ -9,6 +9,7 @@ package sdktest
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/cullenmcdermott/sandbox/client"
@@ -252,5 +253,56 @@ func TestTokenHelpers(t *testing.T) {
 	}
 	if a, _ := cred.AuthForType(cred.AccountConsole); a != "api-key" {
 		t.Errorf("AuthForType(console): got %q, want api-key", a)
+	}
+}
+
+// TestSessionResolutionErrorSemantics pins what a consumer can DO with a failed
+// resolution, from outside the module. ResolveSessions itself needs a *Client
+// (and so a cluster or an in-module fake), but the error vocabulary it returns
+// is usable — and must stay usable — on its own.
+func TestSessionResolutionErrorSemantics(t *testing.T) {
+	// The ambiguity error must satisfy BOTH errors.Is against the sentinel (the
+	// cheap branch) and errors.As to the concrete type (the branch that reaches
+	// the candidates). Losing either one silently downgrades a consumer's
+	// disambiguation UI to a bare error string.
+	err := error(&client.AmbiguousSessionError{
+		Query: "auth",
+		Candidates: []client.SessionMatch{
+			{ID: "claude-pane-one", Title: "auth refactor", MatchedBy: client.MatchTitle},
+			{ID: "claude-pane-two", Title: "auth cleanup", MatchedBy: client.MatchTitle},
+		},
+	})
+	if !errors.Is(err, client.ErrAmbiguousSession) {
+		t.Errorf("AmbiguousSessionError must wrap ErrAmbiguousSession, got %v", err)
+	}
+	var amb *client.AmbiguousSessionError
+	if !errors.As(err, &amb) {
+		t.Fatalf("errors.As to *AmbiguousSessionError failed for %v", err)
+	}
+	if len(amb.Candidates) != 2 || amb.Candidates[0].ID != "claude-pane-one" {
+		t.Errorf("candidates did not survive the error round-trip: %+v", amb.Candidates)
+	}
+	// The message names the query and the colliding ids — a consumer that only
+	// prints it still tells the user what to type next.
+	for _, want := range []string{"auth", "claude-pane-one", "claude-pane-two"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error message %q omits %q", err.Error(), want)
+		}
+	}
+
+	// MatchKind values are stringly-typed and consumers persist/compare them.
+	kinds := map[client.MatchKind]string{
+		client.MatchID:           "id",
+		client.MatchIDPrefix:     "id-prefix",
+		client.MatchTitle:        "title",
+		client.MatchBranch:       "branch",
+		client.MatchWorktreePath: "worktree-path",
+		client.MatchProjectPath:  "project-path",
+		client.MatchAny:          "any",
+	}
+	for got, want := range kinds {
+		if string(got) != want {
+			t.Errorf("MatchKind constant changed value: got %q, want %q", got, want)
+		}
 	}
 }

@@ -77,6 +77,51 @@ var (
 	// no-option calls keep the historical behavior and signature compatibility.
 	_ func(*client.Client, context.Context, client.ID, ...client.ResumeOption) error = (*client.Client).Resume
 	_ func(string, string) client.ResumeOption                                       = client.WithClaudeCredentials
+
+	// Session resolution: turn what a human typed (id, id prefix, title, branch,
+	// or a path they are standing in) into a session. Pinned because a consumer
+	// building its own front-end needs the same answer the CLI gets, and because
+	// completion callers depend on ResolveSessions returning an empty slice
+	// rather than an error when nothing matches.
+	_ func(*client.Client, context.Context, string) ([]client.SessionMatch, error) = (*client.Client).ResolveSessions
+	_ func(*client.Client, context.Context, string) (client.SessionMatch, error)   = (*client.Client).ResolveSession
+)
+
+// --- client: session resolution --------------------------------------------
+
+var (
+	// The match kinds double as the specificity ranking. Dropping or retyping one
+	// changes how a consumer's disambiguation UI groups candidates.
+	_ client.MatchKind = client.MatchAny
+	_ client.MatchKind = client.MatchID
+	_ client.MatchKind = client.MatchWorktreePath
+	_ client.MatchKind = client.MatchBranch
+	_ client.MatchKind = client.MatchIDPrefix
+	_ client.MatchKind = client.MatchTitle
+	_ client.MatchKind = client.MatchProjectPath
+
+	// Sentinels a consumer branches on with errors.Is.
+	_ error = client.ErrNoSessionMatch
+	_ error = client.ErrAmbiguousSession
+
+	// The ambiguity error carries its candidates so a caller can render the
+	// choice without a second lookup; errors.As on this type is the documented
+	// way to reach them.
+	_ = &client.AmbiguousSessionError{
+		Query:      "auth",
+		Candidates: []client.SessionMatch{{ID: "claude-pane-abc"}},
+	}
+
+	_ = client.SessionMatch{
+		ID:           "claude-pane-abc",
+		Title:        "auth refactor",
+		Backend:      "claude-pane",
+		ProjectPath:  "/repo",
+		WorktreePath: "/wt",
+		Branch:       "sandbox/claude-pane-abc",
+		LastActivity: time.Time{},
+		MatchedBy:    client.MatchTitle,
+	}
 )
 
 // --- client: Session method set ----------------------------------------------
