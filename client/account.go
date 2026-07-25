@@ -65,8 +65,14 @@ func (o *CreateOptions) useAccount(store cred.Store, acct cred.Account) error {
 	return nil
 }
 
-// SelectAnthropicAccount applies account-selection semantics to o for a
-// claude-sdk session. selector is a raw user-supplied value (may be ""):
+// SelectAnthropicAccount applies account-selection semantics to o for a session
+// authenticating with an inference-scoped Anthropic credential — the retired
+// claude-sdk backend's contract. BackendClaudePane does NOT use this path: the
+// interactive pane needs the account's full Claude Code OAuth documents, so it
+// goes through SelectClaudePaneMaterial / UseClaudePaneMaterial instead (which,
+// unlike this helper, has no shared-Secret fallback at all).
+//
+// selector is a raw user-supplied value (may be ""):
 //
 //   - selector != "": resolve id|label → account (cred.Resolve), then load its
 //     credential. Any failure is a hard error — it never falls back to the
@@ -78,7 +84,8 @@ func (o *CreateOptions) useAccount(store cred.Store, acct cred.Account) error {
 //   - selector == "" with no accounts stored: the legacy shared-Secret path —
 //     o is left untouched (backward compatible).
 //
-// Callers apply this only for the claude backend; opencode has no account step.
+// Callers apply this only for a token-authenticated Anthropic backend; opencode
+// and codex have their own credential steps.
 func (o *CreateOptions) SelectAnthropicAccount(store cred.Store, selector string) error {
 	accounts, err := store.List()
 	if err != nil {

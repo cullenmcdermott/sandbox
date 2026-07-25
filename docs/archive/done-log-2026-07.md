@@ -2290,3 +2290,75 @@ surface; `just check` green.
   part A. Rider (b) FQDN-egress example + the skills-sync README section also
   landed (see the docs commits). Residual: the operator-prose README section for
   the ExtraEnv/BootstrapFiles injection surface.
+
+## 2026-07-25 — §10 [O15] retired-backend (`claude-sdk`) residue sweep
+
+Burned down [O15] plus its 2026-07-21 batch additions. The headline is a
+**deliberate behavior change**: `client.Create`'s empty-`Backend` default moved
+from the retired `BackendClaudeSDK` to `BackendClaudePane`. The old default
+provisioned a pod whose `selectAgent` returns null, so the session came up and
+then 409'd on every turn — a silent dead end. claude-pane fails LOUDLY instead:
+a caller with no credential material now gets `ErrClaudePaneCredentialMissing`
+(which already carries "log in with `claude` on this machine" remediation from
+[L1]) before any cluster call. Pre-OSS break, per §8's rules.
+
+- **`client/client.go`:** the default flip + a `CreateOptions.Backend` doc that
+  names the material requirement and the sentinel. No production caller relied
+  on the old default — every CLI command and the dashboard picker set `Backend`
+  explicitly (`internal/cli/claude_remote.go`, `backend_picker.go`).
+- **`internal/cli/dashboard_connector.go`:** the Creator's own empty-Backend
+  fallback moved to `BackendClaudePane` to match, with a comment noting the
+  picker always sets it (so this is defense in depth for direct callers).
+- **`internal/session/types.go`:** `BackendClaudeSDK` gained a RETIRED doc block
+  in the `agent.ts:66` pattern — what a lingering pod still serves, and "never
+  select it for a NEW session". `Spec.Backend`'s doc listed the retired id and
+  omitted claude-pane (fixed); the `ID` example is now `claude-pane-7f3a`;
+  `State.AgentSessionID` now describes the pane's `--session-id`/`--resume`
+  pinning rather than "the Claude SDK session UUID"; `TurnInput.ApprovalPolicy`
+  says plainly that it is effectively inert now that opencode is the only
+  runner-turn backend.
+- **`internal/tui/dashboard/zones.go`:** the cluster strip's known-backend order
+  omitted `claude-pane` entirely (so pane sessions fell into the sorted
+  `extras` tail) AND counted by raw backend id — since `ClientLabel`/
+  `BackendMark` map claude-sdk and claude-pane to the same "claude", a fleet
+  holding one of each rendered `claude 1 · claude 1`. Now aggregated by display
+  label over an explicit known list, first id carrying a label as the
+  representative.
+- **`runner/src/session.ts`:** `loadConfig`'s local-dev fallbacks were
+  `claude-sdk-local` / `claude-sdk` — i.e. `npm start` outside a pod booted the
+  retired id and 409'd every turn. Now `claude-pane-local` / `claude-pane`,
+  tracking the CLI default, with a comment saying a real pod always gets both
+  from the pod template.
+- **`client/account.go`:** `SelectAnthropicAccount`'s doc said "for a claude-sdk
+  session … callers apply this only for the claude backend", which post-pane-first
+  reads as covering claude-pane. Reworded to name the inference-scoped token
+  path and point at `SelectClaudePaneMaterial` for the pane.
+- **`justfile`:** the `kind-up` comment claimed the `anthropic-credentials`
+  Secret is what makes `just dev` claude work (false — the pane harvests the
+  host login into a per-session Secret and ignores it); the `kind-test` cost
+  model still described a claude turn that no longer exists. Both rewritten
+  against `backendCases`.
+- **Examples:** `Example` and `client/doc.go`'s "typical use" both drove
+  `StartTurn` on an implicit backend — doubly wrong under the new default, since
+  opencode is the only backend still accepting runner turns. Both now name
+  `BackendOpenCode`. `Example_chat`'s step 1 swapped `SelectAnthropicAccount`
+  (the retired token path) for `HarvestOpencodeAuth`, matching what
+  `dashboard_connector.go` actually does.
+- **Tests:** `client/orchestration_test.go`'s default assertion flipped to
+  claude-pane (with shape-only `testFullPaneCred`/`testPaneAccountDoc`
+  fixtures), plus a NEW subtest pinning that an empty `Backend` with no material
+  returns `ErrClaudePaneCredentialMissing` and never calls `CreateSession`.
+  Sites that were incidentally relying on the default (`ExtraEnv` flow, reserved
+  env name, backend-error propagation, the Destroy call-order seeds, the three
+  worktree Creates) now name `BackendOpenCode`; the two Anthropic-account
+  contract tests in `example_test.go` name `BackendClaudeSDK` explicitly,
+  because the token path IS that backend's contract and the pane gate would
+  otherwise mask the sentinel under test.
+
+**Already done, verified not residue:** `internal/k8sit/local_test.go`'s
+claude-sdk conformance row was already replaced by the claude-pane row (its
+comment cites O15), and SECURITY.md's A1-residual section already cites
+`opencode.ts`/`codex.ts`; its two remaining `runner/src/claude.ts` mentions are
+deliberate historical references to the deleted file. Test-fixture session ids
+of the shape `claude-sdk-<x>` were left alone — they are arbitrary strings, and
+churning ~150 of them would be noise.

@@ -291,15 +291,37 @@ func (m *Model) backendMix(c sessionPartition) string {
 		}
 		return s
 	}
+	// Known ids render in a stable order, aggregated by DISPLAY LABEL: the
+	// retired claude-sdk id and claude-pane share both ClientLabel ("claude") and
+	// BackendMark, so a fleet holding one of each must read "claude 2", not
+	// "claude 1 · claude 1" (O15 residue). The first id in the list carrying a
+	// label is the representative passed to part().
+	known := []string{session.BackendClaudePane, session.BackendClaudeSDK, session.BackendOpenCode}
+	isKnown := make(map[string]bool, len(known))
+	for _, b := range known {
+		isKnown[b] = true
+	}
 	var parts []string
-	for _, b := range []string{session.BackendClaudeSDK, session.BackendOpenCode} {
-		if n := c.byBackend[b]; n > 0 {
+	counted := make(map[string]bool, len(known))
+	for _, b := range known {
+		label := ClientLabel(b)
+		if counted[label] {
+			continue
+		}
+		counted[label] = true
+		n := 0
+		for _, alias := range known {
+			if ClientLabel(alias) == label {
+				n += c.byBackend[alias]
+			}
+		}
+		if n > 0 {
 			parts = append(parts, part(b, n))
 		}
 	}
 	var extras []string
 	for b := range c.byBackend {
-		if b == session.BackendClaudeSDK || b == session.BackendOpenCode {
+		if isKnown[b] {
 			continue
 		}
 		extras = append(extras, b)

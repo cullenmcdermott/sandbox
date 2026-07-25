@@ -340,7 +340,11 @@ func (c *Client) StateDir() string { return c.stateDir }
 
 // CreateOptions parameterizes Create.
 type CreateOptions struct {
-	// Backend selects the agent backend (default "claude-sdk").
+	// Backend selects the agent backend (default BackendClaudePane). A
+	// claude-pane session requires full credential material — set it with
+	// SelectClaudePaneMaterial (or UseClaudePaneMaterial) or Create fails with
+	// ErrClaudePaneCredentialMissing. Pass BackendOpenCode/BackendCodex
+	// explicitly for those backends; BackendClaudeSDK is retired.
 	Backend string
 	// ProjectPath is the absolute workspace path mirrored into the pod. Required.
 	ProjectPath string
@@ -531,9 +535,15 @@ func (c *Client) Create(ctx context.Context, opt CreateOptions) (_ *Session, err
 	// set, so this is a no-op when off.
 	tr := newTracer()
 	defer tr.start("create.total").end()
+	// O15: the empty-Backend default is BackendClaudePane, not the retired
+	// BackendClaudeSDK. The old default provisioned a pod whose selectAgent
+	// returns null, so the session came up and then 409'd on every turn — a
+	// silent dead end. claude-pane is the flagship backend and fails LOUDLY
+	// instead: a caller with no credential material now gets
+	// ErrClaudePaneCredentialMissing below rather than a broken session.
 	backendName := opt.Backend
 	if backendName == "" {
-		backendName = session.BackendClaudeSDK
+		backendName = session.BackendClaudePane
 	}
 	if opt.ProjectPath == "" {
 		return nil, ErrProjectPathRequired

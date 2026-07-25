@@ -12,6 +12,9 @@ import {
   type PaneObserverDeps,
   type PaneObserverFs,
 } from '../src/claude-pane-observer.js';
+// The bypassPermissions assertions below read the mode back through the pane's
+// own resolver, which lives in claude-pane.ts (the observer only WRITES the key).
+import { paneDefaultPermissionMode, claudePaneArgs } from '../src/claude-pane.js';
 import type { EventType } from '../src/types.js';
 
 interface Emitted {

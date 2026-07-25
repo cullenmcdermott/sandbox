@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/cullenmcdermott/sandbox/internal/index"
+	"github.com/cullenmcdermott/sandbox/internal/session"
 )
 
 // worktree_test.go covers the wave-2 per-session worktree lifecycle: the
@@ -259,7 +260,9 @@ func TestCreateStampsWorktree(t *testing.T) {
 	be := newFakeBackend()
 	c, _, _ := fakeClient(t, be)
 
-	sess, err := c.Create(ctx, CreateOptions{ProjectPath: repo, ID: "claude-sdk-wt1"})
+	// Backend explicit: these tests are about worktree stamping, not about the
+	// default backend's credential gate.
+	sess, err := c.Create(ctx, CreateOptions{ProjectPath: repo, ID: "claude-sdk-wt1", Backend: session.BackendOpenCode})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -299,7 +302,7 @@ func TestCreateRollsBackWorktreeOnBackendFailure(t *testing.T) {
 	be.createErr = errors.New("apiserver down")
 	c, _, _ := fakeClient(t, be)
 
-	if _, err := c.Create(ctx, CreateOptions{ProjectPath: repo, ID: "claude-sdk-rbfail"}); err == nil {
+	if _, err := c.Create(ctx, CreateOptions{ProjectPath: repo, ID: "claude-sdk-rbfail", Backend: session.BackendOpenCode}); err == nil {
 		t.Fatal("Create: want backend error, got nil")
 	}
 	// The worktree created before the failed cluster call was torn down: no dir,
@@ -321,7 +324,7 @@ func TestCreateWorktreeOffKeepsProjectPath(t *testing.T) {
 	be := newFakeBackend()
 	c, _, _ := fakeClient(t, be)
 
-	sess, err := c.Create(ctx, CreateOptions{ProjectPath: repo, ID: "claude-sdk-off", Worktree: WorktreeOff})
+	sess, err := c.Create(ctx, CreateOptions{ProjectPath: repo, ID: "claude-sdk-off", Worktree: WorktreeOff, Backend: session.BackendOpenCode})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

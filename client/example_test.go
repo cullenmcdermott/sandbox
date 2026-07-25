@@ -31,7 +31,14 @@ func Example() {
 		return
 	}
 
-	sess, err := c.Create(ctx, client.CreateOptions{ProjectPath: "/work/repo"})
+	// Backend is explicit: StartTurn below is a runner-driven turn, and opencode
+	// is the only backend that still accepts one. The default backend
+	// (BackendClaudePane) is supervise-only — its turns run in the interactive
+	// pane, which you attach with Session.AttachPane instead.
+	sess, err := c.Create(ctx, client.CreateOptions{
+		ProjectPath: "/work/repo",
+		Backend:     client.BackendOpenCode,
+	})
 	if err != nil {
 		return
 	}
@@ -81,17 +88,25 @@ func Example_chat() {
 		return
 	}
 
-	// 1. Account selection. DefaultStore is the multi-account Anthropic credential
-	// store; SelectAnthropicAccount resolves that account's credential bytes into
-	// the CreateOptions. It is fail-closed: a named-but-unresolvable account is a
-	// hard error, never a silent fall-back to the shared cluster Secret. The ""
-	// selector picks the stored default (or the sole stored account, or — with no
-	// accounts stored — leaves the options on the legacy shared-Secret path).
-	opts := client.CreateOptions{ProjectPath: "/work/repo"}
-	if store, serr := cred.DefaultStore(); serr == nil {
-		if err := opts.SelectAnthropicAccount(store, ""); err != nil {
-			return
-		}
+	// 1. Backend + credential selection. The backend is named explicitly: this
+	// example drives runner turns (StartTurn below), and opencode is the only
+	// backend that still accepts them — BackendClaudePane, the empty-Backend
+	// default, is supervise-only and is driven through Session.AttachPane
+	// instead. HarvestOpencodeAuth reads this machine's own `opencode` login and
+	// seeds it into the per-session Secret; a missing local login is not fatal
+	// (the session falls back to the shared cluster Secret), but a corrupt one
+	// is — credential handling here is fail-closed, never a silent fallback.
+	opts := client.CreateOptions{
+		ProjectPath: "/work/repo",
+		Backend:     client.BackendOpenCode,
+	}
+	switch material, herr := client.HarvestOpencodeAuth(); {
+	case errors.Is(herr, client.ErrOpencodeAuthNotFound):
+		// No local login: leave opts alone and use the shared-Secret fallback.
+	case herr != nil:
+		return
+	default:
+		opts.OpencodeAuthJSON = material.JSON
 	}
 
 	sess, err := c.Create(ctx, opts)
@@ -285,10 +300,16 @@ func TestCreateRejectsInvalidAnthropicAuth(t *testing.T) {
 // TestCreateFailsClosedOnAnthropicAccount: Create rejects a named account with
 // no resolved credential bytes (fail-closed — never fall back to the shared
 // Secret) and credential bytes with no account id, before any cluster call.
+//
+// Backend is named explicitly: AnthropicAccountID/AnthropicCredential are the
+// inference-scoped TOKEN path, which is the retired claude-sdk backend's
+// contract. Since O15 the empty-Backend default is claude-pane, whose material
+// gate would fire first and mask the sentinel under test.
 func TestCreateFailsClosedOnAnthropicAccount(t *testing.T) {
 	c := &client.Client{}
 	_, err := c.Create(context.Background(), client.CreateOptions{
 		ProjectPath:        "/p",
+		Backend:            client.BackendClaudeSDK,
 		AnthropicAccountID: "acct-work",
 	})
 	if !errors.Is(err, client.ErrAnthropicCredentialMissing) {
@@ -296,6 +317,7 @@ func TestCreateFailsClosedOnAnthropicAccount(t *testing.T) {
 	}
 	_, err = c.Create(context.Background(), client.CreateOptions{
 		ProjectPath:         "/p",
+		Backend:             client.BackendClaudeSDK,
 		AnthropicCredential: []byte("sk-ant-oat-SECRET"),
 	})
 	if !errors.Is(err, client.ErrAnthropicAccountRequired) {
@@ -318,8 +340,11 @@ func TestCreatePlumbsAnthropicAccount(t *testing.T) {
 	}
 
 	const cred = "sk-ant-oat-PLUMBED"
+	// Backend explicit: the token path belongs to the retired claude-sdk backend
+	// (the empty-Backend default is claude-pane since O15).
 	sess, err := c.Create(context.Background(), client.CreateOptions{
 		ProjectPath:         "/work/repo",
+		Backend:             client.BackendClaudeSDK,
 		AnthropicAuth:       "oauth",
 		AnthropicAccountID:  "acct-work",
 		AnthropicCredential: []byte(cred),

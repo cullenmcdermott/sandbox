@@ -322,8 +322,9 @@ func (m *Model) dashListTable() []boundAction[*Model] {
 		},
 		// View the read-only activity feed (`v`) for an external-pane session — a
 		// detached monitor of its normalized events, from which enter/a attaches
-		// the pane. For a non-external (claude-sdk transcript) session `v` is a
-		// no-op: it has its own attach screen and no feed.
+		// the pane. Gated on externalPaneBackend, so `v` is a no-op for a backend
+		// with no pane to monitor (today: the retired claude-sdk id, whose custom
+		// transcript screen went with the renderer, and codex until its pane lands).
 		{
 			binding: key.NewBinding(key.WithKeys("v"), key.WithHelp("v", "view feed")),
 			when: func(m *Model) bool {
