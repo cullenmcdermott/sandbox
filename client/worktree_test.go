@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -859,4 +860,182 @@ func reapByID(reaped []ReapedWorktree) map[string]ReapedWorktree {
 		m[r.SessionID] = r
 	}
 	return m
+}
+
+// --- change 3: carry the parent checkout's dirty state into a new worktree ----
+
+// gitRun runs a git command in dir with an isolated config, mirroring initRepo,
+// so the new-worktree carry tests can dirty the parent checkout deterministically.
+func gitRun(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, out)
+	}
+}
+
+func TestCarryDirtyUnstagedTrackedEdit(t *testing.T) {
+	requireGit(t)
+	repo := initRepo(t)
+	c, _ := worktreeClient(t)
+	if err := os.WriteFile(filepath.Join(repo, "seed.txt"), []byte("edited\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := c.createWorktree(context.Background(), WorktreeOn, repo, "cs-unstaged")
+	if err != nil {
+		t.Fatalf("createWorktree: %v", err)
+	}
+	got, _ := os.ReadFile(filepath.Join(info.Path, "seed.txt"))
+	if string(got) != "edited\n" {
+		t.Errorf("worktree seed.txt = %q, want carried edit %q", got, "edited\n")
+	}
+}
+
+func TestCarryDirtyStagedNewFile(t *testing.T) {
+	requireGit(t)
+	repo := initRepo(t)
+	c, _ := worktreeClient(t)
+	if err := os.WriteFile(filepath.Join(repo, "new.txt"), []byte("new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, repo, "add", "new.txt") // staged addition — shows in `git diff HEAD`
+	info, err := c.createWorktree(context.Background(), WorktreeOn, repo, "cs-staged")
+	if err != nil {
+		t.Fatalf("createWorktree: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(info.Path, "new.txt"))
+	if err != nil || string(got) != "new\n" {
+		t.Errorf("worktree new.txt = %q err=%v, want %q", got, err, "new\n")
+	}
+}
+
+func TestCarryDirtyUntrackedFile(t *testing.T) {
+	requireGit(t)
+	repo := initRepo(t)
+	c, _ := worktreeClient(t)
+	if err := os.WriteFile(filepath.Join(repo, "untracked.txt"), []byte("u\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := c.createWorktree(context.Background(), WorktreeOn, repo, "cs-untracked")
+	if err != nil {
+		t.Fatalf("createWorktree: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(info.Path, "untracked.txt"))
+	if err != nil || string(got) != "u\n" {
+		t.Errorf("worktree untracked.txt = %q err=%v, want %q", got, err, "u\n")
+	}
+}
+
+func TestCarryDirtyIgnoredFileNotCarried(t *testing.T) {
+	requireGit(t)
+	repo := initRepo(t)
+	c, _ := worktreeClient(t)
+	// Commit a .gitignore so it is tracked (and so not itself carried as untracked).
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("ignored.txt\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, repo, "add", ".gitignore")
+	gitRun(t, repo, "commit", "-m", "gitignore")
+	if err := os.WriteFile(filepath.Join(repo, "ignored.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := c.createWorktree(context.Background(), WorktreeOn, repo, "cs-ignored")
+	if err != nil {
+		t.Fatalf("createWorktree: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(info.Path, "ignored.txt")); !os.IsNotExist(err) {
+		t.Errorf("ignored file was carried into the worktree (stat err=%v)", err)
+	}
+}
+
+func TestCarryDirtyBinaryEdit(t *testing.T) {
+	requireGit(t)
+	repo := initRepo(t)
+	c, _ := worktreeClient(t)
+	if err := os.WriteFile(filepath.Join(repo, "bin.dat"), []byte{0, 1, 2, 3, 0, 255, 254}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, repo, "add", "bin.dat")
+	gitRun(t, repo, "commit", "-m", "bin")
+	newBin := []byte{9, 8, 7, 0, 6, 5}
+	if err := os.WriteFile(filepath.Join(repo, "bin.dat"), newBin, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := c.createWorktree(context.Background(), WorktreeOn, repo, "cs-binary")
+	if err != nil {
+		t.Fatalf("createWorktree: %v", err)
+	}
+	got, _ := os.ReadFile(filepath.Join(info.Path, "bin.dat"))
+	if !bytes.Equal(got, newBin) {
+		t.Errorf("worktree bin.dat = %v, want carried binary edit %v", got, newBin)
+	}
+}
+
+func TestCarryDirtyCleanParentNoOp(t *testing.T) {
+	requireGit(t)
+	repo := initRepo(t) // clean checkout
+	c, _ := worktreeClient(t)
+	info, err := c.createWorktree(context.Background(), WorktreeOn, repo, "cs-clean")
+	if err != nil {
+		t.Fatalf("createWorktree: %v", err)
+	}
+	// A clean parent must leave the worktree clean (no spurious carry).
+	out, _ := exec.Command("git", "-C", info.Path, "status", "--porcelain").CombinedOutput()
+	if strings.TrimSpace(string(out)) != "" {
+		t.Errorf("clean parent produced a dirty worktree: %q", out)
+	}
+	if _, err := os.Stat(filepath.Join(info.Path, "seed.txt")); err != nil {
+		t.Errorf("worktree missing seed.txt from HEAD: %v", err)
+	}
+}
+
+func TestCarryDirtyEmbeddedRepoSkipped(t *testing.T) {
+	requireGit(t)
+	repo := initRepo(t)
+	c, _ := worktreeClient(t)
+	embedded := filepath.Join(repo, "embedded")
+	if err := os.MkdirAll(embedded, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, embedded, "init", "-b", "main") // nested repo => single "embedded/" entry
+	if err := os.WriteFile(filepath.Join(embedded, "inner.txt"), []byte("i\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := c.createWorktree(context.Background(), WorktreeOn, repo, "cs-embedded")
+	if err != nil {
+		t.Fatalf("createWorktree: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(info.Path, "embedded")); !os.IsNotExist(err) {
+		t.Errorf("embedded git repo was carried into the worktree (stat err=%v)", err)
+	}
+}
+
+func TestCarryDirtyFailureRollsBack(t *testing.T) {
+	requireGit(t)
+	repo := initRepo(t)
+	c, stateDir := worktreeClient(t)
+	// Dirty tracked state so the carry actually invokes `git apply`.
+	if err := os.WriteFile(filepath.Join(repo, "seed.txt"), []byte("edited\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Inject a failure on `git apply`, delegating every other git call to the real
+	// binary so the worktree is genuinely created (and thus genuinely torn down).
+	c.gitExec = func(ctx context.Context, dir string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "apply" {
+			return []byte("boom"), errors.New("injected apply failure")
+		}
+		return realGitRunner(ctx, dir, args...)
+	}
+	if _, err := c.createWorktree(context.Background(), WorktreeOn, repo, "cs-rbfail"); err == nil {
+		t.Fatal("createWorktree: want carry failure, got nil")
+	}
+	// No residue: the half-populated worktree dir is gone and the auto-branch deleted.
+	if _, err := os.Stat(filepath.Join(stateDir, "worktrees", "cs-rbfail")); !os.IsNotExist(err) {
+		t.Errorf("worktree dir survived rollback (stat err=%v)", err)
+	}
+	out, _ := exec.Command("git", "-C", repo, "branch", "--list", "sandbox/cs-rbfail").CombinedOutput()
+	if strings.Contains(string(out), "cs-rbfail") {
+		t.Errorf("auto-branch survived rollback: %q", out)
+	}
 }

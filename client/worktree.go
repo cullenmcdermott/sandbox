@@ -141,6 +141,18 @@ func (c *Client) createWorktree(ctx context.Context, mode WorktreeMode, projectP
 	if err := worktreeAdd(ctx, git, info.RepoRoot, info.Branch, info.Path); err != nil {
 		return worktreeInfo{}, err
 	}
+	// `git worktree add … HEAD` checks out the last commit, so a session created
+	// from a dirty checkout would get NONE of the user's uncommitted work — the
+	// agent silently working on stale files while the user looks at their edits
+	// locally. Carry the parent's dirty state in. A failure tears the
+	// half-populated worktree down (the same no-residue contract as the caller's
+	// rollback) and fails the create loudly — never a silent partial carry.
+	if cerr := carryDirtyState(ctx, git, info.RepoRoot, info.Path); cerr != nil {
+		rbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), worktreeRollbackTimeout)
+		defer cancel()
+		c.rollbackWorktree(rbCtx, info)
+		return worktreeInfo{}, cerr
+	}
 	return info, nil
 }
 
@@ -237,6 +249,96 @@ func worktreeAdd(ctx context.Context, git gitRunner, toplevel, branch, path stri
 		}
 	}
 	return nil
+}
+
+// carryDirtyState replays the parent checkout's uncommitted work into a freshly
+// added worktree (see createWorktree). Tracked changes ride one `git diff HEAD
+// --binary` patch; untracked-but-not-ignored files are copied individually.
+func carryDirtyState(ctx context.Context, git gitRunner, parent, worktreePath string) error {
+	// Tracked changes (staged + unstaged) as one patch against HEAD, --binary so a
+	// binary edit round-trips. No --index, and here is why: everything downstream
+	// that consumes the worktree's changes (the WIP capture in teardownWorktree /
+	// ReapWorktrees, and ConvertToBranch) runs `git add -A` before committing, and
+	// WorktreeStatus reads porcelain — none depend on the staged/unstaged split, so
+	// the worktree just needs its tree dirty the same way the parent's is.
+	diff, err := git(ctx, parent, "diff", "HEAD", "--binary")
+	if err != nil {
+		return fmt.Errorf("sandbox: read parent checkout's tracked changes: %w", err)
+	}
+	if strings.TrimSpace(string(diff)) != "" {
+		// The gitRunner seam has no stdin, so the patch goes through a temp file.
+		patch, perr := os.CreateTemp("", "sandbox-carry-*.patch")
+		if perr != nil {
+			return fmt.Errorf("sandbox: stage carry patch: %w", perr)
+		}
+		defer os.Remove(patch.Name())
+		if _, werr := patch.Write(diff); werr != nil {
+			patch.Close()
+			return fmt.Errorf("sandbox: stage carry patch: %w", werr)
+		}
+		if cerr := patch.Close(); cerr != nil {
+			return fmt.Errorf("sandbox: stage carry patch: %w", cerr)
+		}
+		if _, aerr := git(ctx, worktreePath, "apply", patch.Name()); aerr != nil {
+			return fmt.Errorf("sandbox: apply parent checkout's tracked changes to worktree: %w", aerr)
+		}
+	}
+
+	// Untracked-but-not-ignored files, copied one by one. --exclude-standard is
+	// git's own filter, so ignored build artifacts and .dev/ junk deliberately stay
+	// behind.
+	out, err := git(ctx, parent, "ls-files", "--others", "--exclude-standard", "-z")
+	if err != nil {
+		return fmt.Errorf("sandbox: list parent checkout's untracked files: %w", err)
+	}
+	for _, rel := range strings.Split(strings.TrimRight(string(out), "\x00"), "\x00") {
+		if rel == "" {
+			continue
+		}
+		if cerr := copyUntrackedFile(parent, worktreePath, rel); cerr != nil {
+			return fmt.Errorf("sandbox: carry untracked file %s into worktree: %w", rel, cerr)
+		}
+	}
+	return nil
+}
+
+// copyUntrackedFile copies one untracked entry (rel, relative to the parent repo
+// root) into the worktree, preserving mode and relinking symlinks rather than
+// dereferencing them.
+func copyUntrackedFile(parentRoot, worktreeRoot, rel string) error {
+	src := filepath.Join(parentRoot, rel)
+	dst := filepath.Join(worktreeRoot, rel)
+	fi, err := os.Lstat(src)
+	if err != nil {
+		return err
+	}
+	// A directory entry here is a nested git repo: `git ls-files --others` recurses
+	// into every OTHER untracked dir and lists its files individually, but emits an
+	// embedded git repo as a single "path/" entry. An embedded repo is not the
+	// project's dirty state and must not be shipped to the pod.
+	if fi.IsDir() {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	switch {
+	case fi.Mode()&os.ModeSymlink != 0:
+		target, rerr := os.Readlink(src)
+		if rerr != nil {
+			return rerr
+		}
+		return os.Symlink(target, dst)
+	case fi.Mode().IsRegular():
+		data, rerr := os.ReadFile(src)
+		if rerr != nil {
+			return rerr
+		}
+		return os.WriteFile(dst, data, fi.Mode().Perm())
+	default:
+		// FIFO, socket, device, etc. Carrying it silently wrong is worse than failing.
+		return fmt.Errorf("unsupported file type %s", rel)
+	}
 }
 
 // worktreeStatusPorcelain returns `git -C <path> status --porcelain` output; an
