@@ -23,3 +23,8 @@ dev/local/.kubeconfig
 dev/local/secret.local.yaml
 
 .DS_STORE
+
+# Build output of the vendored in-pane statusline. The runner image builds its
+# own Linux binary from source (runner/Dockerfile statusline stage); an 8.6 MB
+# host-arch binary was committed in d19fd16 and is useless everywhere.
+runner/statusline/statusline
