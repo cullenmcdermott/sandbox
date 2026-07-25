@@ -166,8 +166,12 @@ kind-up:
     fi
     # Provision the Claude OAuth token Secret (anthropic-credentials) from 1Password
     # (op) or $CLAUDE_CODE_OAUTH_TOKEN — mirrors the ESO-provisioned Secret on a real
-    # cluster so `just dev` (claude) works without hand-maintaining secret.local.yaml.
-    # Non-fatal: a missing token just leaves the claude backend plumbing-only.
+    # cluster without hand-maintaining secret.local.yaml. Non-fatal.
+    # NOTE (O15): this Secret feeds the RETIRED claude-sdk backend's inference-scoped
+    # token only. `sandbox claude` (claude-pane) ignores it entirely — the pane
+    # harvests this machine's own `claude` login and seeds a per-session Secret — so
+    # a missing token here does not affect the claude path. Kept for the opencode
+    # anthropic provider fallback and for exercising legacy pods.
     bash dev/local/claude-creds.sh ensure-secret || true
     # Provision the OpenCode Zen API key Secret (opencode-credentials) from 1Password
     # (op) or $OPENCODE_API_KEY — same pattern as above. Non-fatal.
@@ -227,12 +231,13 @@ dev-image:
 # `just kind-up` + `just dev-image` first. Build-tagged `integration`, kept out
 # of the default `go test ./...` and out of `just check`.
 #
-# Cost model (the suite drives REAL turns): the opencode turn uses opencode's
-# default free model (opencode/big-pickle) → $0, no key. The claude turn asserts a
-# real reply ONLY when the anthropic-credentials Secret is present (apply your own
-# dev/local/secret.local.yaml); without it, claude degrades to plumbing-only and
-# makes no model call. So PAID calls happen only when you have deliberately wired a
-# key. Each run makes ~2 free opencode calls — run it on demand, not in a loop.
+# Cost model (the suite drives REAL turns): opencode is the ONLY backend that
+# drives a runner turn post-pane-first, and it uses opencode's default free model
+# (opencode/big-pickle) → $0, no key. claude-pane and codex are supervise-only —
+# their POST /turns 409s — so they fill the CLI-smoke column with no model call at
+# all (backendCases.drivesRunnerTurns in internal/k8sit/local_test.go). No row
+# currently sets needsKey, so the suite makes NO paid calls; each run makes ~2 free
+# opencode calls — run it on demand, not in a loop.
 kind-test:
     #!/usr/bin/env bash
     [ -n "${FLOX_ENV:-}" ] || exec flox activate -- just kind-test

@@ -208,9 +208,12 @@ func creatorProjectPath(picked string) (string, error) {
 // API.
 func newDashboardCreator(c *client.Client, runnerImage, reaperImage string) dashboard.Creator {
 	return func(ctx context.Context, params dashboard.CreateParams, onStage func(dashboard.ConnectStage, string)) (dashboard.CreateResult, error) {
+		// The backend picker always sets params.Backend (claude-pane or opencode),
+		// so this is defense in depth for direct Creator callers; it matches
+		// client.Create's own empty-Backend default (O15).
 		backendName := params.Backend
 		if backendName == "" {
-			backendName = client.BackendClaudeSDK
+			backendName = client.BackendClaudePane
 		}
 		projectPath, err := creatorProjectPath(params.ProjectPath)
 		if err != nil {

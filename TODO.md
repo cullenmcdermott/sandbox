@@ -103,6 +103,29 @@ Raw maintainer notes. Triage = either promote into a numbered section with
 pointers, or answer inline and archive. (Resolved investigations moved to the
 done log.)
 
+* **`just typecheck` does not cover `runner/test/`, and it cost us two red
+  tests** (found 2026-07-25 during the [O15] sweep, fixed in the same change).
+  `runner/test/claude-pane-observer.test.ts` used `paneDefaultPermissionMode`
+  and `claudePaneArgs` without importing them — both live in
+  `runner/src/claude-pane.ts` — so the two `permissions.defaultMode` tests threw
+  `ReferenceError` on every run. `tsc --noEmit` stayed green because the
+  typecheck's tsconfig excludes `test/`. Fix direction: widen the typecheck to
+  the test tree (a second `tsc -p` pass over a test tsconfig is the cheap
+  version) so an unimported symbol fails at typecheck rather than at runtime.
+  Worth checking how these landed green in CI — `just check` runs the runner
+  suite, so either the gate was skipped for that commit or the suite's exit code
+  is not being propagated; the latter would be the more serious finding.
+
+* **Autopilot residue in the runner** (found 2026-07-25; same class as [O15] but
+  a different retirement — §1e deleted autopilot on 2026-07-20). ~10 stale
+  references: `runner/src/turns.ts:2,82,90,102,128` (`turnSettledHandler` exists
+  "for the autopilot driver"), `runner/src/server.ts:30,398`,
+  `runner/src/events.ts:445,473`, `runner/src/index.ts:247`. Also a live wire
+  field: `capabilities.autopilot` (`runner/src/types.ts:182-185`,
+  `session.ts:312-315`) is always false and nothing consumes it — decide keep
+  (documented-always-false) vs drop from the status body. Comments-only except
+  that last decision.
+
 * Create nix flake (with binary and container outputs?). Is there a place to
   host nix binary cache, maybe tigris? Also consider publishing to FloxHub as
   a public package (via Depot CI). — *note: a flake exists but only packages
@@ -1274,7 +1297,26 @@ do well is recorded there too; fix in roughly this order):
   error both carry "log in with `claude` on this machine" remediation.
 - [ ] **[O14] README hero GIF predates the pane UI** — re-record after the
   live pass (was already noted in 7.4; now has an id).
-- [ ] **[O15] Retired-backend residue sweep** — `backend.go:1716`,
+- [x] **[O15] Retired-backend residue sweep — done 2026-07-25** (done log):
+  `client.Create`'s empty-`Backend` default moved off the retired
+  `BackendClaudeSDK` to `BackendClaudePane` — the old default silently
+  provisioned a pod whose `selectAgent` returns null (409 on every turn); the
+  new one fails closed with `ErrClaudePaneCredentialMissing` before any
+  cluster call, and the dashboard Creator's fallback matches. Retired-id doc
+  block on the constant (`agent.ts:66` pattern); `Spec.Backend` / `ID` /
+  `AgentSessionID` / `ApprovalPolicy` docs corrected; the cluster-strip
+  backend mix now aggregates by DISPLAY LABEL (a claude-sdk + claude-pane
+  fleet rendered `claude 1 · claude 1`, since both map to the same
+  `ClientLabel`/`BackendMark`); `runner/src/session.ts` local-dev defaults →
+  claude-pane; `SelectAnthropicAccount` doc scoped to the token path;
+  justfile kind-up/kind-test comments rewritten against `backendCases`;
+  `Example` / `doc.go` / `Example_chat` retargeted at opencode (the only
+  backend still accepting runner turns). Two listed pointers were ALREADY
+  fixed — `internal/k8sit/local_test.go`'s conformance row and SECURITY.md's
+  A1 citation. **Verified: runner suite (244 pass / 0 fail) + `tsc --noEmit`
+  only; NO Go toolchain in the authoring environment, so `just check` has not
+  been run — the Go edits are unbuilt.**
+  *(original item, for the pointer trail)* — `backend.go:1716`,
   `internal/session/types.go:53`, `runner/src/session.ts:37`,
   `client/account.go:69`, `internal/k8sit/local_test.go:44`; apply the
   `agent.ts:66` retired-id comment pattern or delete dead branches. (The

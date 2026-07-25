@@ -33,8 +33,13 @@ export interface RunnerConfig {
 }
 
 export function loadConfig(): RunnerConfig {
-  const sessionId = process.env.SANDBOX_SESSION_ID ?? 'claude-sdk-local';
-  const backend = process.env.SANDBOX_BACKEND ?? 'claude-sdk';
+  // Local-dev fallbacks only: a real pod always gets both from the pod template
+  // (internal/k8s buildEnv). The backend default tracks the CLI's default
+  // (client.Create) so `npm start` outside a pod behaves like a real session
+  // rather than booting the retired claude-sdk id, which selectAgent turns into
+  // a 409 on every turn.
+  const sessionId = process.env.SANDBOX_SESSION_ID ?? 'claude-pane-local';
+  const backend = process.env.SANDBOX_BACKEND ?? 'claude-pane';
   const projectPath = process.env.PROJECT_PATH ?? process.cwd();
   const runnerToken = process.env.RUNNER_TOKEN ?? '';
   const model = process.env.SANDBOX_MODEL ?? '';

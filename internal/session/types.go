@@ -22,6 +22,12 @@ var ErrSessionGone = errors.New("session no longer exists")
 // the canonical values for Spec.Backend / State.Backend, shared across the CLI,
 // the k8s backend, and the dashboard to avoid stringly-typed drift.
 const (
+	// BackendClaudeSDK is a RETIRED backend id (claude-pane-first deleted the SDK
+	// turn engine it named). It is kept only so an id already baked into a
+	// long-lived Sandbox pod template or a local index entry still round-trips:
+	// the runner boots such a pod and serves /status and /idle, but selectAgent
+	// returns null for it so POST /turns 409s (runner/src/agent.ts). Never select
+	// it for a NEW session — BackendClaudePane is the claude backend.
 	BackendClaudeSDK = "claude-sdk"
 	BackendOpenCode  = "opencode-server"
 	// BackendCodex is the Codex backend: the runner supervises a `codex
@@ -74,7 +80,7 @@ func OpencodeProviderEntryKey(provider string) string {
 	}
 }
 
-// ID is a sandbox session identifier, e.g. "claude-sdk-7f3a".
+// ID is a sandbox session identifier, e.g. "claude-pane-7f3a".
 type ID string
 
 // TurnID identifies a single user-prompted turn within a session.
@@ -107,8 +113,8 @@ type Spec struct {
 	// while ProjectPath stays the repo root.
 	WorkspacePath string `json:"workspacePath,omitempty"`
 
-	// Backend selects which agent backend the runner uses (BackendClaudeSDK,
-	// BackendOpenCode, BackendCodex).
+	// Backend selects which agent backend the runner uses (BackendClaudePane,
+	// BackendOpenCode, BackendCodex; BackendClaudeSDK is retired — see its doc).
 	Backend string `json:"backend"`
 
 	// RunnerImage is the container image for the runner pod.
@@ -402,9 +408,10 @@ type State struct {
 	// only by the runner client's SessionState from GET /status (the k8s backend
 	// cannot know it and leaves it empty). Distinct from Status (D9).
 	Activity Activity `json:"activity,omitempty"`
-	// AgentSessionID is the backend's own resume id — the Claude SDK session UUID
-	// for a claude-sdk session, or the opencode session id — reported by the
-	// runner's session.json. One backend per session ⇒ one resume id. It is
+	// AgentSessionID is the backend's own resume id — the Claude Code session
+	// UUID the pane pins with --session-id/--resume, or the opencode session id —
+	// reported by the runner's session.json. One backend per session ⇒ one
+	// resume id. It is
 	// carried for resume/inspection; the local index/history path persists it
 	// separately (see internal/index.Entry.AgentSessionID).
 	AgentSessionID string `json:"agentSession,omitempty"`
@@ -456,9 +463,11 @@ type TurnInput struct {
 	// than a raw SDK string. Empty means the runner applies its default
 	// (ApprovalBypass since 2026-07-12 — the sandbox pod is the isolation
 	// boundary; see docs/runner-api.md). The wire key stays "mode" and the wire
-	// values are the SDK permission-mode strings, so this maps 1:1 for the
-	// claude-sdk backend; the runner maps it per-backend and a backend that does
-	// not honor it (opencode owns its own permission modal) ignores it.
+	// values are the SDK permission-mode strings, which is what the retired
+	// claude-sdk backend mapped 1:1; the runner maps it per-backend and a backend
+	// that does not honor it ignores it. Post-pane-first the only backend still
+	// accepting runner turns is opencode, which owns its own permission modal —
+	// so today this field is effectively inert on the wire.
 	ApprovalPolicy ApprovalPolicy `json:"mode,omitempty"`
 	// Model overrides the model for this turn (the in-session /model switch):
 	// an id/alias like "opus", "sonnet", "haiku", or a full id. Empty means the

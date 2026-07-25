@@ -23,6 +23,14 @@ import (
 // regression net for §8's Destroy reorder: sync stop must precede the cluster
 // destroy, or mutagen sessions orphan against a dead pod.
 
+// Minimal credential material that satisfies validateClaudePaneMaterial, for
+// the tests that exercise Create's empty-Backend default (BackendClaudePane).
+// The values are shape-only — nothing here reaches a real Anthropic endpoint.
+const (
+	testFullPaneCred   = `{"claudeAiOauth":{"accessToken":"AT","refreshToken":"RT"}}`
+	testPaneAccountDoc = `{"oauthAccount":{}}`
+)
+
 // fakeBackend implements client.Backend. Each method optionally records itself
 // into *order (shared with the fake sync runner so a test can pin cross-seam
 // call ordering) and returns the pre-seeded result/error for that method.
@@ -194,14 +202,21 @@ func TestClientCreate(t *testing.T) {
 		be := newFakeBackend()
 		c, _, _ := fakeClient(t, be)
 
-		sess, err := c.Create(ctx, CreateOptions{ProjectPath: "/work/repo", ID: "claude-sdk-abc123"})
+		// No Backend set: this exercises the empty-Backend default, which is
+		// BackendClaudePane (O15), so full pane material is required.
+		sess, err := c.Create(ctx, CreateOptions{
+			ProjectPath:            "/work/repo",
+			ID:                     "claude-pane-abc123",
+			ClaudeCredentialsJSON:  []byte(testFullPaneCred),
+			ClaudeOAuthAccountJSON: []byte(testPaneAccountDoc),
+		})
 		if err != nil {
 			t.Fatalf("Create: %v", err)
 		}
-		if sess.ID() != "claude-sdk-abc123" {
-			t.Errorf("session id = %q, want claude-sdk-abc123", sess.ID())
+		if sess.ID() != "claude-pane-abc123" {
+			t.Errorf("session id = %q, want claude-pane-abc123", sess.ID())
 		}
-		if !sess.fresh || sess.freshBackend != session.BackendClaudeSDK || sess.sshPrivPath == "" {
+		if !sess.fresh || sess.freshBackend != session.BackendClaudePane || sess.sshPrivPath == "" {
 			t.Errorf("fresh shortcuts not stamped: fresh=%v backend=%q priv=%q", sess.fresh, sess.freshBackend, sess.sshPrivPath)
 		}
 		// The spec handed to the backend carries the project path and the freshly
@@ -217,8 +232,8 @@ func TestClientCreate(t *testing.T) {
 		if sess.workspacePath != "/work/repo" {
 			t.Errorf("session workspacePath = %q, want /work/repo", sess.workspacePath)
 		}
-		if be.gotSpec.Backend != session.BackendClaudeSDK {
-			t.Errorf("spec backend = %q, want default claude-sdk", be.gotSpec.Backend)
+		if be.gotSpec.Backend != session.BackendClaudePane {
+			t.Errorf("spec backend = %q, want default claude-pane", be.gotSpec.Backend)
 		}
 		// The session is recorded locally so status/reconnect can find it.
 		if _, lerr := c.index.Load(string(sess.ID())); lerr != nil {
@@ -240,9 +255,12 @@ func TestClientCreate(t *testing.T) {
 	t.Run("valid ExtraEnv/ExtraSecretEnv flow into the spec", func(t *testing.T) {
 		be := newFakeBackend()
 		c, _, _ := fakeClient(t, be)
+		// Backend is explicit so this stays a test of the env-injection surface,
+		// not of the default backend's credential gate.
 		_, err := c.Create(ctx, CreateOptions{
 			ProjectPath:    "/work/repo",
-			ID:             "claude-sdk-extraenv",
+			ID:             "opencode-extraenv",
+			Backend:        session.BackendOpenCode,
 			ExtraEnv:       map[string]string{"TOOL_ENDPOINT": "https://tool.internal"},
 			ExtraSecretEnv: map[string][]byte{"GITLAB_TOKEN": []byte("glpat-secret")},
 		})
@@ -262,6 +280,7 @@ func TestClientCreate(t *testing.T) {
 		c, _, _ := fakeClient(t, be)
 		_, err := c.Create(ctx, CreateOptions{
 			ProjectPath: "/work/repo",
+			Backend:     session.BackendOpenCode,
 			ExtraEnv:    map[string]string{"RUNNER_TOKEN": "nope"},
 		})
 		if !errors.Is(err, ErrReservedEnvName) {
@@ -276,8 +295,24 @@ func TestClientCreate(t *testing.T) {
 		be := newFakeBackend()
 		be.createErr = errors.New("apiserver down")
 		c, _, _ := fakeClient(t, be)
-		if _, err := c.Create(ctx, CreateOptions{ProjectPath: "/work/repo"}); err == nil {
+		if _, err := c.Create(ctx, CreateOptions{ProjectPath: "/work/repo", Backend: session.BackendOpenCode}); err == nil {
 			t.Fatal("Create: want error from CreateSession, got nil")
+		}
+	})
+
+	// O15: the empty-Backend default moved off the retired claude-sdk id. A
+	// caller who sets nothing must land on claude-pane and be told, loudly, that
+	// the pane needs credential material — never get a silently-broken session
+	// on a backend whose POST /turns always 409s.
+	t.Run("empty Backend defaults to claude-pane and fails closed without material", func(t *testing.T) {
+		be := newFakeBackend()
+		c, _, _ := fakeClient(t, be)
+		_, err := c.Create(ctx, CreateOptions{ProjectPath: "/work/repo"})
+		if !errors.Is(err, ErrClaudePaneCredentialMissing) {
+			t.Fatalf("Create with no Backend and no material: got %v, want ErrClaudePaneCredentialMissing", err)
+		}
+		if len(be.gotRefs["create"]) != 0 {
+			t.Error("CreateSession must not be called when the pane credential gate fails")
 		}
 	})
 }
@@ -463,7 +498,7 @@ func TestDestroyStopsSyncBeforeClusterDestroy(t *testing.T) {
 		be := newFakeBackend()
 		c, spy, order := fakeClient(t, be)
 		// Seed a local index entry so we can prove RemoveLocalState ran (after destroy).
-		if _, err := c.Create(ctx, CreateOptions{ProjectPath: "/work/repo", ID: "sess-1"}); err != nil {
+		if _, err := c.Create(ctx, CreateOptions{ProjectPath: "/work/repo", ID: "sess-1", Backend: session.BackendOpenCode}); err != nil {
 			t.Fatalf("seed Create: %v", err)
 		}
 		*order = (*order)[:0] // discard the create bookkeeping; measure Destroy only
@@ -487,7 +522,7 @@ func TestDestroyStopsSyncBeforeClusterDestroy(t *testing.T) {
 		be := newFakeBackend()
 		be.destroyErr = errors.New("finalizer stuck")
 		c, _, order := fakeClient(t, be)
-		if _, err := c.Create(ctx, CreateOptions{ProjectPath: "/work/repo", ID: "sess-1"}); err != nil {
+		if _, err := c.Create(ctx, CreateOptions{ProjectPath: "/work/repo", ID: "sess-1", Backend: session.BackendOpenCode}); err != nil {
 			t.Fatalf("seed Create: %v", err)
 		}
 		*order = (*order)[:0]

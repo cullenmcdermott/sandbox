@@ -20,7 +20,10 @@
 //
 //	c, err := client.New(client.WithContext("my-cluster"), client.WithNamespace("agent-sessions"))
 //	if err != nil { ... }
-//	sess, err := c.Create(ctx, client.CreateOptions{ProjectPath: "/work/repo"})
+//	sess, err := c.Create(ctx, client.CreateOptions{
+//		ProjectPath: "/work/repo",
+//		Backend:     client.BackendOpenCode, // the only backend accepting runner turns
+//	})
 //	if err != nil { ... }
 //	if _, err := sess.Connect(ctx, client.ConnectOptions{}); err != nil { ... }
 //	defer sess.Close()

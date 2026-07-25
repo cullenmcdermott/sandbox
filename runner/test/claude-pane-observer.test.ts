@@ -12,10 +12,11 @@ import {
   type PaneObserverDeps,
   type PaneObserverFs,
 } from '../src/claude-pane-observer.js';
-// The provisioning tests assert the seeded settings actually drive the SPAWN,
-// so they reach across to the supervisor's readers. Missing here until now,
-// which made both of those tests throw ReferenceError instead of asserting —
-// tsconfig only typechecks src/, so nothing caught the unbound identifier.
+// The bypassPermissions assertions below read the mode back through the pane's
+// own resolver, which lives in claude-pane.ts (the observer only WRITES the
+// key). Missing here until 50e568e, which made both of those tests throw
+// ReferenceError instead of asserting — tsconfig only covered src/, so nothing
+// caught the unbound identifier (closed by tsconfig.test.json).
 import { claudePaneArgs, paneDefaultPermissionMode } from '../src/claude-pane.js';
 import type { EventType } from '../src/types.js';
 
