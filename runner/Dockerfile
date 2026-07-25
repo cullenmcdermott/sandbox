@@ -80,6 +80,12 @@ RUN set -eux; \
       "https://downloads.claude.ai/claude-code-releases/${CLAUDE_CODE_VERSION}/${platform}/claude"; \
     echo "${sha256}  /usr/local/bin/claude" | sha256sum -c -; \
     chmod 0755 /usr/local/bin/claude
+# Surface the pinned version to the runner so claude-config's boot seed reads it
+# instead of spawning `claude --version` (a ~50MB Node cold-start that blocks the
+# readiness-gated :8787 listen on every resume). Sourced from the SAME ARG that
+# pins the download so it cannot drift from the installed binary — bump it with
+# the ARG, not separately.
+ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
 
 # opencode CLI for opencode-server sessions: the runner supervises `opencode
 # serve` and the local client attaches over a port-forward. Pin OPENCODE_VERSION

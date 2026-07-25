@@ -8,10 +8,17 @@
 // start seamlessly (no login, no trust dialog, subscription mode), those must
 // exist as files in CLAUDE_CONFIG_DIR on the PVC:
 //
-//   .credentials.json  — written ONLY when absent. The in-pod claude refreshes
-//                        this file itself (rotating access tokens); overwriting
-//                        a refreshed credential with stale Secret material
-//                        would re-break auth, so presence always wins.
+//   .credentials.json  — written only when the PVC has no USABLE credential.
+//                        The in-pod claude refreshes this file itself (rotating
+//                        access tokens), so overwriting a fresh credential with
+//                        stale Secret material would re-break auth. But presence
+//                        is the wrong test: claude BLANKS its own claudeAiOauth
+//                        block on a failed refresh or a logout — the keys stay
+//                        with an empty accessToken and expiresAt: 0 — and that
+//                        dead file would otherwise win every boot, pinning the
+//                        session at /login forever while a good credential sits
+//                        unused in the Secret. So the guard is validity, not
+//                        presence (see materializeCredentials).
 //   .claude.json       — merged, not overwritten: the boot ensures the minimal
 //                        seamless-start seed (hasCompletedOnboarding,
 //                        lastOnboardingVersion, oauthAccount, and the workspace
@@ -61,17 +68,35 @@ export interface MaterializeClaudePaneOptions {
   claudeVersion?: () => string;
 }
 
+/** Leading "X.Y.Z" of s, or '' — `claude --version` prints trailing build text,
+ * and an ENV carrying anything unexpected must degrade like a failed exec
+ * rather than seed a malformed version. */
+function semverPrefix(s: string): string {
+  const m = /^(\d+\.\d+\.\d+)/.exec(s.trim());
+  return m ? m[1] : '';
+}
+
 /** Read the installed claude version for the lastOnboardingVersion seed. Any
  * failure (binary missing in dev images, unexpected output) degrades to '' —
  * the field is then omitted and claude may show a what's-new note, which is
- * cosmetic, so this is deliberately not fail-closed. */
+ * cosmetic, so this is deliberately not fail-closed.
+ *
+ * Prefers $CLAUDE_CODE_VERSION and skips the spawn entirely when it is set: the
+ * exec sits on the boot path — execFileSync cold-starts a second ~50MB Node
+ * bundle and blocks the :8787 listen, which readiness gates, which Connect
+ * blocks on, for 1-3s (worst case the 10s timeout) on every cold start and every
+ * resume, purely to seed a cosmetic lastOnboardingVersion. The ENV is baked into
+ * the runner image alongside the pinned, sha256-verified binary; the exec path
+ * stays as the fallback for dev images and any build that does not set it, so
+ * this degrades to the old behavior until the image is rebuilt. */
 export function detectClaudeVersion(
   exec: (cmd: string, args: string[], opts: ExecFileSyncOptions) => Buffer | string = execFileSync,
+  env: NodeJS.ProcessEnv = process.env,
 ): string {
+  const pinned = semverPrefix(env.CLAUDE_CODE_VERSION ?? '');
+  if (pinned !== '') return pinned;
   try {
-    const out = exec('claude', ['--version'], { timeout: 10_000 }).toString();
-    const m = /^(\d+\.\d+\.\d+)/.exec(out.trim());
-    return m ? m[1] : '';
+    return semverPrefix(exec('claude', ['--version'], { timeout: 10_000 }).toString());
   } catch {
     return '';
   }
@@ -91,17 +116,56 @@ export function materializeClaudePaneConfig(opts: MaterializeClaudePaneOptions):
   fs.mkdirSync(dir, { recursive: true });
 
   materializeCredentials(dir, env, fs);
-  const version = (opts.claudeVersion ?? detectClaudeVersion)();
+  // Resolve the version against the SAME env the rest of this function uses, so a
+  // test or an env-overriding caller sees the pinned version rather than the
+  // ambient process env.
+  const version = opts.claudeVersion ? opts.claudeVersion() : detectClaudeVersion(undefined, env);
   mergeStateSeed(dir, env, fs, opts.workspaceDir, version);
+}
+
+/** Whether a claudeAiOauth block can actually log claude in. The one test both
+ * the on-PVC file and the Secret material are judged by, so a credential that
+ * cannot authenticate is never mistaken for one. */
+function usableToken(oauth: { accessToken?: unknown } | undefined): boolean {
+  return typeof oauth?.accessToken === 'string' && oauth.accessToken !== '';
+}
+
+/** usableToken applied to a whole .credentials.json document. Unparseable input
+ * is "not usable" — it cannot log claude in either. */
+function hasUsableOAuth(raw: string): boolean {
+  try {
+    const doc = JSON.parse(raw) as { claudeAiOauth?: { accessToken?: unknown } };
+    return usableToken(doc.claudeAiOauth);
+  } catch {
+    return false;
+  }
+}
+
+/** existing with its dead claudeAiOauth replaced by oauth, or undefined when
+ * existing is not a JSON object — there is then nothing to preserve and the
+ * caller falls back to the Secret bytes. */
+function withOAuth(existing: string, oauth: unknown): string | undefined {
+  let doc: unknown;
+  try {
+    doc = JSON.parse(existing);
+  } catch {
+    return undefined;
+  }
+  if (doc === null || typeof doc !== 'object' || Array.isArray(doc)) return undefined;
+  return JSON.stringify({ ...(doc as Record<string, unknown>), claudeAiOauth: oauth });
 }
 
 function materializeCredentials(dir: string, env: NodeJS.ProcessEnv, fs: ClaudeConfigFs): void {
   const path = join(dir, '.credentials.json');
-  if (readIfExists(fs, path) !== undefined) return; // in-pod refresh wins; never clobber
+  const existing = readIfExists(fs, path);
+  // Validity, not presence: a present-but-dead file (blanked claudeAiOauth) must
+  // NOT win — it would pin the session at /login while a good Secret credential
+  // sits unused. Only an on-PVC file that can actually authenticate short-circuits.
+  if (existing !== undefined && hasUsableOAuth(existing)) return; // in-pod refresh wins
   const raw = env.CLAUDE_CREDENTIALS_JSON;
   if (!raw) {
     throw new Error(
-      'claude-pane: no .credentials.json on the PVC and no CLAUDE_CREDENTIALS_JSON in the env — session Secret material is missing',
+      'claude-pane: no usable .credentials.json on the PVC and no CLAUDE_CREDENTIALS_JSON in the env — session Secret material is missing',
     );
   }
   let doc: { claudeAiOauth?: { accessToken?: unknown } };
@@ -110,12 +174,16 @@ function materializeCredentials(dir: string, env: NodeJS.ProcessEnv, fs: ClaudeC
   } catch {
     throw new Error('claude-pane: CLAUDE_CREDENTIALS_JSON is not valid JSON');
   }
-  if (typeof doc.claudeAiOauth?.accessToken !== 'string' || doc.claudeAiOauth.accessToken === '') {
+  if (!usableToken(doc.claudeAiOauth)) {
     throw new Error('claude-pane: CLAUDE_CREDENTIALS_JSON carries no claudeAiOauth.accessToken');
   }
-  // Write the Secret bytes verbatim (no re-serialization) so credential fields
-  // this module does not model survive untouched.
-  fs.writeFileSync(path, raw, { mode: 0o600 });
+  // Merge rather than overwrite on recovery: the pod's mcpOAuth server tokens are
+  // per-pod and unrecoverable from the Secret, so only claudeAiOauth is swapped
+  // in. A fresh dir has nothing to preserve, so it takes the Secret bytes
+  // verbatim (no re-serialization) and credential fields this module does not
+  // model survive untouched.
+  const recovered = existing === undefined ? undefined : withOAuth(existing, doc.claudeAiOauth);
+  fs.writeFileSync(path, recovered ?? raw, { mode: 0o600 });
 }
 
 /** The subset of .claude.json state the seed touches. Everything else in an

@@ -141,3 +141,50 @@ test('detectClaudeVersion parses the version line and degrades on failure', () =
     '',
   );
 });
+
+// --- change 4: re-materialize a dead on-PVC credential (validity, not presence) ---
+
+// claude blanks its own claudeAiOauth block on a failed refresh / logout,
+// leaving a file that "exists" but cannot authenticate. Each shape below must be
+// treated as NOT usable and replaced from the Secret, preserving the per-pod
+// mcpOAuth tokens the Secret does not carry.
+const DEAD_SHAPES: Record<string, string> = {
+  'blanked tokens': '{"claudeAiOauth":{"accessToken":"","refreshToken":"","expiresAt":0},"mcpOAuth":{"srv":"tok"}}',
+  'null token': '{"claudeAiOauth":{"accessToken":null},"mcpOAuth":{"srv":"tok"}}',
+  'no oauth block': '{"mcpOAuth":{"srv":"tok"}}',
+};
+
+for (const [name, dead] of Object.entries(DEAD_SHAPES)) {
+  test(`dead credential (${name}) is replaced from the Secret, mcpOAuth preserved at 0600`, () => {
+    const { fs, files, writes } = memFs({ '/cfg/.credentials.json': dead });
+    materialize(fs, { CLAUDE_CREDENTIALS_JSON: CREDS, CLAUDE_OAUTH_ACCOUNT_JSON: ACCT });
+
+    const doc = JSON.parse(files.get('/cfg/.credentials.json')!);
+    assert.equal(doc.claudeAiOauth.accessToken, 'at'); // usable token swapped in
+    assert.equal(doc.claudeAiOauth.refreshToken, 'rt');
+    assert.deepEqual(doc.mcpOAuth, { srv: 'tok' }); // per-pod tokens survive recovery
+    const credWrite = writes.find((w) => w.path === '/cfg/.credentials.json');
+    assert.equal(credWrite?.mode, 0o600);
+  });
+}
+
+test('unparseable on-PVC credential falls back to the Secret bytes verbatim', () => {
+  const { fs, files } = memFs({ '/cfg/.credentials.json': 'not-json-garbage' });
+  materialize(fs, { CLAUDE_CREDENTIALS_JSON: CREDS, CLAUDE_OAUTH_ACCOUNT_JSON: ACCT });
+  assert.equal(files.get('/cfg/.credentials.json'), CREDS); // verbatim, nothing to merge
+});
+
+test('dead on-PVC credential with no Secret material still fails boot', () => {
+  const { fs } = memFs({ '/cfg/.credentials.json': '{"claudeAiOauth":{"accessToken":""}}' });
+  assert.throws(() => materialize(fs, {}), /Secret material is missing/);
+});
+
+test('detectClaudeVersion prefers $CLAUDE_CODE_VERSION over spawning claude', () => {
+  const version = detectClaudeVersion(
+    () => {
+      throw new Error('should not spawn');
+    },
+    { CLAUDE_CODE_VERSION: '3.0.0' },
+  );
+  assert.equal(version, '3.0.0');
+});
