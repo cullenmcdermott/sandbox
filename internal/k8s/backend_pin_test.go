@@ -140,7 +140,7 @@ func TestResumeRewritesImageFromPin(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if err := b.Resume(ctx, session.Ref{ID: "sess-res"}); err != nil {
+	if err := b.Resume(ctx, session.Ref{ID: "sess-res"}, session.ResumeOptions{}); err != nil {
 		t.Fatalf("Resume: %v", err)
 	}
 
@@ -169,7 +169,7 @@ func TestResumeWithoutPinLeavesImage(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if err := b.Resume(ctx, session.Ref{ID: "sess-np"}); err != nil {
+	if err := b.Resume(ctx, session.Ref{ID: "sess-np"}, session.ResumeOptions{}); err != nil {
 		t.Fatalf("Resume: %v", err)
 	}
 	c := getSandbox(t, agents, "sess-np").Spec.PodTemplate.Spec.Containers[0]

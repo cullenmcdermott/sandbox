@@ -355,7 +355,7 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 			return nil, fmt.Errorf("session %s: %w", s.ref.ID, ErrSessionSuspended)
 		}
 		stage(StageResume)
-		if err := s.c.backend.Resume(ctx, s.ref); err != nil {
+		if err := s.c.backend.Resume(ctx, s.ref, ResumeOptions{}); err != nil {
 			return nil, fmt.Errorf("resume: %w", err)
 		}
 	}

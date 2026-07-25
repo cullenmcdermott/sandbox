@@ -9,11 +9,18 @@ import (
 	"github.com/cullenmcdermott/sandbox/internal/session"
 )
 
-// Backend is the subset of *k8s.Backend the dashboard needs: seeding the
-// read-model, watching the cluster, and the suspend/resume/destroy session
-// actions. It is declared as an interface (rather than depending on the
+// Backend is the subset of the session-lifecycle surface the dashboard needs:
+// seeding the read-model, watching the cluster, and the suspend/resume/destroy
+// session actions. It is declared as an interface (rather than depending on the
 // concrete *k8s.Backend) so unit tests can inject a fake and assert that a
-// keystroke dispatches the right cluster call. *k8s.Backend satisfies it.
+// keystroke dispatches the right cluster call.
+//
+// Resume here is deliberately options-free — unlike session.Backend.Resume /
+// client.Client.Resume, which grew a per-resume options parameter for the
+// claude-pane credential refresh. Production wiring satisfies this seam with
+// clientLifecycleBackend (internal/cli), whose Suspend/Resume/Destroy route
+// through *client.Client so file sync pause/resume rides along; the dashboard's
+// plain Resume carries no per-resume material, so it needs no options.
 type Backend interface {
 	List(ctx context.Context) ([]session.State, error)
 	Watch(ctx context.Context) (<-chan session.StateEvent, error)

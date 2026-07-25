@@ -111,16 +111,19 @@ var (
 	// carries no credential material.
 	ErrInvalidCodexAccountID = errors.New("sandbox: codex account id is not a valid kubernetes label value")
 
-	// ErrClaudePaneCredentialMissing is returned by Create for a claude-pane
-	// session missing the full provisioning material (the credential +
-	// oauthAccount documents). The interactive pane authenticates ONLY from the
-	// materialized credentials file, and the pod template references the Secret
-	// keys non-Optionally — creating without material would stall the pod in
+	// ErrClaudePaneCredentialMissing is returned when a claude-pane provisioning
+	// path is handed incomplete material — the credential and oauthAccount
+	// documents are required together. Create returns it for a claude-pane
+	// session created without full material; Resume's WithClaudeCredentials
+	// refresh returns it when only one of the two documents is supplied. The
+	// interactive pane authenticates ONLY from the materialized credentials
+	// file, and the pod template references the Secret keys non-Optionally — a
+	// lone document would strip the other key and stall the pod in
 	// CreateContainerConfigError; failing here is the actionable version.
 	// Populate CreateOptions via SelectClaudePaneMaterial (the system Claude
 	// Code login — the Max-mode source) or UseClaudePaneMaterial. The error
 	// carries no credential material.
-	ErrClaudePaneCredentialMissing = errors.New("sandbox: claude-pane session requires full Claude Code credential material — log in with `claude` on this machine so the host login can be provisioned (CreateOptions.SelectClaudePaneMaterial)")
+	ErrClaudePaneCredentialMissing = errors.New("sandbox: claude-pane session requires full Claude Code credential material (credential + oauthAccount documents) — log in with `claude` on this machine so the host login can be provisioned")
 
 	// ErrInvalidExtraEnvName is returned by Create when a key in
 	// CreateOptions.ExtraEnv or ExtraSecretEnv is not a valid environment variable

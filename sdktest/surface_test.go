@@ -63,7 +63,6 @@ var (
 	_ func(*client.Client, context.Context) (<-chan client.StateEvent, error)              = (*client.Client).Watch
 	_ func(*client.Client, context.Context, client.ID) (client.State, error)               = (*client.Client).Status
 	_ func(*client.Client, context.Context, client.ID) error                               = (*client.Client).Suspend
-	_ func(*client.Client, context.Context, client.ID) error                               = (*client.Client).Resume
 	_ func(*client.Client, context.Context, client.ID) error                               = (*client.Client).Destroy
 	_ func(*client.Client, context.Context, client.ID) error                               = (*client.Client).SyncPause
 	_ func(*client.Client, context.Context, client.ID) error                               = (*client.Client).SyncResume
@@ -73,6 +72,11 @@ var (
 	_ func(*client.Client, client.ID)                                                      = (*client.Client).RemoveLocalState
 	_ func(*client.Client) string                                                          = (*client.Client).Namespace
 	_ func(*client.Client) string                                                          = (*client.Client).StateDir
+
+	// Resume grew variadic per-resume options (credential refresh on resume);
+	// no-option calls keep the historical behavior and signature compatibility.
+	_ func(*client.Client, context.Context, client.ID, ...client.ResumeOption) error = (*client.Client).Resume
+	_ func(string, string) client.ResumeOption                                       = client.WithClaudeCredentials
 )
 
 // --- client: Session method set ----------------------------------------------

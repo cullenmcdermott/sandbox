@@ -1169,7 +1169,11 @@ func (b *Backend) Suspend(ctx context.Context, ref session.Ref) error {
 	return b.setReplicas(ctx, ref, 0)
 }
 
-// Resume sets replicas back to 1 and waits for the pod to be ready.
+// Resume sets replicas back to 1 and waits for the pod to be ready. When opts
+// carries claude-pane credential material it refreshes the per-session Secret's
+// copy before scaling up (see refreshClaudePaneCredential), so a session
+// suspended past its OAuth token's expiry resumes on the orchestrator's fresh
+// host login instead of walling at a /login prompt.
 //
 // Before scaling up it rewrites the pod template's runner image from the
 // pinned-digest annotation (stamped at first ready — see pinRunnerImageDigest),
@@ -1178,7 +1182,21 @@ func (b *Backend) Suspend(ctx context.Context, ref session.Ref) error {
 // later — which would reinterpret the session's persisted events.db /
 // session.json under new-shape assumptions. Image + replicas go in one Update:
 // at replicas 0 there is no pod, so the template change cannot churn a live one.
-func (b *Backend) Resume(ctx context.Context, ref session.Ref) error {
+func (b *Backend) Resume(ctx context.Context, ref session.Ref, opts session.ResumeOptions) error {
+	// Refresh the claude-pane credential copy in the per-session Secret BEFORE
+	// the replicas 0→1 flip below. The pod resolves that Secret (via SecretKeyRef)
+	// only at container start, so writing it AFTER the flip races the kubelet and
+	// could still boot the pod on the expired copy — the whole point of the
+	// refresh is to beat pod start. Both documents are required together: a lone
+	// credential would drive reconcileSecretCredential's empty-value strip branch
+	// for the other key, delete claude-oauth-account-json, and dangle the pod's
+	// NOT-Optional SecretKeyRef (CreateContainerConfigError). The client gate
+	// (Client.Resume) enforces the both-or-neither pairing before we get here.
+	if len(opts.ClaudeCredentialsJSON) > 0 && len(opts.ClaudeOAuthAccountJSON) > 0 {
+		if err := b.refreshClaudePaneCredential(ctx, ref, opts); err != nil {
+			return err
+		}
+	}
 	sandboxes := b.agents.AgentsV1alpha1().Sandboxes(b.namespace)
 	one := int32(1)
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -1204,6 +1222,41 @@ func (b *Backend) Resume(ctx context.Context, ref session.Ref) error {
 	// Re-pin best-effort: a no-op when the annotation already matches (the
 	// common case, since the template now carries the pinned digest ref).
 	_ = b.pinRunnerImageDigest(ctx, ref)
+	return nil
+}
+
+// refreshClaudePaneCredential rewrites the claude-pane credential copy in the
+// session's per-session Secret from opts, used by Resume so a resumed pod boots
+// on a fresh OAuth token rather than the (possibly expired) copy written at
+// Create. It reconciles exactly the two claude-pane data keys via the shared
+// reconcileSecretCredential helper (empty labelKey — see below) under
+// RetryOnConflict, matching the setReplicas/syncSessionCredential Get→reconcile→
+// Update idiom, and skips the Update when nothing changed.
+//
+// labelAnthropicAccount is deliberately left untouched: a refresh carries new
+// OAuth tokens for the SAME account the Secret was created under, this path has
+// no account id to stamp, and — unlike the opencode creds hash — there is no
+// freshness annotation for this credential family to restamp. The wrapped error
+// never includes credential bytes.
+func (b *Backend) refreshClaudePaneCredential(ctx context.Context, ref session.Ref, opts session.ResumeOptions) error {
+	name := sessionSecretName(string(ref.ID))
+	secrets := b.core.CoreV1().Secrets(b.namespace)
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		secret, getErr := secrets.Get(ctx, name, metav1.GetOptions{})
+		if getErr != nil {
+			return getErr
+		}
+		changed := reconcileSecretCredential(secret, secretKeyClaudeCredentialsJSON, "", opts.ClaudeCredentialsJSON, "")
+		changed = reconcileSecretCredential(secret, secretKeyClaudeOAuthAccountJSON, "", opts.ClaudeOAuthAccountJSON, "") || changed
+		if !changed {
+			return nil
+		}
+		_, updateErr := secrets.Update(ctx, secret, metav1.UpdateOptions{})
+		return updateErr
+	})
+	if err != nil {
+		return fmt.Errorf("k8s: refresh claude credential on Secret %s for resume: %w", name, err)
+	}
 	return nil
 }
 

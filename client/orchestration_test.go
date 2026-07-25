@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/cullenmcdermott/sandbox/client/cred"
 	"github.com/cullenmcdermott/sandbox/internal/k8s"
 	"github.com/cullenmcdermott/sandbox/internal/session"
 )
@@ -48,9 +49,10 @@ type fakeBackend struct {
 	tokenErr        error
 
 	// captured inputs
-	gotSpec  Spec
-	gotSpecs []session.PortSpec
-	gotRefs  map[string][]Ref
+	gotSpec       Spec
+	gotSpecs      []session.PortSpec
+	gotRefs       map[string][]Ref
+	gotResumeOpts ResumeOptions
 }
 
 func newFakeBackend() *fakeBackend {
@@ -97,7 +99,8 @@ func (f *fakeBackend) Suspend(_ context.Context, ref Ref) error {
 	return f.suspendErr
 }
 
-func (f *fakeBackend) Resume(_ context.Context, ref Ref) error {
+func (f *fakeBackend) Resume(_ context.Context, ref Ref, opts ResumeOptions) error {
+	f.gotResumeOpts = opts
 	f.record("resume", ref)
 	return f.resumeErr
 }
@@ -381,6 +384,70 @@ func TestClientResume(t *testing.T) {
 		}
 		if spy.sawSync("resume") {
 			t.Error("Resume must NOT resume sync when the backend resume failed")
+		}
+	})
+
+	const fullCred = `{"claudeAiOauth":{"accessToken":"a","refreshToken":"r"}}`
+	const account = `{"oauthAccount":{"uuid":"acc"}}`
+
+	t.Run("plain resume carries no material", func(t *testing.T) {
+		be := newFakeBackend()
+		c, _, _ := fakeClient(t, be)
+		if err := c.Resume(ctx, "sess-1"); err != nil {
+			t.Fatalf("Resume: %v", err)
+		}
+		if be.gotResumeOpts.ClaudeCredentialsJSON != nil || be.gotResumeOpts.ClaudeOAuthAccountJSON != nil {
+			t.Errorf("plain resume threaded material: %+v", be.gotResumeOpts)
+		}
+	})
+
+	t.Run("credential material threads through to backend", func(t *testing.T) {
+		be := newFakeBackend()
+		c, spy, _ := fakeClient(t, be)
+		if err := c.Resume(ctx, "sess-1", WithClaudeCredentials(fullCred, account)); err != nil {
+			t.Fatalf("Resume: %v", err)
+		}
+		if got := string(be.gotResumeOpts.ClaudeCredentialsJSON); got != fullCred {
+			t.Errorf("credential not threaded: %q", got)
+		}
+		if got := string(be.gotResumeOpts.ClaudeOAuthAccountJSON); got != account {
+			t.Errorf("oauth account not threaded: %q", got)
+		}
+		if !spy.sawSync("resume") {
+			t.Error("Resume must resume sync after a successful backend resume")
+		}
+	})
+
+	t.Run("half-set pair fails closed before backend or sync", func(t *testing.T) {
+		be := newFakeBackend()
+		c, spy, order := fakeClient(t, be)
+		// WithClaudeCredentials(cred, "") sets only the credential — the account
+		// document is empty — so the both-or-neither gate must reject it.
+		err := c.Resume(ctx, "sess-1", WithClaudeCredentials(fullCred, ""))
+		if !errors.Is(err, ErrClaudePaneCredentialMissing) {
+			t.Fatalf("err = %v, want ErrClaudePaneCredentialMissing", err)
+		}
+		if len(*order) != 0 {
+			t.Errorf("gate must not reach the backend, saw calls: %v", *order)
+		}
+		if spy.sawSync("resume") {
+			t.Error("gate must not resume sync")
+		}
+	})
+
+	t.Run("partial credential fails closed before backend", func(t *testing.T) {
+		be := newFakeBackend()
+		c, spy, order := fakeClient(t, be)
+		const noRefresh = `{"claudeAiOauth":{"accessToken":"a"}}`
+		err := c.Resume(ctx, "sess-1", WithClaudeCredentials(noRefresh, account))
+		if !errors.Is(err, cred.ErrNoFullCredential) {
+			t.Fatalf("err = %v, want cred.ErrNoFullCredential", err)
+		}
+		if len(*order) != 0 {
+			t.Errorf("gate must not reach the backend, saw calls: %v", *order)
+		}
+		if spy.sawSync("resume") {
+			t.Error("gate must not resume sync")
 		}
 	})
 }

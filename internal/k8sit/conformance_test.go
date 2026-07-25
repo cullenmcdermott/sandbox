@@ -252,7 +252,7 @@ func TestBackendLifecycle(t *testing.T) {
 			}
 			susCancel()
 			resCtx, resCancel := context.WithTimeout(context.Background(), 5*time.Minute)
-			if err := be.Resume(resCtx, ref); err != nil {
+			if err := be.Resume(resCtx, ref, session.ResumeOptions{}); err != nil {
 				resCancel()
 				t.Fatalf("Resume: %v", err)
 			}

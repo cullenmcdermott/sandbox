@@ -2,6 +2,20 @@ package session
 
 import "context"
 
+// ResumeOptions carries optional material a Resume applies to the session's
+// cluster resources before scaling the pod back up. It rides the Backend
+// signature (not a side-channel) so every implementation and fake sees the
+// same contract. The zero value is exactly the historical Resume behavior.
+type ResumeOptions struct {
+	// ClaudeCredentialsJSON / ClaudeOAuthAccountJSON, when non-empty, replace
+	// the claude-pane credential copy in the per-session Secret before the
+	// resumed pod starts. Same shapes as Spec.ClaudeCredentialsJSON /
+	// Spec.ClaudeOAuthAccountJSON. Never serialized (json:"-") so a debug
+	// marshal cannot leak them. Empty leaves the Secret untouched.
+	ClaudeCredentialsJSON  []byte `json:"-"`
+	ClaudeOAuthAccountJSON []byte `json:"-"`
+}
+
 // Backend manages the lifecycle of remote agent sessions. It is the
 // session-oriented equivalent of the existing lima VM Backend, designed for
 // Kubernetes-based sessions where the pod/PVC is the source of truth.
@@ -23,8 +37,11 @@ type Backend interface {
 	// the PVC and session.json survive.
 	Suspend(ctx context.Context, ref Ref) error
 
-	// Resume sets operatingMode back to Running and waits for the pod.
-	Resume(ctx context.Context, ref Ref) error
+	// Resume sets operatingMode back to Running and waits for the pod. opts
+	// carries optional per-resume material the backend applies to the session's
+	// cluster resources BEFORE the pod starts (see ResumeOptions); the zero value
+	// is exactly the historical Resume behavior.
+	Resume(ctx context.Context, ref Ref, opts ResumeOptions) error
 
 	// Destroy deletes the Sandbox and PVC. Irreversible.
 	Destroy(ctx context.Context, ref Ref) error

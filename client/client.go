@@ -46,6 +46,7 @@ type (
 	Capabilities   = session.Capabilities
 	BootstrapFile  = session.BootstrapFile
 	Resources      = session.Resources
+	ResumeOptions  = session.ResumeOptions
 )
 
 // RunnerClient is the live connection to a session's in-pod runner: start and
@@ -96,9 +97,11 @@ type Backend interface {
 	// session-list read-model; the caller seeds with List first. The channel is
 	// closed when ctx is cancelled.
 	Watch(ctx context.Context) (<-chan StateEvent, error)
-	// Suspend / Resume / Destroy drive the pod lifecycle.
+	// Suspend / Resume / Destroy drive the pod lifecycle. Resume takes
+	// per-resume options (credential refresh — see WithClaudeCredentials); the
+	// zero ResumeOptions is the historical behavior.
 	Suspend(ctx context.Context, ref Ref) error
-	Resume(ctx context.Context, ref Ref) error
+	Resume(ctx context.Context, ref Ref, opts ResumeOptions) error
 	Destroy(ctx context.Context, ref Ref) error
 	// StartWithProgress blocks until the pod is ready, reporting phase detail.
 	StartWithProgress(ctx context.Context, ref Ref, onPhase func(detail string)) error
@@ -755,9 +758,43 @@ func (c *Client) Suspend(ctx context.Context, id ID) error {
 	return nil
 }
 
-// Resume resumes a suspended session and resumes its file sync.
-func (c *Client) Resume(ctx context.Context, id ID) error {
-	if err := c.backend.Resume(ctx, Ref{ID: id}); err != nil {
+// ResumeOption customizes a single Resume call (see WithClaudeCredentials).
+type ResumeOption func(*ResumeOptions)
+
+// WithClaudeCredentials refreshes the session's claude-pane credential material
+// at resume: the FULL Claude Code OAuth credential document (the shape of
+// ~/.claude/.credentials.json) and the {"oauthAccount": ...} identity document,
+// the same pair Create provisions. Both are required together (the pod
+// re-materializes both files) and the credential must be full — Resume fails
+// closed otherwise, mirroring Create's material gate.
+func WithClaudeCredentials(credentialsJSON, accountJSON string) ResumeOption {
+	return func(o *ResumeOptions) {
+		o.ClaudeCredentialsJSON = []byte(credentialsJSON)
+		o.ClaudeOAuthAccountJSON = []byte(accountJSON)
+	}
+}
+
+// Resume resumes a suspended session and resumes its file sync. Options refresh
+// per-resume material before the pod starts (WithClaudeCredentials); with no
+// options it is the historical resume (zero ResumeOptions), so existing call
+// sites compile unchanged.
+func (c *Client) Resume(ctx context.Context, id ID, opts ...ResumeOption) error {
+	var ro ResumeOptions
+	for _, opt := range opts {
+		opt(&ro)
+	}
+	// Gate before any cluster call, mirroring Create's validateClaudePaneMaterial:
+	// a half-set pair would drive the backend's strip branch and dangle the pod's
+	// NOT-Optional SecretKeyRef, and a partial credential walls the pane at login.
+	if len(ro.ClaudeCredentialsJSON) > 0 || len(ro.ClaudeOAuthAccountJSON) > 0 {
+		if len(ro.ClaudeCredentialsJSON) == 0 || len(ro.ClaudeOAuthAccountJSON) == 0 {
+			return ErrClaudePaneCredentialMissing
+		}
+		if err := cred.ValidateFullCredential(ro.ClaudeCredentialsJSON); err != nil {
+			return fmt.Errorf("resume credential material: %w", err)
+		}
+	}
+	if err := c.backend.Resume(ctx, Ref{ID: id}, ro); err != nil {
 		return err
 	}
 	_ = c.syncManager().ResumeAll(ctx, string(id))

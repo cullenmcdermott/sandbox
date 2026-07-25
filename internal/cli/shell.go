@@ -39,7 +39,7 @@ func newShellCmd() *cobra.Command {
 			case session.StatusGone:
 				return fmt.Errorf("session %s does not exist", ref.ID)
 			case session.StatusSuspended:
-				if err := backend.Resume(ctx, ref); err != nil {
+				if err := backend.Resume(ctx, ref, session.ResumeOptions{}); err != nil {
 					return fmt.Errorf("resume session: %w", err)
 				}
 			}
