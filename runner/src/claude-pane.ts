@@ -36,6 +36,8 @@
 
 import { createRequire } from 'node:module';
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { resolveWorkspaceDir } from './exec.js';
 import { getRegistry, setExternalActivityProbe, type RunnerConfig } from './session.js';
 import { CLAUDE_CONFIG_DIR } from './types.js';
@@ -211,10 +213,42 @@ export function buildClaudePaneEnv(env: NodeJS.ProcessEnv = process.env): NodeJS
 /**
  * The `claude` args for a pane spawn. The very first spawn ever for a session
  * (no persisted uuid yet) STARTS a session with `--session-id <uuid>`; every
- * later spawn RESUMES it with `--resume <uuid>`. Pure/exported for unit tests.
+ * later spawn RESUMES it with `--resume <uuid>`. When permissionMode is
+ * non-empty it is appended as `--permission-mode <mode>` on EVERY spawn:
+ * interactive claude applies settings.json's permissions.defaultMode only to
+ * NEW sessions, so a `--resume` spawn would otherwise come back in default
+ * (prompting) mode — silently downgrading a bypassPermissions ("yolo") session
+ * on every suspend/resume and every child restart. Pure/exported for unit tests.
  */
-export function claudePaneArgs(uuid: string, resume: boolean): string[] {
-  return resume ? ['--resume', uuid] : ['--session-id', uuid];
+export function claudePaneArgs(uuid: string, resume: boolean, permissionMode = ''): string[] {
+  const args = resume ? ['--resume', uuid] : ['--session-id', uuid];
+  if (permissionMode !== '') args.push('--permission-mode', permissionMode);
+  return args;
+}
+
+/** The claude permission modes --permission-mode accepts; anything else found
+ * in settings is ignored rather than passed through to the child's argv. */
+const PANE_PERMISSION_MODES = new Set(['default', 'acceptEdits', 'plan', 'bypassPermissions']);
+
+/**
+ * The permissions.defaultMode from the pane's settings.json, or '' on a missing
+ * file, missing key, unrecognized mode, or any throw. Read FRESH on each spawn
+ * (not cached) so a settings edit inside the session applies to the next
+ * respawn. Exported + injectable-read for unit tests.
+ */
+export function paneDefaultPermissionMode(
+  env: NodeJS.ProcessEnv = process.env,
+  read: (path: string) => string = (p) => readFileSync(p, 'utf8'),
+): string {
+  try {
+    const raw = read(join(env.CLAUDE_CONFIG_DIR || CLAUDE_CONFIG_DIR, 'settings.json'));
+    const doc = JSON.parse(raw) as { permissions?: { defaultMode?: unknown } };
+    const mode = doc.permissions?.defaultMode;
+    if (typeof mode === 'string' && PANE_PERMISSION_MODES.has(mode)) return mode;
+    return '';
+  } catch {
+    return '';
+  }
 }
 
 // --- Persistence seam -----------------------------------------------------
@@ -263,6 +297,12 @@ export interface ClaudePaneDeps {
   spawn?: PaneSpawner;
   /** UUID generator for the first spawn (defaults to node:crypto randomUUID). */
   generateUuid?: () => string;
+  /** Reads the pane's settings.json for paneDefaultPermissionMode (test seam,
+   * defaults to node:fs readFileSync). */
+  readSettings?: (path: string) => string;
+  /** Tapped for every PTY output chunk, attached client or not — the "child is
+   * printing/working" liveness signal (drives the pane-output idle window). */
+  onOutput?: () => void;
   /** Notified when the child exits (the observer integration lands in a later
    * task; kept as a narrow seam for now). */
   onExit?: (info: PaneExitInfo) => void;
@@ -278,6 +318,8 @@ class Supervisor implements ClaudePaneSupervisor {
   private readonly spawnFn: PaneSpawner;
   private readonly generateUuid: () => string;
   private readonly persistence: ClaudePanePersistence;
+  private readonly readSettings: (path: string) => string;
+  private readonly onOutputCb: (() => void) | undefined;
   private readonly onExitCb: ((info: PaneExitInfo) => void) | undefined;
   private readonly onStopCb: (() => void) | undefined;
   private readonly ring: ScrollbackRing;
@@ -295,6 +337,8 @@ class Supervisor implements ClaudePaneSupervisor {
     this.spawnFn = deps.spawn ?? defaultPaneSpawner;
     this.generateUuid = deps.generateUuid ?? randomUUID;
     this.persistence = deps.persistence;
+    this.readSettings = deps.readSettings ?? ((p) => readFileSync(p, 'utf8'));
+    this.onOutputCb = deps.onOutput;
     this.onExitCb = deps.onExit;
     this.onStopCb = deps.onStop;
     this.ring = new ScrollbackRing(deps.scrollbackBytes ?? SCROLLBACK_BYTES);
@@ -320,6 +364,9 @@ class Supervisor implements ClaudePaneSupervisor {
         /* previous socket already gone */
       }
     }
+    // Whether a child was ALREADY running before this attach. A fresh spawn (below)
+    // paints itself, so only a reattach to a live child needs the forced repaint.
+    const wasRunning = this.pty !== null;
     this.socket = socket;
     this.ensureSpawned();
     // Replay accumulated scrollback so a (re)attaching pane catches up, as one
@@ -327,6 +374,25 @@ class Supervisor implements ClaudePaneSupervisor {
     // interleave here — attach() runs to completion synchronously.
     const snap = this.ring.snapshot();
     if (snap.length > 0) this.safeSend(snap);
+    // The scrollback ring is a byte TAIL, not a screen model: its oldest
+    // full-screen paint may have scrolled out, leaving only incremental frames,
+    // so the input box + statusline reconstruct stale/garbled until the child
+    // repaints. Force one for an already-running child (a live-hit; /status + esc
+    // "fixed" it by forcing a repaint).
+    if (wasRunning) this.forceRepaint();
+  }
+
+  /** Nudge a running fullscreen child into a full redraw by momentarily changing
+   * the PTY row count and restoring it: the size change delivers SIGWINCH and
+   * fullscreen claude redraws the whole screen at the restored geometry. A fresh
+   * spawn needs none of this (it paints itself), and a same-size client resize
+   * arriving right after attach is a no-op ioctl, so this is the only repaint
+   * source on reattach. */
+  private forceRepaint(): void {
+    if (!this.pty) return;
+    const jiggleRows = this.rows > 1 ? this.rows - 1 : this.rows + 1;
+    this.pty.resize(this.cols, jiggleRows);
+    this.pty.resize(this.cols, this.rows);
   }
 
   detachAll(): void {
@@ -388,8 +454,11 @@ class Supervisor implements ClaudePaneSupervisor {
     const resume = persisted !== '';
     const uuid = resume ? persisted : this.generateUuid();
     if (!resume) this.persistence.set(uuid);
-    const args = claudePaneArgs(uuid, resume);
     const env = buildClaudePaneEnv(this.env);
+    // Re-apply the settings default permission mode on EVERY spawn (fresh read):
+    // --resume ignores settings.defaultMode, so without this a respawn silently
+    // drops a bypassPermissions session back to prompting.
+    const args = claudePaneArgs(uuid, resume, paneDefaultPermissionMode(env, this.readSettings));
     const pty = this.spawnFn({
       command: 'claude',
       args,
@@ -399,6 +468,11 @@ class Supervisor implements ClaudePaneSupervisor {
       rows: this.rows,
     });
     pty.onData((d) => {
+      // Tap FIRST (before the ring push / socket send) so the "child is printing"
+      // liveness signal fires even when no client is attached — a long tool call
+      // emits no observer hooks for minutes, and this is what keeps the reaper
+      // from suspending a working detached session mid-turn.
+      this.onOutputCb?.();
       this.ring.push(d);
       this.safeSend(d);
     });
@@ -481,6 +555,9 @@ export function startClaudePaneSupervisor(
       set: (uuid) => reg.setClaudePaneSession(uuid),
     },
     spawn,
+    // Every PTY output chunk is "child is working" evidence — feed the pane-output
+    // idle window so a long, hook-silent tool call can't be mislabeled idle.
+    onOutput: () => reg.notePaneOutput(),
     onExit: (info) => {
       // Pod-log visibility first, then the observer (which closes any open
       // synthetic turn as interrupted — Stop/SessionEnd hooks are graceful-only

@@ -19,6 +19,7 @@ import {
   MAX_PANE_CLIENT_BUFFER_BYTES,
   buildClaudePaneEnv,
   claudePaneArgs,
+  paneDefaultPermissionMode,
   createClaudePaneSupervisor,
   type PanePty,
   type PaneSocket,
@@ -137,6 +138,118 @@ test('ScrollbackRing default cap bounds output to 256 KiB', () => {
 test('claudePaneArgs starts a session on first spawn and resumes afterwards', () => {
   assert.deepEqual(claudePaneArgs('uuid-1', false), ['--session-id', 'uuid-1']);
   assert.deepEqual(claudePaneArgs('uuid-1', true), ['--resume', 'uuid-1']);
+});
+
+// 5a: --permission-mode must ride EVERY spawn (settings.defaultMode applies only
+// to NEW sessions, so a --resume respawn silently drops bypassPermissions).
+test('claudePaneArgs appends --permission-mode on both fresh and resume spawns', () => {
+  assert.deepEqual(claudePaneArgs('u', false, 'bypassPermissions'), [
+    '--session-id',
+    'u',
+    '--permission-mode',
+    'bypassPermissions',
+  ]);
+  assert.deepEqual(claudePaneArgs('u', true, 'bypassPermissions'), [
+    '--resume',
+    'u',
+    '--permission-mode',
+    'bypassPermissions',
+  ]);
+  // Empty/absent mode leaves argv unchanged (back-compat).
+  assert.deepEqual(claudePaneArgs('u', true), ['--resume', 'u']);
+  assert.deepEqual(claudePaneArgs('u', true, ''), ['--resume', 'u']);
+});
+
+test('paneDefaultPermissionMode reads an allowlisted mode from settings.json', () => {
+  const read = () => JSON.stringify({ permissions: { defaultMode: 'bypassPermissions' } });
+  assert.equal(paneDefaultPermissionMode({ CLAUDE_CONFIG_DIR: '/cfg' }, read), 'bypassPermissions');
+  assert.equal(
+    paneDefaultPermissionMode({}, () => JSON.stringify({ permissions: { defaultMode: 'plan' } })),
+    'plan',
+  );
+});
+
+test('paneDefaultPermissionMode returns "" for missing file / key / unknown mode', () => {
+  // Missing file (read throws).
+  assert.equal(
+    paneDefaultPermissionMode({}, () => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    }),
+    '',
+  );
+  // Missing key.
+  assert.equal(paneDefaultPermissionMode({}, () => '{}'), '');
+  assert.equal(paneDefaultPermissionMode({}, () => JSON.stringify({ permissions: {} })), '');
+  // Unrecognized / non-string mode.
+  assert.equal(
+    paneDefaultPermissionMode({}, () => JSON.stringify({ permissions: { defaultMode: 'yolo' } })),
+    '',
+  );
+  assert.equal(
+    paneDefaultPermissionMode({}, () => JSON.stringify({ permissions: { defaultMode: 1 } })),
+    '',
+  );
+  // Malformed JSON.
+  assert.equal(paneDefaultPermissionMode({}, () => 'not json'), '');
+});
+
+test('supervisor re-applies the settings permission mode on the resume spawn', () => {
+  const { spawn, spawns, ptys } = makeSpawner();
+  const sup = createClaudePaneSupervisor({
+    cwd: '/w',
+    env: { CLAUDE_CONFIG_DIR: '/cfg' },
+    persistence: makePersistence(''), // fresh → first spawn --session-id
+    spawn,
+    generateUuid: () => 'u',
+    readSettings: () => JSON.stringify({ permissions: { defaultMode: 'bypassPermissions' } }),
+  });
+  sup.attach(new FakeSocket());
+  assert.deepEqual(spawns[0].args, ['--session-id', 'u', '--permission-mode', 'bypassPermissions']);
+
+  // A respawn after exit must NOT lose the mode (the 5a live-hit).
+  ptys[0].exit(0);
+  sup.attach(new FakeSocket());
+  assert.deepEqual(spawns[1].args, ['--resume', 'u', '--permission-mode', 'bypassPermissions']);
+});
+
+// 5b: a reattach to an ALREADY-running child jiggles the PTY rows to force a full
+// repaint (scrollback is a byte tail, not a screen model). A fresh spawn does not.
+test('reattach to a running child forces a repaint; a fresh spawn does not', () => {
+  const { spawn, ptys } = makeSpawner();
+  const sup = createClaudePaneSupervisor({ cwd: '/w', env: {}, persistence: makePersistence('u'), spawn });
+
+  // Fresh spawn: the child paints itself, so attach performs no repaint jiggle.
+  sup.attach(new FakeSocket());
+  assert.equal(ptys[0].resizes.length, 0, 'a fresh spawn is not jiggled');
+
+  sup.resize(100, 40); // establish geometry (one real resize)
+  const before = ptys[0].resizes.length;
+
+  // Reattach to the already-running child → jiggle rows down then restore.
+  sup.attach(new FakeSocket());
+  assert.deepEqual(ptys[0].resizes.slice(before), [
+    [100, 39],
+    [100, 40],
+  ]);
+  assert.equal(ptys.length, 1, 'no respawn on reattach');
+});
+
+// 5c: every PTY output chunk taps onOutput (the detached "child is working"
+// signal), before the ring push / socket send, attached or not.
+test('onOutput fires for every PTY chunk, before the ring/socket forward', () => {
+  const { spawn, ptys } = makeSpawner();
+  let taps = 0;
+  const sup = createClaudePaneSupervisor({
+    cwd: '/w',
+    env: {},
+    persistence: makePersistence('u'),
+    spawn,
+    onOutput: () => taps++,
+  });
+  sup.attach(new FakeSocket());
+  ptys[0].emit(Buffer.from('one'));
+  ptys[0].emit(Buffer.from('two'));
+  assert.equal(taps, 2, 'one tap per output chunk');
 });
 
 test('supervisor generates + persists a uuid on first spawn, resumes it after exit', () => {

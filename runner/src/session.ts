@@ -75,6 +75,13 @@ function emptyState(cfg: RunnerConfig): SessionState {
  * session that has neither a runner turn nor an SSE client. */
 const EXTERNAL_ACTIVE_WINDOW_MS = 90_000;
 
+/** The interactive pane child is considered "working" if it produced PTY output
+ * within this window. 90s matches EXTERNAL_ACTIVE_WINDOW_MS deliberately: same
+ * "recent liveness evidence" semantics, comfortably above the reaper's 30s poll
+ * so an active child can't slip through a poll gap, and short enough that a
+ * genuinely quiescent pane still starts its idle clock within ~2 minutes. */
+const PANE_OUTPUT_ACTIVE_WINDOW_MS = 90_000;
+
 /** An observer-set synthetic 'busy' (an interactive turn the observer mirrors —
  * no registered runner turn) normally clears when the observer sees the turn
  * end. But a wedged mapper or a missed terminal would pin status='busy'
@@ -334,6 +341,13 @@ class SessionRegistry {
   // 'busy' but the stream went quiet). See SYNTHETIC_BUSY_STALE_MS.
   private lastObserverEventAt = 0;
 
+  // Epoch ms of the last interactive-pane PTY output chunk, or 0 if none. A
+  // detached pane's synthetic busy rests on observer hook POSTs, and a single
+  // long tool call emits none for minutes — so PTY output is the independent
+  // "child is working" signal that keeps the reaper off a mid-turn session. See
+  // PANE_OUTPUT_ACTIVE_WINDOW_MS.
+  private lastPaneOutputAt = 0;
+
   constructor(state: SessionState) {
     this.state = state;
   }
@@ -378,8 +392,14 @@ class SessionRegistry {
       return;
     }
     // Past the release above, a 'busy' status is fresh (or a real turn) and
-    // blocks idle unconditionally.
-    const idle = this.activeTurns.size === 0 && this.state.status !== 'busy' && this.isDetached();
+    // blocks idle unconditionally. paneOutputActive() also blocks idle even when
+    // status is 'idle' — e.g. the observer hooks were lost but the child is
+    // visibly printing.
+    const idle =
+      this.activeTurns.size === 0 &&
+      this.state.status !== 'busy' &&
+      this.isDetached() &&
+      !this.paneOutputActive();
     if (idle && this.idleSince === null) {
       this.idleSince = new Date().toISOString();
     } else if (!idle) {
@@ -398,7 +418,17 @@ class SessionRegistry {
    */
   private syntheticBusyStale(): boolean {
     if (this.activeTurns.size > 0 || this.lastObserverEventAt === 0) return false;
+    // A busy child actively printing is by definition not wedged; releasing it
+    // would mislabel a working session idle and start the reaper clock mid-turn.
+    if (this.paneOutputActive()) return false;
     return Date.now() - this.lastObserverEventAt >= SYNTHETIC_BUSY_STALE_MS;
+  }
+
+  /** True when the interactive pane child produced PTY output within
+   * PANE_OUTPUT_ACTIVE_WINDOW_MS. Pure timestamp compare — evaluated on-demand
+   * wherever idle is computed, so no timer is needed for the window to lapse. */
+  private paneOutputActive(): boolean {
+    return this.lastPaneOutputAt > 0 && Date.now() - this.lastPaneOutputAt < PANE_OUTPUT_ACTIVE_WINDOW_MS;
   }
 
   /**
@@ -430,6 +460,15 @@ class SessionRegistry {
   noteObserverEvent(atMs: number = Date.now()): void {
     this.lastObserverEventAt = atMs;
     this.recomputeIdle();
+  }
+
+  /** Record an interactive-pane PTY output chunk. Deliberately does NOT
+   * recomputeIdle: onData fires at output rate, and idle is computed on-demand
+   * (idleStatus / clients-changed / status changes), where the fresh timestamp is
+   * observed — keeping this O(1) on the hot path. `atMs` is injectable so tests
+   * can backdate the clock. */
+  notePaneOutput(atMs: number = Date.now()): void {
+    this.lastPaneOutputAt = atMs;
   }
 
   /** Persist the active model id reported by the backend (Seam C). */
