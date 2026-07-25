@@ -241,10 +241,16 @@ func newDashboardCreator(c *client.Client, runnerImage, reaperImage string) dash
 			}
 		case backendName == client.BackendOpenCode:
 			// opencode: minimal parity with `sandbox opencode` — seed ALL of the
-			// host's local opencode login when a store exists (the D4 default). The
-			// dashboard creator collects no provider/seed filter yet, so there is no
-			// per-provider picker here; that's a deferred follow-up. A missing local
-			// login leaves opts empty → the shared-Secret fallback; a corrupt store
+			// host's local opencode login when a store exists (the D4 default),
+			// and default the provider the same way the CLI does: the remembered
+			// last-used provider when still logged in, else auto-pick from the
+			// harvest (the old behavior — provider "" meaning anthropic —
+			// fail-closed at Create with ErrOpencodeProviderNotSeeded for any
+			// user whose local login lacks anthropic). The dashboard creator
+			// still collects no provider/seed filter — a per-provider picker is
+			// a deferred follow-up — so "" from the pick (nothing selectable
+			// logged in) keeps that fail-closed path. A missing local login
+			// leaves opts empty → the shared-Secret fallback; a corrupt store
 			// surfaces (fail closed), never a silent fallback.
 			material, herr := client.HarvestOpencodeAuth()
 			switch {
@@ -253,6 +259,7 @@ func newDashboardCreator(c *client.Client, runnerImage, reaperImage string) dash
 			case herr != nil:
 				return dashboard.CreateResult{}, herr
 			default:
+				opts.OpencodeProvider = defaultOpencodeProvider(material, readLastOpencodeProvider(), "")
 				opts.OpencodeAuthJSON = material.JSON
 			}
 		case params.AnthropicAccountID != "":
@@ -273,6 +280,12 @@ func newDashboardCreator(c *client.Client, runnerImage, reaperImage string) dash
 		sess, err := c.Create(ctx, opts)
 		if err != nil {
 			return dashboard.CreateResult{}, err
+		}
+		// Remember the provider the session actually launched with (best-effort;
+		// "" is never recorded) so the next launch — CLI or dashboard — defaults
+		// to it. Recorded only after a successful Create.
+		if backendName == client.BackendOpenCode {
+			writeLastOpencodeProvider(opts.OpencodeProvider)
 		}
 
 		opt := client.ConnectOptions{ReaperImage: reaperImage, OnPhase: stageSink(onStage)}

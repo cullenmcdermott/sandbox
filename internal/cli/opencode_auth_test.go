@@ -79,9 +79,12 @@ func TestResolveOpencodeSeedNoStoreFallsBack(t *testing.T) {
 			return nil
 		},
 	}
-	seed, err := deps.resolve(context.Background(), "", "", &stderr)
+	provider, seed, err := deps.resolve(context.Background(), "", "", &stderr)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
+	}
+	if provider != "" {
+		t.Fatalf("provider = %q, want \"\" (no login to default FROM — pass through)", provider)
 	}
 	if seed != nil {
 		t.Fatalf("seed = %q, want nil (shared-Secret fallback)", seed)
@@ -100,7 +103,7 @@ func TestResolveOpencodeSeedCorruptStoreSurfaces(t *testing.T) {
 		isTTY:    func() bool { return true },
 		runLogin: func(context.Context, string) error { t.Fatal("runLogin must not fire on a corrupt store"); return nil },
 	}
-	_, err := deps.resolve(context.Background(), "", "", &bytes.Buffer{})
+	_, _, err := deps.resolve(context.Background(), "", "", &bytes.Buffer{})
 	if !errors.Is(err, boom) {
 		t.Fatalf("resolve err = %v, want the harvest error", err)
 	}
@@ -115,9 +118,12 @@ func TestResolveOpencodeSeedDefaultSeedsAll(t *testing.T) {
 		isTTY:    func() bool { return true },
 		runLogin: func(context.Context, string) error { t.Fatal("no login expected"); return nil },
 	}
-	seed, err := deps.resolve(context.Background(), "", "", &bytes.Buffer{})
+	provider, seed, err := deps.resolve(context.Background(), "", "", &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
+	}
+	if provider != session.OpencodeProviderAnthropic {
+		t.Fatalf("provider = %q, want the auto-picked anthropic (preference order)", provider)
 	}
 	if !bytes.Equal(seed, m.JSON) {
 		t.Fatalf("seed = %q, want the whole harvested document %q", seed, m.JSON)
@@ -136,7 +142,7 @@ func TestResolveOpencodeSeedSubsetFilters(t *testing.T) {
 		isTTY:    func() bool { return true },
 		runLogin: func(context.Context, string) error { t.Fatal("no login expected"); return nil },
 	}
-	seed, err := deps.resolve(context.Background(), session.OpencodeProviderAnthropic, "anthropic,openai", &bytes.Buffer{})
+	_, seed, err := deps.resolve(context.Background(), session.OpencodeProviderAnthropic, "anthropic,openai", &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -158,14 +164,16 @@ func TestResolveOpencodeSeedUnknownSeedProviderErrors(t *testing.T) {
 		isTTY:    func() bool { return true },
 		runLogin: func(context.Context, string) error { t.Fatal("no login expected"); return nil },
 	}
-	_, err := deps.resolve(context.Background(), "", "bogus", &bytes.Buffer{})
+	_, _, err := deps.resolve(context.Background(), "", "bogus", &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "unknown --seed-providers value") || !strings.Contains(err.Error(), "bogus") {
 		t.Fatalf("err = %v, want an unknown-value error naming bogus", err)
 	}
 }
 
-// If --seed-providers excludes the session's own provider, the pod would get an
-// auth.json with no credential for the provider it uses — a hard error.
+// If --seed-providers excludes the session's EXPLICITLY selected provider, the
+// pod would get an auth.json with no credential for the provider it uses — a
+// hard error. (An empty --provider instead auto-picks a provider INSIDE the
+// filter — see TestResolveOpencodeSeedEmptyProviderFilterNarrowsPick.)
 func TestResolveOpencodeSeedExcludedSelectedProviderErrors(t *testing.T) {
 	m := testMaterial(t, "anthropic", "openai")
 	deps := opencodeSeedDeps{
@@ -173,8 +181,8 @@ func TestResolveOpencodeSeedExcludedSelectedProviderErrors(t *testing.T) {
 		isTTY:    func() bool { return true },
 		runLogin: func(context.Context, string) error { t.Fatal("no login expected"); return nil },
 	}
-	// Session default provider is anthropic; the filter names only openai.
-	_, err := deps.resolve(context.Background(), "", "openai", &bytes.Buffer{})
+	// Explicit --provider anthropic; the filter names only openai.
+	_, _, err := deps.resolve(context.Background(), session.OpencodeProviderAnthropic, "openai", &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "must include the session's --provider") || !strings.Contains(err.Error(), "anthropic") {
 		t.Fatalf("err = %v, want the exclusion error naming anthropic", err)
 	}
@@ -190,7 +198,7 @@ func TestResolveOpencodeSeedMissingProviderNonTTYFailsClosed(t *testing.T) {
 		isTTY:    func() bool { return false },
 		runLogin: func(context.Context, string) error { loginCalls++; return nil },
 	}
-	_, err := deps.resolve(context.Background(), session.OpencodeProviderOpenAI, "", &bytes.Buffer{})
+	_, _, err := deps.resolve(context.Background(), session.OpencodeProviderOpenAI, "", &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "opencode auth login openai") {
 		t.Fatalf("err = %v, want remediation for openai", err)
 	}
@@ -211,7 +219,7 @@ func TestResolveOpencodeSeedMissingProviderTTYYesLogsInThenSeeds(t *testing.T) {
 		runLogin: func(_ context.Context, entryKey string) error { loginCalls = append(loginCalls, entryKey); return nil },
 		stdin:    strings.NewReader("y\n"),
 	}
-	seed, err := deps.resolve(context.Background(), session.OpencodeProviderOpenAI, "", &bytes.Buffer{})
+	_, seed, err := deps.resolve(context.Background(), session.OpencodeProviderOpenAI, "", &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -233,7 +241,7 @@ func TestResolveOpencodeSeedMissingProviderTTYNoDeclines(t *testing.T) {
 		runLogin: func(context.Context, string) error { loginCalls++; return nil },
 		stdin:    strings.NewReader("n\n"),
 	}
-	_, err := deps.resolve(context.Background(), session.OpencodeProviderOpenAI, "", &bytes.Buffer{})
+	_, _, err := deps.resolve(context.Background(), session.OpencodeProviderOpenAI, "", &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "opencode auth login openai") {
 		t.Fatalf("err = %v, want remediation for openai", err)
 	}
@@ -251,7 +259,7 @@ func TestResolveOpencodeSeedZenWireMapsToOpencodeEntryKey(t *testing.T) {
 		isTTY:    func() bool { return true },
 		runLogin: func(context.Context, string) error { t.Fatal("no login expected — zen is present"); return nil },
 	}
-	seed, err := deps.resolve(context.Background(), session.OpencodeProviderZen, "opencode-zen", &bytes.Buffer{})
+	_, seed, err := deps.resolve(context.Background(), session.OpencodeProviderZen, "opencode-zen", &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -291,5 +299,144 @@ func TestSeedProvidersFlagIsOpencodeOnly(t *testing.T) {
 	}
 	if newCodexCmd().Flags().Lookup("seed-providers") != nil {
 		t.Error("codex must not expose --seed-providers")
+	}
+}
+
+// Empty --provider + a local login WITHOUT anthropic auto-picks a selectable
+// provider from the harvest (instead of the old hardcoded-anthropic fail-closed)
+// and announces the pick on stderr. Non-selectable entries (github-copilot)
+// still ride along in the seed; they just can't BE the pick.
+func TestResolveOpencodeSeedEmptyProviderAutoPicks(t *testing.T) {
+	m := testMaterial(t, "github-copilot", "opencode") // no anthropic
+	var stderr bytes.Buffer
+	deps := opencodeSeedDeps{
+		harvest: harvestSeq(harvestResult{m: m}),
+		isTTY:   func() bool { return true },
+		runLogin: func(context.Context, string) error {
+			t.Fatal("no login expected — a selectable provider is present")
+			return nil
+		},
+		readPref: func() string { return "" },
+	}
+	provider, seed, err := deps.resolve(context.Background(), "", "", &stderr)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if provider != session.OpencodeProviderZen {
+		t.Fatalf("provider = %q, want %q (the only selectable harvested provider)", provider, session.OpencodeProviderZen)
+	}
+	if got := seedKeys(t, seed); !got["opencode"] || !got["github-copilot"] {
+		t.Fatalf("seed keys = %v, want the whole login (opencode + github-copilot)", got)
+	}
+	if !strings.Contains(stderr.String(), `defaulting to "opencode-zen"`) {
+		t.Fatalf("stderr = %q, want the announced default", stderr.String())
+	}
+}
+
+// The remembered last-used provider beats the preference order when it is still
+// logged in.
+func TestResolveOpencodeSeedEmptyProviderPrefersLastUsed(t *testing.T) {
+	m := testMaterial(t, "anthropic", "openai")
+	deps := opencodeSeedDeps{
+		harvest:  harvestSeq(harvestResult{m: m}),
+		isTTY:    func() bool { return true },
+		runLogin: func(context.Context, string) error { t.Fatal("no login expected"); return nil },
+		readPref: func() string { return session.OpencodeProviderOpenAI },
+	}
+	provider, _, err := deps.resolve(context.Background(), "", "", &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if provider != session.OpencodeProviderOpenAI {
+		t.Fatalf("provider = %q, want the remembered openai (beating anthropic preference)", provider)
+	}
+}
+
+// A remembered provider the user has since LOGGED OUT of is ignored; the pick
+// falls through to the preference order.
+func TestResolveOpencodeSeedEmptyProviderIgnoresLoggedOutPref(t *testing.T) {
+	m := testMaterial(t, "opencode") // anthropic remembered, no longer logged in
+	deps := opencodeSeedDeps{
+		harvest:  harvestSeq(harvestResult{m: m}),
+		isTTY:    func() bool { return true },
+		runLogin: func(context.Context, string) error { t.Fatal("no login expected"); return nil },
+		readPref: func() string { return session.OpencodeProviderAnthropic },
+	}
+	provider, _, err := deps.resolve(context.Background(), "", "", &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if provider != session.OpencodeProviderZen {
+		t.Fatalf("provider = %q, want %q (logged-out pref ignored)", provider, session.OpencodeProviderZen)
+	}
+}
+
+// Empty --provider + a --seed-providers filter picks a provider INSIDE the
+// filter (defaulting to an excluded provider would only re-error downstream).
+func TestResolveOpencodeSeedEmptyProviderFilterNarrowsPick(t *testing.T) {
+	m := testMaterial(t, "anthropic", "openai")
+	deps := opencodeSeedDeps{
+		harvest:  harvestSeq(harvestResult{m: m}),
+		isTTY:    func() bool { return true },
+		runLogin: func(context.Context, string) error { t.Fatal("no login expected"); return nil },
+		readPref: func() string { return "" },
+	}
+	provider, seed, err := deps.resolve(context.Background(), "", "openai", &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if provider != session.OpencodeProviderOpenAI {
+		t.Fatalf("provider = %q, want openai (the in-filter provider)", provider)
+	}
+	got := seedKeys(t, seed)
+	if !got["openai"] || got["anthropic"] {
+		t.Fatalf("seed keys = %v, want ONLY openai (the filter)", got)
+	}
+}
+
+// Empty --provider with NOTHING selectable in the login keeps the original
+// anthropic-default remediation verbatim (fail closed, no login attempt on a
+// non-TTY).
+func TestResolveOpencodeSeedEmptyProviderNothingSelectableKeepsRemediation(t *testing.T) {
+	m := testMaterial(t, "github-copilot") // no anthropic/openai/opencode
+	loginCalls := 0
+	deps := opencodeSeedDeps{
+		harvest:  harvestSeq(harvestResult{m: m}),
+		isTTY:    func() bool { return false },
+		runLogin: func(context.Context, string) error { loginCalls++; return nil },
+		readPref: func() string { return "" },
+	}
+	provider, _, err := deps.resolve(context.Background(), "", "", &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "opencode auth login anthropic") {
+		t.Fatalf("err = %v, want the anthropic remediation (nothing selectable to default to)", err)
+	}
+	if provider != "" {
+		t.Fatalf("provider = %q, want \"\" on the error path", provider)
+	}
+	if loginCalls != 0 {
+		t.Fatalf("login fired %d times on a non-TTY, want 0", loginCalls)
+	}
+}
+
+// An explicit --provider skips the pick entirely: the pref seam is never
+// consulted and no default is announced.
+func TestResolveOpencodeSeedExplicitProviderSkipsPick(t *testing.T) {
+	m := testMaterial(t, "opencode")
+	var stderr bytes.Buffer
+	deps := opencodeSeedDeps{
+		harvest:  harvestSeq(harvestResult{m: m}),
+		isTTY:    func() bool { return true },
+		runLogin: func(context.Context, string) error { t.Fatal("no login expected"); return nil },
+		readPref: func() string { t.Fatal("readPref must not be consulted for an explicit --provider"); return "" },
+	}
+	provider, _, err := deps.resolve(context.Background(), session.OpencodeProviderZen, "", &stderr)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if provider != session.OpencodeProviderZen {
+		t.Fatalf("provider = %q, want the explicit %q", provider, session.OpencodeProviderZen)
+	}
+	if strings.Contains(stderr.String(), "defaulting to") {
+		t.Fatalf("stderr = %q, must NOT announce a default for an explicit --provider", stderr.String())
 	}
 }

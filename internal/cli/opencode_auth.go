@@ -33,13 +33,16 @@ var errOpencodeProviderNotHarvested = errors.New("selected provider not in local
 // opencodeSeedDeps carries resolveOpencodeSeed's external dependencies behind
 // function seams so the resolver is hermetically testable: harvest reads the
 // host auth.json, isTTY gates the interactive login passthrough, runLogin shells
-// out to `opencode auth login`, and stdin feeds the yes/no confirmation. The real
-// wiring lives in defaultOpencodeSeedDeps; tests substitute fakes so no test ever
-// touches a real opencode binary or the user's terminal.
+// out to `opencode auth login`, readPref reads the remembered last-used
+// provider, and stdin feeds the yes/no confirmation. The real wiring lives in
+// defaultOpencodeSeedDeps; tests substitute fakes so no test ever touches a real
+// opencode binary, the pref file, or the user's terminal. A nil readPref reads
+// as "no preference remembered".
 type opencodeSeedDeps struct {
 	harvest  func() (client.OpencodeAuthMaterial, error)
 	isTTY    func() bool
 	runLogin func(ctx context.Context, entryKey string) error
+	readPref func() string
 	stdin    io.Reader
 }
 
@@ -49,7 +52,8 @@ type opencodeSeedDeps struct {
 // streams so opencode's own device-code/browser flow owns the terminal.
 func defaultOpencodeSeedDeps() opencodeSeedDeps {
 	return opencodeSeedDeps{
-		harvest: client.HarvestOpencodeAuth,
+		harvest:  client.HarvestOpencodeAuth,
+		readPref: readLastOpencodeProvider,
 		isTTY: func() bool {
 			// Prompt only when we can both ASK (stderr) and READ an answer (stdin);
 			// a piped stdin or redirected stderr must fail closed, not hang.
@@ -68,71 +72,95 @@ func defaultOpencodeSeedDeps() opencodeSeedDeps {
 
 // resolveOpencodeSeed decides what (if anything) `sandbox opencode` seeds into a
 // new session from the host's local opencode login, given the session's default
-// --provider and the --seed-providers filter. It returns the seed document bytes
-// for CreateOptions.OpencodeAuthJSON, or nil to signal "leave it empty and take
-// the shared-Secret fallback". ctx is threaded through solely for the login
-// passthrough (exec.CommandContext); it is NOT in the change's abstract D4/D5/D6
-// signature but is required to make the passthrough cancellable and mirror the
-// rest of runStartSession, which already carries ctx.
-func resolveOpencodeSeed(ctx context.Context, provider, seedProviders string, stderr io.Writer) ([]byte, error) {
+// --provider and the --seed-providers filter. It returns the EFFECTIVE provider
+// (the --provider value, or — when that is empty — the remembered last-used /
+// auto-picked default; see defaultOpencodeProvider) plus the seed document bytes
+// for CreateOptions.OpencodeAuthJSON, or a nil seed to signal "leave it empty
+// and take the shared-Secret fallback". ctx is threaded through solely for the
+// login passthrough (exec.CommandContext); it is NOT in the change's abstract
+// D4/D5/D6 signature but is required to make the passthrough cancellable and
+// mirror the rest of runStartSession, which already carries ctx.
+func resolveOpencodeSeed(ctx context.Context, provider, seedProviders string, stderr io.Writer) (string, []byte, error) {
 	return defaultOpencodeSeedDeps().resolve(ctx, provider, seedProviders, stderr)
 }
 
 // resolve implements the D4/D5/D6 case logic. See resolveOpencodeSeed for the
 // contract; the branches are commented inline (Case A/B/C + the exclusion error).
-func (d opencodeSeedDeps) resolve(ctx context.Context, provider, seedProviders string, stderr io.Writer) ([]byte, error) {
+func (d opencodeSeedDeps) resolve(ctx context.Context, provider, seedProviders string, stderr io.Writer) (string, []byte, error) {
 	material, err := d.harvest()
 	if errors.Is(err, client.ErrOpencodeAuthNotFound) {
-		// Case A (D6): no local opencode login → return nil so runStartSession
-		// leaves OpencodeAuthJSON empty and the unchanged shared-Secret fallback
-		// path takes over. One stderr line so the fallback is visible, never silent.
+		// Case A (D6): no local opencode login → return a nil seed so
+		// runStartSession leaves OpencodeAuthJSON empty and the unchanged
+		// shared-Secret fallback path takes over. The provider passes through
+		// untouched (there is no login to default FROM). One stderr line so the
+		// fallback is visible, never silent.
 		fmt.Fprintf(stderr, "opencode: no local opencode login found; using the shared cluster Secret for provider %q\n", opencodeProviderLabel(provider))
-		return nil, nil
+		return provider, nil, nil
 	}
 	if err != nil {
 		// Case B: a present-but-broken store (unreadable / non-object / bad entry)
 		// fails closed. A corrupt local login must NOT silently fall back to the
 		// shared Secret — that would mask the breakage and ship the wrong creds.
-		return nil, err
+		return "", nil, err
 	}
 
-	seed, err := d.seedFromMaterial(material, provider, seedProviders)
+	// --provider empty: default to the remembered last-used provider when still
+	// logged in, else auto-pick from the local login (defaultOpencodeProvider).
+	// The selected provider is only an auth gate — the default D4 seed carries
+	// the WHOLE login into the pod, so this never narrows what the session can
+	// use — but a silent default is how the old hardcoded-anthropic default
+	// surprised users, so the pick is announced on stderr. "" from the pick
+	// means nothing selectable is logged in; keeping "" preserves the original
+	// anthropic-default remediation paths below verbatim.
+	effective := provider
+	if effective == "" {
+		lastUsed := ""
+		if d.readPref != nil {
+			lastUsed = d.readPref()
+		}
+		effective = defaultOpencodeProvider(material, lastUsed, seedProviders)
+		if effective != "" {
+			fmt.Fprintf(stderr, "opencode: no --provider given; defaulting to %q from your local login\n", effective)
+		}
+	}
+
+	seed, err := d.seedFromMaterial(material, effective, seedProviders)
 	if err == nil {
-		return seed, nil
+		return effective, seed, nil
 	}
 	if !errors.Is(err, errOpencodeProviderNotHarvested) {
 		// Unknown --seed-providers value, an excluded selected provider, or a
 		// Filter error — all terminal, surface as-is.
-		return nil, err
+		return "", nil, err
 	}
 
 	// Case C (D5): the session's provider is not in the local login. The user HAS
 	// a local store (Case A already handled its absence), so the shared Secret is
 	// likely unpopulated for this provider — never fall back to it here.
-	entryKey := opencodeProviderEntryKey(provider)
+	entryKey := opencodeProviderEntryKey(effective)
 	if !d.isTTY() {
-		return nil, opencodeLoginRemediation(provider, entryKey)
+		return "", nil, opencodeLoginRemediation(effective, entryKey)
 	}
 	prompt := fmt.Sprintf("provider %q is not in your local opencode login — run `opencode auth login %s` now? [y/N] ",
-		opencodeProviderLabel(provider), entryKey)
+		opencodeProviderLabel(effective), entryKey)
 	if !promptYesNo(d.stdin, stderr, prompt) {
-		return nil, opencodeLoginRemediation(provider, entryKey)
+		return "", nil, opencodeLoginRemediation(effective, entryKey)
 	}
 	if lerr := d.runLogin(ctx, entryKey); lerr != nil {
-		return nil, fmt.Errorf("opencode auth login %s: %w", entryKey, lerr)
+		return "", nil, fmt.Errorf("opencode auth login %s: %w", entryKey, lerr)
 	}
 	// Re-harvest and recompute exactly ONCE — the login just wrote a fresh entry.
 	material, err = d.harvest()
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
-	seed, err = d.seedFromMaterial(material, provider, seedProviders)
+	seed, err = d.seedFromMaterial(material, effective, seedProviders)
 	if err != nil {
 		// Still missing after a login (cancelled, or a different provider chosen)
 		// → fail closed rather than loop.
-		return nil, err
+		return "", nil, err
 	}
-	return seed, nil
+	return effective, seed, nil
 }
 
 // seedFromMaterial computes the seed document from harvested material for the

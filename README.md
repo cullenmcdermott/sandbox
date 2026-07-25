@@ -219,7 +219,13 @@ per-session Secret (`<session-id>-runner`); you do not manage it manually.
   shared key.
 
   - `--provider anthropic|openai|opencode-zen` names the session's **default
-    model provider** and must be one of the seeded providers.
+    model provider** and must be one of the seeded providers. Unset, it
+    defaults to your **last-used provider** (remembered at
+    `~/.local/share/sandbox/last-opencode-provider` after each successful
+    launch) when still logged in, else is **auto-picked from your local login**
+    (preference: anthropic, opencode-zen, openai). This selects only the
+    provider the session's auth gate checks — the whole login is seeded
+    regardless, so every provider stays switchable in-session via `/model`.
   - `--seed-providers anthropic,openai,opencode-zen` **narrows** which of your
     locally-authenticated providers leave your machine (the security lever — see
     [`SECURITY.md`](SECURITY.md)). Unset seeds all of them; the set must include

@@ -82,7 +82,7 @@ func newOpencodeCmd() *cobra.Command {
 	cmd.Flags().StringVar(&reaperImage, "reaper-image", k8s.DefaultReaperImage, "idle-reaper container image")
 	cmd.Flags().StringVar(&nameFlag, "name", "", "custom display name for the session (overrides the auto title)")
 	cmd.Flags().StringVar(&modelFlag, "model", "", "model id for the session default as provider/model (e.g. anthropic/claude-sonnet-4-5); empty uses the opencode server default")
-	cmd.Flags().StringVar(&providerFlag, "provider", "", "opencode model provider the session defaults to: anthropic (default), openai, or opencode-zen")
+	cmd.Flags().StringVar(&providerFlag, "provider", "", "opencode model provider the session defaults to: anthropic, openai, or opencode-zen. Empty: your last-used provider when still logged in, else auto-picked from your local opencode login (preference: anthropic, opencode-zen, openai). The whole login is seeded either way — switch providers in-session with /model")
 	cmd.Flags().StringVar(&seedProvidersFlag, "seed-providers", "", "comma-separated providers (anthropic, openai, opencode-zen) to seed into the session from your local opencode login; empty seeds every provider you're logged into. The security lever for narrowing which credentials leave your machine")
 	cmd.Flags().StringVar(&worktreeFlag, "worktree", "auto", "per-session git worktree isolation: auto (worktree iff the project is a git repo), on (require a git repo), off (never)")
 	return cmd
@@ -218,15 +218,20 @@ func runStartSession(cmd *cobra.Command, backendName, prompt, runnerImage, reape
 	// opencode: harvest the host's own opencode login and seed it per-session
 	// (the new primary path), narrowed by --seed-providers. A nil seed means "no
 	// local login" — leave OpencodeAuthJSON empty so client.Create falls back to
-	// the shared opencode-credentials Secret (D6). Any resolution error (corrupt
-	// store, or a selected provider the user isn't logged into and won't log into
-	// now) is fail-closed here, before any cluster call. client.Create's
-	// validateOpencodeSeed is the final backstop.
+	// the shared opencode-credentials Secret (D6). An empty --provider defaults
+	// to the remembered last-used provider, else auto-picks from the local login
+	// (resolveOpencodeSeed returns the effective value, which must reach the
+	// Spec so client.Create's seed check and the pod's SANDBOX_OPENCODE_PROVIDER
+	// agree with the seed). Any resolution error (corrupt store, or a selected
+	// provider the user isn't logged into and won't log into now) is fail-closed
+	// here, before any cluster call. client.Create's validateOpencodeSeed is the
+	// final backstop.
 	if backendName == session.BackendOpenCode {
-		seed, serr := resolveOpencodeSeed(ctx, opencodeProvider, seedProviders, cmd.ErrOrStderr())
+		effective, seed, serr := resolveOpencodeSeed(ctx, opencodeProvider, seedProviders, cmd.ErrOrStderr())
 		if serr != nil {
 			return serr
 		}
+		opts.OpencodeProvider = effective
 		if seed != nil {
 			opts.OpencodeAuthJSON = seed
 		}
@@ -238,6 +243,13 @@ func runStartSession(cmd *cobra.Command, backendName, prompt, runnerImage, reape
 	sess, err := c.Create(ctx, opts)
 	if err != nil {
 		return err
+	}
+	// Remember the provider the session actually launched with so the next
+	// launch defaults to it (best-effort; "" — the shared-Secret fallback — is
+	// never recorded). Recorded only AFTER a successful Create so a refused
+	// launch doesn't become the default.
+	if backendName == session.BackendOpenCode {
+		writeLastOpencodeProvider(opts.OpencodeProvider)
 	}
 	sid := sess.ID()
 

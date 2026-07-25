@@ -15,6 +15,10 @@
   * Somewhat related but exposing  endpoints from laptop to agent pods. Could be MCP servers, ssh key socket, etc. Potentially risky so should be careful/explicit before using.
 * What is not exposed through our public sdk. I want an external consumer to be able to reuse all of our tui compnents like building blocks, transitions, modals, etc. Glyphs, information, all that jazz
 * rewrite agent piece into go?
+* Validate that the project/sdk adheres to some principles:
+    * people should be able to use custom transports to communicate with kube-api/pod endpoints
+    * TUI should be batteries included but customizable by consumers, for example modifying the layout by adding or removing boxes should be possible, resizing them, etc.
+    * Lean on agent-sandbox/k8s primitives when it makes sense. However do not (typically) expose these to consumers.
 
 > **How to use this file (agents):** sections are numbered workstreams, ordered
 > roughly bugs → strategy → perf → platform. Every item carries `file:line`
@@ -852,12 +856,18 @@ first.
   verify on omni-prod still pending (task 6.4):** multi-provider seed
   session + fallback session — the original `CreateContainerConfigError`
   repro. Deferred follow-ups (filed, not blocking):
-  - Dashboard opencode creator seeds ALL local providers but collects no
+  - ~~Dashboard opencode creator seeds ALL local providers but collects no
     `--provider` (defaults anthropic) and has no per-provider picker — a
     user whose local login lacks anthropic hits `ErrOpencodeProviderNotSeeded`
-    fail-closed at Create instead of the CLI's login prompt. Add a provider
-    picker to the create overlay (parity with the account picker) OR default
-    the dashboard's opencode provider to the sole/first harvested entry.
+    fail-closed at Create instead of the CLI's login prompt.~~ **Defaulting
+    DONE 2026-07-25:** an unset `--provider` now defaults to the remembered
+    last-used provider (new pref file
+    `~/.local/share/sandbox/last-opencode-provider`, recorded after each
+    successful create) when still logged in, else auto-picks from the
+    harvested local login (preference: anthropic, opencode-zen, openai) — in
+    BOTH `sandbox opencode` and the dashboard creator. Remaining follow-up:
+    a provider picker for the create overlay (parity with the account
+    picker).
   - `stampOpencodeCredsFreshness` still stamps a shared-Secret provider-key
     fingerprint for SEEDED sessions too (`internal/k8s/backend.go`), so
     `warnIfOpencodeCredsRotated` could emit a spurious rotation warning for
