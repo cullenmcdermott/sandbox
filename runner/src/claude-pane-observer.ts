@@ -331,17 +331,32 @@ export function createPaneObserverCore(deps: PaneObserverDeps): PaneObserverCore
     }
 
     const ctx = payload.context_window as
-      | { current_usage?: Record<string, unknown> }
+      | { current_usage?: Record<string, unknown>; context_window_size?: unknown; size?: unknown }
       | undefined;
     const cu = ctx?.current_usage;
     const cost = payload.cost as Record<string, unknown> | undefined;
     if (cu) {
+      // The window the pane child is ACTUALLY running with, straight from the
+      // agent. Without it the Go side divides by models.EffectiveContextLimit,
+      // which infers a window from the model id and is wrong whenever the
+      // model's maximum is an opt-in beta this session did not request (the
+      // 1M-vs-200k Claude gap that made ctx% read 20% at 100% full). Carried on
+      // usage.updated because it is the ctx% numerator's own event — denominator
+      // and numerator then always come from the same statusline sample.
+      //
+      // `context_window_size` is the field Claude Code emits (see
+      // runner/statusline/main.go, which has consumed it on the host since
+      // before this observer existed); `size` is accepted as a rename hedge.
+      // Omitted entirely when neither is a usable number, which leaves the
+      // model-derived fallback in play instead of pinning ctx% to a bogus 0.
+      const limit = num(ctx?.context_window_size) || num(ctx?.size);
       const usage = {
         inputTokens: num(cu.input_tokens),
         outputTokens: num(cu.output_tokens),
         cacheReadTokens: num(cu.cache_read_input_tokens),
         cacheWriteTokens: num(cu.cache_creation_input_tokens),
         totalCostUsd: num(cost?.total_cost_usd),
+        ...(limit > 0 ? { contextLimitTokens: limit } : {}),
       };
       const key = JSON.stringify(usage);
       if (key !== lastUsageJson) {

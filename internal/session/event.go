@@ -120,6 +120,19 @@ type UsagePayload struct {
 	CacheReadTokens  int     `json:"cacheReadTokens"`
 	CacheWriteTokens int     `json:"cacheWriteTokens"`
 	TotalCostUSD     float64 `json:"totalCostUsd"`
+
+	// ContextLimitTokens is the context window the agent is ACTUALLY running
+	// with, as reported by the agent itself — the honest ctx% denominator.
+	//
+	// The alternative is models.EffectiveContextLimit(model), which only knows
+	// what a model id implies. That guess is wrong whenever a model's maximum
+	// window is an opt-in beta the session did not request: models.dev lists
+	// claude-opus-4-8 at 1,000,000 while Claude Code runs 200,000, so ctx% read
+	// 20% on a pane whose own statusline said 100%. Only the agent knows.
+	//
+	// 0/absent for backends that do not report it (opencode, codex today), which
+	// keeps the model-derived fallback in play rather than showing no gauge.
+	ContextLimitTokens int `json:"contextLimitTokens,omitempty"`
 }
 
 // RateLimitPayload is the payload for rate_limit.updated events: the claude.ai

@@ -179,6 +179,8 @@ export interface UsagePayload {
   cacheReadTokens: number;
   cacheWriteTokens: number;
   totalCostUsd: number;
+  /** the context window the agent is ACTUALLY running with, as the agent itself reports it (claude-pane's statusline context_window.context_window_size). This is the ctx% denominator; when 0/absent the consumer falls back to models.EffectiveContextLimit(model), which only guesses. The two differ whenever a model's maximum window is an opt-in beta the session did not request — Claude's extended windows being the case that made this field necessary. */
+  contextLimitTokens?: number;
 }
 
 /** payload for rate_limit.updated events: the claude.ai plan usage windows (5-hour + weekly, plus the optional per-model weekly Opus/Sonnet caps) and their reset instants, fetched from the SDK's structured /usage data (Query.usage_EXPERIMENTAL...). `available` is false for API-key/Bedrock/Vertex sessions where plan limits do not apply; the TUI hides the windows then rather than fabricating values. Utilizations are 0-100; resets are ISO 8601 (RFC3339) and may be empty when the SDK reports null. The per-model windows are absent (nil pointer / undefined) unless the plan has a separate cap for that model; the status line surfaces the one matching the attached model. The runner emits this during a turn (the control channel is only open until the result closes stdin), so the status line shows real reset times instead of projecting 5h/7d from the wall clock. */

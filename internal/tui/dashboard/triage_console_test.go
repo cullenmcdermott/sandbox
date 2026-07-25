@@ -484,6 +484,31 @@ func TestPhase3_CtxLimitCachedOnSessionStarted(t *testing.T) {
 	}
 }
 
+// The model-derived limit above is only a guess at what the agent runs with.
+// When the agent reports its own window (claude-pane's statusline, carried on
+// usage.updated), that fact wins — no model id can be more authoritative about
+// a running session than the session itself.
+func TestCtxLimitPrefersTheAgentReportedWindow(t *testing.T) {
+	sess := makeSession("s1", StatusIdle)
+	ApplyRunnerEvent(&sess, mkEvent(session.EventSessionStarted, session.SessionStartedPayload{Model: "opus-4.8"}))
+	guess := sess.CtxLimit
+
+	const reported = 175000 // deliberately unlike any value the guess could produce
+	ApplyRunnerEvent(&sess, mkEvent(session.EventUsageUpdated, session.UsagePayload{
+		InputTokens: 1000, ContextLimitTokens: reported,
+	}))
+	if sess.CtxLimit != reported {
+		t.Fatalf("CtxLimit = %d, want the agent-reported %d (guess was %d)", sess.CtxLimit, reported, guess)
+	}
+
+	// Counter: a backend that reports no window (opencode, codex) must not zero
+	// the fallback — a 0 denominator hides the ctx% gauge entirely.
+	ApplyRunnerEvent(&sess, mkEvent(session.EventUsageUpdated, session.UsagePayload{InputTokens: 2000}))
+	if sess.CtxLimit != reported {
+		t.Errorf("a usage event with no window changed CtxLimit to %d", sess.CtxLimit)
+	}
+}
+
 // --------------------------------------------------------------------------
 // Phase 4 — tool.started ring (main-thread only) + detail recent section
 // --------------------------------------------------------------------------

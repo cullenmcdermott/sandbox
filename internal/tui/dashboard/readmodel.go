@@ -26,8 +26,10 @@ type sessionReadModel struct {
 	DashStatus SessionStatus
 
 	// Model is the SDK-resolved active model id; CtxLimit is its context-window
-	// (cached via models.EffectiveContextLimit — the window the model actually
-	// runs with, NOT its maximum — so ctx% needs no per-render lookup). cwd is the
+	// (cached so ctx% needs no per-render lookup). CtxLimit is seeded from
+	// models.EffectiveContextLimit — the window the model id IMPLIES it runs
+	// with — and then replaced by the real window as soon as a usage.updated
+	// carries one (ContextLimitTokens; claude-pane only, today). cwd is the
 	// pod working dir and defaultModel the first resolved id (the account/session
 	// default, restored by /model-default) — both read only by the transcript
 	// status line, but derived here so session.started is unmarshalled once.
@@ -158,6 +160,18 @@ func (rm *sessionReadModel) ApplyEvent(ev session.Event) readModelResult {
 		}
 		if p.TotalCostUSD > 0 {
 			rm.TotalCostUSD = p.TotalCostUSD
+		}
+		// An agent-reported window supersedes the model-derived guess set by
+		// session.started: it is the window the agent is actually running with,
+		// not the one its model id implies. Only claude-pane reports it today;
+		// backends that don't leave this 0 and keep the fallback.
+		//
+		// A mid-session /model switch re-emits session.started, which resets
+		// CtxLimit to the fallback for the moment between that event and the next
+		// statusline sample. Harmless in practice — the statusline re-POSTs within
+		// seconds, and the two values agree for every Claude tier anyway.
+		if p.ContextLimitTokens > 0 {
+			rm.CtxLimit = p.ContextLimitTokens
 		}
 
 	case session.EventContextCompacted:

@@ -138,7 +138,8 @@
         {"json": "outputTokens", "type": "int", "optional": false},
         {"json": "cacheReadTokens", "type": "int", "optional": false},
         {"json": "cacheWriteTokens", "type": "int", "optional": false},
-        {"json": "totalCostUsd", "type": "float", "optional": false}
+        {"json": "totalCostUsd", "type": "float", "optional": false},
+        {"json": "contextLimitTokens", "type": "int", "optional": true, "doc": "the context window the agent is ACTUALLY running with, as the agent itself reports it (claude-pane's statusline context_window.context_window_size). This is the ctx% denominator; when 0/absent the consumer falls back to models.EffectiveContextLimit(model), which only guesses. The two differ whenever a model's maximum window is an opt-in beta the session did not request — Claude's extended windows being the case that made this field necessary."}
       ]
     },
     "RateLimitPayload": {

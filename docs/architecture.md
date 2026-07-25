@@ -28,7 +28,7 @@ survives detach, suspend/resume, and CLI restarts.
 | Local | `internal/sync` | Mutagen manager, SSH keypair + per-session ssh-config alias |
 | Local | `internal/index` | Local session index + SSH key storage under `~/.local/share/sandbox` |
 | Local | `internal/session` | Shared contract: `Spec`, `State`, `Event`, `Backend`, `RunnerClient` |
-| SDK   | `client/models` | Resolves a model's context-window limit + per-million-token pricing; drives the TUI ctx% indicator; importable by external consumers |
+| SDK   | `client/models` | Resolves a model's context-window limit + per-million-token pricing; importable by external consumers. `EffectiveContextLimit` seeds the TUI ctx% denominator, but only until the agent reports its real window (`usage.updated`'s `contextLimitTokens`, claude-pane today) — the agent's own number always wins |
 | Local | `internal/authstatus` | Offline per-agent auth-status report behind `sandbox auth status` (Claude/Codex/OpenCode providers) |
 | SDK   | `client/`, `client/cred` | Public Go SDK (create/connect/suspend/destroy/turns/events/sync) the CLI + TUI dogfood; `client/cred` is the multi-account Anthropic credential store. New capability lands here first |
 | SDK   | `tui/` | Public, importable TUI building blocks split out of the dashboard: `tui/kit`, `tui/anim`, `tui/list`, `tui/picker`, `tui/theme`, `tui/composer`, `tui/chrome`, `tui/terminal` |

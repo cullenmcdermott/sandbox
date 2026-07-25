@@ -186,6 +186,9 @@ test('statusline maps usage/rate-limit/model/title with duplicate suppression', 
   // Model + CtxLimit (ctx% in the pane status row) — opencode-observer parity.
   assert.deepEqual(emitted[0].payload, { model: 'claude-opus-4-8', cwd: '' });
   const usage = emitted[2].payload;
+  // deepEqual, not a subset match: this fixture reports no context_window_size,
+  // so contextLimitTokens must be ABSENT rather than 0 — a 0 would be read as a
+  // real denominator downstream instead of "fall back to the model's window".
   assert.deepEqual(usage, {
     inputTokens: 10,
     outputTokens: 41,
@@ -208,6 +211,54 @@ test('statusline maps usage/rate-limit/model/title with duplicate suppression', 
   const started = emitted.filter((e) => e.type === 'session.started');
   assert.equal(started.length, 2);
   assert.deepEqual(started[1].payload, { model: 'claude-sonnet-5', cwd: '' });
+});
+
+// The statusline is the ONLY place the real context window is observable: the
+// Go side otherwise infers it from the model id, which overstated Claude's
+// window 5× (models.dev says 1M, Claude Code runs 200k) and made ctx% read 20%
+// on a session whose own in-pane statusline said 100%.
+test('statusline forwards the agent-reported context window as the ctx% denominator', () => {
+  const { deps, emitted } = fakeDeps();
+  const core = createPaneObserverCore(deps);
+  const base = {
+    model: { id: 'claude-opus-4-8' },
+    context_window: {
+      context_window_size: 200000,
+      current_usage: { input_tokens: 1, output_tokens: 2 },
+    },
+  };
+  core.handleStatusline(base);
+  const usage = emitted.find((e) => e.type === 'usage.updated');
+  assert.equal(usage?.payload.contextLimitTokens, 200000);
+
+  // `size` is accepted as a rename hedge, but never over the documented field.
+  const { deps: d2, emitted: e2 } = fakeDeps();
+  const c2 = createPaneObserverCore(d2);
+  c2.handleStatusline({
+    context_window: { size: 123456, current_usage: { input_tokens: 1 } },
+  });
+  assert.equal(e2.find((e) => e.type === 'usage.updated')?.payload.contextLimitTokens, 123456);
+
+  const { deps: d3, emitted: e3 } = fakeDeps();
+  const c3 = createPaneObserverCore(d3);
+  c3.handleStatusline({
+    context_window: {
+      context_window_size: 200000,
+      size: 999,
+      current_usage: { input_tokens: 1 },
+    },
+  });
+  assert.equal(e3.find((e) => e.type === 'usage.updated')?.payload.contextLimitTokens, 200000);
+
+  // A non-numeric window is not a window: omit it so the model-derived fallback
+  // stays in play. Pinning ctx% to 0 would divide by nothing.
+  const { deps: d4, emitted: e4 } = fakeDeps();
+  const c4 = createPaneObserverCore(d4);
+  c4.handleStatusline({
+    context_window: { context_window_size: 'lots', current_usage: { input_tokens: 1 } },
+  });
+  const u4 = e4.find((e) => e.type === 'usage.updated')?.payload;
+  assert.equal('contextLimitTokens' in (u4 as object), false);
 });
 
 // --- provisional busy confirm window (L8a) ----------------------------------
