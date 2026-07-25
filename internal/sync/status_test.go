@@ -46,6 +46,19 @@ func TestParseSyncState(t *testing.T) {
 		{"paused", `[{"status":"Paused"}]`, SyncPaused},
 		{"conflicts", `[{"status":"Watching for changes","conflicts":[{"root":"x"}]}]`, SyncConflicted},
 		{"empty", `[]`, SyncUnknown},
+		// A DROPPED transport sits in connecting-alpha/connecting-beta carrying a
+		// lastError. It used to fall through to the default and render as healthy
+		// in-flight "syncing", which also kept it out of healEligible so the
+		// self-heal never fired. It must stall (heal-eligible) instead. Both the
+		// hyphenated machine status and mutagen's human form are covered.
+		{"dropped-transport-stalls", `[{"status":"connecting-beta","lastError":"beta polling error: unable to receive poll response: unable to read message length: unexpected EOF"}]`, SyncStalled},
+		{"dropped-alpha-stalls", `[{"status":"Connecting to alpha","lastError":"alpha polling error: unexpected EOF"}]`, SyncStalled},
+		// A sync that has NEVER connected carries no lastError — that is a genuine
+		// first connect, still in flight, and must not be reported as broken.
+		{"first-connect-is-syncing", `[{"status":"connecting-beta"}]`, SyncSyncing},
+		{"blank-lasterror-is-syncing", `[{"status":"connecting-beta","lastError":"   "}]`, SyncSyncing},
+		// One dead sync among healthy ones still surfaces (worst-of reducer).
+		{"one-dropped-among-healthy", `[{"status":"Watching for changes"},{"status":"connecting-beta","lastError":"unexpected EOF"}]`, SyncStalled},
 		{"two-sessions-worst-wins", `[{"status":"Watching for changes"},{"status":"Staging files on beta"}]`, SyncSyncing},
 		// A conflict outranks a co-occurring safety halt so the actionable
 		// resolution surfaces (both need user action; conflict wins the reducer).

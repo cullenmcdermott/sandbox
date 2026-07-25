@@ -56,7 +56,11 @@ func (s SyncState) String() string {
 // mutagenSession is the subset of `mutagen sync list --template '{{json .}}'`
 // output we care about.
 type mutagenSession struct {
-	Status    string            `json:"status"`
+	Status string `json:"status"`
+	// LastError is mutagen's most recent per-session error. It is what separates
+	// a sync still establishing its transport from one whose transport DROPPED —
+	// both sit in `connecting-alpha`/`connecting-beta`. See classify.
+	LastError string            `json:"lastError"`
 	Conflicts []mutagenConflict `json:"conflicts"`
 }
 
@@ -317,6 +321,22 @@ func classify(s mutagenSession) SyncState {
 		// [V14] A paused sync is frozen, not syncing. Surface it honestly instead of
 		// as perpetual "syncing"; the prober self-heals it while the session runs.
 		return SyncPaused
+	case strings.HasPrefix(status, "connecting"):
+		// mutagen reports connecting-alpha/connecting-beta in TWO very different
+		// situations: a fresh sync still establishing its transport (benign), and
+		// an established one whose transport DROPPED — the latter being exactly
+		// why a workspace silently stops updating. lastError separates them: a
+		// sync that has never connected carries none.
+		//
+		// Both previously fell through to the default and rendered as healthy
+		// in-flight "syncing". That also kept them out of healEligible (which
+		// admits only Stalled/Paused), so the one mechanism that would have
+		// recovered them — the MF5 ResumeAll+FlushAll self-heal — never fired and
+		// a dead sync stayed dead while reporting progress.
+		if strings.TrimSpace(s.LastError) != "" {
+			return SyncStalled
+		}
+		return SyncSyncing
 	case strings.Contains(status, "watching"):
 		return SyncSynced
 	default:
