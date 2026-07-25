@@ -201,7 +201,9 @@ function openSse(port: number, path: string, token: string): {
         .filter((f) => f.startsWith('data: '))
         .map((f) => JSON.parse(f.slice('data: '.length)) as Record<string, unknown>),
     hasReplayComplete: (): boolean => wire().includes(': replay-complete'),
-    close: (): void => request.destroy(),
+    close: (): void => {
+      request.destroy();
+    },
   };
 }
 

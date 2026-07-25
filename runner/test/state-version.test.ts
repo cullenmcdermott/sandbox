@@ -65,7 +65,7 @@ test('a newer-versioned file warns loudly and preserves unknown fields', () => {
     assert.match(String(errors.mock.calls[0].arguments[0]), /newer than this runner supports/);
     // Restamped to what this runner writes; unknown field carried through.
     assert.equal(loaded.state_version, STATE_VERSION);
-    assert.deepEqual((loaded as Record<string, unknown>).future_field, { nested: true });
+    assert.deepEqual((loaded as unknown as Record<string, unknown>).future_field, { nested: true });
     // Known-field semantics still apply (stale persisted 'busy' → 'idle').
     assert.equal(loaded.status, 'idle');
   } finally {

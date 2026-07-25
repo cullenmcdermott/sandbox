@@ -29,7 +29,7 @@ function fakeDeps() {
   const emitted: Emitted[] = [];
   const statuses: string[] = [];
   const audits: Array<{ turnId: string; tool: string }> = [];
-  let models: string[] = [];
+  const models: string[] = [];
   let n = 0;
   const deps: PaneObserverDeps = {
     nextTurnId: () => `t-${++n}`,

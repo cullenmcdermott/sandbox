@@ -1,0 +1,22 @@
+// Typecheck config for the test tree.
+//
+// tsconfig.json is the BUILD config: rootDir is src/, so it cannot also include
+// test/ without breaking the dist/ layout. The consequence was that nothing
+// typechecked tests at all — two provisioning tests used claudePaneArgs and
+// paneDefaultPermissionMode without importing them and threw ReferenceError at
+// runtime instead of asserting, on green-looking `just typecheck` runs, for as
+// long as it took someone to run the suite and read the output.
+//
+// This config drops rootDir/outDir (noEmit — it checks, it never builds) and
+// covers both trees, so `just typecheck` runs it in addition to the build
+// config. Test-only relaxations belong here, not in the build config.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "outDir": null
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}

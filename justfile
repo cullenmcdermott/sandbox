@@ -94,10 +94,17 @@ test:
         printf '\033[33m%s\033[0m\n' "warning: runner deps not installed — skipping runner tests. Run: cd runner && npm install --ignore-scripts"; \
     fi
 
-# Typecheck the TS runner.
+# Typecheck the TS runner — BOTH trees.
+#
+# tsconfig.json is the build config and its rootDir confines it to src/, so for
+# most of this repo's life the test tree was never typechecked at all: two tests
+# in claude-pane-observer.test.ts called functions they had not imported and
+# threw ReferenceError instead of asserting, through green typecheck runs.
+# tsconfig.test.json covers src/ + test/ with noEmit and closes that hole.
 typecheck:
     @if [ -x runner/node_modules/.bin/tsc ]; then \
-        cd runner && ./node_modules/.bin/tsc --noEmit; \
+        cd runner && ./node_modules/.bin/tsc --noEmit \
+            && ./node_modules/.bin/tsc --noEmit -p tsconfig.test.json; \
     else \
         printf '\033[33m%s\033[0m\n' "warning: runner deps not installed — skipping typecheck. Run: cd runner && npm install --ignore-scripts"; \
     fi

@@ -10,7 +10,7 @@
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "test": "node --import tsx --test test/*.test.ts",
-    "lint": "eslint src"
+    "lint": "eslint src test"
   },
   "dependencies": {
     "@opencode-ai/sdk": "^1.17.7",

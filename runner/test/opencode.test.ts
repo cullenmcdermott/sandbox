@@ -44,7 +44,7 @@ const PROC_TCP = `  sl  local_address rem_address   st tx_queue rx_queue tr tm->
 
 test('counts only ESTABLISHED connections on the target port', () => {
   const reader = (p: string) => (p === '/proc/net/tcp' ? PROC_TCP : (() => { throw new Error('no tcp6'); })());
-  assert.equal(establishedConnections(4096, reader as typeof import('node:fs').readFileSync), 1);
+  assert.equal(establishedConnections(4096, reader as unknown as typeof import('node:fs').readFileSync), 1);
 });
 
 test('external client count subtracts runner-owned opencode sockets', () => {
@@ -61,9 +61,9 @@ test('external client count subtracts runner-owned opencode sockets', () => {
   const two = (p: string) => (p === '/proc/net/tcp' ? observerPlusAttach : (() => { throw new Error('no tcp6'); })());
   const readdir = () => ['3'] as string[];
   const readlink = () => 'socket:[111]';
-  assert.equal(runnerOwnedConnections(4096, one as typeof import('node:fs').readFileSync, readdir as typeof import('node:fs').readdirSync, readlink as typeof import('node:fs').readlinkSync), 1);
-  assert.equal(externalClientConnections(4096, one as typeof import('node:fs').readFileSync, readdir as typeof import('node:fs').readdirSync, readlink as typeof import('node:fs').readlinkSync), 0);
-  assert.equal(externalClientConnections(4096, two as typeof import('node:fs').readFileSync, readdir as typeof import('node:fs').readdirSync, readlink as typeof import('node:fs').readlinkSync), 1);
+  assert.equal(runnerOwnedConnections(4096, one as unknown as typeof import('node:fs').readFileSync, readdir as unknown as typeof import('node:fs').readdirSync, readlink as unknown as typeof import('node:fs').readlinkSync), 1);
+  assert.equal(externalClientConnections(4096, one as unknown as typeof import('node:fs').readFileSync, readdir as unknown as typeof import('node:fs').readdirSync, readlink as unknown as typeof import('node:fs').readlinkSync), 0);
+  assert.equal(externalClientConnections(4096, two as unknown as typeof import('node:fs').readFileSync, readdir as unknown as typeof import('node:fs').readdirSync, readlink as unknown as typeof import('node:fs').readlinkSync), 1);
 });
 
 test('runner-owned socket scan tolerates disappearing fds', () => {
@@ -77,19 +77,19 @@ test('runner-owned socket scan tolerates disappearing fds', () => {
     if (p.endsWith('/3')) throw new Error('ENOENT');
     return 'socket:[111]';
   };
-  assert.equal(runnerOwnedConnections(4096, reader as typeof import('node:fs').readFileSync, readdir as typeof import('node:fs').readdirSync, readlink as typeof import('node:fs').readlinkSync), 1);
-  assert.equal(externalClientConnections(4096, reader as typeof import('node:fs').readFileSync, readdir as typeof import('node:fs').readdirSync, readlink as typeof import('node:fs').readlinkSync), 0);
+  assert.equal(runnerOwnedConnections(4096, reader as unknown as typeof import('node:fs').readFileSync, readdir as unknown as typeof import('node:fs').readdirSync, readlink as unknown as typeof import('node:fs').readlinkSync), 1);
+  assert.equal(externalClientConnections(4096, reader as unknown as typeof import('node:fs').readFileSync, readdir as unknown as typeof import('node:fs').readdirSync, readlink as unknown as typeof import('node:fs').readlinkSync), 0);
 });
 
 test('returns 0 when the port has only a LISTEN socket', () => {
   const listenOnly = `  sl  local_address rem_address   st\n   0: 00000000:1000 00000000:0000 0A 0\n`;
   const reader = (p: string) => (p === '/proc/net/tcp' ? listenOnly : (() => { throw new Error('no tcp6'); })());
-  assert.equal(establishedConnections(4096, reader as typeof import('node:fs').readFileSync), 0);
+  assert.equal(establishedConnections(4096, reader as unknown as typeof import('node:fs').readFileSync), 0);
 });
 
 test('missing proc files yield 0, not a throw', () => {
   const reader = () => { throw new Error('ENOENT'); };
-  assert.equal(establishedConnections(4096, reader as unknown as typeof import('node:fs').readFileSync), 0);
+  assert.equal(establishedConnections(4096, reader as unknown as unknown as typeof import('node:fs').readFileSync), 0);
 });
 
 test('buildOpencodeConfig enables only providers present in env', () => {
