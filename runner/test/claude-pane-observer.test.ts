@@ -12,6 +12,11 @@ import {
   type PaneObserverDeps,
   type PaneObserverFs,
 } from '../src/claude-pane-observer.js';
+// The provisioning tests assert the seeded settings actually drive the SPAWN,
+// so they reach across to the supervisor's readers. Missing here until now,
+// which made both of those tests throw ReferenceError instead of asserting —
+// tsconfig only typechecks src/, so nothing caught the unbound identifier.
+import { claudePaneArgs, paneDefaultPermissionMode } from '../src/claude-pane.js';
 import type { EventType } from '../src/types.js';
 
 interface Emitted {
