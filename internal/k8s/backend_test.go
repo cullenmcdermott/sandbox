@@ -115,6 +115,16 @@ func TestCreateSessionProbes(t *testing.T) {
 			t.Errorf("%s probe port = %q, want \"http\"", tc.name, h.Port.StrVal)
 		}
 	}
+
+	// Readiness is tuned for fast cold-start/resume attach: 0s initial delay,
+	// 1s period (an early miss just retries next period; there is no penalty and
+	// nothing to settle). Pin it so the latency win isn't quietly reverted.
+	if got := c.ReadinessProbe.InitialDelaySeconds; got != 0 {
+		t.Errorf("readiness InitialDelaySeconds = %d, want 0", got)
+	}
+	if got := c.ReadinessProbe.PeriodSeconds; got != 1 {
+		t.Errorf("readiness PeriodSeconds = %d, want 1", got)
+	}
 }
 
 // TestCreateSessionExplicitStorageClass verifies an explicit Spec.StorageClass

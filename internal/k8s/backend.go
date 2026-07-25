@@ -1900,6 +1900,24 @@ func buildSandbox(spec session.Spec) *agentv1alpha1.Sandbox {
 							// unauthenticated GET /healthz (server.ts) on the runner
 							// port. Readiness gates traffic (and is what the reaper
 							// can key suspension on); liveness restarts a hung runner.
+							// Readiness sits directly on the resume/cold-start attach
+							// path: waitForPodReady blocks Connect on this condition,
+							// and resume is a full cold pod boot (suspend deletes the
+							// pod). InitialDelaySeconds 0 / PeriodSeconds 1 (was 5/10):
+							//   - The delay bought nothing but latency — a probe that
+							//     fires before the server binds simply fails and is
+							//     retried a period later, which is what the period is
+							//     for; there is no penalty for an early miss and no
+							//     state that needs to settle.
+							//   - The pod now goes Ready within ~1s of the listen
+							//     instead of ~2-4s, on every cold start and every resume.
+							//   - Failure detection gets FASTER, not slower:
+							//     FailureThreshold 3 x 1s turns readiness off within ~3s
+							//     of the first failed probe, against ~30s before.
+							//   - Tradeoff: readiness QPS per pod rises 10x. These are
+							//     single-tenant session pods with a trivial
+							//     unauthenticated /healthz handler, so the kubelet cost
+							//     is noise next to the latency removed.
 							ReadinessProbe: &corev1.Probe{
 								ProbeHandler: corev1.ProbeHandler{
 									HTTPGet: &corev1.HTTPGetAction{
@@ -1907,8 +1925,8 @@ func buildSandbox(spec session.Spec) *agentv1alpha1.Sandbox {
 										Port: intstr.FromString("http"),
 									},
 								},
-								InitialDelaySeconds: 5,
-								PeriodSeconds:       10,
+								InitialDelaySeconds: 0,
+								PeriodSeconds:       1,
 								TimeoutSeconds:      5,
 								FailureThreshold:    3,
 							},
