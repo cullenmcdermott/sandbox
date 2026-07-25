@@ -617,10 +617,13 @@ func (m *Model) renderConvertModal() string {
 	body := title + "\n" + factsLine + "\n\n" + branchView + "\n" + messageView
 	if cm.inlineErr != "" {
 		body += "\n\n" + kit.ErrorBlock(cm.inlineErr, "", "")
+	} else if cm.note != "" {
+		body += "\n\n" + lipgloss.NewStyle().Foreground(theme.Guac).Render("✓ "+cm.note)
 	}
 	body += "\n\n" + kit.KbdRow(
 		[2]string{"tab", "field"},
 		[2]string{"↵", "convert"},
+		[2]string{"^y", "copy branch"},
 		[2]string{"esc", "cancel"},
 	)
 

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/cullenmcdermott/sandbox/internal/session"
 	"github.com/cullenmcdermott/sandbox/tui/terminal"
 )
@@ -163,9 +164,79 @@ func TestConvertSuccessToast(t *testing.T) {
 	if toastCmd == nil {
 		t.Fatal("no success toast emitted")
 	}
-	toast := toastCmd().(toastMsg)
+	// Success now batches a clipboard set with the toast: assert BOTH, so a
+	// regression that drops the copy is a failure rather than a silent revert.
+	batch, ok := toastCmd().(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("want tea.BatchMsg (clipboard + toast), got %T", toastCmd())
+	}
+	var toast toastMsg
+	var sawToast, sawClipboard bool
+	for _, c := range batch {
+		switch msg := c().(type) {
+		case toastMsg:
+			toast, sawToast = msg, true
+		default:
+			// SetClipboard's message type is unexported; identify it structurally
+			// by its rendered form rather than importing bubbletea internals.
+			if strings.Contains(fmt.Sprintf("%#v", msg), "feat/fix-login-flow") {
+				sawClipboard = true
+			}
+		}
+	}
+	if !sawClipboard {
+		t.Error("successful convert did not put the final branch on the clipboard")
+	}
+	if !sawToast {
+		t.Fatal("successful convert emitted no toast")
+	}
 	if !strings.Contains(toast.note, "feat/fix-login-flow") || !strings.Contains(toast.note, "ready to merge") {
 		t.Errorf("toast note = %q, want branch ready-to-merge message", toast.note)
+	}
+}
+
+// TestConvertModalCopyBranch asserts ctrl+y copies the LIVE branch field (an
+// edit is reflected), sets the confirmation note, and leaves the modal open —
+// and that a bare "c" still types into the field rather than triggering a copy.
+func TestConvertModalCopyBranch(t *testing.T) {
+	ops := &fakeWorktreeOps{branch: "sandbox/s1", dirty: true, changed: []string{"a.go"}}
+	m := modelWithOneSession(ops, "Fix login flow")
+
+	_, cmd := m.handleKey(keyMsg("b"))
+	m.Update(cmd().(worktreeStatusMsg))
+	if m.convert == nil {
+		t.Fatal("convert modal did not open")
+	}
+
+	// A bare letter must reach the text input, not act as a command.
+	before := m.convert.branch.Value()
+	m.handleKey(keyMsg("c"))
+	if got := m.convert.branch.Value(); got != before+"c" {
+		t.Errorf("bare 'c' = %q, want it typed into the branch field (%q)", got, before+"c")
+	}
+
+	_, copyCmd := m.handleKey(keyMsg("ctrl+y"))
+	if copyCmd == nil {
+		t.Fatal("ctrl+y produced no clipboard command")
+	}
+	if m.convert == nil {
+		t.Fatal("ctrl+y should keep the modal open")
+	}
+	want := before + "c"
+	if !strings.Contains(fmt.Sprintf("%#v", copyCmd()), want) {
+		t.Errorf("clipboard payload does not carry the edited branch %q", want)
+	}
+	if m.convert.note != "copied "+want {
+		t.Errorf("note = %q, want %q", m.convert.note, "copied "+want)
+	}
+	if ops.convertCalls != 0 {
+		t.Error("ctrl+y must not run a convert")
+	}
+
+	// A subsequent edit invalidates the note (the clipboard no longer matches).
+	m.handleKey(keyMsg("x"))
+	if m.convert.note != "" {
+		t.Errorf("note = %q, want cleared after an edit", m.convert.note)
 	}
 }
 

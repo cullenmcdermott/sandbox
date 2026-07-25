@@ -95,6 +95,7 @@ type convertModal struct {
 	dirty     bool
 	changed   int
 	inlineErr string // set on a keep-modal error (taken name, dirty/empty message)
+	note      string // transient confirmation, e.g. "copied feat/foo" (ctrl+y)
 	busy      bool   // a Convert is in flight
 }
 
@@ -153,7 +154,12 @@ func newConvertModal(id session.ID, branch, message, curBranch string, dirty boo
 }
 
 // handleConvertKey routes keys while the convert modal is open: esc cancels,
-// enter submits, tab/↑/↓ move focus, everything else edits the focused field.
+// enter submits, ctrl+y copies the branch field, tab/↑/↓ move focus, everything
+// else edits the focused field.
+//
+// Copy is ctrl+y (yank), NOT a bare `c`: both fields are text inputs and every
+// key this switch does not claim is typed into the focused one, so a bare letter
+// would make branch names containing it unwritable.
 func (m *Model) handleConvertKey(msg tea.KeyPressMsg) tea.Cmd {
 	cm := m.convert
 	switch msg.String() {
@@ -162,9 +168,14 @@ func (m *Model) handleConvertKey(msg tea.KeyPressMsg) tea.Cmd {
 		return nil
 	case "enter":
 		return m.submitConvert()
+	case "ctrl+y":
+		return cm.copyBranchCmd()
 	case "tab", "shift+tab", "up", "down":
 		return cm.toggleFocus()
 	}
+	// An edit invalidates a "copied <name>" note — the field no longer matches
+	// what is on the clipboard.
+	cm.note = ""
 	var cmd tea.Cmd
 	if cm.focus == 0 {
 		cm.branch, cmd = cm.branch.Update(msg)
@@ -174,10 +185,26 @@ func (m *Model) handleConvertKey(msg tea.KeyPressMsg) tea.Cmd {
 	return cmd
 }
 
+// copyBranchCmd puts the branch field on the system clipboard via OSC 52 and
+// sets the in-modal confirmation note. It reads the LIVE field rather than the
+// prefill, so an edited name copies as edited. A toast is not usable here: the
+// modal is placed as the whole view, so toast plumbing would render underneath it.
+func (cm *convertModal) copyBranchCmd() tea.Cmd {
+	branch := strings.TrimSpace(cm.branch.Value())
+	if branch == "" {
+		cm.inlineErr = "nothing to copy — branch name is empty"
+		return nil
+	}
+	cm.inlineErr = ""
+	cm.note = "copied " + branch
+	return tea.SetClipboard(branch)
+}
+
 // toggleFocus flips the active field, clearing any inline error the edit is
-// about to address.
+// about to address (and the copy note, which the next edit may invalidate).
 func (cm *convertModal) toggleFocus() tea.Cmd {
 	cm.inlineErr = ""
+	cm.note = ""
 	if cm.focus == 0 {
 		cm.focus = 1
 		cm.branch.Blur()
@@ -243,7 +270,14 @@ func (m *Model) handleConvertResult(msg convertResultMsg) tea.Cmd {
 	id := m.convert.id
 	title := m.sessionByID(id).DisplayTitle()
 	m.convert = nil
-	return worktreeToastCmd(id, title, "branch "+msg.branch+" ready to merge", StatusIdle)
+	// Copy the FINAL branch (BranchResult.Branch, post-rename) rather than the
+	// submitted field, so what lands on the clipboard is what git actually has.
+	// The next step is always `git merge`/`git diff` against this name, so the
+	// success path pre-loads it; ctrl+y covers copying without converting.
+	return tea.Batch(
+		tea.SetClipboard(msg.branch),
+		worktreeToastCmd(id, title, "branch "+msg.branch+" copied · ready to merge", StatusIdle),
+	)
 }
 
 // worktreeToastCmd surfaces a convert outcome through the existing cross-session
