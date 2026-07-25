@@ -524,6 +524,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for i := range m.sessions {
 			if m.sessions[i].ID() == msg.id {
 				m.sessions[i].SyncStatus = msg.status
+				m.sessions[i].SyncDetail = msg.detail
 				m.sessions[i].SyncConflicts = msg.conflicts
 				m.sessions[i].SyncHint = msg.hint
 				break

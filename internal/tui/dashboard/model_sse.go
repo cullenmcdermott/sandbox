@@ -65,6 +65,7 @@ type RunnerEventBatchMsg struct {
 type syncStatusMsg struct {
 	id        session.ID
 	status    string
+	detail    string
 	conflicts []string
 	hint      string
 }
@@ -180,7 +181,7 @@ func (m *Model) probeSyncCmd(id session.ID) tea.Cmd {
 	}
 	return func() tea.Msg {
 		h := prober(context.Background(), id)
-		return syncStatusMsg{id: id, status: h.Status, conflicts: h.Conflicts, hint: h.Hint}
+		return syncStatusMsg{id: id, status: h.Status, detail: h.Detail, conflicts: h.Conflicts, hint: h.Hint}
 	}
 }
 

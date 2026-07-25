@@ -157,6 +157,10 @@ type Session struct {
 	// SyncStatus is the coarse Mutagen sync health for this session, polled while
 	// warm: "synced"/"syncing"/"stalled"/"conflicted"/"unknown". "" = no data yet.
 	SyncStatus string
+	// SyncDetail is a short WHY for SyncStatus, rendered next to it. Today it is
+	// set for "unknown", which is otherwise indistinguishable between "the sync
+	// system could not be asked" and "this session has no sync at all".
+	SyncDetail string
 	// SyncConflicts and SyncHint carry the per-file conflict detail + resolution
 	// hint the detail pane renders when SyncStatus == "conflicted" (§1d). Empty
 	// otherwise. Formatted upstream (the sync prober) so this package stays

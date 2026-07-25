@@ -94,8 +94,15 @@ type Connector func(ctx context.Context, ref session.Ref, projectPath string, on
 // "conflicted" status: Conflicts holds a few already-formatted per-file detail
 // lines and Hint a one-line resolution reminder — the dashboard renders both
 // verbatim in the detail pane, staying ignorant of mutagen's conflict shape.
+//
+// Detail is a short WHY for the status, rendered alongside it. It exists
+// because "unknown" is otherwise a dead end: the probe reaches it both when the
+// mutagen CLI/daemon can't be asked and when the answer is "this session has no
+// sync at all" — opposite situations, one benign-and-transient, the other
+// meaning files are silently not moving. Formatted upstream, rendered verbatim.
 type SyncHealth struct {
 	Status    string
+	Detail    string
 	Conflicts []string
 	Hint      string
 }

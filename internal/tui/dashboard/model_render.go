@@ -437,8 +437,15 @@ func (m *Model) renderDetailLines(width, height int) []string {
 			"syncing":    "⟳",
 			"stalled":    "⚠",
 			"conflicted": "⇄",
+			// "unknown" had no glyph and no reason, so a session whose files were
+			// silently not moving rendered as a bare shrug the user could not act on.
+			"unknown": "?",
 		}[s.SyncStatus]
-		kvPairs = append(kvPairs, struct{ k, v string }{"sync", strings.TrimSpace(glyph + " " + s.SyncStatus)})
+		v := strings.TrimSpace(glyph + " " + s.SyncStatus)
+		if s.SyncDetail != "" {
+			v += " (" + s.SyncDetail + ")"
+		}
+		kvPairs = append(kvPairs, struct{ k, v string }{"sync", v})
 	}
 
 	// detailKVWidth is the fixed key column width for aligned key/value rows

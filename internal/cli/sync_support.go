@@ -3,9 +3,12 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -89,8 +92,17 @@ type syncProber struct {
 }
 
 // probe reads a session's sync health, shapes the conflict detail, and triggers
-// the self-heal when the sync has stalled. It degrades to "unknown" on any error
-// so the indicator never blocks the UI.
+// the self-heal when the sync has stalled. It still degrades to "unknown" rather
+// than failing — the indicator must never block the UI — but it no longer
+// degrades SILENTLY: the reason rides along in Detail.
+//
+// "unknown" was previously the terminus of two unrelated situations, and losing
+// the difference is what let a broken sync masquerade as an unremarkable blank:
+//
+//   - StatusDetail errored — the mutagen CLI is missing, or its daemon is not
+//     answering. Nothing is known about ANY session's sync.
+//   - StatusDetail succeeded and reported no sync sessions at all. That is a
+//     definite answer, and a bad one: this session's files are not syncing.
 func (p *syncProber) probe(ctx context.Context, id session.ID) dashboard.SyncHealth {
 	// conflictFileCap bounds how many conflicting files the detail pane lists
 	// before collapsing the rest into a "+N more" line, so a mass conflict can't
@@ -98,12 +110,19 @@ func (p *syncProber) probe(ctx context.Context, id session.ID) dashboard.SyncHea
 	const conflictFileCap = 5
 	st, summary, err := syncManager().StatusDetail(ctx, string(id))
 	if err != nil {
-		return dashboard.SyncHealth{Status: "unknown"}
+		return dashboard.SyncHealth{Status: "unknown", Detail: probeErrDetail(err)}
 	}
 	if healEligible(st) {
 		p.maybeHeal(id)
 	}
 	h := dashboard.SyncHealth{Status: st.String()}
+	if st == syncpkg.SyncUnknown {
+		// A definite answer, not a failure to answer: mutagen knows of no sync for
+		// this session, so its files are not moving. True both for a session never
+		// attached from this install and for one whose sync was terminated/reaped —
+		// attaching is the fix for both, since connect recreates the syncs.
+		h.Detail = "no sync session — attach to create one"
+	}
 	if st == syncpkg.SyncConflicted && summary.Total > 0 {
 		for i, cf := range summary.Files {
 			if i >= conflictFileCap {
@@ -115,6 +134,38 @@ func (p *syncProber) probe(ctx context.Context, id session.ID) dashboard.SyncHea
 		h.Hint = syncpkg.ConflictResolutionHint
 	}
 	return h
+}
+
+// probeDetailCap bounds the sync-health reason to something that fits the detail
+// pane's one-line KV value next to the status token.
+const probeDetailCap = 56
+
+// probeErrDetail renders a probe error as a short reason for the detail pane.
+// The raw error is a whole mutagen invocation plus its stderr — far too long and
+// too noisy for a KV row — so this keeps the part that tells the user what to do
+// and drops the argv echo. It never returns "", because an empty detail is what
+// made the swallowed error invisible in the first place.
+func probeErrDetail(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, exec.ErrNotFound) {
+		return "mutagen CLI not found"
+	}
+	msg := err.Error()
+	// ExecRunner formats "mutagen [<argv>]: <err>: <stderr>"; the argv echo is
+	// noise here, and the caller already knows which session it asked about.
+	if _, rest, ok := strings.Cut(msg, "]: "); ok {
+		msg = rest
+	}
+	msg = strings.Join(strings.Fields(msg), " ") // collapse newlines from stderr
+	if msg == "" {
+		return "sync status unavailable"
+	}
+	if len(msg) > probeDetailCap {
+		msg = msg[:probeDetailCap-1] + "…"
+	}
+	return msg
 }
 
 // healEligible reports whether a sync state should trigger the debounced MF5
@@ -155,7 +206,8 @@ func (p *syncProber) maybeHeal(id session.ID) {
 
 // dashboardSyncProber builds the dashboard's per-session sync-health probe,
 // backed by the Mutagen sync manager. It maps a SyncState to its short token and
-// degrades to "unknown" on any error so the indicator never blocks the UI. For a
+// degrades to "unknown" — carrying the REASON in Detail, see probe — on any
+// error so the indicator never blocks the UI. For a
 // conflicted sync it also formats a capped per-file detail list + a resolution
 // hint (§1d), and for a stalled sync it fires a debounced self-heal (MF5) — the
 // internal/sync parsing/reconcile lives in the sync package; this adapter only

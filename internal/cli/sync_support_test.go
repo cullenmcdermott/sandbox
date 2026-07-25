@@ -1,6 +1,10 @@
 package cli
 
 import (
+	"errors"
+	"fmt"
+	"os/exec"
+	"strings"
 	"sync"
 	"testing"
 
@@ -29,6 +33,62 @@ func TestHealEligible(t *testing.T) {
 		if got := healEligible(c.st); got != c.heal {
 			t.Errorf("healEligible(%v) = %v, want %v", c.st, got, c.heal)
 		}
+	}
+}
+
+// The prober degrades to "unknown" on a probe error, but the REASON must
+// survive: an empty detail is what let a mutagen that could not even be run read
+// as an unremarkable blank in the detail pane.
+func TestProbeErrDetail(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			// The single most likely cause, and the only one with an obvious fix.
+			name: "missing binary names itself",
+			err:  fmt.Errorf("mutagen [sync list]: %w: ", &exec.Error{Name: "mutagen", Err: exec.ErrNotFound}),
+			want: "mutagen CLI not found",
+		},
+		{
+			// The argv echo is noise the user can do nothing with; the stderr after
+			// it is the actionable part.
+			name: "argv echo dropped, stderr kept",
+			err:  errors.New("mutagen [sync list --label-selector=sandbox-session=s1]: exit status 1: unable to connect to daemon"),
+			want: "exit status 1: unable to connect to daemon",
+		},
+		{
+			name: "multi-line stderr collapses to one line",
+			err:  errors.New("mutagen [sync list]: exit status 1: first line\n\tsecond line"),
+			want: "exit status 1: first line second line",
+		},
+		{
+			// Never "" — a blank detail is the bug this fixes.
+			name: "unstructured error still yields a reason",
+			err:  errors.New("boom"),
+			want: "boom",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := probeErrDetail(c.err); got != c.want {
+				t.Errorf("probeErrDetail = %q, want %q", got, c.want)
+			}
+		})
+	}
+
+	if got := probeErrDetail(nil); got != "" {
+		t.Errorf("probeErrDetail(nil) = %q, want empty", got)
+	}
+
+	long := errors.New("mutagen [sync list]: " + strings.Repeat("x", 200))
+	got := probeErrDetail(long)
+	if len([]rune(got)) > probeDetailCap {
+		t.Errorf("probeErrDetail did not clamp a long error: %d runes", len([]rune(got)))
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("a clamped reason should be marked elided, got %q", got)
 	}
 }
 
