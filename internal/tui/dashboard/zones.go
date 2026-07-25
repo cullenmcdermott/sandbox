@@ -317,9 +317,16 @@ func (m *Model) bottomBar(w int) string {
 	left := " " + m.help.ShortHelpView(m.shortHelp())
 	// Right-aligned warm-session count: how many running sessions are kept warm
 	// (live model + passive stream) and so resume instantly.
+	//
+	// Labelled "streaming", not the internal term "warm": this is a lone number
+	// in the footer with no surrounding breakdown, so a bare adjective gave the
+	// reader nothing to attach it to and it was mistaken for a restatement of
+	// the header's "N ready" attention count. "streaming" names what is actually
+	// being counted — sessions with a live event stream — which no other counter
+	// in the chrome is about.
 	warm := ""
 	if n := m.warmCount(); n > 0 {
-		warm = lipgloss.NewStyle().Foreground(theme.Gold).Render(fmt.Sprintf("⚡%d warm", n)) + " "
+		warm = lipgloss.NewStyle().Foreground(theme.Gold).Render(fmt.Sprintf("⚡%d streaming", n)) + " "
 	}
 	// Async action task queue (§C1): a spinner + in-flight action text, then a
 	// ✓/✗ result, sits to the LEFT of the warm badge in the right segment and
