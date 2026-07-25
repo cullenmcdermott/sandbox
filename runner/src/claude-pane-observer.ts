@@ -618,6 +618,26 @@ function mergeSettings(
   sandbox.enabled = false;
   doc.sandbox = sandbox;
 
+  // Yolo by default. The pod IS the sandbox (default-deny ingress + egress
+  // allowlist, no service-account token), and the k8s side already asserts
+  // IS_SANDBOX=1 specifically so claude will accept bypassPermissions as uid 0
+  // (backend.go buildEnv) — that env var existed for a mode nothing ever turned
+  // on. Without this key paneDefaultPermissionMode() returns '' and NO
+  // --permission-mode rides the spawn, so the pane silently prompts.
+  //
+  // SEEDED, not owned: unlike statusLine/sandbox above we write it only when
+  // absent, so changing permissions.defaultMode in-session survives. That works
+  // because settings.json lives on the PVC and claude-pane re-reads the mode
+  // FRESH on every spawn — set it to "default" in-pane and the next respawn
+  // prompts. Note the tradeoff: with nothing to approve, the provisioned
+  // PermissionRequest/PermissionDenied hooks stop firing, so permission events
+  // (and approval-driven attention routing) go quiet in bypass mode.
+  const permissions = (doc.permissions as Record<string, unknown> | undefined) ?? {};
+  if (typeof permissions.defaultMode !== 'string' || permissions.defaultMode === '') {
+    permissions.defaultMode = 'bypassPermissions';
+  }
+  doc.permissions = permissions;
+
   const hooks = (doc.hooks as Record<string, HookEntry[]> | undefined) ?? {};
   for (const { event, matcher } of PROVISIONED_HOOK_EVENTS) {
     const entries = Array.isArray(hooks[event]) ? hooks[event] : [];

@@ -331,6 +331,54 @@ test('provisioning writes scripts + token and registers every hook event', () =>
   }
 });
 
+// Yolo default. The regression this guards is specific: every other piece of
+// bypassPermissions plumbing (IS_SANDBOX=1, paneDefaultPermissionMode,
+// claudePaneArgs' --permission-mode) shipped and was unit-tested while NOTHING
+// wrote the key, so the pane silently prompted. Assert the produced settings
+// actually drive the spawn, not just that a key exists.
+test('provisioning seeds permissions.defaultMode=bypassPermissions (yolo by default)', () => {
+  const { fs, files } = memFs();
+  provisionPaneObserver('/cfg', fs);
+
+  const settings = JSON.parse(files.get('/cfg/settings.json')!);
+  assert.equal(settings.permissions.defaultMode, 'bypassPermissions');
+
+  // End-to-end through the readers the supervisor actually uses: the seeded
+  // file must yield --permission-mode on BOTH a fresh and a resume spawn.
+  const read = (p: string) => files.get(p)!;
+  const mode = paneDefaultPermissionMode({ CLAUDE_CONFIG_DIR: '/cfg' }, read);
+  assert.equal(mode, 'bypassPermissions');
+  assert.deepEqual(claudePaneArgs('u', false, mode), [
+    '--session-id',
+    'u',
+    '--permission-mode',
+    'bypassPermissions',
+  ]);
+  assert.deepEqual(claudePaneArgs('u', true, mode), [
+    '--resume',
+    'u',
+    '--permission-mode',
+    'bypassPermissions',
+  ]);
+});
+
+// Seeded, not owned: the in-session escape hatch only works if a user's chosen
+// mode survives re-provisioning (which runs on every runner boot).
+test('an existing permissions.defaultMode is preserved, not clobbered', () => {
+  const { fs, files } = memFs({
+    '/cfg/settings.json': JSON.stringify({ permissions: { defaultMode: 'default', extra: 1 } }),
+  });
+  provisionPaneObserver('/cfg', fs);
+
+  const settings = JSON.parse(files.get('/cfg/settings.json')!);
+  assert.equal(settings.permissions.defaultMode, 'default');
+  assert.equal(settings.permissions.extra, 1); // sibling keys untouched
+  assert.equal(
+    paneDefaultPermissionMode({ CLAUDE_CONFIG_DIR: '/cfg' }, (p: string) => files.get(p)!),
+    'default',
+  );
+});
+
 test('provisioning is idempotent and preserves user settings/hook entries', () => {
   const userSettings = JSON.stringify({
     theme: 'dark',

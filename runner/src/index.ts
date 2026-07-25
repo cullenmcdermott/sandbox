@@ -14,7 +14,12 @@ import { resolveWorkspaceDir } from './exec.js';
 import { startOpencodeSupervisor, type OpencodeSupervisor } from './opencode.js';
 import { warmupOpencodeSession } from './opencode-turn.js';
 import { startOpencodeObserver, type OpencodeObserver } from './opencode-observer.js';
-import { materializeCodexAuth, startCodexSupervisor, type CodexSupervisor } from './codex.js';
+import {
+  materializeCodexAuth,
+  seedCodexConfig,
+  startCodexSupervisor,
+  type CodexSupervisor,
+} from './codex.js';
 import { startCodexObserver, type CodexObserver } from './codex-observer.js';
 import { startClaudePaneSupervisor, type ClaudePaneSupervisor } from './claude-pane.js';
 import { materializeClaudePaneConfig } from './claude-config.js';
@@ -207,6 +212,9 @@ function main(): void {
   // interactive `codex` TUI attaches to the same app-server over a port-forward.
   if (reg.state.backend === 'codex-app-server') {
     materializeCodexAuth();
+    // After auth (which is fail-closed) and before the server starts, so the
+    // very first app-server read already sees the yolo defaults.
+    seedCodexConfig();
     codex = startCodexSupervisor();
     // Owns its own ws reconnect loop, so it must not block boot on server readiness.
     codexObserver = startCodexObserver();

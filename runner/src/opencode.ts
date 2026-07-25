@@ -164,6 +164,18 @@ export function buildOpencodeConfig(env: NodeJS.ProcessEnv = process.env): Recor
   const config: Record<string, unknown> = {
     $schema: 'https://opencode.ai/config.json',
   };
+  // Yolo by default, matching the claude pane's bypassPermissions seed: the pod
+  // IS the sandbox, so per-tool prompting only interrupts. `permission` accepts
+  // either a per-tool object or a BARE action ("ask" | "allow" | "deny" —
+  // PermissionConfig.anyOf[0] is PermissionActionConfig in the published
+  // schema); the bare form is used deliberately so tools added by a later
+  // opencode build are covered without editing a key list here.
+  //
+  // Operator-overridable rather than seed-if-absent, because unlike claude's
+  // PVC-backed settings.json this file is REGENERATED from scratch on every
+  // boot (writeOpencodeConfig) — an in-session edit would not survive a
+  // restart, so the escape hatch has to be the cluster env.
+  config.permission = env.OPENCODE_PERMISSION || 'allow';
   if (Object.keys(provider).length > 0) {
     config.provider = provider;
   }

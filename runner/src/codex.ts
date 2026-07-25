@@ -128,6 +128,54 @@ export function materializeCodexAuth(env: NodeJS.ProcessEnv = process.env, fs: C
   return codexHome;
 }
 
+/** The yolo config seeded into $CODEX_HOME/config.toml when none exists.
+ *
+ * Both keys are real, enum-validated codex config.toml keys (verified against
+ * codex-cli 0.139.0: a deliberately-bogus approval_policy makes app-server log
+ * "unknown variant ..., expected one of untrusted, on-failure, on-request,
+ * granular, never", while an unknown KEY is silently ignored — so a typo here
+ * would fail silently, not loudly). They are the config-file equivalents of the
+ * `--ask-for-approval never` / `--sandbox danger-full-access` CLI flags, which
+ * `codex app-server` does not take. */
+const CODEX_YOLO_CONFIG = `# Seeded by the sandbox runner on first boot (only when absent — edit freely,
+# your changes persist on the PVC and are never overwritten).
+#
+# Yolo by default, matching the claude pane's bypassPermissions seed and
+# opencode's permission="allow": the pod IS the sandbox (default-deny ingress +
+# egress allowlist, no service-account token), so per-tool approval prompts in a
+# pane the runner does not proxy would just wedge the session waiting on input.
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+`;
+
+/**
+ * Seed $CODEX_HOME/config.toml with the yolo defaults when the file is absent.
+ *
+ * Seed-if-absent, NOT overwrite: CODEX_HOME is PVC-persisted, so an operator or
+ * in-pane edit survives every restart. Best-effort — a failure here must not
+ * block boot the way a missing credential does (codex still runs, it just
+ * prompts), so this logs and returns instead of throwing.
+ */
+export function seedCodexConfig(
+  env: NodeJS.ProcessEnv = process.env,
+  fs: CodexAuthFs = realAuthFs,
+): void {
+  const path = join(codexHomeDir(env), 'config.toml');
+  try {
+    fs.readFileSync(path, 'utf8');
+    return; // present — leave it alone
+  } catch {
+    /* absent/unreadable — seed below */
+  }
+  try {
+    fs.mkdirSync(codexHomeDir(env), { recursive: true });
+    fs.writeFileSync(path, CODEX_YOLO_CONFIG, { mode: 0o600 });
+    console.log(`codex: seeded ${path} (approval_policy=never, sandbox_mode=danger-full-access)`);
+  } catch (err) {
+    console.error(`codex: could not seed config.toml at ${path} — codex will prompt for approvals`, err);
+  }
+}
+
 /**
  * Build the env for the `codex app-server` child: sanitizedExecEnv (drops
  * RUNNER_TOKEN + the other runner-infra secrets, A1) with only the credentials

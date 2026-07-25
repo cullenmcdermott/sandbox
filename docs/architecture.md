@@ -240,7 +240,12 @@ Mutagen runs three session groups (see `internal/sync`):
    pod (one-way; `statusline/user-statusline` is the host-provided executable
    the claude pane's provisioned statusline chains to — a sibling of the
    runner-owned `pane-observer/` dir so host sync can never touch the observer
-   token), and
+   token). Supplying one is optional: the runner image ships a built-in
+   statusline at `/usr/local/bin/sandbox-user-statusline` (built from
+   `runner/statusline/`, vendored from the maintainer's nix-config) as the
+   chain's last candidate, so a host-synced executable *overrides* the default
+   rather than being required for a rich line. Its usage-API rows are inert
+   in-pod — see the header of `runner/statusline/main.go`, and
 3. **transcripts** — pod `/session/state/claude/{projects,todos,tasks}`
    (`CLAUDE_CONFIG_DIR`) → local `~/.claude/{projects,todos,tasks}` (one-way).
 

@@ -26,6 +26,18 @@ RUN npm run build
 # the runtime stage can reuse node_modules without a toolchain of its own.
 RUN npm prune --omit=dev
 
+# --- statusline stage -----------------------------------------------------
+# The in-pane statusline (starship-style: model ─ dir ─ branch ─ tokens/ctx-bar
+# · $cost), vendored at statusline/ from cullenmcdermott/nix-config. Stdlib-only
+# Go in a nested module, so this stage fetches nothing — no network, no go.sum.
+# No GOOS/GOARCH juggling: Depot builds each platform on a native builder, so
+# the plain build already produces the target arch. CGO_ENABLED=0 keeps it a
+# static binary independent of the runtime stage's glibc.
+FROM golang:1.26-bookworm AS statusline
+WORKDIR /src
+COPY statusline/ ./
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/sandbox-user-statusline .
+
 # --- runtime stage --------------------------------------------------------
 FROM node:24-slim AS runtime
 
@@ -67,9 +79,9 @@ WORKDIR /app
 # TARGETARCH is BuildKit's automatic build arg; it must be re-declared here to
 # be visible inside this RUN.
 ARG TARGETARCH
-ARG CLAUDE_CODE_VERSION=2.1.215
-ARG CLAUDE_CODE_SHA256_AMD64=c1efffaaf370aa187cb6a09dd93d4e511c646899b0078476f83791b664bde7fe
-ARG CLAUDE_CODE_SHA256_ARM64=2b43a3d5b0787217e5d7381fad42c7314292546fe9db9eb8b9b379de90509b30
+ARG CLAUDE_CODE_VERSION=2.1.220
+ARG CLAUDE_CODE_SHA256_AMD64=674f61f20ff306f3100cf9200e4c36c4b70278b5bef2884549819b942a89c863
+ARG CLAUDE_CODE_SHA256_ARM64=159e4a51d796f3bf14677577100f7efb845611b1ceaf0c30cbd8d4650d942185
 RUN set -eux; \
     case "${TARGETARCH}" in \
       amd64) platform=linux-x64;   sha256="${CLAUDE_CODE_SHA256_AMD64}" ;; \
@@ -86,6 +98,14 @@ RUN set -eux; \
 # pins the download so it cannot drift from the installed binary — bump it with
 # the ARG, not separately.
 ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
+
+# The built-in in-pane statusline. claude-pane's provisioned statusline.js walks
+# three candidates and takes the first that exists; this is the LAST of them
+# (bare name, resolved via PATH — which claude-pane does pass through to the
+# child), so a pod-local drop-in or a host-synced ~/.claude/statusline override
+# still wins. See runner/statusline/main.go and STATUSLINE_SCRIPT in
+# src/claude-pane-observer.ts.
+COPY --from=statusline /out/sandbox-user-statusline /usr/local/bin/sandbox-user-statusline
 
 # opencode CLI for opencode-server sessions: the runner supervises `opencode
 # serve` and the local client attaches over a port-forward. Pin OPENCODE_VERSION

@@ -46,15 +46,15 @@ gen:
         || { printf '\033[31m%s\033[0m\n' "generated files are stale — schema/events.json changed without regen, or a *.gen.* file was hand-edited. Commit the regenerated output."; exit 1; }
 
 # Format Go source in place. Scoped to our Go trees (cmd/, internal/, the public
-# client/ + tui/ SDK packages, sdktest/) so it never touches the vendored Go
-# inside runner/node_modules.
+# client/ + tui/ SDK packages, sdktest/, runner/statusline/) so it never touches
+# the vendored Go inside runner/node_modules.
 fmt:
-    gofmt -w cmd internal client tui sdktest
-    @command -v goimports >/dev/null 2>&1 && goimports -w cmd internal client tui sdktest || echo "note: goimports absent, skipping (gofmt applied)"
+    gofmt -w cmd internal client tui sdktest runner/statusline
+    @command -v goimports >/dev/null 2>&1 && goimports -w cmd internal client tui sdktest runner/statusline || echo "note: goimports absent, skipping (gofmt applied)"
 
 # Fail if any Go file is not gofmt-clean (no writes). Same scope as `fmt`.
 fmt-check:
-    @unformatted="$(gofmt -l cmd internal client tui sdktest || true)"; \
+    @unformatted="$(gofmt -l cmd internal client tui sdktest runner/statusline || true)"; \
     if [ -n "$unformatted" ]; then \
         printf '\033[31m%s\033[0m\n' "gofmt: these files need formatting (run 'just fmt'):"; \
         echo "$unformatted"; exit 1; \
@@ -73,13 +73,17 @@ lint:
         printf '\033[33m%s\033[0m\n' "warning: runner eslint not installed — skipping (CI enforces it). Run: cd runner && npm install --ignore-scripts"; \
     fi
 
-# Build the whole Go module.
+# Build the whole Go module, plus the nested runner/statusline module (the
+# in-pane statusline binary). The nested module is invisible to `./...`, so
+# without this line a compile error there would surface only in the image build.
 build:
     go build ./...
+    cd runner/statusline && go build ./...
 
-# Vet the whole Go module.
+# Vet the whole Go module, plus the nested runner/statusline module.
 vet:
     go vet ./...
+    cd runner/statusline && go vet ./...
 
 # Run Go + runner unit tests. See the in-sandbox httptest caveat above.
 test:

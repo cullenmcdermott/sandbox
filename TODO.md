@@ -51,6 +51,14 @@
 > credential failure spawned
 > `openspec/changes/opencode-multi-provider-auth/` (see §7a).
 >
+> **2026-07-24 observability review:** a logs/traces/metrics audit of the
+> whole system landed ten verified findings in §10 (ids `[T1]`-`[T10]`),
+> backed by [`docs/observability-design.md`](docs/observability-design.md)
+> — which also carries a staged proposal for on-disk OTLP/JSON plus a
+> disposable local LGTM stack (draft; four open decisions await maintainer
+> sign-off). The §10 `[~]` "Observability first cut" item is the direct
+> ancestor: `[T4]` and `[T9]` are its "STILL OPEN" tail with pointers.
+>
 > **Opus-ready map (updated 2026-07-21 after the seven-agent Fable fan-out
 > batch — [S1]/[S3], [L7]+[P3], the pane RTT probe, [O1]/[O3]/[O5]/
 > [O7]-[O10] incl. both parked-worktree harvests, §9 T10 dirPicker, and the
@@ -1081,9 +1089,27 @@ naming-break, and Shell items each stand alone.
   → builtin. Host side: ConfigInputsSubs gains `statusline/` — a SIBLING
   of runner-owned `pane-observer/`, so host sync can never touch the
   observer token (pinned by test). Runner tests execute the real script.
-  - [ ] **Maintainer follow-up (not blocking):** package
-    `claude-statusline` into the runner flox env so the PATH branch lights
-    up; then a live session shows the host statusline in-pane.
+  - [x] **PATH branch lit up — done 2026-07-24:** `claude-statusline`
+    vendored to `runner/statusline/` (nested Go module, stdlib-only,
+    byte-identical to nix-config bar a provenance header) and built by a
+    `golang:1.26-bookworm` stage in `runner/Dockerfile` into
+    `/usr/local/bin/sandbox-user-statusline` — the chain's 3rd candidate, so
+    a host-synced override still wins. Went to the image rather than the flox
+    env: the binary must exist in the pod, which is what the image builds.
+    Verified by running the REAL extracted `STATUSLINE_SCRIPT` against the
+    REAL binary — chained (not builtin) in 0.34 s vs the 1 s budget.
+    - [ ] **Live gate (unverified):** no local Docker daemon, so the image
+      build is untested until CI; confirm in a live session that the pane
+      shows the full line.
+    - [ ] **Usage rows (lines 2–3) are inert in-pod** and render nowhere:
+      `accessToken()` reads `$HOME/.claude` (HOME=/root) but creds live at
+      `CLAUDE_CONFIG_DIR=/session/state/claude`, so it bails before any HTTP
+      call — load-bearing, since the pane credential is inference-scoped and
+      a located token would only buy a doomed 3 s request against the 1 s
+      chain budget. The seam if we want them: the binary already reads
+      `/tmp/claude-statusline-usage-cache.json` (60 s TTL), so the host —
+      which *can* read usage — could push JSON there. Needs a runner route +
+      CLI push; not started.
 - [ ] **Worktree continuity + merge-back UX (maintainer ask, 2026-07-21).**
   What EXISTS (verify-then-build-on, don't rebuild): destroy is
   capture-then-remove — dirty WIP is committed to the session's
@@ -1290,6 +1316,119 @@ do well is recorded there too; fix in roughly this order):
   RTT (§4 "Pane transport RTT probe", 2026-07-21 — same family, keep
   output formats consistent); the §1d observer-cap model remains absent
   from `docs/architecture.md` (doc drift, 2026-07-06 harness audit).
+
+**2026-07-24 observability review** (ids `[T#]`; full audit + the staged
+proposal behind them in
+[`docs/observability-design.md`](docs/observability-design.md), status
+draft/awaiting sign-off). The findings below are verified against `a0ed573`
+and are each actionable on their own — none of them is gated on accepting
+that design. Headline: three trace formats, two log formats, zero metrics,
+all of it line-oriented text nothing can ingest.
+
+- [ ] **[T1] The CLI's structured debug log has three call sites.**
+  `internal/cli/debug.go` is a real slog JSON-lines logger with a
+  documented schema (`docs/runner-api.md:376-401`), and `dbg()` is called
+  at `internal/cli/trace.go:74`, `:88`, and `internal/cli/k8slog.go:37` —
+  that last one (client-go error capture) is the only one earning its
+  keep. Fix: instrument the paths that currently log nothing — backend
+  create/suspend/resume/destroy, port-forward establish + each reconnect,
+  health-check attempts, sync create/flush, credential resolution. Also
+  add a **file sink**: `--debug` writes to stderr, but the dashboard owns
+  the alt-screen, so the primary workflow is exactly the one where the
+  output is unreadable — tee to
+  `~/.local/share/sandbox/remote-sessions/<id>/debug.jsonl`. Verify: a
+  dashboard run with `--debug` leaves a parseable JSONL file behind and no
+  visible terminal corruption.
+- [ ] **[T2] The runner emits no structured logs at all (C10).** ~30 ad-hoc
+  `console.log/warn/error` with no level, timestamp, session id, or
+  correlation id (`session.ts`, `events.ts`, `opencode.ts`,
+  `claude-pane.ts`, …), and `runner/src/server.ts` logs exactly one line
+  ever (`:280`) — the HTTP surface has **zero request logging**.
+  `docs/runner-api.md:387-390` documents the gap and points at C10 in
+  `docs/oss-launch/HARDENING-BACKLOG.md`. Fix: one `runner/src/log.ts`
+  (level/ts/component/sessionId/traceId), migrate every `console.*`, keep
+  emitting human text to stdout so `kubectl logs` stays readable. Verify:
+  no `console.` left outside `log.ts` (lint rule), and pod logs still
+  scannable by eye.
+- [ ] **[T3] `startTurnTrace` is dead code kept green by its own tests.**
+  `runner/src/trace.ts:39` has zero production callers — the turn engine
+  that used it was deleted by `claude-pane-first` — while
+  `runner/test/trace.test.ts:27,35,48` still exercises it in three cases.
+  Fix: delete the function and its tests (`traceTurnLink`/`startBootTrace`
+  stay — both are wired). Verify: `just typecheck` + runner tests green
+  after removal, which is the whole point.
+- [ ] **[T4] No end-to-end trace correlation for the primary backend.**
+  `X-Sandbox-Trace-Id` is consumed in exactly one place —
+  `runner/src/server.ts:418`, on `POST /turns`, i.e. the *opencode
+  headless* path. The claude-pane WebSocket upgrade never reads or
+  propagates it, so a connect-flow id from `client/trace.go` cannot be
+  followed into pane activity. Fix: read the header (or a query param —
+  browsers can't set headers on WS, but our dialer can) in the pane
+  upgrade path and stamp it on the pane's log/trace records. Verify: one
+  `sandbox --trace attach`, then grep the connect id and land on pane
+  lines.
+- [ ] **[T5] No metrics exist anywhere, including data already on the
+  wire.** No `/metrics` route (`runner/src/server.ts` serves healthz /
+  observer / sessions / status / idle / events / turns / interrupt /
+  exec); no otel or prometheus dep in `go.mod` or `runner/package.json`;
+  `internal/k8s` never touches `metrics.k8s.io`. Meanwhile
+  `usage.updated` (`schema/events.json:134-143` — token counts +
+  `totalCostUsd`), `rate_limit.updated` (`:144-156` — 5h/7d/Opus/Sonnet
+  utilization), and `IdleStatus` (`turnActive`/`attachedClients`/
+  `idleSince`, polled by the reaper) are all collected and then discarded
+  after render. Fix: the D6 catalog in the design doc — fleet cost/tokens
+  are derivable CLI-side today with no pod change. Verify: fleet cost for
+  one session matches its real spend.
+- [ ] **[T6] PVC fill is unwatched, and the defaults grow without bound.**
+  `runner/src/events.ts:396` deliberately never `VACUUM`s (it would block
+  the single writer) and `RETENTION_MAX_EVENTS` (`:153-155`) is opt-in and
+  **off by default**, so the event log grows monotonically with no gauge
+  on it. Fix, in order: (a) emit `runner.eventlog.bytes`/`.rows` and
+  `runner.pvc.free_bytes` (`statvfs('/session')` — no cluster metrics
+  needed); (b) *then* decide whether `RETENTION_MAX_EVENTS` should default
+  non-zero, informed by what (a) measures rather than by guesswork.
+  Verify: gauge tracks actual file growth under a load run.
+- [ ] **[T7] No way to see runner logs without `kubectl`.** The command
+  tree (`internal/cli/root.go:96-113`) has no `logs`, and pod stdout is
+  ephemeral — it is not on the PVC, so a restart destroys the record of
+  why it restarted. Fix: a runner log route + `sandbox logs <session>
+  [-f]` over the existing port-forward, and write the runner's log to
+  `/session/state/sandbox/` so it survives restarts. Depends on [T2].
+  Verify: kill a pod mid-session, resume, read the pre-restart logs.
+- [ ] **[T8] `audit.jsonl` is write-only in practice.**
+  `runner/src/audit.ts` is the one structured on-disk log we have —
+  append-only, redacted, PVC-backed at `types.ts:203` — and it is never
+  surfaced host-side, never synced, and never capped or rotated. Fix:
+  either sync it home with the transcript group
+  (`internal/sync/sync.go:332-334`) and give it a reader, or cap it; a
+  growing file nobody can read is the worst of both. Verify: the file has
+  a bounded size and a command that prints it.
+- [ ] **[T9] Latency blind spots — the paths most likely to be slow are
+  the ones with no clock in them.** `runner/src/claude-pane.ts` contains
+  no clock read at all (the whole frame path is untimed); observer
+  ingestion is unmeasured to the point that §4 `[P6]` proposes `kubectl
+  logs | rg -c observer` as its measurement recipe; `appendEvent`
+  (`runner/src/events.ts:353`) sits on the critical path of every event
+  via the append-before-stream invariant and is untimed; SSE first-event
+  latency is wanted at `internal/runner/pane_rtt.go:32`; steady-state
+  Mutagen sync and port-forward reconnect frequency
+  (`classifyForwardReconnect`/`nextForwardBackoff` back off with no
+  counter) are both uncounted. Fix: histograms, **not** spans, on the
+  frame path (a span per frame is unbounded; see the design doc's D5
+  rule). Verify: `[P6]`'s open question gets answered with a number.
+- [ ] **[T10] Local OTel stack (the design doc's deliverable).** Write
+  telemetry as newline-delimited OTLP/JSON so the Collector's
+  `otlpjsonfilereceiver` can ingest it, sync it home on the existing
+  one-way transcript rail (`internal/sync/sync.go:332-334`,
+  `TranscriptSubs` at `:241`), and stand up a `dev/observability/`
+  compose stack that is off unless asked. **Start with stage 1** —
+  `events.db` → OTLP spans — because `session.started`/`turn.started`/
+  `tool.*` with timestamps is already a span tree, so it yields full
+  turn-level tracing retroactively with zero pod-side code and zero
+  hot-path risk. Open decisions (docker-compose vs flox-native services;
+  reuse `SANDBOX_TRACE` vs a new switch; rotation caps) are listed in the
+  design doc and need maintainer sign-off first. Verify: a fixture
+  `events.db` renders as a correctly-parented trace in Tempo.
 
 - [~] **Visual-testing gaps (2026-07-13 review; re-scoped 2026-07-20 after
   claude-pane-first deleted the transcript surfaces) — motion/theme/size
