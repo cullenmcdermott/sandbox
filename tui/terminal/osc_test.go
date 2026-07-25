@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 )
@@ -83,5 +84,53 @@ func TestOSCNotifySanitizes(t *testing.T) {
 	// the framing semicolons we expect (777;notify;title;body).
 	if strings.Count(got, "\x1b") != 1 {
 		t.Errorf("expected exactly one ESC (the leading one), got %q", got)
+	}
+}
+
+// ParseOSC52 must accept the selection fields and base64 encodings real
+// emitters use, and reject anything that isn't an actionable clipboard write —
+// notably the `?` read query, which the caller cannot answer synchronously.
+func TestParseOSC52(t *testing.T) {
+	b64 := base64.StdEncoding.EncodeToString([]byte("hi"))
+	cases := []struct {
+		name        string
+		data        string // OSC payload, command number included
+		wantText    string
+		wantPrimary bool
+		wantOK      bool
+	}{
+		{"clipboard", "52;c;" + b64, "hi", false, true},
+		{"primary", "52;p;" + b64, "hi", true, true},
+		{"empty-selection-defaults-to-clipboard", "52;;" + b64, "hi", false, true},
+		{"multi-target-is-not-primary", "52;cp;" + b64, "hi", false, true},
+		{"unpadded", "52;c;" + strings.TrimRight(b64, "="), "hi", false, true},
+		{"read-query", "52;c;?", "", false, false},
+		{"missing-payload", "52;c", "", false, false},
+		{"not-base64", "52;c;!!!!", "", false, false},
+		{"empty", "", "", false, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			text, primary, ok := ParseOSC52([]byte(c.data))
+			if text != c.wantText || primary != c.wantPrimary || ok != c.wantOK {
+				t.Fatalf("ParseOSC52(%q) = (%q, %v, %v), want (%q, %v, %v)",
+					c.data, text, primary, ok, c.wantText, c.wantPrimary, c.wantOK)
+			}
+		})
+	}
+}
+
+// Some emitters wrap long base64 payloads across lines; a wrapped payload must
+// decode to the same text as the unwrapped form.
+func TestParseOSC52StripsWrapping(t *testing.T) {
+	want := strings.Repeat("wrap ", 40)
+	enc := base64.StdEncoding.EncodeToString([]byte(want))
+	var wrapped strings.Builder
+	for i := 0; i < len(enc); i += 76 {
+		wrapped.WriteString(enc[i:min(i+76, len(enc))] + "\r\n")
+	}
+	got, _, ok := ParseOSC52([]byte("52;c;" + wrapped.String()))
+	if !ok || got != want {
+		t.Fatalf("ParseOSC52(wrapped) = (%q, ok=%v), want %q", got, ok, want)
 	}
 }

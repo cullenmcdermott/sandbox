@@ -115,6 +115,7 @@ var (
 	_ func(terminal.Progress) string                             = terminal.OSCProgress
 	_ func(string, string) string                                = terminal.OSCNotify
 	_ func(terminal.Caps, string, string) string                 = terminal.NotifyString
+	_ func([]byte) (string, bool, bool)                          = terminal.ParseOSC52
 	_ func() terminal.Caps                                       = terminal.Detect
 	_ func(float64, int, int, terminal.RGB, terminal.RGB) []byte = terminal.GaugeRGBA
 	_ func(uint32, int, int, int, int, []byte) string            = terminal.KittyTransmitRGBA

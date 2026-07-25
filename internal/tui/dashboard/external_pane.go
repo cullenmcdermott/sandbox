@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
 	"github.com/cullenmcdermott/sandbox/tui/kit"
+	"github.com/cullenmcdermott/sandbox/tui/terminal"
 	"github.com/cullenmcdermott/sandbox/tui/theme"
 	"github.com/rivo/uniseg"
 )
@@ -93,6 +94,12 @@ type ExternalPane struct {
 	// the next chunk, so a cluster split across transport reads isn't rendered as
 	// two cells (O7). At most one grapheme cluster (a few bytes).
 	carry []byte
+
+	// pendingClip collects OSC 52 clipboard writes the child emitted during the
+	// emu.Write in feed(). The emulator's OSC handler runs synchronously inside
+	// that Write (which is on the Bubble Tea loop), so the handler can only
+	// stash; apply() drains this into tea.SetClipboard Cmds on the way out.
+	pendingClip []paneClip
 
 	// activeModes tracks DEC modes the child has enabled via the emulator's
 	// callbacks, so we know whether to forward PasteMsg (bracketed paste) and
@@ -231,6 +238,12 @@ func (p *ExternalPane) Init() tea.Cmd {
 			}
 		},
 	})
+	// Relay the child's OSC 52 clipboard writes out to the HOST terminal (O8).
+	// Without this the emulator swallows them ("unhandled sequence") and the
+	// in-pane copy — Claude Code's mouse-selection copy, opencode's yank —
+	// silently does nothing, leaving shift-drag native selection as the only way
+	// to get text out.
+	p.emu.RegisterOscHandler(52, p.handleOSC52)
 
 	tr, err := p.dial(cols, rows)
 	if err != nil {
@@ -360,7 +373,9 @@ func (p *ExternalPane) apply(chunk ptyChunk) (tea.Cmd, bool) {
 		p.feed(data)
 	}
 	if end == nil {
-		return p.readCmd(), false
+		// Clipboard writes ride out alongside the next read (O8): feed() may have
+		// just handed us OSC 52 payloads from the child.
+		return tea.Batch(p.drainClipboard(), p.readCmd()), false
 	}
 	p.exited = true
 	// Flush any held trailing grapheme now that the stream has ended.
@@ -373,7 +388,59 @@ func (p *ExternalPane) apply(chunk ptyChunk) (tea.Cmd, bool) {
 	if end.err != nil {
 		p.err = end.err
 	}
-	return nil, true
+	// A copy in the child's final output still belongs on the clipboard, so the
+	// drain runs on the end-of-stream path too (the caller batches it with the
+	// finished message).
+	return p.drainClipboard(), true
+}
+
+// paneClip is one clipboard write requested by the child via OSC 52.
+type paneClip struct {
+	// primary selects the X11/Wayland PRIMARY selection ("p") over the system
+	// clipboard; on macOS the host terminal treats both as the pasteboard.
+	primary bool
+	text    string
+}
+
+// handleOSC52 receives the child's `OSC 52 ; <selection> ; <base64>` sequences
+// from the emulator and queues them for relay to the host terminal (O8).
+//
+// data is the whole OSC payload including the leading command number, and the
+// emulator's parser reassembles it across transport reads, so a copy larger
+// than one 32 KB chunk arrives here whole (bounded by the emulator's 4 MiB
+// sequence buffer). It always reports the sequence as handled so the emulator
+// stops logging it as unhandled.
+//
+// Sequences ParseOSC52 rejects — malformed payloads and clipboard *read*
+// queries, which would need an async round-trip to the host to answer — are
+// dropped, exactly as they were before the relay existed.
+func (p *ExternalPane) handleOSC52(data []byte) bool {
+	text, primary, ok := terminal.ParseOSC52(data)
+	if !ok {
+		return true
+	}
+	p.pendingClip = append(p.pendingClip, paneClip{primary: primary, text: text})
+	return true
+}
+
+// drainClipboard turns queued OSC 52 payloads into the Bubble Tea commands that
+// write them to the host terminal, and empties the queue. Returns nil when the
+// child asked for no copy, which is the overwhelmingly common case.
+func (p *ExternalPane) drainClipboard() tea.Cmd {
+	if len(p.pendingClip) == 0 {
+		return nil
+	}
+	clips := p.pendingClip
+	p.pendingClip = nil
+	cmds := make([]tea.Cmd, 0, len(clips))
+	for _, c := range clips {
+		if c.primary {
+			cmds = append(cmds, tea.SetPrimaryClipboard(c.text))
+			continue
+		}
+		cmds = append(cmds, tea.SetClipboard(c.text))
+	}
+	return tea.Batch(cmds...)
 }
 
 // drainBatch coalesces the first (blocking-received) chunk with any successors

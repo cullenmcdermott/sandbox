@@ -1,11 +1,17 @@
 package terminal
 
-import "strings"
+import (
+	"encoding/base64"
+	"strings"
+)
 
 // This file emits OSC ("Operating System Command") control strings as plain Go
 // strings. They are zero-width when parsed by a terminal (and by Bubble Tea's
 // cellbuf renderer), so callers splice them into the composed View frame and
 // they cost no layout cells. Nothing here performs I/O.
+//
+// ParseOSC52 is the one parse-side helper: an app embedding a child terminal
+// receives OSC from the child as well as emitting it to the host.
 
 const (
 	// bel terminates an OSC string (the ST/string-terminator; BEL is the widely
@@ -97,6 +103,48 @@ func NotifyString(c Caps, title, body string) string {
 	default:
 		return ""
 	}
+}
+
+// ParseOSC52 parses an OSC 52 clipboard-write payload — `52;<selection>;<base64>`,
+// the whole OSC data field including the leading command number, which is what a
+// terminal-emulator library hands an OSC handler.
+//
+// It returns the decoded text, whether the child asked for the X11/Wayland
+// PRIMARY selection rather than the system clipboard, and ok=false for anything
+// that is not an actionable write. In particular a clipboard *read* query
+// (`52;c;?`) is not actionable: answering it means an async round-trip to the
+// host terminal, so it reports ok=false and the caller drops it.
+//
+// This is the parse an app embedding a child terminal needs: a virtual-terminal
+// emulator has no clipboard of its own, so unless the host relays the child's
+// OSC 52 outward (e.g. via tea.SetClipboard) an in-pane copy silently does
+// nothing and the user is left with the host terminal's own shift-drag
+// selection.
+//
+// Emitters differ on base64 padding and some wrap long payloads, so whitespace
+// is stripped and both the padded and raw alphabets are accepted.
+func ParseOSC52(data []byte) (text string, primary, ok bool) {
+	parts := strings.SplitN(string(data), ";", 3)
+	if len(parts) != 3 {
+		return "", false, false
+	}
+	s := strings.Map(func(r rune) rune {
+		switch r {
+		case '\n', '\r', ' ', '\t':
+			return -1
+		default:
+			return r
+		}
+	}, parts[2])
+	b, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		if b, err = base64.RawStdEncoding.DecodeString(s); err != nil {
+			return "", false, false
+		}
+	}
+	// Per the XTerm spec the selection field may name several targets; "p"
+	// alone is the only one that means PRIMARY rather than the clipboard.
+	return string(b), parts[1] == "p", true
 }
 
 // sanitizeOSC strips bytes that would prematurely terminate or corrupt an OSC

@@ -560,7 +560,9 @@ func (a *App) handlePtyOutput(msg ptyOutputMsg) (tea.Model, tea.Cmd) {
 	}
 	cmd, finished := a.external.apply(msg.chunk)
 	if finished {
-		return a, func() tea.Msg { return externalPaneFinishedMsg{err: a.external.err} }
+		// cmd here is any clipboard relay from the child's final output (O8); it
+		// must still run, so batch it ahead of the finished message.
+		return a, tea.Batch(cmd, func() tea.Msg { return externalPaneFinishedMsg{err: a.external.err} })
 	}
 	return a, cmd
 }
