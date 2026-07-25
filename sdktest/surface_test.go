@@ -441,6 +441,11 @@ var _ = cred.Account{
 var (
 	_ func(string) models.Info = models.Limit
 
+	// EffectiveContextLimit is the running window (what a utilization percentage
+	// divides by), as opposed to Limit's model maximum. A consumer building a
+	// ctx% indicator needs this one.
+	_ func(string) int = models.EffectiveContextLimit
+
 	_ = models.Info{
 		ContextLimit: 200000,
 		InputPrice:   0,

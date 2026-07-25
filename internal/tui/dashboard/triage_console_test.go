@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cullenmcdermott/sandbox/client/models"
 	"github.com/cullenmcdermott/sandbox/internal/session"
 	"github.com/cullenmcdermott/sandbox/tui/theme"
 )
@@ -470,7 +471,16 @@ func TestPhase3_CtxLimitCachedOnSessionStarted(t *testing.T) {
 	sess := makeSession("s1", StatusIdle)
 	ApplyRunnerEvent(&sess, mkEvent(session.EventSessionStarted, session.SessionStartedPayload{Model: "opus-4.8"}))
 	if sess.CtxLimit <= 0 {
-		t.Errorf("session.started should cache CtxLimit from models.Limit; got %d", sess.CtxLimit)
+		t.Fatalf("session.started should cache CtxLimit; got %d", sess.CtxLimit)
+	}
+	// The denominator must be the window the model RUNS with, not the 1M maximum
+	// models.dev reports for the opus tier — dividing by the maximum showed 20%
+	// for a pane whose own statusline read 100% full.
+	if want := models.EffectiveContextLimit("opus-4.8"); sess.CtxLimit != want {
+		t.Errorf("CtxLimit = %d, want the effective window %d", sess.CtxLimit, want)
+	}
+	if sess.CtxLimit >= models.Limit("opus-4.8").ContextLimit && models.Limit("opus-4.8").ContextLimit > 200000 {
+		t.Errorf("CtxLimit = %d is the model MAXIMUM, not its running window", sess.CtxLimit)
 	}
 }
 

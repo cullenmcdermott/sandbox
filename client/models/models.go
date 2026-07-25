@@ -24,9 +24,27 @@ type Info struct {
 // It consults a cached copy of the models.dev table (fetched + cached on first
 // use with a TTL), falling back to a static table (200k context + known Claude
 // prices) when offline or when the id is unknown.
+//
+// ContextLimit is the model's MAXIMUM window, not necessarily the one it runs
+// with — for a utilization percentage use EffectiveContextLimit instead.
 func Limit(modelID string) Info { return defaultProvider.limit(modelID) }
 
 const staticContextLimit = 200000
+
+// claudeDefaultContext is the context window a Claude model runs with unless the
+// caller opts into the extended-window beta.
+//
+// models.dev reports a model's MAXIMUM (1,000,000 for the opus tier), which
+// answers a different question than a ctx% denominator asks. Nothing in this
+// repo requests the extended window — not the claude-pane child, not opencode,
+// not codex — so reporting the maximum overstated every Claude session's
+// headroom by 5×: a pane whose own statusline read 100% full showed 20% here,
+// and the indicator that exists to warn before a context fills never warned.
+//
+// This is a heuristic standing in for a fact the agent itself knows. Claude Code
+// reports its real context_window numbers through the pane observer; once those
+// are carried on the usage event they supersede this clamp for pane sessions.
+const claudeDefaultContext = 200000
 
 // apiURL is the models.dev endpoint. Overridable for tests.
 var apiURL = "https://models.dev/api.json"
@@ -167,6 +185,34 @@ func (p *provider) limit(modelID string) Info {
 		}
 	}
 	return staticFallback(normalize(modelID))
+}
+
+// EffectiveContextLimit returns the context window a model actually RUNS with,
+// which is what a "% of context used" denominator needs — as opposed to
+// Limit().ContextLimit, which reports the maximum the model is capable of.
+//
+// The two differ for Claude models, whose largest windows are an opt-in beta
+// (see claudeDefaultContext). Use this for any utilization display; use Limit
+// when you want the model's capability or its prices.
+func EffectiveContextLimit(modelID string) int {
+	limit := Limit(modelID).ContextLimit
+	if isClaudeModel(modelID) && limit > claudeDefaultContext {
+		return claudeDefaultContext
+	}
+	return limit
+}
+
+// isClaudeModel reports whether a model id names a Claude model, by the same
+// family keywords staticFallback uses to price one — so the clamp and the
+// static prices can never disagree about what counts as Claude. It matches the
+// bare-family shorthand ("opus-4.8") the runner sometimes emits alongside the
+// fully-qualified id.
+func isClaudeModel(modelID string) bool {
+	id := strings.ToLower(modelID)
+	return strings.Contains(id, "claude") ||
+		strings.Contains(id, "opus") ||
+		strings.Contains(id, "sonnet") ||
+		strings.Contains(id, "haiku")
 }
 
 // lookupEntry finds the best provider entry for an exact table key.

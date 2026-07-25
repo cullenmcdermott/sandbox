@@ -1,6 +1,7 @@
 package models
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -342,5 +343,74 @@ func TestColdLimitDoesNotBlockOnNetwork(t *testing.T) {
 	}
 	if got.ContextLimit != 1000000 { // static fallback knows opus is 1M
 		t.Errorf("fallback ContextLimit = %d, want 1000000", got.ContextLimit)
+	}
+}
+
+// The ctx% denominator asks what window a model RUNS with, not what it is
+// capable of, and for Claude those differ: models.dev reports the opus tier's
+// 1M maximum, but the extended window is an opt-in beta nothing here requests.
+// Reporting the maximum overstated headroom 5×, so a pane whose own statusline
+// read 100% full showed 20% in the dashboard.
+func TestEffectiveContextLimitClampsClaudeToRunningWindow(t *testing.T) {
+	cases := []struct {
+		model string
+		want  int
+	}{
+		// The reported case: table + static fallback both say 1M.
+		{"claude-opus-4-8", 200000},
+		{"claude-opus-4-8-20260101", 200000},
+		{"opus-4.8", 200000}, // bare-family shorthand
+		{"OPUS-4.8", 200000}, // case-insensitive
+		// Already at or below the running window — unchanged, not floored up.
+		{"claude-sonnet-4-6", 200000},
+		{"claude-haiku-4-5", 200000},
+		// Unknown ids fall back to 200k anyway.
+		{"", 200000},
+	}
+	for _, c := range cases {
+		if got := EffectiveContextLimit(c.model); got != c.want {
+			t.Errorf("EffectiveContextLimit(%q) = %d, want %d", c.model, got, c.want)
+		}
+	}
+}
+
+// The clamp is scoped to Claude: a non-Claude model's models.dev limit is the
+// real one and must survive untouched, or every opencode/codex session's ctx%
+// would be wrong in the other direction.
+func TestEffectiveContextLimitLeavesNonClaudeAlone(t *testing.T) {
+	dir := t.TempDir()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"openai":{"name":"OpenAI","models":{"gpt-4.1":{"id":"gpt-4.1","limit":{"context":1000000,"output":32000},"cost":{"input":2,"output":8}}}}}`)
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(srv.URL, dir)
+	prime(p)
+	if got := p.limit("gpt-4.1").ContextLimit; got != 1000000 {
+		t.Fatalf("precondition: table limit = %d, want 1000000", got)
+	}
+	// EffectiveContextLimit reads the package-level provider, so drive the clamp
+	// decision directly — the branch under test is the isClaudeModel guard.
+	if isClaudeModel("gpt-4.1") {
+		t.Error("gpt-4.1 must not be treated as a Claude model")
+	}
+	for _, id := range []string{"gpt-4.1", "grok-code", "gemini-2.5-pro"} {
+		if isClaudeModel(id) {
+			t.Errorf("isClaudeModel(%q) = true, want false", id)
+		}
+	}
+	for _, id := range []string{"claude-opus-4-8", "opus-4.8", "sonnet-4.6", "haiku-4-5"} {
+		if !isClaudeModel(id) {
+			t.Errorf("isClaudeModel(%q) = false, want true", id)
+		}
+	}
+}
+
+// Limit itself must keep reporting the model's true maximum: it is also the
+// provider-selection and pricing path, and several tests use the 1M value to
+// prove the table was consulted rather than the static fallback.
+func TestLimitStillReportsTheModelMaximum(t *testing.T) {
+	if got := Limit("claude-opus-4-8").ContextLimit; got != 1000000 {
+		t.Errorf("Limit(opus).ContextLimit = %d, want the 1M maximum", got)
 	}
 }

@@ -26,7 +26,8 @@ type sessionReadModel struct {
 	DashStatus SessionStatus
 
 	// Model is the SDK-resolved active model id; CtxLimit is its context-window
-	// (cached via models.Limit so ctx% needs no per-render lookup). cwd is the
+	// (cached via models.EffectiveContextLimit — the window the model actually
+	// runs with, NOT its maximum — so ctx% needs no per-render lookup). cwd is the
 	// pod working dir and defaultModel the first resolved id (the account/session
 	// default, restored by /model-default) — both read only by the transcript
 	// status line, but derived here so session.started is unmarshalled once.
@@ -113,7 +114,7 @@ func (rm *sessionReadModel) ApplyEvent(ev session.Event) readModelResult {
 		_ = json.Unmarshal(ev.Payload, &p) // malformed → zero value → no-op
 		if p.Model != "" {
 			rm.Model = p.Model
-			rm.CtxLimit = models.Limit(p.Model).ContextLimit
+			rm.CtxLimit = models.EffectiveContextLimit(p.Model)
 			if rm.defaultModel == "" {
 				// First resolved id is the account/session default; remember it so
 				// /model-default can restore the status line to it.

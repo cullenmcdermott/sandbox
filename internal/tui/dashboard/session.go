@@ -499,7 +499,7 @@ func (s *Session) applySnapshot(snap SessionSnapshot) {
 	s.PendingPermissionArg = snap.PendingPermissionArg
 	if snap.Model != "" {
 		s.Model = snap.Model
-		s.CtxLimit = models.Limit(snap.Model).ContextLimit
+		s.CtxLimit = models.EffectiveContextLimit(snap.Model)
 	}
 	s.InputTokens = snap.InputTokens
 	s.OutputTokens = snap.OutputTokens
@@ -525,7 +525,7 @@ func SessionFromState(st session.State) Session {
 		sessionReadModel: sessionReadModel{DashStatus: DeriveStatus(st), Model: st.Model},
 	}
 	if st.Model != "" {
-		s.CtxLimit = models.Limit(st.Model).ContextLimit
+		s.CtxLimit = models.EffectiveContextLimit(st.Model)
 	}
 	return s
 }
