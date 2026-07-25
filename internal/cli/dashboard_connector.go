@@ -67,6 +67,14 @@ func mapOpencode(oc *client.ExternalCreds) *dashboard.OpencodeCreds {
 // a first-ever attach.
 const paneDialTimeout = 30 * time.Second
 
+// paneGateTimeout bounds the workspace-staging gate that runs BEFORE the dial
+// (Session.AttachPane refuses an attach whose first-ever sync never staged).
+// That wait is a different order of magnitude from the dial: it can run as long
+// as the session's whole background sync phase, which the client bounds at 60s.
+// Charging it to paneDialTimeout would fail an attach on a slow-but-healthy
+// session, so it gets its own budget and the dial keeps its tight one.
+const paneGateTimeout = 90 * time.Second
+
 // mapPaneDial adapts Session.AttachPane to the dashboard's PaneDial seam for a
 // claude-pane session (nil for every other backend, which keeps the dashboard's
 // pane routing off). client.PaneStream satisfies dashboard.PaneTransport
@@ -77,6 +85,22 @@ func mapPaneDial(sess *client.Session, backend string) dashboard.PaneDial {
 		return nil
 	}
 	return func(cols, rows int) (dashboard.PaneTransport, error) {
+		// Settle the workspace-staging gate under its own budget first, so the
+		// wait is not charged to the dial timeout below. AttachPane applies the
+		// same gate itself (it is the SDK's guarantee, not this adapter's), and
+		// finds it already settled after this call.
+		//
+		// Only a KNOWN failure blocks the attach: ErrInitialSyncFailed means the
+		// workspace is empty and spawning claude there is worse than not
+		// attaching. A gate that merely runs out of budget is not evidence of
+		// anything, so it falls through to the dial rather than stranding a
+		// healthy session with no pane.
+		gateCtx, gcancel := context.WithTimeout(context.Background(), paneGateTimeout)
+		_, gerr := sess.AwaitSync(gateCtx)
+		gcancel()
+		if errors.Is(gerr, client.ErrInitialSyncFailed) {
+			return nil, gerr
+		}
 		// The context governs only the dial/handshake; the established stream
 		// lives until Close (same ownership rule as the port-forwards).
 		ctx, cancel := context.WithTimeout(context.Background(), paneDialTimeout)

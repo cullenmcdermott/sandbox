@@ -39,12 +39,28 @@ var (
 //
 // Only the claude-pane backend serves the endpoint; every other backend
 // rejects the attach with a 409, surfaced as an error here.
+//
+// The attach is gated on the session's background first-sync staging, the same
+// way the turn gate (stagedRunner) gates StartTurn: the runner spawns the
+// interactive child LAZILY on the first attach, so this call — not a turn — is
+// what starts an agent in the workspace for a pane session. A first-ever sync
+// whose transport broke leaves that workspace EMPTY, so the attach is refused
+// with ErrInitialSyncFailed rather than booting claude into nothing. A
+// slow-but-healthy upload is only an advisory and does not block the attach.
+//
+// The gate observes ctx: since the wait can run as long as the session's
+// background sync phase, a caller whose ctx budget is sized for the dial alone
+// should AwaitSync under its own budget first (see internal/cli mapPaneDial) —
+// this gate then returns immediately.
 func (s *Session) AttachPane(ctx context.Context, cols, rows int) (PaneStream, error) {
 	s.mu.Lock()
 	rc := s.runner
 	s.mu.Unlock()
 	if rc == nil {
 		return nil, ErrNotConnected
+	}
+	if _, err := s.AwaitSync(ctx); err != nil {
+		return nil, err
 	}
 	return rc.AttachPane(ctx, s.ref, cols, rows)
 }

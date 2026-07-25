@@ -49,6 +49,14 @@ D1/D3, `runner/src/claude-pane.ts`):
 - **Lazy spawn on first attach.** The first `GET /sessions/:id/pane` WebSocket
   attach spawns `claude --session-id <runner-generated-uuid>` under node-pty;
   the uuid is persisted in `session.json` as `claude_pane_session_id`.
+- **The attach is gated on first-sync staging.** Because the spawn is lazy, the
+  attach — not a turn — is what starts an agent for this backend, so
+  `client.Session.AttachPane` waits on `AwaitSync` and refuses with
+  `ErrInitialSyncFailed` when the session's first-ever project sync never
+  staged. Without the gate a broken sync transport boots claude into an EMPTY
+  workspace. A slow-but-healthy first upload is only an advisory and does not
+  block the attach; a reconnect is never gated (the workspace already staged
+  once).
 - **Detach keeps it alive.** Ctrl+] closes the WS; the child keeps running
   (core product behavior). Reattach replays a bounded scrollback ring
   (~256 KiB) so the screen repaints instantly. One concurrent attacher; a new
