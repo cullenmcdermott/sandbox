@@ -155,19 +155,23 @@ type syncTask struct {
 	done    chan struct{}
 	mu      sync.Mutex
 	warning string
+	// err is the FATAL outcome (ErrInitialSyncFailed), distinct from warning: it
+	// means the workspace was never staged, so acting on it would be acting on an
+	// empty directory. AwaitSync returns it and the turn gate refuses.
+	err error
 }
 
-func (t *syncTask) finish(warning string) {
+func (t *syncTask) finish(warning string, err error) {
 	t.mu.Lock()
-	t.warning = warning
+	t.warning, t.err = warning, err
 	t.mu.Unlock()
 	close(t.done)
 }
 
-func (t *syncTask) result() string {
+func (t *syncTask) result() (string, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.warning
+	return t.warning, t.err
 }
 
 // ID returns the session id.
@@ -678,6 +682,7 @@ func (s *Session) startBackgroundSync(tr *tracer, gen uint64, spec syncpkg.Spec,
 		bgSpan := tr.start("connect.background")
 		defer bgSpan.end()
 		var warn string
+		var fatal error
 		id := string(s.ref.ID)
 		mgr := s.c.syncManager()
 		if doSync {
@@ -693,11 +698,28 @@ func (s *Session) startBackgroundSync(tr *tracer, gen uint64, spec syncpkg.Spec,
 				timedOut := flushCtx.Err() == context.DeadlineExceeded
 				fc()
 				flushSpan.end()
-				switch {
-				case ferr != nil && timedOut:
-					warn = appendWarning(warn, "initial file sync still in progress (continuing in the background)")
-				case ferr != nil && bgCtx.Err() == nil:
-					warn = appendWarning(warn, fmt.Sprintf("file sync error: %v", ferr))
+				// A failed first flush is AMBIGUOUS, and the two cases need opposite
+				// handling: a large repo may simply still be uploading over a healthy
+				// transport (benign — keep going in the background), or the transport
+				// may be broken, in which case the workspace was never staged and the
+				// agent would start in an EMPTY directory. Treating both as advisory
+				// is what let a session come up empty and burn tokens on nothing.
+				//
+				// mutagen knows which it is, so ask: a dropped transport classifies as
+				// SyncStalled (connecting-* carrying a lastError), while a healthy
+				// upload in flight is SyncSyncing.
+				if ferr != nil {
+					probeCtx, pc := context.WithTimeout(bgCtx, syncProbeTimeout)
+					st, serr := mgr.StatusSummary(probeCtx, id)
+					pc()
+					switch {
+					case serr == nil && st == syncpkg.SyncStalled:
+						fatal = fmt.Errorf("%w: %v", ErrInitialSyncFailed, ferr)
+					case timedOut:
+						warn = appendWarning(warn, "initial file sync still in progress (continuing in the background)")
+					case bgCtx.Err() == nil:
+						warn = appendWarning(warn, fmt.Sprintf("file sync error: %v", ferr))
+					}
 				}
 			} else {
 				// Reconnect to an already-synced session: the mutagen session persists
@@ -736,7 +758,7 @@ func (s *Session) startBackgroundSync(tr *tracer, gen uint64, spec syncpkg.Spec,
 		if context.Cause(bgCtx) == errBgSyncTimeout {
 			warn = appendWarning(warn, fmt.Sprintf("background sync/reaper setup timed out after %s (file sync may be unavailable)", bgSyncOverallTimeout))
 		}
-		task.finish(warn)
+		task.finish(warn, fatal)
 	}()
 	return true
 }
@@ -749,6 +771,22 @@ const bgSyncOverallTimeout = 60 * time.Second
 // errBgSyncTimeout distinguishes the C6 deadline from an ordinary cancel
 // (closeHandles), which must stay silent.
 var errBgSyncTimeout = errors.New("background sync setup timed out")
+
+// syncProbeTimeout bounds the post-flush "is the transport broken or just slow?"
+// status probe. It is one local `mutagen sync list`, so a short bound is right —
+// a probe that cannot answer promptly falls back to the advisory path rather
+// than failing a session closed on a slow daemon.
+const syncProbeTimeout = 5 * time.Second
+
+// ErrInitialSyncFailed reports that a session's FIRST-EVER project sync never
+// staged because its transport is broken — mutagen reached a stalled state
+// rather than merely still uploading. The workspace is EMPTY, so the session is
+// refused rather than handed to an agent that would act on nothing: AwaitSync
+// returns this and the turn gate (stagedRunner) propagates it.
+//
+// A slow-but-healthy first upload is NOT this error; it stays a warning and
+// finishes in the background.
+var ErrInitialSyncFailed = errors.New("sandbox: initial project sync failed — the workspace was never staged")
 
 // AwaitSync blocks until Connect's background file-sync + idle-reaper work (see
 // startBackgroundSync) has settled, returning any non-fatal advisory to surface
@@ -767,7 +805,7 @@ func (s *Session) AwaitSync(ctx context.Context) (warning string, err error) {
 	}
 	select {
 	case <-t.done:
-		return t.result(), nil
+		return t.result()
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}

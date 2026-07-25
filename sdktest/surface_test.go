@@ -117,6 +117,11 @@ var (
 
 	_ error = client.ErrPanePreempted
 	_ error = client.ErrPaneChildExited
+
+	// AwaitSync's fatal outcome: the first-ever project sync never staged, so the
+	// workspace is empty. Consumers branch on this to refuse to drive an agent
+	// against nothing, which is why it is part of the pinned surface.
+	_ error = client.ErrInitialSyncFailed
 )
 
 // consumerPaneStream proves client.PaneStream is implementable outside the

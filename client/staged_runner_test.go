@@ -2,6 +2,8 @@ package client
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -44,7 +46,7 @@ func TestStartTurnGatedOnBackgroundSync(t *testing.T) {
 		t.Fatalf("turn reached the runner before staging settled (started=%d)", n)
 	}
 
-	task.finish("")
+	task.finish("", nil)
 	select {
 	case err := <-res:
 		if err != nil {
@@ -55,6 +57,50 @@ func TestStartTurnGatedOnBackgroundSync(t *testing.T) {
 	}
 	if n := fr.started.Load(); n != 1 {
 		t.Fatalf("expected exactly one submitted turn, got %d", n)
+	}
+}
+
+// A first-ever sync whose transport broke leaves the workspace EMPTY, so the
+// turn gate must refuse rather than hand an agent an empty directory — the
+// failure mode that let a session come up blank and burn tokens on nothing.
+func TestStagedRunnerRefusesTurnAfterFailedInitialSync(t *testing.T) {
+	s := &Session{}
+	task := &syncTask{done: make(chan struct{})}
+	s.syncTask = task
+	fr := &fakeTurnRunner{}
+	g := &stagedRunner{RunnerClient: fr, s: s}
+
+	task.finish("", fmt.Errorf("%w: flush failed", ErrInitialSyncFailed))
+
+	_, err := g.StartTurn(context.Background(), Ref{ID: "x"}, TurnInput{Prompt: "hi"})
+	if !errors.Is(err, ErrInitialSyncFailed) {
+		t.Fatalf("StartTurn err = %v, want ErrInitialSyncFailed", err)
+	}
+	if n := fr.started.Load(); n != 0 {
+		t.Fatalf("turn reached the runner despite an unstaged workspace (started=%d)", n)
+	}
+}
+
+// A slow-but-healthy first upload is an advisory, NOT a refusal: the warning
+// surfaces and the turn still goes through.
+func TestStagedRunnerAllowsTurnAfterSyncWarning(t *testing.T) {
+	s := &Session{}
+	task := &syncTask{done: make(chan struct{})}
+	s.syncTask = task
+	fr := &fakeTurnRunner{}
+	g := &stagedRunner{RunnerClient: fr, s: s}
+
+	task.finish("initial file sync still in progress (continuing in the background)", nil)
+
+	if _, err := g.StartTurn(context.Background(), Ref{ID: "x"}, TurnInput{Prompt: "hi"}); err != nil {
+		t.Fatalf("a sync WARNING must not block a turn: %v", err)
+	}
+	warn, err := s.AwaitSync(context.Background())
+	if err != nil {
+		t.Fatalf("AwaitSync err = %v, want nil", err)
+	}
+	if warn == "" {
+		t.Fatal("AwaitSync dropped the advisory")
 	}
 }
 
