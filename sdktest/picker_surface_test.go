@@ -17,6 +17,7 @@ var (
 	_ func(func()) picker.Option                                  = picker.WithCancel
 	_ func() picker.Option                                        = picker.WithFilter
 	_ func(int) picker.Option                                     = picker.WithMaxRows
+	_ func(int) picker.Option                                     = picker.WithMaxWidth
 )
 
 var (
@@ -35,7 +36,11 @@ var (
 	// Height budget (WithMaxRows): the row cap a host recomputes on resize.
 	_ func(*picker.Model) int  = (*picker.Model).MaxRows
 	_ func(*picker.Model, int) = (*picker.Model).SetMaxRows
+	// Width budget (WithMaxWidth): the cap a columned host raises.
+	_ func(*picker.Model) int  = (*picker.Model).MaxWidth
+	_ func(*picker.Model, int) = (*picker.Model).SetMaxWidth
 )
 
-// Item field-set pin.
-var _ = picker.Item{ID: "", Name: "", Desc: "", Current: false}
+// Item field-set pin. Cols makes Item non-comparable (it holds a slice) — an
+// external consumer must compare rows by ID, not with ==.
+var _ = picker.Item{ID: "", Name: "", Desc: "", Cols: []string{}, Current: false}

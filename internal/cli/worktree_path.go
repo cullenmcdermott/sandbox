@@ -217,9 +217,10 @@ func noWorktreeError(m client.SessionMatch) error {
 	return errors.New(msg + " (created with --worktree=off, or its project is not a git repo)")
 }
 
-// matchSummary is the one-line description of a candidate used by both the
-// picker rows and the no-tty listing: branch when there is one, else the
-// project, plus how it matched.
+// matchSummary is the one-line description of a candidate in the no-tty
+// listing: branch when there is one, else the project, plus how it matched.
+// (The picker rows use pickerCols instead — that surface has room to align
+// fields into columns, and this one already prints the id in its own column.)
 func matchSummary(m client.SessionMatch) string {
 	detail := m.Branch
 	if detail == "" {
@@ -231,26 +232,26 @@ func matchSummary(m client.SessionMatch) string {
 	return fmt.Sprintf("%s  (%s)", detail, m.MatchedBy)
 }
 
-// pickerSummary is the detail line for one picker row. It is deliberately NOT
-// matchSummary: the listing at least prints the id in its own column, but the
-// picker rows are all the caller has, and on this machine most of them share a
-// project AND a title fallback — twenty rows reading "sandbox
-// /Users/cullen/git/sandbox (any)" cannot be told apart, let alone chosen
-// between. What actually distinguishes two sessions of the same project is the
-// id suffix and when they were last touched, so those lead; the branch (when
-// the session has a worktree) follows; the match kind appears only when a query
-// produced it, since an all-"any" column is pure noise.
-func pickerSummary(m client.SessionMatch, now time.Time) string {
-	parts := []string{shortSessionID(string(m.ID)), shortAge(m.LastActivity, now)}
-	if m.Branch != "" {
-		parts = append(parts, m.Branch)
-	} else if m.ProjectPath != "" {
-		parts = append(parts, filepath.Base(m.ProjectPath))
+// pickerCols is the aligned detail for one picker row: repo, short id, age, and
+// (only when a query produced something other than "any") how it matched.
+//
+// These are COLUMNS rather than a prose summary because the rows they describe
+// are near-identical: on a working machine most candidates share a project and
+// many have no title but their own id. Scanning twenty such rows means comparing
+// the same field across them, which a ragged line makes you re-find on every row
+// and an aligned stripe hands you for free. The match kind is dropped for
+// MatchAny — with an empty query every row carries it, so it separates nothing
+// and costs a whole column.
+func pickerCols(m client.SessionMatch, now time.Time) []string {
+	repo := filepath.Base(m.ProjectPath)
+	if m.ProjectPath == "" {
+		repo = "—"
 	}
+	cols := []string{repo, shortSessionID(string(m.ID)), shortAge(m.LastActivity, now)}
 	if m.MatchedBy != "" && m.MatchedBy != client.MatchAny {
-		parts = append(parts, string(m.MatchedBy))
+		cols = append(cols, string(m.MatchedBy))
 	}
-	return strings.Join(parts, " · ")
+	return cols
 }
 
 // shortSessionID is the trailing random suffix of a session id
@@ -302,7 +303,7 @@ func ttyPicker(matches []client.SessionMatch) (client.SessionMatch, error) {
 		items = append(items, picker.Item{
 			ID:   string(m.ID),
 			Name: name,
-			Desc: pickerSummary(m, now),
+			Cols: pickerCols(m, now),
 		})
 	}
 
@@ -311,6 +312,11 @@ func ttyPicker(matches []client.SessionMatch) (client.SessionMatch, error) {
 	// that typing to narrow beats paging through it.
 	model.p = picker.New("Which session?", items,
 		picker.WithFilter(),
+		// Columns need room: the default 60-column cap squeezes a session title
+		// into an ellipsis long before the terminal runs out of width. The real
+		// width arrives with the first WindowSizeMsg; this is the pre-resize
+		// floor.
+		picker.WithMaxWidth(pickerWidthCap(0)),
 		picker.WithChoose(func(it picker.Item) { model.chosen = it.ID; model.done = true }),
 		picker.WithCancel(func() { model.cancelled = true; model.done = true }),
 	)
@@ -365,6 +371,24 @@ func pickerRowBudget(height int) int {
 	return 3
 }
 
+// Width bounds for the session picker. It carries four columns, so it wants far
+// more than the picker's 60-column default — but not the whole of a very wide
+// terminal, where a row's eye has to travel the full screen from title to age.
+const (
+	pickerMinWidth = 76
+	pickerMaxWidth = 110
+)
+
+// pickerWidthCap converts a terminal width into the overlay's width cap, leaving
+// the margin View itself reserves. An unknown width (0, before the first resize)
+// yields the floor rather than the picker's much narrower default.
+func pickerWidthCap(termWidth int) int {
+	if termWidth <= 0 {
+		return pickerMinWidth
+	}
+	return min(pickerMaxWidth, max(pickerMinWidth, termWidth-8))
+}
+
 func (m *pathPicker) Init() tea.Cmd { return nil }
 
 func (m *pathPicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -372,6 +396,7 @@ func (m *pathPicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.p.SetMaxRows(pickerRowBudget(msg.Height))
+		m.p.SetMaxWidth(pickerWidthCap(msg.Width))
 		return m, nil
 	case tea.KeyPressMsg:
 		// ctrl+c is a hard cancel; everything else belongs to the picker (whose

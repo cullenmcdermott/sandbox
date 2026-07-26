@@ -270,28 +270,54 @@ func TestWorktreePathResolverErrorPropagates(t *testing.T) {
 // a real machine most candidates share a project and a title fallback. These
 // pin what makes two such rows tellable apart.
 
-func TestPickerSummaryLeadsWithWhatDistinguishesSessions(t *testing.T) {
+func TestPickerColsCarryRepoIDAndAge(t *testing.T) {
 	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
 	m := match("claude-pane-df80e6-3bf602fc", "Review TODO", "/wt", "feat/x", client.MatchAny)
+	m.ProjectPath = "/Users/cullen/git/sandbox"
 	m.LastActivity = now.Add(-3 * time.Hour)
-	got := pickerSummary(m, now)
-	// Short id first (the only always-unique field), then age, then the branch.
-	// The match kind is omitted for MatchAny: when the query was empty every row
-	// carries it, so it distinguishes nothing and costs a third of the line.
-	if want := "3bf602fc · 3h · feat/x"; got != want {
-		t.Errorf("pickerSummary = %q, want %q", got, want)
-	}
+	// Repo basename (not the path — it is identical down every row), the id
+	// suffix, and the age. The match kind is omitted for MatchAny: with an empty
+	// query every row carries it, so it separates nothing and costs a column.
+	assertCols(t, pickerCols(m, now), []string{"sandbox", "3bf602fc", "3h"})
+
 	// A real query produces varied kinds, and then the kind explains the row.
 	m.MatchedBy = client.MatchTitle
-	if want := "3bf602fc · 3h · feat/x · title"; pickerSummary(m, now) != want {
-		t.Errorf("pickerSummary = %q, want %q", pickerSummary(m, now), want)
+	assertCols(t, pickerCols(m, now), []string{"sandbox", "3bf602fc", "3h", "title"})
+
+	// A session with no project path still gets a cell, so the columns after it
+	// stay aligned with every other row's.
+	m.ProjectPath, m.MatchedBy = "", client.MatchAny
+	assertCols(t, pickerCols(m, now), []string{"—", "3bf602fc", "3h"})
+}
+
+func assertCols(t *testing.T, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("cols = %q, want %q", got, want)
 	}
-	// No branch (a worktree-off session) falls back to the project basename, not
-	// the full path — the path is identical across every row of one project.
-	m.Branch, m.MatchedBy = "", client.MatchAny
-	m.ProjectPath = "/Users/cullen/git/sandbox"
-	if want := "3bf602fc · 3h · sandbox"; pickerSummary(m, now) != want {
-		t.Errorf("pickerSummary = %q, want %q", pickerSummary(m, now), want)
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("col %d = %q, want %q (full: %q)", i, got[i], want[i], got)
+		}
+	}
+}
+
+func TestPickerWidthCapLeavesRoomForFourColumns(t *testing.T) {
+	// Before the first resize the cap is the floor, NOT the picker's much
+	// narrower 60-column default — a four-column row does not fit in 60.
+	if got := pickerWidthCap(0); got != pickerMinWidth {
+		t.Errorf("pickerWidthCap(0) = %d, want the %d floor", got, pickerMinWidth)
+	}
+	// A narrow terminal still gets the floor (the picker clamps to the terminal
+	// itself); a wide one is capped so the eye does not cross the whole screen.
+	if got := pickerWidthCap(40); got != pickerMinWidth {
+		t.Errorf("pickerWidthCap(40) = %d, want the %d floor", got, pickerMinWidth)
+	}
+	if got := pickerWidthCap(400); got != pickerMaxWidth {
+		t.Errorf("pickerWidthCap(400) = %d, want the %d cap", got, pickerMaxWidth)
+	}
+	if got := pickerWidthCap(100); got != 92 {
+		t.Errorf("pickerWidthCap(100) = %d, want 92 (100 - the view margin)", got)
 	}
 }
 

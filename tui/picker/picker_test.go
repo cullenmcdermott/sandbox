@@ -238,8 +238,9 @@ func TestFilterNoMatchesIsInert(t *testing.T) {
 	if got := len(m.Filtered()); got != 0 {
 		t.Fatalf("filtered = %d rows, want 0", got)
 	}
-	if m.SelectedItem() != (Item{}) {
-		t.Errorf("SelectedItem on an empty set = %+v, want zero", m.SelectedItem())
+	// Item carries a slice (Cols) and so is not comparable; check the fields.
+	if got := m.SelectedItem(); got.ID != "" || got.Name != "" || got.Desc != "" || got.Cols != nil {
+		t.Errorf("SelectedItem on an empty set = %+v, want zero", got)
 	}
 	m.Update(key(tea.KeyEnter))
 	if chose {
@@ -421,5 +422,159 @@ func TestMaxRowsZeroIsUnbounded(t *testing.T) {
 	m.SetMaxRows(-3) // a host that computed a nonsense budget still gets a row
 	if got := m.MaxRows(); got != 1 {
 		t.Errorf("SetMaxRows(-3) = %d, want the 1-row floor", got)
+	}
+}
+
+// --- aligned columns --------------------------------------------------------
+
+func recordItems() []Item {
+	return []Item{
+		{ID: "a-1111", Name: "Review TODO list", Cols: []string{"sandbox", "1111", "now"}},
+		{ID: "b-2222", Name: "x", Cols: []string{"demo-project", "2222", "18h"}},
+		{ID: "c-3333", Name: "a much longer session title", Cols: []string{"homelab", "3333", "2d"}},
+	}
+}
+
+// cellStarts reports the display column each cell of a rendered row begins at,
+// which is the only thing "aligned" can mean here.
+func cellStarts(line string, cells []string) []int {
+	plain := ansi.Strip(line)
+	out := make([]int, 0, len(cells))
+	from := 0
+	for _, c := range cells {
+		i := strings.Index(plain[from:], c)
+		if i < 0 {
+			return nil
+		}
+		out = append(out, lipgloss.Width(plain[:from+i]))
+		from += i + len(c)
+	}
+	return out
+}
+
+func rowLines(out string, names []string) []string {
+	lines := []string{}
+	for _, l := range strings.Split(out, "\n") {
+		for _, n := range names {
+			if strings.Contains(l, n) {
+				lines = append(lines, l)
+				break
+			}
+		}
+	}
+	return lines
+}
+
+func TestColumnsAlignAcrossRows(t *testing.T) {
+	theme.ApplyForBackground(true)
+	t.Cleanup(func() { theme.ApplyForBackground(true) })
+	items := recordItems()
+	m := New("Which session?", items, WithFilter(), WithMaxWidth(100))
+	out := ansi.Strip(m.View(120))
+	lines := rowLines(out, []string{"1111", "2222", "3333"})
+	if len(lines) != 3 {
+		t.Fatalf("want 3 row lines, got %d:\n%s", len(lines), out)
+	}
+	// Every row's repo/id/age must begin at the SAME display column, whatever
+	// its name's length — that is what makes the fields scannable down the list.
+	var want []int
+	for i, l := range lines {
+		got := cellStarts(l, items[i].Cols)
+		if got == nil {
+			t.Fatalf("row %d missing a cell: %q", i, l)
+		}
+		if i == 0 {
+			want = got
+			continue
+		}
+		for c := range want {
+			if got[c] != want[c] {
+				t.Errorf("row %d column %d starts at %d, row 0 has %d:\n%s", i, c, got[c], want[c], out)
+			}
+		}
+	}
+}
+
+// A row with fewer cells than the widest row must leave the missing ones blank
+// rather than shifting its later columns left.
+func TestColumnsTolerateRaggedRows(t *testing.T) {
+	theme.ApplyForBackground(true)
+	t.Cleanup(func() { theme.ApplyForBackground(true) })
+	items := []Item{
+		{Name: "full", Cols: []string{"repo", "1111", "now", "title"}},
+		{Name: "short", Cols: []string{"repo", "2222"}},
+	}
+	m := New("t", items, WithFilter(), WithMaxWidth(100))
+	out := ansi.Strip(m.View(120))
+	lines := rowLines(out, []string{"1111", "2222"})
+	if len(lines) != 2 {
+		t.Fatalf("want 2 rows, got %d:\n%s", len(lines), out)
+	}
+	full := cellStarts(lines[0], []string{"repo", "1111"})
+	short := cellStarts(lines[1], []string{"repo", "2222"})
+	for c := range full {
+		if full[c] != short[c] {
+			t.Errorf("column %d: full row at %d, short row at %d:\n%s", c, full[c], short[c], out)
+		}
+	}
+}
+
+// When the row does not fit, the NAME gives up width first — an id or an age
+// truncated to "1…" is worthless, while a shortened title still reads. (Past the
+// name's floor there is nothing left to give and the row is simply truncated
+// like any other; that is below any width these columns are usable at.)
+func TestTightBoxSqueezesTheNameNotTheCells(t *testing.T) {
+	theme.ApplyForBackground(true)
+	t.Cleanup(func() { theme.ApplyForBackground(true) })
+	const boxW = 56 // holds the cells, but not the longest name at full length
+	m := New("t", recordItems(), WithFilter(), WithMaxWidth(boxW))
+	out := ansi.Strip(m.View(boxW + 8))
+	for _, want := range []string{"sandbox", "1111", "now", "demo-project", "18h", "2d"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("tight box dropped cell %q:\n%s", want, out)
+		}
+	}
+	// The long name is the one that paid for it.
+	if !strings.Contains(out, "…") {
+		t.Errorf("nothing was truncated, so this is not the squeeze case:\n%s", out)
+	}
+	if strings.Contains(out, "a much longer session title") {
+		t.Errorf("the long name survived intact, so the cells must have been cut:\n%s", out)
+	}
+	// And nothing wrapped: the box's own width is still respected.
+	for i, l := range strings.Split(m.View(boxW+8), "\n") {
+		if w := lipgloss.Width(l); w > boxW+8 {
+			t.Errorf("line %d overflows (%d cols): %q", i, w, l)
+		}
+	}
+}
+
+func TestColumnsAreFilterable(t *testing.T) {
+	m := New("t", recordItems(), WithFilter())
+	m.SetQuery("demo-project") // a repo cell, visible on screen
+	if vis := m.Filtered(); len(vis) != 1 || vis[0].ID != "b-2222" {
+		t.Errorf("column filter failed: %+v", vis)
+	}
+	m.SetQuery("2d") // an age cell
+	if vis := m.Filtered(); len(vis) != 1 || vis[0].ID != "c-3333" {
+		t.Errorf("age filter failed: %+v", vis)
+	}
+}
+
+func TestMaxWidthDefaultsAndFloors(t *testing.T) {
+	m := New("t", items())
+	if got := m.MaxWidth(); got != defaultMaxWidth {
+		t.Errorf("MaxWidth default = %d, want %d", got, defaultMaxWidth)
+	}
+	m.SetMaxWidth(5) // below the floor: a box this narrow cannot hold a row
+	if got := m.MaxWidth(); got != minBoxWidth {
+		t.Errorf("SetMaxWidth(5) = %d, want the %d floor", got, minBoxWidth)
+	}
+	// A raised cap actually widens the box.
+	wide := New("t", recordItems(), WithFilter(), WithMaxWidth(100))
+	narrow := New("t", recordItems(), WithFilter())
+	if lipgloss.Width(strings.Split(wide.View(200), "\n")[0]) <=
+		lipgloss.Width(strings.Split(narrow.View(200), "\n")[0]) {
+		t.Error("WithMaxWidth did not widen the box")
 	}
 }
