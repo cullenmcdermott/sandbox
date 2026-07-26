@@ -138,6 +138,25 @@ done log.)
   file for pane byte-flow so the next occurrence is root-causeable — the TUI
   hides stderr, so child #1's byte stream was unobservable post-mortem.
 
+* **The dashboard DROPS `rate_limit.updated` on the floor** (found 2026-07-26
+  alongside the in-pane 5h/weekly fix, which is a different surface and is now
+  done). The runner emits the event correctly
+  (`runner/src/claude-pane-observer.ts:368-390`, off the statusline payload's
+  `rate_limits`), and `session.RateLimitPayload`
+  (`internal/session/event.go:147`) is fully defined — but
+  `sessionReadModel.ApplyEvent` (`internal/tui/dashboard/readmodel.go:111`) has
+  no case for it and `ApplyRunnerEvent`
+  (`internal/tui/dashboard/session.go:558-572`) does not list it, so the payload
+  is parsed by nobody. The renderer that used to show the windows,
+  `internal/tui/dashboard/statusline.go` (`rateRow`, 5h/weekly bars + reset
+  countdowns), was deleted with the chat stack in a935541. Fix direction: add
+  the read-model fields + the one reducer case, then render them in the pane
+  status row next to ctx%/cost (`internal/tui/dashboard/external_pane.go:791`
+  `statusRow`) — `git show a935541^:internal/tui/dashboard/statusline.go` has
+  the old bar/countdown formatting to crib. Guard rendering on a
+  "seen an available event" flag so a session that never reported a window
+  shows nothing rather than a fabricated 0%.
+
 * **`internal/authstatus` tests read the AMBIENT `CLAUDE_CONFIG_DIR` and fail
   inside a sandbox pod** (found 2026-07-26 during the §9 T1-T5 batch; not
   caused by it). `TestClaudeProvider/nothing_anywhere` and

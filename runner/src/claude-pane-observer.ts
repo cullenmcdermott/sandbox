@@ -492,7 +492,15 @@ const STATUSLINE_SCRIPT = `#!/usr/bin/env node
 //   3. sandbox-user-statusline on PATH  (a future flox-provided binary)
 // The candidate gets this script's stdin JSON verbatim and ~1s to print the
 // line. Missing/not-executable falls through to the next candidate; nonzero
-// exit, timeout, or empty output falls back to the built-in minimal line.
+// exit, timeout, or empty output falls back to the built-in line:
+//
+//   <model> · ctx <n>% · 5h <n>% <until> · wk <n>% <until>
+//
+// The two plan windows come from the payload's rate_limits and are the whole
+// reason the built-in line is not just model+ctx: a pod cannot fetch its own
+// plan usage (its token is inference-scoped, so /api/oauth/usage — the source
+// the host statusline uses — is closed to it), and the host's binary cannot run
+// here, so without this a sandbox session shows no 5h/weekly anywhere.
 const { readFileSync } = require('node:fs');
 const { spawnSync } = require('node:child_process');
 const { join } = require('node:path');
@@ -511,9 +519,34 @@ process.stdin.on('end', () => {
   let line = 'claude';
   try {
     const j = JSON.parse(raw.toString('utf8'));
-    const model = (j.model && j.model.display_name) || 'claude';
+    const segs = [(j.model && j.model.display_name) || 'claude'];
     const pct = j.context_window && j.context_window.used_percentage;
-    line = typeof pct === 'number' ? model + ' · ctx ' + pct + '%' : model;
+    if (typeof pct === 'number') segs.push('ctx ' + Math.round(pct) + '%');
+    // claude.ai plan usage (5-hour + weekly). This stdin payload is the ONLY
+    // place a pod ever learns its plan usage: the session's token is
+    // inference-scoped and cannot call /api/oauth/usage, which is how the
+    // host-side statusline gets the same numbers. Present only for Pro/Max
+    // sessions and only after the first API response of the session, so every
+    // field is probed rather than assumed — an API-key/Bedrock/Vertex session
+    // simply keeps the model+ctx line it had before.
+    const rl = j.rate_limits || {};
+    const until = (at) => {
+      if (typeof at !== 'number' || at <= 0) return '';
+      const mins = Math.floor((at * 1000 - Date.now()) / 60000);
+      if (mins <= 0) return '';
+      if (mins < 60) return ' ' + mins + 'm';
+      const hrs = Math.floor(mins / 60);
+      if (hrs < 24) return ' ' + hrs + 'h' + (mins % 60 ? (mins % 60) + 'm' : '');
+      return ' ' + Math.floor(hrs / 24) + 'd' + (hrs % 24 ? (hrs % 24) + 'h' : '');
+    };
+    const addWindow = (w, label) => {
+      const used = w && w.used_percentage;
+      if (typeof used !== 'number') return;
+      segs.push(label + ' ' + Math.round(used) + '%' + until(w.resets_at));
+    };
+    addWindow(rl.five_hour, '5h');
+    addWindow(rl.seven_day, 'wk');
+    line = segs.join(' · ');
   } catch {}
   const t = Number(process.env.SANDBOX_STATUSLINE_TIMEOUT_MS);
   const timeoutMs = t > 0 ? t : 1000;

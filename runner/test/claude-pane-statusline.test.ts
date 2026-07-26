@@ -3,9 +3,11 @@
 // controlled stdin/env, a local capture server standing in for the runner
 // observer route, and user-statusline fixtures covering the chain contract:
 //   present (config-dir drop-in / host-synced sibling / PATH) → chained output,
-//   absent → built-in minimal line,
-//   nonzero exit / timeout / empty output → built-in minimal line,
+//   absent → built-in line,
+//   nonzero exit / timeout / empty output → built-in line,
 //   and the metrics POST fires with the verbatim stdin JSON in EVERY case.
+// The built-in line's own content (model · ctx% · the claude.ai 5h/weekly plan
+// windows) is covered by the last group.
 // The chain timeout is injected via SANDBOX_STATUSLINE_TIMEOUT_MS (the script's
 // env seam; production uses the 1s default) and the POST target via
 // SANDBOX_OBSERVER_URL, so no fakes stand between the tests and the shipped
@@ -82,13 +84,13 @@ function writeExecutable(path: string, content: string): void {
   chmodSync(path, 0o755);
 }
 
-/** Run the provisioned statusline.js with STDIN_JSON; resolve once the process
- * exits (which the script does only after the metrics fetch settles, so any
- * POST is already captured). Returns the printed line and the posts this run
- * added. */
+/** Run the provisioned statusline.js with STDIN_JSON (or opts.stdin); resolve
+ * once the process exits (which the script does only after the metrics fetch
+ * settles, so any POST is already captured). Returns the printed line and the
+ * posts this run added. */
 async function runStatusline(
   configDir: string,
-  opts: { pathPrepend?: string; timeoutMs?: number } = {},
+  opts: { pathPrepend?: string; timeoutMs?: number; stdin?: string } = {},
 ): Promise<{ line: string; posted: Array<{ auth: string | undefined; body: string }> }> {
   const seen = posts.length;
   const env: NodeJS.ProcessEnv = {
@@ -103,7 +105,7 @@ async function runStatusline(
   });
   let line = '';
   child.stdout.on('data', (c: Buffer) => (line += c.toString('utf8')));
-  child.stdin.end(STDIN_JSON);
+  child.stdin.end(opts.stdin ?? STDIN_JSON);
   await new Promise<void>((resolve, reject) => {
     const kill = setTimeout(() => {
       child.kill('SIGKILL');
@@ -185,4 +187,61 @@ test('empty stdout with exit 0 → built-in line (a blank statusline is useless)
   const { line, posted } = await runStatusline(cfg);
   assert.equal(line, BUILTIN_LINE);
   assert.equal(posted.length, 1);
+});
+
+// --- claude.ai plan usage windows ------------------------------------------
+//
+// `rate_limits` rides in on the SAME stdin payload the observer POST consumes,
+// and it is the ONLY channel by which a pod learns its plan usage — the
+// session's token is inference-scoped and cannot call /api/oauth/usage the way
+// the host-side statusline does. Before this, the built-in line dropped the
+// windows on the floor and a sandbox session showed no 5h/weekly at all.
+
+test('rate_limits in the payload → 5h + weekly windows on the built-in line', async () => {
+  const cfg = freshConfigDir();
+  // resets_at are absolute epoch SECONDS; pick offsets from now so the
+  // countdown is deterministic without freezing the clock. The countdown FLOORS
+  // to whole minutes, so each offset carries an extra 59s of slack — the
+  // rendered value then survives up to a minute of test-run drift instead of
+  // flaking one unit low the moment the spawn takes a millisecond.
+  const now = Math.floor(Date.now() / 1000);
+  const stdin = JSON.stringify({
+    model: { id: 'claude-opus-4-8', display_name: 'Opus 4.8' },
+    context_window: { used_percentage: 16 },
+    rate_limits: {
+      five_hour: { used_percentage: 41.4, resets_at: now + 2 * 3600 + 12 * 60 + 59 },
+      seven_day: { used_percentage: 4, resets_at: now + 3 * 86400 + 4 * 3600 + 59 * 60 },
+    },
+  });
+  const { line, posted } = await runStatusline(cfg, { stdin });
+  assert.equal(line, 'Opus 4.8 · ctx 16% · 5h 41% 2h12m · wk 4% 3d4h');
+  assert.equal(posted.length, 1);
+  assert.equal(posted[0].body, stdin); // the metrics POST is still verbatim
+});
+
+test('a window without resets_at prints its percentage alone', async () => {
+  const cfg = freshConfigDir();
+  const stdin = JSON.stringify({
+    model: { display_name: 'Opus 4.8' },
+    context_window: { used_percentage: 16 },
+    rate_limits: { five_hour: { used_percentage: 41 } },
+  });
+  const { line } = await runStatusline(cfg, { stdin });
+  assert.equal(line, 'Opus 4.8 · ctx 16% · 5h 41%');
+});
+
+test('an already-elapsed resets_at prints no countdown (never a negative one)', async () => {
+  const cfg = freshConfigDir();
+  const stdin = JSON.stringify({
+    model: { display_name: 'Opus 4.8' },
+    rate_limits: { seven_day: { used_percentage: 88, resets_at: Math.floor(Date.now() / 1000) - 60 } },
+  });
+  const { line } = await runStatusline(cfg, { stdin });
+  assert.equal(line, 'Opus 4.8 · wk 88%');
+});
+
+test('no rate_limits (API-key / pre-first-response) → the model+ctx line, unchanged', async () => {
+  const cfg = freshConfigDir();
+  const { line } = await runStatusline(cfg);
+  assert.equal(line, BUILTIN_LINE);
 });
