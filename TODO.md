@@ -107,6 +107,37 @@ Raw maintainer notes. Triage = either promote into a numbered section with
 pointers, or answer inline and archive. (Resolved investigations moved to the
 done log.)
 
+* **opencode pane blank for ~13 min on the first attach of a fresh session;
+  self-healed when the port-forward cycled** (incident 2026-07-25, investigated
+  same day, root cause not provable post-mortem). Fresh `sandbox opencode`
+  session: pod healthy, `opencode serve` answering through the forward
+  (verified by direct curl of `/session`, `/config`, `/path`, `/event` SSE with
+  the session secret), attach child #1 alive with a normal connection profile,
+  yet the pane rendered nothing from 16:26 until the SPDY forward dropped at
+  ~16:39 — after which `runForward`'s reconnect loop respawned the attach child
+  and the pane immediately rendered. Eliminated while live: server side, the
+  x/vt emulator + reply-pump pipeline (a headless replica of the exact
+  `ExternalPane` plumbing — PTY child → emulator → reply pump → `Render()` —
+  rendered the TUI correctly through the replacement forward), the
+  OSC 66 / CSI 6n width-measurement exchange (emulator answers "cursor didn't
+  move"; opentui tolerates it), and a dashboard main-loop freeze (the loop
+  processed the 16:39 reconnect). Also: a manual `opencode attach` through the
+  ORIGINAL forward rendered fine while the pane was still blank. What remains
+  unexcluded, fit-all-facts candidate: one or more of child #1's startup
+  streams stalling inside the legacy SPDY port-forward (`forwardOnce`,
+  `internal/k8s/portforward.go:310-329` — bare `spdy.NewDialer`, no WebSocket
+  fallback; SPDY stream stalls under concurrent long-lived streams are the
+  upstream-known pathology `PortForwardWebsockets` was built for). The gap that
+  made it user-visible for 13 min: NOTHING detects a silent pane — the system
+  only recovers when the forward happens to die. Fix directions, in order of
+  value: (1) liveness watchdog in the pane/attach path — child alive but no
+  emulator frame within N seconds of attach → respawn the attach and/or cycle
+  the connection (`internal/tui/dashboard/external_pane.go:223` Init,
+  `:367` apply); (2) switch the dialer to `portforward.NewSPDYOverWebsocketDialer`
+  / `NewFallbackDialer` (`internal/k8s/portforward.go:319`); (3) a debug log
+  file for pane byte-flow so the next occurrence is root-causeable — the TUI
+  hides stderr, so child #1's byte stream was unobservable post-mortem.
+
 * **`just typecheck` does not cover `runner/test/`, and it cost us two red
   tests** (found 2026-07-25 during the [O15] sweep, fixed in the same change).
   `runner/test/claude-pane-observer.test.ts` used `paneDefaultPermissionMode`
@@ -1200,7 +1231,118 @@ naming-break, and Shell items each stand alone.
       `/tmp/claude-statusline-usage-cache.json` (60 s TTL), so the host —
       which *can* read usage — could push JSON there. Needs a runner route +
       CLI push; not started.
+- [ ] **Worktree/branch terminal ergonomics — T1-T5 (maintainer ask,
+  2026-07-25).** Five items designed in conversation and never written down;
+  recovered 2026-07-26 from the session transcript and recorded here so no one
+  has to read it again. **The driving complaint:** a converted branch cannot be
+  checked out in the main repo, because the session's own worktree already
+  holds it — `fatal: 'feat/pick-small-task-from-todo-list' is already used by
+  worktree at '…/remote-sessions/worktrees/claude-pane-df80e6-3e1d6e81'` — and
+  nothing in the CLI lists worktrees, finds one by a name a human remembers, or
+  prints a path you can `cd` to. `sandbox worktree` hosts only `gc`
+  (`internal/cli/worktree.go:26-34`, whose own doc comment says "Today it hosts
+  `gc`").
+
+  **The keystone already landed:** `client.ResolveSessions` /
+  `ResolveSession` (`6d3f42f`, `client/resolve.go:169,:213`) fuzzy-resolve a
+  human-typed query to a session. `SessionMatch` (`:91`) carries
+  `ID/Title/Backend/ProjectPath/WorktreePath/Branch/LastActivity/MatchedBy`;
+  match kinds rank id → worktree-path → branch → id-prefix → title →
+  project-path → any (`:77`), tie-broken by `LastActivity`. `ResolveSessions`
+  never errors on no-match (empty slice — completion must stay silent);
+  `ResolveSession` returns `*AmbiguousSessionError` with candidates (`:137`)
+  when the top kind is tied. T1/T2 are thin consumers of it — do not rebuild
+  resolution.
+
+  **Decisions already settled — implement, don't relitigate:**
+  - **ID is identity, title is a mutable label.** Already the design
+    (`sandbox rename <session-id> <name>`, `internal/cli/rename.go`). Fuzzy
+    match over both, always resolve to the ID.
+  - **Never rename a worktree directory.** Its name is a live cross-machine
+    contract, not cosmetics: the pod bind-mounts the workspace at the *same
+    absolute host path* (`client/sync.go:284-289`). A rename would
+    simultaneously break mutagen's alpha path (baked in at create), the pod's
+    bind-mount match, transcript path-keying for resume, git's
+    `.git/worktrees/<name>/gitdir` admin entry, `index.Entry.WorktreePath`, and
+    the `sandbox/<id>` branch. Titles are LLM-generated and non-unique anyway —
+    **never put a title in a path.**
+  - **The TTY rule shapes the CLI.** `cd $(sandbox worktree path …)` runs
+    stdout through a pipe, so any interactive picker MUST render to **stderr**,
+    read keys from **/dev/tty**, and put *only* the resolved path on
+    **stdout**. Get this wrong and `cd $(…)` either eats escape codes or can't
+    draw at all.
+  - **Picker is `tui/picker`, not gum.** gum is bubbletea underneath, so
+    `tui/picker` is the same machinery without the subprocess hop — and it is
+    already public and themed.
+  - **Continuity is deprioritized** (maintainer, 2026-07-26): gap (1) of the
+    2026-07-21 item below is explicitly *not* wanted right now.
+
+  - [ ] **T1 — `sandbox worktree path [query]`.** Prints a session's worktree
+    dir so `cd $(sandbox worktree path pick-small)` works. Thin consumer of
+    `ResolveSessions`. Rules, per the TTY decision above: `--json` is always
+    structured and never interactive; 0 matches → error; 1 → print the path; N
+    + `/dev/tty` available → picker on stderr; N + no tty → error listing the
+    candidates. The per-session path is already exposed via
+    `Session.WorktreeStatus` (`client/worktree.go:380,:393` — `Path`, live
+    `Branch`, `Dirty`, `Changed`), and `SessionMatch.WorktreePath` carries it
+    without a git call. Empty `WorktreePath` = non-git or `WorktreeOff`
+    session; say so rather than printing the repo root.
+  - [ ] **T2 — shell completion.** No `ValidArgsFunction` exists anywhere in
+    `internal/cli` today. Wiring one over `ResolveSessions(ctx, "")` gives zsh
+    completion to **every** session-taking command — `attach`, `destroy`,
+    `rename`, `suspend`, `resume`, `cancel`, plus T1 — not just the new one.
+    Add a `sandbox completion` subcommand (cobra generates the script) for the
+    maintainer's home-manager config. No new dependencies. Completion must
+    never block or prompt: `ResolveSessions` is TTY-free and returns an empty
+    slice rather than an error, which is exactly why it was built that way.
+  - [ ] **T3 — type-to-filter in `tui/picker`.** `Item{ID,Name,Desc,Current}`
+    (`tui/picker/picker.go:29-34`) and `New`/`WithChoose`/`WithCancel` exist,
+    but there is **no filter or query field** (`:48-54`), so typing `pick-small`
+    to narrow is impossible today. Add a filter matching over ID+Name, threaded
+    through `Update` (`:106`) and `View` (`:145`). Public-package improvement:
+    the dashboard's own overlays inherit it, and it is what lets T1 use
+    in-process bubbletea. Pin any new exported surface in `sdktest/`.
+  - [ ] **T4 — `sandbox worktree convert` + the merge-back docs.** Convert is
+    TUI-only today (`b` modal, `internal/tui/dashboard/worktree.go:120-254`),
+    so nothing about the flow is scriptable or headless.
+    `Session.ConvertToBranch` is already public
+    (`client/worktree.go:450`, `ConvertOptions` `:417`, `BranchResult` `:425`),
+    so this is a thin Cobra wrapper taking `--branch`/`--message`; map the
+    existing sentinels (`ErrInvalidBranchName`, `ErrBranchNameTaken`,
+    `ErrWorktreeDirty`, `ErrNoWorktree`) to useful exit messages. Pair it with
+    the missing "finishing a session's work" section covering: live view via
+    the worktree dir, snapshot via convert, then merge/rebase/push — this is
+    also gap (2) of the 2026-07-21 item below, so writing it closes both. Homes:
+    `README.md:329` Commands table + a subsection under
+    `docs/session-lifecycle.md:87` ("Per-session git worktrees").
+    **Document the checkout gotcha explicitly** — the branch is held by the
+    worktree, so `git checkout` fails, but `git diff`, `git merge`, and
+    `git push` against that branch all work fine from the main repo. That
+    misunderstanding is what started this whole thread.
+  - [ ] **T5 — `worktree gc` retention + interactive confirm.** Wanted:
+    prune old worktrees on age / last-commit / session-existence, with a
+    confirmation listing exactly what will be deleted. **This is a semantics
+    change, not just new flags:** `ReapOptions` carries only `DryRun`
+    (`client/worktree.go:556`), and the sole reap trigger is "session no longer
+    live in the cluster" — which directly conflicts with the maintainer's
+    requirement that **worktrees should persist past their agent session**.
+    Needed: (1) age/last-commit criteria — `index.Entry` already has
+    `CreatedAt`/`LastActivity` (`internal/index/index.go:96-97`), plus
+    `git log -1 --format=%ct <branch>` and dir mtime; (2) a **retain-if-unlanded
+    rule** — never auto-reap a branch holding commits unreachable from the base
+    branch (a better signal than age alone); (3) an interactive confirmation
+    listing the victims before mutating, reusing the `ReapedWorktree` report
+    shape (`:563`). Note the live-session gate is also load-bearing for safety
+    (`docs/audit-2026-07-18.md` :76-77 — a cross-cluster `gc` can reap a running
+    session's worktree); do not weaken it while adding retention.
+
+  Tests: `client/resolve_test.go` (extend), `worktree_test.go`,
+  `tui/picker` unit tests, CLI flag/TTY-branch parsing. Run
+  `go test ./client/ ./internal/cli/ ./tui/...` — `client` and `internal/cli`
+  need the command sandbox disabled (httptest ports).
 - [ ] **Worktree continuity + merge-back UX (maintainer ask, 2026-07-21).**
+  *(2026-07-26: gap (1) continuity is deprioritized by the maintainer; gap (2)
+  merge-back docs is now owned by T4 above. Gap (3) is the live remainder.)*
   What EXISTS (verify-then-build-on, don't rebuild): destroy is
   capture-then-remove — dirty WIP is committed to the session's
   `sandbox/<id>` branch before the worktree is removed
