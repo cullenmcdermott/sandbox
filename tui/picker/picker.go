@@ -7,11 +7,15 @@
 // The host supplies the rows and the choose/cancel callbacks; the picker owns
 // only the selection state and rendering. Multi-stage flows (e.g. backend →
 // account) are the host's business: drive one picker per stage.
+//
+// Long lists can opt into type-to-filter with WithFilter; see that option for
+// why it is opt-in rather than always on.
 package picker
 
 import (
 	"strconv"
 	"strings"
+	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -43,12 +47,25 @@ func WithChoose(fn func(Item)) Option { return func(m *Model) { m.onChoose = fn 
 // WithCancel registers the callback fired when the picker is dismissed (esc).
 func WithCancel(fn func()) Option { return func(m *Model) { m.onCancel = fn } }
 
+// WithFilter enables type-to-filter: printable keys build a query that narrows
+// the rows to those whose ID or Name contains it (case-insensitively), backspace
+// and ctrl+u edit it, and esc clears a non-empty query before it cancels.
+//
+// It is opt-in because it necessarily takes over the key grammar: once letters
+// type into a query, j/k can no longer navigate (↑/↓ and ctrl+n/ctrl+p do) and
+// digits can no longer jump to a row (they are part of the query — you cannot
+// type "claude-4-5" otherwise). A picker of four models is better served by the
+// default vocabulary; a picker of forty sessions is not navigable without this.
+func WithFilter() Option { return func(m *Model) { m.filter = true } }
+
 // Model is a picker overlay. Build one with New; drive it with Update; render
 // with View.
 type Model struct {
 	title    string
 	items    []Item
 	sel      int
+	filter   bool
+	query    string
 	onChoose func(Item)
 	onCancel func()
 }
@@ -72,20 +89,58 @@ func New(title string, items []Item, opts ...Option) *Model {
 func (m *Model) Items() []Item { return m.items }
 func (m *Model) SetItems(items []Item) {
 	m.items = items
-	if m.sel >= len(items) {
-		m.sel = max(0, len(items)-1)
-	}
+	m.clampSel()
 }
 
-// Selected reports the cursor index.
+// Filtered returns the rows currently visible: every item when no query is
+// active, else those matching it. Selected indexes into THIS slice, so a host
+// reading the picker's state mid-filter reads the same rows the user sees.
+func (m *Model) Filtered() []Item {
+	if !m.filter || m.query == "" {
+		return m.items
+	}
+	q := strings.ToLower(m.query)
+	out := make([]Item, 0, len(m.items))
+	for _, it := range m.items {
+		if matches(it, q) {
+			out = append(out, it)
+		}
+	}
+	return out
+}
+
+// Query reports the active filter text (always "" unless WithFilter was set).
+func (m *Model) Query() string { return m.query }
+
+// SetQuery replaces the filter text and moves the cursor to the top match —
+// the selection cannot meaningfully survive a change to the set it indexes, and
+// the first match is what the next keystroke is aiming at.
+func (m *Model) SetQuery(q string) {
+	if !m.filter {
+		return
+	}
+	m.query = q
+	m.sel = 0
+}
+
+// matches reports whether q (already lowercased) is a substring of the item's ID
+// or Name. Desc is deliberately excluded: it holds prose ("most capable",
+// "account default") that would match far too much.
+func matches(it Item, q string) bool {
+	return strings.Contains(strings.ToLower(it.ID), q) || strings.Contains(strings.ToLower(it.Name), q)
+}
+
+// Selected reports the cursor index (into Filtered).
 func (m *Model) Selected() int { return m.sel }
 
-// SelectedItem returns the currently highlighted item (zero Item when empty).
+// SelectedItem returns the currently highlighted item (zero Item when the
+// visible set is empty — which a filter that matches nothing can produce).
 func (m *Model) SelectedItem() Item {
-	if m.sel < 0 || m.sel >= len(m.items) {
+	vis := m.Filtered()
+	if m.sel < 0 || m.sel >= len(vis) {
 		return Item{}
 	}
-	return m.items[m.sel]
+	return vis[m.sel]
 }
 
 // MoveUp / MoveDown move the cursor, clamping at the ends.
@@ -95,17 +150,30 @@ func (m *Model) MoveUp() {
 	}
 }
 func (m *Model) MoveDown() {
-	if m.sel < len(m.items)-1 {
+	if m.sel < len(m.Filtered())-1 {
 		m.sel++
 	}
 }
 
-// Update routes a key: ↑/k and ↓/j navigate, a 1-9 digit jumps to and chooses a
-// row, enter confirms the current row, and esc cancels. Non-grammar keys are
-// swallowed (a picker is a full-capture overlay).
+// clampSel keeps the cursor inside the visible set.
+func (m *Model) clampSel() {
+	if n := len(m.Filtered()); m.sel >= n {
+		m.sel = max(0, n-1)
+	}
+}
+
+// Update routes a key. In the default grammar: ↑/k and ↓/j navigate, a 1-9 digit
+// jumps to and chooses a row, enter confirms the current row, and esc cancels.
+// Under WithFilter the letter and digit keys type into the query instead — see
+// updateFiltering. Non-grammar keys are swallowed (a picker is a full-capture
+// overlay).
 func (m *Model) Update(msg tea.Msg) (*Model, tea.Cmd) {
 	key, ok := msg.(tea.KeyPressMsg)
 	if !ok {
+		return m, nil
+	}
+	if m.filter {
+		m.updateFiltering(key)
 		return m, nil
 	}
 	switch key.String() {
@@ -130,18 +198,66 @@ func (m *Model) Update(msg tea.Msg) (*Model, tea.Cmd) {
 	return m, nil
 }
 
+// updateFiltering is the WithFilter key grammar. Navigation is arrow keys plus
+// ctrl+n/ctrl+p (readline muscle memory, since j/k now type); every printable
+// key extends the query; esc clears a non-empty query before it cancels, so a
+// mistyped filter costs one keystroke rather than the whole picker.
+func (m *Model) updateFiltering(key tea.KeyPressMsg) {
+	switch key.String() {
+	case "esc":
+		if m.query != "" {
+			m.SetQuery("")
+			return
+		}
+		if m.onCancel != nil {
+			m.onCancel()
+		}
+	case "up", "ctrl+p":
+		m.MoveUp()
+	case "down", "ctrl+n":
+		m.MoveDown()
+	case "enter":
+		m.choose(m.sel)
+	case "backspace":
+		if r := []rune(m.query); len(r) > 0 {
+			m.SetQuery(string(r[:len(r)-1]))
+		}
+	case "ctrl+u":
+		m.SetQuery("")
+	default:
+		if t := key.Text; t != "" && !hasControl(t) {
+			m.SetQuery(m.query + t)
+		}
+	}
+}
+
+// hasControl reports whether s contains a control rune — the guard that keeps a
+// key whose Text is set but unprintable from landing in the query.
+func hasControl(s string) bool {
+	for _, r := range s {
+		if unicode.IsControl(r) {
+			return true
+		}
+	}
+	return false
+}
+
+// choose fires the callback for visible row i (indexes Filtered).
 func (m *Model) choose(i int) {
-	if i < 0 || i >= len(m.items) {
+	vis := m.Filtered()
+	if i < 0 || i >= len(vis) {
 		return
 	}
 	if m.onChoose != nil {
-		m.onChoose(m.items[i])
+		m.onChoose(vis[i])
 	}
 }
 
 // View renders the picker box at the given width: a titled, rounded overlay of
 // numbered rows with the selected row highlighted, the current choice marked ✓,
-// and a keybind hint footer.
+// and a keybind hint footer. Under WithFilter it gains a query line and drops
+// the row numbers (digits type into the query, so numbering would advertise a
+// jump that no longer exists).
 func (m *Model) View(width int) string {
 	boxW := width - 8
 	if boxW < 30 {
@@ -154,15 +270,17 @@ func (m *Model) View(width int) string {
 		title = "Select"
 	}
 	lines := []string{lipgloss.NewStyle().Foreground(theme.TextBright).Bold(true).Render(title), ""}
-	for i, r := range m.items {
+	if m.filter {
+		lines = append(lines, m.queryLine(boxW-2), "")
+	}
+	vis := m.Filtered()
+	if len(vis) == 0 {
+		lines = append(lines, lipgloss.NewStyle().Foreground(theme.TextMuted).Render("no matches"))
+	}
+	for i, r := range vis {
 		lines = append(lines, m.line(i, r, boxW-2))
 	}
-	lines = append(lines, "", kit.KbdRow(
-		[2]string{"↑/↓", "select"},
-		[2]string{"1-9", "jump"},
-		[2]string{"enter", "choose"},
-		[2]string{"esc", "close"},
-	))
+	lines = append(lines, "", m.hints())
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(theme.Malibu).
@@ -172,10 +290,43 @@ func (m *Model) View(width int) string {
 		Render(strings.Join(lines, "\n"))
 }
 
-// line renders one numbered row: "› 1. <name>  <dim desc>" with the current
-// choice suffixed by a dim-green ✓ and the selected row highlighted.
+// queryLine renders the filter prompt: the typed text plus a block cursor, or a
+// dim hint while it is empty.
+func (m *Model) queryLine(w int) string {
+	prompt := lipgloss.NewStyle().Foreground(theme.Guac).Render("/ ")
+	if m.query == "" {
+		return clamp(prompt+lipgloss.NewStyle().Foreground(theme.TextMuted).Render("type to filter"), w)
+	}
+	return clamp(prompt+lipgloss.NewStyle().Foreground(theme.TextBright).Render(m.query)+
+		lipgloss.NewStyle().Foreground(theme.TextDim).Render("▏"), w)
+}
+
+// hints renders the keybind footer for the active grammar.
+func (m *Model) hints() string {
+	if m.filter {
+		return kit.KbdRow(
+			[2]string{"↑/↓", "select"},
+			[2]string{"type", "filter"},
+			[2]string{"enter", "choose"},
+			[2]string{"esc", "clear/close"},
+		)
+	}
+	return kit.KbdRow(
+		[2]string{"↑/↓", "select"},
+		[2]string{"1-9", "jump"},
+		[2]string{"enter", "choose"},
+		[2]string{"esc", "close"},
+	)
+}
+
+// line renders one row: "› 1. <name>  <dim desc>" with the current choice
+// suffixed by a dim-green ✓ and the selected row highlighted. The number is
+// omitted in filter mode (see View).
 func (m *Model) line(i int, r Item, w int) string {
-	num := strconv.Itoa(i+1) + ". "
+	var num string
+	if !m.filter {
+		num = strconv.Itoa(i+1) + ". "
+	}
 	var suffix string
 	if r.Current {
 		suffix = " " + lipgloss.NewStyle().Foreground(theme.Guac).Faint(true).Render("✓")

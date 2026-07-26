@@ -219,8 +219,14 @@ var (
 		Committed: true,
 		CommitSHA: "deadbeef",
 	}
+	// Retention (T5): MinAge/ReapUnlanded/BaseBranch let a consumer keep recent
+	// or unmerged worktrees. The zero value is the SAFE policy — unlanded work
+	// is retained — so a caller that passes only DryRun still gets protection.
 	_ = client.ReapOptions{
-		DryRun: true,
+		DryRun:       true,
+		MinAge:       168 * time.Hour,
+		ReapUnlanded: false,
+		BaseBranch:   "main",
 	}
 	_ = client.ReapedWorktree{
 		SessionID: "x",
@@ -228,6 +234,7 @@ var (
 		Branch:    "sandbox/x",
 		Action:    "removed",
 		CommitSHA: "deadbeef",
+		Reason:    "session is still live",
 	}
 )
 

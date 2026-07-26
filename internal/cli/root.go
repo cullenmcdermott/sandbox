@@ -111,6 +111,7 @@ func NewRoot() *cobra.Command {
 	cmd.AddCommand(newTraceCmd())
 	cmd.AddCommand(newAuthCmd())
 	cmd.AddCommand(newDoctorCmd())
+	cmd.AddCommand(newCompletionCmd(cmd))
 	return cmd
 }
 

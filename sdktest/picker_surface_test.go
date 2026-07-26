@@ -15,6 +15,7 @@ var (
 	_ func(string, []picker.Item, ...picker.Option) *picker.Model = picker.New
 	_ func(func(picker.Item)) picker.Option                       = picker.WithChoose
 	_ func(func()) picker.Option                                  = picker.WithCancel
+	_ func() picker.Option                                        = picker.WithFilter
 )
 
 var (
@@ -26,6 +27,10 @@ var (
 	_ func(*picker.Model) picker.Item                       = (*picker.Model).SelectedItem
 	_ func(*picker.Model)                                   = (*picker.Model).MoveUp
 	_ func(*picker.Model)                                   = (*picker.Model).MoveDown
+	// Type-to-filter (WithFilter): the query and the visible subset it selects.
+	_ func(*picker.Model) []picker.Item = (*picker.Model).Filtered
+	_ func(*picker.Model) string        = (*picker.Model).Query
+	_ func(*picker.Model, string)       = (*picker.Model).SetQuery
 )
 
 // Item field-set pin.

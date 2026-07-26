@@ -48,6 +48,8 @@ func newRenameCmd() *cobra.Command {
 		Use:   "rename <session-id> <name>",
 		Short: "Set a custom display name for a session (overrides the auto title)",
 		Args:  cobra.ExactArgs(2),
+		// Completes the session id only; the free-text name gets no suggestions.
+		ValidArgsFunction: completeSessionArg,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Verify the session exists in the cluster before writing a title, so
 			// a typo'd id doesn't create a phantom local index entry. If the

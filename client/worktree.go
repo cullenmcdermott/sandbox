@@ -6,8 +6,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/cullenmcdermott/sandbox/internal/index"
 )
 
 // worktree.go holds the DETERMINISTIC git side of the per-session worktree
@@ -553,10 +556,41 @@ func parsePorcelainPaths(out []byte) []string {
 }
 
 // ReapOptions parameterizes ReapWorktrees.
+//
+// The retention fields exist because "the session is gone" turned out to be the
+// wrong sole trigger for deleting a worktree: a worktree is a laptop artifact
+// that OUTLIVES the agent session that made it, and the branch is the durable
+// unit of work. MinAge and ReapUnlanded let a caller keep recent or unmerged
+// work while still clearing out what has already landed.
 type ReapOptions struct {
 	// DryRun classifies and reports what would happen without mutating anything
 	// (no commits, no removals, no index or prune changes).
 	DryRun bool
+
+	// MinAge retains any worktree touched more recently than this. "Touched" is
+	// the most recent of: the index entry's LastActivity/CreatedAt, the branch
+	// tip's commit time, and the directory's mtime — the most recent signal
+	// wins, because this gate decides whether deletion is safe and the safe
+	// answer to a conflicting signal is "not yet".
+	//
+	// Zero disables the age gate (every orphan is eligible), which is the
+	// pre-retention behavior.
+	MinAge time.Duration
+
+	// ReapUnlanded opts IN to reaping worktrees whose branch holds commits that
+	// are not reachable from the base branch — i.e. work that has not been
+	// merged anywhere. The zero value RETAINS them, which is the safe default:
+	// unmerged commits are the single best signal that someone still cares about
+	// a worktree, better than age alone.
+	//
+	// The work is never destroyed either way (the branch survives a reap), but
+	// removing the checkout of unmerged work is a surprise worth avoiding.
+	ReapUnlanded bool
+
+	// BaseBranch names the ref that "landed" is measured against. Empty
+	// auto-detects: origin's default branch, else a local main, else master. If
+	// none can be determined the worktree is retained rather than guessed about.
+	BaseBranch string
 }
 
 // ReapedWorktree reports the disposition of one enumerated worktree directory.
@@ -566,6 +600,12 @@ type ReapedWorktree struct {
 	Branch    string // the session/worktree branch, when known
 	Action    string // "removed" | "committed-then-removed" | "skipped"
 	CommitSHA string // set when dirty work was captured before removal
+
+	// Reason explains the disposition in one human phrase — chiefly why a
+	// worktree was skipped, so a confirmation prompt can show "still live" and
+	// "3 commits not on main" instead of an undifferentiated wall of "skipped".
+	// Empty for a plain removal.
+	Reason string
 }
 
 // Reap action / skip labels.
@@ -574,6 +614,16 @@ const (
 	reapCommittedRemoved   = "committed-then-removed"
 	reapSkipped            = "skipped"
 	reapWIPMessagePrefixed = "sandbox: WIP at reap"
+)
+
+// Skip reasons, as reported in ReapedWorktree.Reason.
+const (
+	reasonLive           = "session is still live"
+	reasonForeignNS      = "owned by another namespace"
+	reasonNoIndexEntry   = "no local index entry (ownership unprovable)"
+	reasonNoRepoRoot     = "no recorded repo root"
+	reasonStatusUnreadab = "git status unreadable"
+	reasonCommitFailed   = "WIP commit failed — work left in place"
 )
 
 // ReapWorktrees GCs orphaned per-session worktrees under worktreesRoot() (design
@@ -642,6 +692,7 @@ func (c *Client) ReapWorktrees(ctx context.Context, opt ReapOptions) ([]ReapedWo
 		// Live session ⇒ never touch its worktree.
 		if live[id] {
 			rec.Action = reapSkipped
+			rec.Reason = reasonLive
 			rec.Branch = c.reapBranchHint(id)
 			reaped = append(reaped, rec)
 			continue
@@ -656,12 +707,14 @@ func (c *Client) ReapWorktrees(ctx context.Context, opt ReapOptions) ([]ReapedWo
 		entry, entryErr := c.index.Load(id)
 		if entryErr != nil || entry.WorktreePath == "" {
 			rec.Action = reapSkipped
+			rec.Reason = reasonNoIndexEntry
 			reaped = append(reaped, rec)
 			continue
 		}
 		if ns := entry.Namespace; ns != "" && ns != c.backend.Namespace() {
 			rec.Branch = entry.WorktreeBranch
 			rec.Action = reapSkipped
+			rec.Reason = reasonForeignNS
 			reaped = append(reaped, rec)
 			continue
 		}
@@ -672,8 +725,32 @@ func (c *Client) ReapWorktrees(ctx context.Context, opt ReapOptions) ([]ReapedWo
 		rec.Branch = branch
 		if repoRoot == "" {
 			rec.Action = reapSkipped
+			rec.Reason = reasonNoRepoRoot
 			reaped = append(reaped, rec)
 			continue
+		}
+
+		// Retention gate 1: age. A worktree outlives its session by design, so a
+		// recently-touched one is kept even though its session is gone.
+		if opt.MinAge > 0 {
+			if age, known := worktreeAge(ctx, git, dir, entry); !known || age < opt.MinAge {
+				rec.Action = reapSkipped
+				rec.Reason = ageReason(age, known, opt.MinAge)
+				reaped = append(reaped, rec)
+				continue
+			}
+		}
+
+		// Retention gate 2: unlanded work. Commits not reachable from the base
+		// branch mean nobody has merged this yet — the strongest signal that the
+		// checkout is still wanted.
+		if !opt.ReapUnlanded {
+			if keep, why := unlandedReason(ctx, git, dir, branch, opt.BaseBranch); keep {
+				rec.Action = reapSkipped
+				rec.Reason = why
+				reaped = append(reaped, rec)
+				continue
+			}
 		}
 
 		// Classify dirty vs clean.
@@ -681,6 +758,7 @@ func (c *Client) ReapWorktrees(ctx context.Context, opt ReapOptions) ([]ReapedWo
 		if serr != nil {
 			// Can't read status ⇒ don't risk a mutation; report skipped.
 			rec.Action = reapSkipped
+			rec.Reason = reasonStatusUnreadab
 			reaped = append(reaped, rec)
 			continue
 		}
@@ -702,6 +780,7 @@ func (c *Client) ReapWorktrees(ctx context.Context, opt ReapOptions) ([]ReapedWo
 			if cErr := worktreeCommitAll(ctx, git, dir, msg); cErr != nil {
 				// Commit failed ⇒ leave the worktree and its work in place.
 				rec.Action = reapSkipped
+				rec.Reason = reasonCommitFailed
 				reaped = append(reaped, rec)
 				continue
 			}
@@ -730,6 +809,124 @@ func (c *Client) ReapWorktrees(ctx context.Context, opt ReapOptions) ([]ReapedWo
 		}
 	}
 	return reaped, nil
+}
+
+// worktreeAge reports how long ago the worktree was last touched by ANY signal
+// (index activity, branch tip commit time, directory mtime), and whether any
+// signal was available at all.
+//
+// The most RECENT signal wins. That is deliberately the conservative direction:
+// this value gates deletion, so when the index says "stale" and the filesystem
+// says "someone saved a file an hour ago", the right answer is to keep it.
+// known=false means nothing could be read, which callers treat as "retain".
+func worktreeAge(ctx context.Context, git gitRunner, dir string, entry index.Entry) (time.Duration, bool) {
+	var newest time.Time
+	consider := func(t time.Time) {
+		if !t.IsZero() && t.After(newest) {
+			newest = t
+		}
+	}
+	consider(entry.LastActivity)
+	consider(entry.CreatedAt)
+	if fi, err := os.Stat(dir); err == nil {
+		consider(fi.ModTime())
+	}
+	// Branch tip time, read from inside the worktree so it needs no branch name
+	// (a converted branch has a different one than the index records).
+	if out, err := git(ctx, dir, "log", "-1", "--format=%ct", "HEAD"); err == nil {
+		if secs, perr := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64); perr == nil && secs > 0 {
+			consider(time.Unix(secs, 0))
+		}
+	}
+	if newest.IsZero() {
+		return 0, false
+	}
+	return time.Since(newest), true
+}
+
+// ageReason phrases the age skip for a confirmation prompt.
+func ageReason(age time.Duration, known bool, min time.Duration) string {
+	if !known {
+		return "age unknown — retained"
+	}
+	return fmt.Sprintf("last touched %s ago (< %s)", roundDur(age), roundDur(min))
+}
+
+// roundDur renders a duration at day/hour granularity — "3d", "5h", "12m" —
+// because reap reports are read by humans deciding whether to delete something.
+func roundDur(d time.Duration) string {
+	switch {
+	case d >= 48*time.Hour:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	case d >= time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	case d >= time.Minute:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	default:
+		return "just now"
+	}
+}
+
+// unlandedReason reports whether a worktree's branch holds commits that are not
+// reachable from the base branch, and the phrase explaining it.
+//
+// Fail-safe by construction: every failure to determine the answer (no base
+// branch, unreadable rev-list, unparseable count) returns keep=true. Deleting a
+// checkout because git could not be interrogated is the one outcome this must
+// never produce.
+func unlandedReason(ctx context.Context, git gitRunner, dir, branch, baseOverride string) (bool, string) {
+	base, ok := resolveBaseBranch(ctx, git, dir, baseOverride)
+	if !ok {
+		return true, "base branch could not be determined — retained"
+	}
+	// HEAD, not the recorded branch name: a converted worktree is on the renamed
+	// branch and the index may lag.
+	out, err := git(ctx, dir, "rev-list", "--count", base+"..HEAD")
+	if err != nil {
+		return true, "unmerged state unreadable — retained"
+	}
+	n, perr := strconv.Atoi(strings.TrimSpace(string(out)))
+	if perr != nil {
+		return true, "unmerged state unreadable — retained"
+	}
+	if n == 0 {
+		return false, ""
+	}
+	label := branch
+	if label == "" {
+		label = "this branch"
+	}
+	return true, fmt.Sprintf("%d commit(s) on %s not on %s", n, label, base)
+}
+
+// resolveBaseBranch picks the ref that "landed" is measured against: an explicit
+// override, else the remote's default branch, else a local main/master. It
+// returns ok=false when none resolves, which the caller turns into "retain".
+func resolveBaseBranch(ctx context.Context, git gitRunner, dir, override string) (string, bool) {
+	if override != "" {
+		if revExists(ctx, git, dir, override) {
+			return override, true
+		}
+		return "", false
+	}
+	// origin's default branch is the most accurate answer when it exists.
+	if out, err := git(ctx, dir, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"); err == nil {
+		if ref := strings.TrimSpace(string(out)); ref != "" && revExists(ctx, git, dir, ref) {
+			return ref, true
+		}
+	}
+	for _, candidate := range []string{"main", "master"} {
+		if revExists(ctx, git, dir, candidate) {
+			return candidate, true
+		}
+	}
+	return "", false
+}
+
+// revExists reports whether a revision resolves in the repo.
+func revExists(ctx context.Context, git gitRunner, dir, rev string) bool {
+	_, err := git(ctx, dir, "rev-parse", "--verify", "--quiet", rev+"^{commit}")
+	return err == nil
 }
 
 // reapBranchHint returns the recorded branch for a live-session worktree, best

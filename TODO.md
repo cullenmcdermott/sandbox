@@ -138,6 +138,23 @@ done log.)
   file for pane byte-flow so the next occurrence is root-causeable — the TUI
   hides stderr, so child #1's byte stream was unobservable post-mortem.
 
+* **`internal/authstatus` tests read the AMBIENT `CLAUDE_CONFIG_DIR` and fail
+  inside a sandbox pod** (found 2026-07-26 during the §9 T1-T5 batch; not
+  caused by it). `TestClaudeProvider/nothing_anywhere` and
+  `TestSystemLoginProbeCore` build a provider with `Home: t.TempDir()` to mean
+  "nothing configured", but `systemLoginPresent`
+  (`internal/authstatus/providers.go:105-108`) prefers
+  `envOr(p.Env)("CLAUDE_CONFIG_DIR")` over `p.Home` and `p.Env` is nil in those
+  cases, so it falls through to the REAL environment. Every claude-pane session
+  pod exports `CLAUDE_CONFIG_DIR=/session/state/claude` with a live
+  `.credentials.json`, so the "empty home" cases see a genuine login and fail;
+  `env -u CLAUDE_CONFIG_DIR go test ./internal/authstatus/` is green. CI and a
+  normal laptop shell don't set it, which is why it has never been seen. Fix
+  direction: give the two cases an explicit empty `Env` (`env(map[string]
+  string{})`, the helper already used elsewhere in the file) so the probe is
+  hermetic rather than inheriting the developer's environment — a test that
+  asserts "nothing is configured" must not consult the ambient config at all.
+
 * **`just typecheck` does not cover `runner/test/`, and it cost us two red
   tests** (found 2026-07-25 during the [O15] sweep, fixed in the same change).
   `runner/test/claude-pane-observer.test.ts` used `paneDefaultPermissionMode`
@@ -1277,7 +1294,20 @@ naming-break, and Shell items each stand alone.
   - **Continuity is deprioritized** (maintainer, 2026-07-26): gap (1) of the
     2026-07-21 item below is explicitly *not* wanted right now.
 
-  - [ ] **T1 — `sandbox worktree path [query]`.** Prints a session's worktree
+  **STATUS 2026-07-26: all five implemented** (this batch). Summary per item
+  below; what shipped, in one place: `tui/picker` gained opt-in
+  `WithFilter()`/`Query`/`SetQuery`/`Filtered` (T3); `internal/cli/
+  worktree_path.go` is the new `worktree path` (T1); `internal/cli/
+  completion.go` carries `completeSessionArg` + `sandbox completion` (T2);
+  `internal/cli/worktree_convert.go` is the headless convert and
+  `docs/session-lifecycle.md` "Finishing a session's work (merge back)" is the
+  merge-back doc incl. the checkout gotcha (T4); `ReapOptions` gained
+  `MinAge`/`ReapUnlanded`/`BaseBranch` and `ReapedWorktree` a `Reason`, with
+  the classify→list→confirm→act flow in `runWorktreeGC` (T5). Unverified:
+  the interactive `/dev/tty` paths (picker + gc confirm) have no automated
+  coverage — they need a human at a terminal.
+
+  - [x] **T1 — `sandbox worktree path [query]` — done 2026-07-26.** Prints a session's worktree
     dir so `cd $(sandbox worktree path pick-small)` works. Thin consumer of
     `ResolveSessions`. Rules, per the TTY decision above: `--json` is always
     structured and never interactive; 0 matches → error; 1 → print the path; N
@@ -1287,7 +1317,7 @@ naming-break, and Shell items each stand alone.
     `Branch`, `Dirty`, `Changed`), and `SessionMatch.WorktreePath` carries it
     without a git call. Empty `WorktreePath` = non-git or `WorktreeOff`
     session; say so rather than printing the repo root.
-  - [ ] **T2 — shell completion.** No `ValidArgsFunction` exists anywhere in
+  - [x] **T2 — shell completion — done 2026-07-26.** No `ValidArgsFunction` existed anywhere in
     `internal/cli` today. Wiring one over `ResolveSessions(ctx, "")` gives zsh
     completion to **every** session-taking command — `attach`, `destroy`,
     `rename`, `suspend`, `resume`, `cancel`, plus T1 — not just the new one.
@@ -1295,14 +1325,14 @@ naming-break, and Shell items each stand alone.
     maintainer's home-manager config. No new dependencies. Completion must
     never block or prompt: `ResolveSessions` is TTY-free and returns an empty
     slice rather than an error, which is exactly why it was built that way.
-  - [ ] **T3 — type-to-filter in `tui/picker`.** `Item{ID,Name,Desc,Current}`
+  - [x] **T3 — type-to-filter in `tui/picker` — done 2026-07-26.** `Item{ID,Name,Desc,Current}`
     (`tui/picker/picker.go:29-34`) and `New`/`WithChoose`/`WithCancel` exist,
     but there is **no filter or query field** (`:48-54`), so typing `pick-small`
     to narrow is impossible today. Add a filter matching over ID+Name, threaded
     through `Update` (`:106`) and `View` (`:145`). Public-package improvement:
     the dashboard's own overlays inherit it, and it is what lets T1 use
     in-process bubbletea. Pin any new exported surface in `sdktest/`.
-  - [ ] **T4 — `sandbox worktree convert` + the merge-back docs.** Convert is
+  - [x] **T4 — `sandbox worktree convert` + the merge-back docs — done 2026-07-26.** Convert was
     TUI-only today (`b` modal, `internal/tui/dashboard/worktree.go:120-254`),
     so nothing about the flow is scriptable or headless.
     `Session.ConvertToBranch` is already public
@@ -1319,7 +1349,7 @@ naming-break, and Shell items each stand alone.
     worktree, so `git checkout` fails, but `git diff`, `git merge`, and
     `git push` against that branch all work fine from the main repo. That
     misunderstanding is what started this whole thread.
-  - [ ] **T5 — `worktree gc` retention + interactive confirm.** Wanted:
+  - [x] **T5 — `worktree gc` retention + interactive confirm — done 2026-07-26.** Wanted:
     prune old worktrees on age / last-commit / session-existence, with a
     confirmation listing exactly what will be deleted. **This is a semantics
     change, not just new flags:** `ReapOptions` carries only `DryRun`

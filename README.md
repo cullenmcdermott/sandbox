@@ -348,7 +348,10 @@ cd runner && npm install --ignore-scripts && ./node_modules/.bin/tsc --noEmit
 | `sandbox cancel <id>` | Interrupt the active turn (opencode turns; for a claude pane session, interrupt in-pane with `Esc`) |
 | `sandbox rename <id> <name>` | Set a persistent display title for a session |
 | `sandbox shell <id>` | Open a debug shell into the session pod |
-| `sandbox worktree gc` | Garbage-collect orphaned per-session git worktrees (`--dry-run` to preview); dirty worktrees are committed to their branch before removal, never discarded |
+| `sandbox worktree path [query]` | Print a session's worktree directory, for `cd $(sandbox worktree path <query>)`. The query is fuzzy (id, id prefix, branch, a path inside the worktree, or a title substring); ambiguous queries open a picker **on stderr** so stdout stays a clean path. `--json` is structured and never interactive |
+| `sandbox worktree convert [query] --branch <name>` | Rename a session's auto-branch `sandbox/<id>` to a human name, committing any pending work (`-m`). The headless form of the dashboard's `b` modal — see [finishing a session's work](docs/session-lifecycle.md#finishing-a-sessions-work-merge-back) |
+| `sandbox worktree gc` | Garbage-collect per-session git worktrees whose session is gone. Retention keeps what you still want: `--min-age` (default 7d) spares recently-touched worktrees and unmerged branches are retained unless `--reap-unlanded`. Lists what it will delete and asks first (`-y` to skip, `--dry-run` to preview). Branches are always preserved — dirty worktrees are committed to their branch before removal, never discarded |
+| `sandbox completion <shell>` | Generate a shell completion script (bash/zsh/fish/powershell). Session-taking commands then complete session ids from the local index, annotated with title and branch — offline, so TAB never waits on the cluster |
 | `sandbox destroy <id>` | Delete the session and its PVC (irreversible) |
 
 ## Testing

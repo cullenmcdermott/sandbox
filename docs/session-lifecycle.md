@@ -98,9 +98,84 @@ never touch the worktree — it is a laptop artifact that persists across the po
 going away. In the dashboard, `b` on a selected session opens the
 **convert-to-branch** modal: it renames `sandbox/<id>` onto a human-approved,
 title-derived branch name (e.g. `feat/fix-login-flow`) and commits the pending
-work, so the session's edits land on a named, mergeable ref. Orphaned worktrees
-(no live session) are reaped by `sandbox worktree gc`. Full design:
+work, so the session's edits land on a named, mergeable ref (`sandbox worktree
+convert` is the headless form). Full design:
 `docs/archive/worktree-lifecycle-design.md`.
+
+**Reaping is retention-gated, not "session is gone".** A worktree outlives its
+session by design, so `sandbox worktree gc` removes one only when *all* of these
+hold: the session is not live in the cluster, the local index proves the current
+namespace owns it ([V1]), it has not been touched within `--min-age` (default
+7d — the most recent of index activity, branch tip commit time and directory
+mtime wins), and its branch has no commits missing from the base branch
+(`--reap-unlanded` opts out of that last one). Eligible worktrees are listed
+with a per-row reason and confirmed before deletion (`-y` skips the prompt,
+`--dry-run` previews). The branch is never deleted — gc removes checkouts, not
+work.
+
+### Finishing a session's work (merge back)
+
+The durable unit of work is **the branch, not the session**. A session is a
+place an agent was working; the branch outlives it, including destruction. This
+is the recipe for getting that work into your main branch.
+
+**1. Look at it.** The worktree is a normal checkout on your laptop — open it in
+an editor, run the tests, use any git tool:
+
+```bash
+cd $(sandbox worktree path auth-refactor)   # fuzzy: id, branch, or title
+git log --oneline
+```
+
+`sandbox worktree path` resolves offline against the local session index, so it
+works with no cluster reachable. With no argument it offers every session; when
+a query matches several, a picker appears **on stderr** so that `cd $(…)` still
+receives only the path.
+
+**2. Name the branch.** While the work is still a session, its branch is
+`sandbox/<id>` — accurate but unmergeable-looking. Convert it:
+
+```bash
+sandbox worktree convert auth-refactor --branch feat/auth --message "auth: rework token refresh"
+```
+
+This commits any uncommitted work under your message, then renames the branch.
+Both strings are taken verbatim — the command never invents a branch name or a
+commit message. In the dashboard, `b` does the same thing with a title-derived
+name prefilled. Converting is optional: an unconverted `sandbox/<id>` branch
+merges exactly as well, it just reads worse in a PR.
+
+**3. Merge it.** Here is the part that trips everyone up:
+
+> **The branch is checked out by the session's worktree, so `git checkout` in
+> the main repo will refuse:**
+>
+> ```
+> fatal: 'feat/auth' is already used by worktree at '…/worktrees/claude-pane-df80e6-…'
+> ```
+>
+> **This is not an error you need to fix.** Git is preventing two checkouts of
+> one branch, which is exactly what worktrees are for. Every operation that does
+> not require checking the branch out works normally from the main repo:
+
+```bash
+git diff main...feat/auth     # review it
+git log main..feat/auth       # what's on it
+git merge feat/auth           # merge it (from main, without checking it out)
+git push origin feat/auth     # push it / open a PR
+git rebase main feat/auth     # rebase it
+```
+
+If you genuinely need the branch checked out in the main repo — say, to keep
+working on it after the agent is done — release it first by destroying the
+session (`sandbox destroy <id>`, which captures any dirty state to the branch
+before removing the worktree) or by removing just the worktree
+(`git worktree remove <path>`). Then `git checkout feat/auth` succeeds.
+
+**4. Clean up.** Destroying a session captures dirty work to its branch, then
+removes the worktree; the branch stays. `sandbox worktree gc` does the same
+sweep for worktrees whose session is already gone. Neither ever deletes a
+branch — deleting work is left to you (`git branch -d`).
 
 ### Idle clock lives in the runner, not the reaper
 The runner tracks `idleSince`: set the moment the session becomes idle

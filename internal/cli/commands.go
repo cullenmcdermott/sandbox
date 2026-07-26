@@ -41,9 +41,10 @@ func cancelActiveTurn(ctx context.Context, client turnStateClient, ref session.R
 
 func newAttachCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "attach <session-id>",
-		Short: "Reconnect to an existing remote session",
-		Args:  cobra.ExactArgs(1),
+		Use:               "attach <session-id>",
+		Short:             "Reconnect to an existing remote session",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: completeSessionArg,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			c, backend, err := newClientAndBackend()
@@ -87,9 +88,10 @@ func newAttachCmd() *cobra.Command {
 
 func newSuspendCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "suspend <session-id>",
-		Short: "Suspend a remote session (terminate pod, keep PVC)",
-		Args:  cobra.ExactArgs(1),
+		Use:               "suspend <session-id>",
+		Short:             "Suspend a remote session (terminate pod, keep PVC)",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: completeSessionArg,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			c, err := newClient()
@@ -125,9 +127,10 @@ func newSuspendCmd() *cobra.Command {
 
 func newResumeCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "resume <session-id>",
-		Short: "Resume a suspended remote session",
-		Args:  cobra.ExactArgs(1),
+		Use:               "resume <session-id>",
+		Short:             "Resume a suspended remote session",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: completeSessionArg,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := newClient()
 			if err != nil {
@@ -146,9 +149,10 @@ func newResumeCmd() *cobra.Command {
 
 func newCancelCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "cancel <session-id>",
-		Short: "Cancel the active turn in a remote session",
-		Args:  cobra.ExactArgs(1),
+		Use:               "cancel <session-id>",
+		Short:             "Cancel the active turn in a remote session",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: completeSessionArg,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			c, err := newClient()
@@ -201,9 +205,10 @@ func confirmDestroy(in io.Reader, out io.Writer, id string) bool {
 func newDestroyCmd() *cobra.Command {
 	var force bool
 	cmd := &cobra.Command{
-		Use:   "destroy <session-id>",
-		Short: "Destroy a remote session and its PVC (irreversible)",
-		Args:  cobra.ExactArgs(1),
+		Use:               "destroy <session-id>",
+		Short:             "Destroy a remote session and its PVC (irreversible)",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: completeSessionArg,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			id := args[0]
@@ -321,9 +326,10 @@ func podLabel(ready bool) string {
 func newSyncCmd() *cobra.Command {
 	var pause, resume, terminate bool
 	cmd := &cobra.Command{
-		Use:   "sync <session-id>",
-		Short: "Manage Mutagen file sync for a remote session",
-		Args:  cobra.ExactArgs(1),
+		Use:               "sync <session-id>",
+		Short:             "Manage Mutagen file sync for a remote session",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: completeSessionArg,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			id := string(session.ID(args[0]))
