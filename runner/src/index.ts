@@ -26,6 +26,7 @@ import { materializeClaudePaneConfig } from './claude-config.js';
 import { provisionPaneObserver, startClaudePaneObserver, type PaneObserverCore } from './claude-pane-observer.js';
 import { type PaneObserverHandle } from './server.js';
 import { materializeBootstrapFiles } from './bootstrap.js';
+import { writeWorkspaceGuide } from './workspace-guide.js';
 import { startBootTrace } from './trace.js';
 
 // Seconds before SIGKILL, reported in session.terminating so the TUI can show
@@ -233,6 +234,11 @@ function main(): void {
     // authenticated, trust-seeded config dir. Fail-closed on missing/invalid
     // credential material (crash boot visibly, mirroring materializeCodexAuth).
     materializeClaudePaneConfig({ workspaceDir: resolveWorkspaceDir(cfg.projectPath) });
+    // Tell the agent what its tree actually is before it can guess wrong — most
+    // importantly that a per-session git worktree's .git points at a host path
+    // that does not exist here, so git commands fail by design. Best-effort: a
+    // missing guide costs the agent context, not the boot.
+    writeWorkspaceGuide({ workspaceDir: resolveWorkspaceDir(cfg.projectPath) });
     // Provision the observer surfaces (settings hooks + statusline + helper
     // scripts + scoped ingestion token) and build the mapping core; the
     // supervisor chains child exits into it for crash-terminal events.

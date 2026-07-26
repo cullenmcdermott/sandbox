@@ -138,6 +138,16 @@ done log.)
   file for pane byte-flow so the next occurrence is root-causeable — the TUI
   hides stderr, so child #1's byte stream was unobservable post-mortem.
 
+* **The workspace guide is claude-pane-only** (added 2026-07-26 with
+  `runner/src/workspace-guide.ts`). It lands at
+  `$CLAUDE_CONFIG_DIR/CLAUDE.md`, which only Claude Code reads, so an opencode
+  or codex session still learns the hard way that its worktree's `.git` is a
+  dangling pointer. Fix direction: write the same block to whatever each
+  backend reads (`AGENTS.md` for opencode/codex) from the same
+  `guideBlock()`/`spliceGuide()` pair — the classifier and the marked-block
+  splice are already backend-agnostic, only the target path is not. Must stay
+  out of the workspace itself: that tree syncs back to the user's machine.
+
 * **`sandbox worktree path` needs a kubeconfig it does not use** (found
   2026-07-26 while fixing the picker; the T1 work landed with it).
   `internal/cli/worktree_path.go:75` calls `newClient()`

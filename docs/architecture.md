@@ -39,6 +39,7 @@ survives detach, suspend/resume, and CLI restarts.
 | Pod | `runner/src/claude-pane.ts` | claude-pane supervisor: lazy node-pty spawn of the real `claude` TUI (`--session-id`/`--resume`), scrubbed env allowlist, scrollback ring, child-exit recording |
 | Pod | `runner/src/claude-pane-observer.ts` | Observer: provisioned command hooks + statusline POST to localhost; maps them to normalized turn/message/tool/permission/usage events |
 | Pod | `runner/src/claude-config.ts` | Boot materialization of the pane's auth/state: `.credentials.json`, `.claude.json` seed, settings merge (hooks, statusline, native-sandbox-off), helper scripts |
+| Pod | `runner/src/workspace-guide.ts` | Boot-written `CLAUDE.md` in `CLAUDE_CONFIG_DIR` describing the workspace to the agent. Classifies `.git` from the filesystem (real repo / working worktree / detached worktree / none) and, for the detached-worktree case that per-session worktrees produce, states that git cannot work in-pod and must not be "repaired". Pod-local by design — the workspace syncs back to the user |
 | Pod | `runner/src/bootstrap.ts` | Boot materialization of operator `BootstrapFiles` (part A) from the mounted `SANDBOX_BOOTSTRAP_DIR` Secret volume into `$HOME`/`/session/state`, before any agent starts; write-if-changed with a per-file seed-hash sidecar |
 | Pod | `runner/src/guards.ts` | Shared Bash blocklist enforced by `/exec` and the generated opencode guard plugin |
 | Pod | `runner/src/grants.ts` | Session-scoped permission grants (retained for the opencode turn path) |

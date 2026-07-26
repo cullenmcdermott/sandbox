@@ -132,6 +132,7 @@ Runs inside the Sandbox pod — one session per pod. Serves HTTP on port 8787, S
 | `src/claude-pane.ts` | claude-pane supervisor: lazy spawn of interactive `claude` under node-pty with a strict env allowlist, `--session-id`/`--resume` chain, 256 KiB scrollback ring, single-attacher preemption (4001), child-exit (4002), 4 MiB send-buffer backpressure close (4003) |
 | `src/claude-pane-observer.ts` | Hook/statusline observer: provisions settings + helper scripts + a scoped observer token into `CLAUDE_CONFIG_DIR`, ingests POSTs → normalized events (turn/message/tool/permission/usage/rate-limit), synthetic busy/idle |
 | `src/claude-config.ts` | Boot materialization of `.credentials.json` + `.claude.json` seed (only-if-absent, refresh-preserving, fail-closed) |
+| `src/workspace-guide.ts` | The `CLAUDE.md` the runner writes into `CLAUDE_CONFIG_DIR` telling the agent what its tree is — chiefly that a per-session worktree's `.git` points at a host path, so git fails in-pod by design. Marked block; content outside it is preserved |
 | `src/opencode.ts` / `src/opencode-observer.ts` / `src/opencode-turn.ts` | `opencode serve` supervisor + SSE observer (via `@opencode-ai/sdk`) + the headless first-turn adapter (the only remaining `POST /turns` consumer) |
 | `src/codex.ts` / `src/codex-observer.ts` | codex app-server supervisor (auth.json seeding) + passive JSON-RPC-over-WS observer |
 | `src/events.ts` | SQLite event log via better-sqlite3; append-before-stream invariant; chunked SSE replay; backpressure cap; redaction via `redact.ts` |
