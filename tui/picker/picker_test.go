@@ -1,6 +1,7 @@
 package picker
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -154,19 +155,22 @@ func TestFilterNarrowsRows(t *testing.T) {
 	}
 }
 
-func TestFilterMatchesIDAndName(t *testing.T) {
+func TestFilterMatchesIDNameAndDesc(t *testing.T) {
 	m := New("t", items(), WithFilter())
 	m.SetQuery("FABLE") // case-insensitive, matches Name "Fable 5"
 	if vis := m.Filtered(); len(vis) != 1 || vis[0].ID != "claude-fable-5" {
 		t.Errorf("name match failed: %+v", vis)
 	}
-	m.SetQuery("claude-opus") // matches ID only
+	m.SetQuery("claude-opus") // matches ID only — reach beyond the visible label
 	if vis := m.Filtered(); len(vis) != 1 || vis[0].ID != "claude-opus-4-8" {
 		t.Errorf("id match failed: %+v", vis)
 	}
-	m.SetQuery("most capable") // Desc is deliberately NOT matched
-	if vis := m.Filtered(); len(vis) != 0 {
-		t.Errorf("desc should not match, got %+v", vis)
+	// Desc IS matched: it is on screen, and for a list whose rows share a Name
+	// (every session of one project) it holds the only distinguishing detail.
+	// Excluding it made a query typed straight off the screen match nothing.
+	m.SetQuery("most capable")
+	if vis := m.Filtered(); len(vis) != 1 || vis[0].ID != "claude-fable-5" {
+		t.Errorf("desc match failed: %+v", vis)
 	}
 }
 
@@ -279,5 +283,143 @@ func TestViewWidthSafe(t *testing.T) {
 				t.Errorf("width %d: line %d overflows (%d cols): %q", w, i, lw, l)
 			}
 		}
+	}
+}
+
+// --- height budget + row truncation ----------------------------------------
+
+func manyItems(n int) []Item {
+	out := make([]Item, n)
+	for i := range out {
+		out[i] = Item{ID: fmt.Sprintf("id-%02d", i), Name: fmt.Sprintf("row-%02d", i)}
+	}
+	return out
+}
+
+// countRowLines counts rendered lines that ARE a manyItems row — matched at the
+// line start (after the box edge, padding and the selection chevron) so the
+// filter query line, which echoes the typed text, is not miscounted as a row. A
+// wrapped row pushes its tail onto a second line without the label, so this
+// counts rows, not lines — exactly what the window cap is about.
+func countRowLines(out string) int {
+	n := 0
+	for _, l := range strings.Split(out, "\n") {
+		body := strings.TrimPrefix(strings.TrimSpace(strings.Trim(l, "│")), "› ")
+		// The default grammar numbers its rows ("1. row-00"); filter mode does not.
+		if _, rest, ok := strings.Cut(strings.TrimSpace(body), ". "); ok && strings.HasPrefix(rest, "row-") {
+			n++
+			continue
+		}
+		if strings.HasPrefix(strings.TrimSpace(body), "row-") {
+			n++
+		}
+	}
+	return n
+}
+
+// A row longer than the box must be TRUNCATED, not wrapped: the enclosing box is
+// width-constrained, so an unclamped row silently becomes two or three lines —
+// which is what pushed a session picker's own title off the top of the screen.
+// The invariant is that row height does not depend on row content.
+func TestViewTruncatesEveryRowSoNoneWrap(t *testing.T) {
+	theme.ApplyForBackground(true)
+	t.Cleanup(func() { theme.ApplyForBackground(true) })
+	short := []Item{{Name: "a"}, {Name: "b"}, {Name: "c"}}
+	long := []Item{
+		{Name: strings.Repeat("long-", 30), Desc: strings.Repeat("detail ", 20)},
+		// Unselected AND long: the case the old code left unclamped, since only
+		// the selected row was truncated.
+		{Name: strings.Repeat("also-long-", 20), Desc: strings.Repeat("more ", 30)},
+		{Name: "c"},
+	}
+	for _, w := range []int{40, 80, 120} {
+		wantLines := len(strings.Split(New("t", short).View(w), "\n"))
+		gotLines := len(strings.Split(New("t", long).View(w), "\n"))
+		if gotLines != wantLines {
+			t.Errorf("width %d: long rows rendered %d lines, short rows %d — a row wrapped",
+				w, gotLines, wantLines)
+		}
+	}
+}
+
+func TestMaxRowsWindowsTheListAndCountsWhatIsHidden(t *testing.T) {
+	theme.ApplyForBackground(true)
+	t.Cleanup(func() { theme.ApplyForBackground(true) })
+	m := New("t", manyItems(40), WithMaxRows(5))
+	out := ansi.Strip(m.View(80))
+	if got := countRowLines(out); got != 5 {
+		t.Errorf("drew %d rows, want the 5-row cap:\n%s", got, out)
+	}
+	// Selection is at the top, so the whole remainder is hidden below.
+	for _, want := range []string{"row-00", "row-04", "↓ 35 more"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("view missing %q in:\n%s", want, out)
+		}
+	}
+	for _, dont := range []string{"row-05", "↑ "} {
+		if strings.Contains(out, dont) {
+			t.Errorf("view should not contain %q in:\n%s", dont, out)
+		}
+	}
+}
+
+func TestMaxRowsWindowFollowsTheSelection(t *testing.T) {
+	theme.ApplyForBackground(true)
+	t.Cleanup(func() { theme.ApplyForBackground(true) })
+	m := New("t", manyItems(40), WithMaxRows(5))
+	for i := 0; i < 39; i++ {
+		m.MoveDown()
+		out := ansi.Strip(m.View(80))
+		if want := fmt.Sprintf("row-%02d", i+1); !strings.Contains(out, want) {
+			t.Fatalf("selection %q scrolled out of the window:\n%s", want, out)
+		}
+		if got := countRowLines(out); got != 5 {
+			t.Fatalf("at row %d: drew %d rows, want 5", i+1, got)
+		}
+	}
+	// At the bottom the hidden count is all above, none below.
+	out := ansi.Strip(m.View(80))
+	if !strings.Contains(out, "↑ 35 more") || strings.Contains(out, "↓ ") {
+		t.Errorf("bottom of list should report only rows hidden above:\n%s", out)
+	}
+}
+
+// The cap applies to the FILTERED set, and a query that narrows below the cap
+// drops the markers entirely.
+func TestMaxRowsAppliesAfterFiltering(t *testing.T) {
+	theme.ApplyForBackground(true)
+	t.Cleanup(func() { theme.ApplyForBackground(true) })
+	m := New("t", manyItems(40), WithFilter(), WithMaxRows(5))
+	m.SetQuery("row-1") // row-10 … row-19: 10 matches, still over the cap
+	out := ansi.Strip(m.View(80))
+	if got := countRowLines(out); got != 5 {
+		t.Errorf("drew %d rows, want 5:\n%s", got, out)
+	}
+	if !strings.Contains(out, "↓ 5 more") {
+		t.Errorf("want 5 hidden below in:\n%s", out)
+	}
+	m.SetQuery("row-17") // one match: no window, no markers
+	out = ansi.Strip(m.View(80))
+	if got := countRowLines(out); got != 1 {
+		t.Errorf("drew %d rows, want 1:\n%s", got, out)
+	}
+	if strings.Contains(out, "more") {
+		t.Errorf("a fully-visible list must not claim hidden rows:\n%s", out)
+	}
+}
+
+func TestMaxRowsZeroIsUnbounded(t *testing.T) {
+	theme.ApplyForBackground(true)
+	t.Cleanup(func() { theme.ApplyForBackground(true) })
+	m := New("t", manyItems(40))
+	if got := m.MaxRows(); got != 0 {
+		t.Errorf("MaxRows default = %d, want 0", got)
+	}
+	if got := countRowLines(ansi.Strip(m.View(80))); got != 40 {
+		t.Errorf("unbounded picker drew %d rows, want 40", got)
+	}
+	m.SetMaxRows(-3) // a host that computed a nonsense budget still gets a row
+	if got := m.MaxRows(); got != 1 {
+		t.Errorf("SetMaxRows(-3) = %d, want the 1-row floor", got)
 	}
 }

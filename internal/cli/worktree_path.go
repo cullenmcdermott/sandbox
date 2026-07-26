@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -229,6 +231,55 @@ func matchSummary(m client.SessionMatch) string {
 	return fmt.Sprintf("%s  (%s)", detail, m.MatchedBy)
 }
 
+// pickerSummary is the detail line for one picker row. It is deliberately NOT
+// matchSummary: the listing at least prints the id in its own column, but the
+// picker rows are all the caller has, and on this machine most of them share a
+// project AND a title fallback — twenty rows reading "sandbox
+// /Users/cullen/git/sandbox (any)" cannot be told apart, let alone chosen
+// between. What actually distinguishes two sessions of the same project is the
+// id suffix and when they were last touched, so those lead; the branch (when
+// the session has a worktree) follows; the match kind appears only when a query
+// produced it, since an all-"any" column is pure noise.
+func pickerSummary(m client.SessionMatch, now time.Time) string {
+	parts := []string{shortSessionID(string(m.ID)), shortAge(m.LastActivity, now)}
+	if m.Branch != "" {
+		parts = append(parts, m.Branch)
+	} else if m.ProjectPath != "" {
+		parts = append(parts, filepath.Base(m.ProjectPath))
+	}
+	if m.MatchedBy != "" && m.MatchedBy != client.MatchAny {
+		parts = append(parts, string(m.MatchedBy))
+	}
+	return strings.Join(parts, " · ")
+}
+
+// shortSessionID is the trailing random suffix of a session id
+// ("claude-pane-df80e6-3bf602fc" → "3bf602fc"), the part that actually varies
+// between two sessions of one project. Ids without a "-" are returned whole.
+func shortSessionID(id string) string {
+	if i := strings.LastIndex(id, "-"); i >= 0 && i+1 < len(id) {
+		return id[i+1:]
+	}
+	return id
+}
+
+// shortAge renders how long ago t was in one compact token ("4m", "2h", "3d").
+// A zero or future t yields "now" rather than a negative or absurd age — the
+// index is written by this machine, but a clock change must not produce "-1h".
+func shortAge(t, now time.Time) string {
+	d := now.Sub(t)
+	switch {
+	case t.IsZero() || d < time.Minute:
+		return "now"
+	case d < time.Hour:
+		return strconv.Itoa(int(d.Minutes())) + "m"
+	case d < 24*time.Hour:
+		return strconv.Itoa(int(d.Hours())) + "h"
+	default:
+		return strconv.Itoa(int(d.Hours()/24)) + "d"
+	}
+}
+
 // ttyPicker disambiguates interactively. It draws on STDERR and reads from
 // /dev/tty so that stdout stays clean for command substitution — the reason
 // this command cannot just reuse the dashboard's picker plumbing.
@@ -241,6 +292,7 @@ func ttyPicker(matches []client.SessionMatch) (client.SessionMatch, error) {
 	}
 	defer tty.Close()
 
+	now := time.Now()
 	items := make([]picker.Item, 0, len(matches))
 	for _, m := range matches {
 		name := m.Title
@@ -250,7 +302,7 @@ func ttyPicker(matches []client.SessionMatch) (client.SessionMatch, error) {
 		items = append(items, picker.Item{
 			ID:   string(m.ID),
 			Name: name,
-			Desc: matchSummary(m),
+			Desc: pickerSummary(m, now),
 		})
 	}
 
@@ -292,12 +344,34 @@ type pathPicker struct {
 	width     int
 }
 
+// pickerChrome is the number of terminal lines the picker spends on everything
+// that is not a row: two border lines, the title, the blank after it, the filter
+// query line and ITS blank, the blank before the hints, the hints themselves,
+// and the two "N more" markers a scrolled window can add. Under-counting is what
+// scrolls the box's own top off the screen, so this rounds up.
+const pickerChrome = 11
+
+// pickerRowBudget converts a terminal height into a row cap for the picker. It
+// never returns less than 3 — on a very short terminal an overflowing box is
+// still better than one with no rows in it — and 0 (unbounded) when the height
+// is unknown, which is what a non-resizing host reports.
+func pickerRowBudget(height int) int {
+	if height <= 0 {
+		return 0
+	}
+	if n := height - pickerChrome; n > 3 {
+		return n
+	}
+	return 3
+}
+
 func (m *pathPicker) Init() tea.Cmd { return nil }
 
 func (m *pathPicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
+		m.p.SetMaxRows(pickerRowBudget(msg.Height))
 		return m, nil
 	case tea.KeyPressMsg:
 		// ctrl+c is a hard cancel; everything else belongs to the picker (whose

@@ -263,3 +263,90 @@ func TestWorktreePathResolverErrorPropagates(t *testing.T) {
 		t.Errorf("err = %v, want the resolver's error", err)
 	}
 }
+
+// --- picker row content + height budget ------------------------------------
+//
+// The picker rows are the ONLY thing the user sees when disambiguating, and on
+// a real machine most candidates share a project and a title fallback. These
+// pin what makes two such rows tellable apart.
+
+func TestPickerSummaryLeadsWithWhatDistinguishesSessions(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	m := match("claude-pane-df80e6-3bf602fc", "Review TODO", "/wt", "feat/x", client.MatchAny)
+	m.LastActivity = now.Add(-3 * time.Hour)
+	got := pickerSummary(m, now)
+	// Short id first (the only always-unique field), then age, then the branch.
+	// The match kind is omitted for MatchAny: when the query was empty every row
+	// carries it, so it distinguishes nothing and costs a third of the line.
+	if want := "3bf602fc · 3h · feat/x"; got != want {
+		t.Errorf("pickerSummary = %q, want %q", got, want)
+	}
+	// A real query produces varied kinds, and then the kind explains the row.
+	m.MatchedBy = client.MatchTitle
+	if want := "3bf602fc · 3h · feat/x · title"; pickerSummary(m, now) != want {
+		t.Errorf("pickerSummary = %q, want %q", pickerSummary(m, now), want)
+	}
+	// No branch (a worktree-off session) falls back to the project basename, not
+	// the full path — the path is identical across every row of one project.
+	m.Branch, m.MatchedBy = "", client.MatchAny
+	m.ProjectPath = "/Users/cullen/git/sandbox"
+	if want := "3bf602fc · 3h · sandbox"; pickerSummary(m, now) != want {
+		t.Errorf("pickerSummary = %q, want %q", pickerSummary(m, now), want)
+	}
+}
+
+func TestShortAgeAndShortSessionID(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		d    time.Duration
+		want string
+	}{
+		{0, "now"},
+		{30 * time.Second, "now"},
+		{5 * time.Minute, "5m"},
+		{90 * time.Minute, "1h"},
+		{50 * time.Hour, "2d"},
+		{-time.Hour, "now"}, // a clock skew must not render "-1h"
+	} {
+		if got := shortAge(now.Add(-tc.d), now); got != tc.want {
+			t.Errorf("shortAge(-%s) = %q, want %q", tc.d, got, tc.want)
+		}
+	}
+	if got := shortAge(time.Time{}, now); got != "now" {
+		t.Errorf("shortAge(zero) = %q, want %q", got, "now")
+	}
+	for in, want := range map[string]string{
+		"claude-pane-df80e6-3bf602fc": "3bf602fc",
+		"opencode-server-95dadb-b23d": "b23d",
+		"nodashes":                    "nodashes",
+		"trailing-":                   "trailing-",
+	} {
+		if got := shortSessionID(in); got != want {
+			t.Errorf("shortSessionID(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// The row budget must leave room for the box's own chrome — under-counting is
+// exactly what scrolled the picker's title and query line off the top.
+func TestPickerRowBudgetLeavesRoomForChrome(t *testing.T) {
+	if got := pickerRowBudget(0); got != 0 {
+		t.Errorf("unknown height should be unbounded, got %d", got)
+	}
+	if got := pickerRowBudget(50); got != 50-pickerChrome {
+		t.Errorf("pickerRowBudget(50) = %d, want %d", got, 50-pickerChrome)
+	}
+	// A tiny terminal still gets rows rather than an empty box, and never a
+	// negative cap (which SetMaxRows would clamp anyway).
+	for _, h := range []int{1, 5, 12} {
+		if got := pickerRowBudget(h); got < 3 {
+			t.Errorf("pickerRowBudget(%d) = %d, want at least 3", h, got)
+		}
+	}
+	// The budget plus the chrome must fit the terminal, or the box overflows.
+	for _, h := range []int{24, 40, 60, 100} {
+		if got := pickerRowBudget(h) + pickerChrome; got > h {
+			t.Errorf("height %d: %d rows + %d chrome = %d lines, overflows", h, pickerRowBudget(h), pickerChrome, got)
+		}
+	}
+}

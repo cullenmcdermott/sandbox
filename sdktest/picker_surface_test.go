@@ -16,6 +16,7 @@ var (
 	_ func(func(picker.Item)) picker.Option                       = picker.WithChoose
 	_ func(func()) picker.Option                                  = picker.WithCancel
 	_ func() picker.Option                                        = picker.WithFilter
+	_ func(int) picker.Option                                     = picker.WithMaxRows
 )
 
 var (
@@ -31,6 +32,9 @@ var (
 	_ func(*picker.Model) []picker.Item = (*picker.Model).Filtered
 	_ func(*picker.Model) string        = (*picker.Model).Query
 	_ func(*picker.Model, string)       = (*picker.Model).SetQuery
+	// Height budget (WithMaxRows): the row cap a host recomputes on resize.
+	_ func(*picker.Model) int  = (*picker.Model).MaxRows
+	_ func(*picker.Model, int) = (*picker.Model).SetMaxRows
 )
 
 // Item field-set pin.

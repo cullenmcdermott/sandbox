@@ -27,6 +27,14 @@ import (
 
 const glyphChevron = "›"
 
+// boxChrome is what the overlay's frame costs a line horizontally: two border
+// columns plus one column of padding on each side. Rows and the query line are
+// clamped to boxW-boxChrome, NOT boxW — clamping to the box's outer width still
+// overflows the content area by these four columns, and lipgloss answers an
+// overflowing line by wrapping it, which is how a one-line row silently becomes
+// two and the list outgrows its height budget.
+const boxChrome = 4
+
 // Item is one selectable row. ID is the opaque value the host acts on; Name is
 // the row label; Desc is an optional dim detail; Current marks the active choice
 // (a dim-green ✓ and pre-selection at open).
@@ -48,8 +56,9 @@ func WithChoose(fn func(Item)) Option { return func(m *Model) { m.onChoose = fn 
 func WithCancel(fn func()) Option { return func(m *Model) { m.onCancel = fn } }
 
 // WithFilter enables type-to-filter: printable keys build a query that narrows
-// the rows to those whose ID or Name contains it (case-insensitively), backspace
-// and ctrl+u edit it, and esc clears a non-empty query before it cancels.
+// the rows to those whose ID, Name, or Desc contains it (case-insensitively),
+// backspace and ctrl+u edit it, and esc clears a non-empty query before it
+// cancels.
 //
 // It is opt-in because it necessarily takes over the key grammar: once letters
 // type into a query, j/k can no longer navigate (↑/↓ and ctrl+n/ctrl+p do) and
@@ -57,6 +66,17 @@ func WithCancel(fn func()) Option { return func(m *Model) { m.onCancel = fn } }
 // type "claude-4-5" otherwise). A picker of four models is better served by the
 // default vocabulary; a picker of forty sessions is not navigable without this.
 func WithFilter() Option { return func(m *Model) { m.filter = true } }
+
+// WithMaxRows caps how many rows View draws at once, scrolling a window of that
+// size to keep the selection visible and reporting the rows it hid. Zero (the
+// default) draws every row.
+//
+// A picker taller than its terminal is worse than useless — the box's own top,
+// including the title and the filter query, scrolls off and the user is left
+// staring at the middle of a list with no way to tell what is happening. Hosts
+// that can size themselves should pass a budget derived from the terminal
+// height; see (*Model).SetMaxRows to update it as the window resizes.
+func WithMaxRows(n int) Option { return func(m *Model) { m.SetMaxRows(n) } }
 
 // Model is a picker overlay. Build one with New; drive it with Update; render
 // with View.
@@ -66,6 +86,7 @@ type Model struct {
 	sel      int
 	filter   bool
 	query    string
+	maxRows  int
 	onChoose func(Item)
 	onCancel func()
 }
@@ -109,6 +130,37 @@ func (m *Model) Filtered() []Item {
 	return out
 }
 
+// MaxRows / SetMaxRows read and replace the visible-row cap (0 = unbounded).
+// Negative values clamp to 1: a host that computed a budget from a tiny
+// terminal should still get a usable row, not an empty box.
+func (m *Model) MaxRows() int { return m.maxRows }
+func (m *Model) SetMaxRows(n int) {
+	if n < 0 {
+		n = 1
+	}
+	m.maxRows = n
+}
+
+// visibleWindow returns the [lo, hi) slice bounds of Filtered that View draws:
+// everything when unbounded or short enough, else a maxRows-sized window
+// centered on the selection and clamped to the ends. It is derived from the
+// selection rather than kept as scroll state so that a filter keystroke — which
+// can change both the row set and the selection at once — can never leave a
+// stale offset pointing past the end.
+func (m *Model) visibleWindow(n int) (int, int) {
+	if m.maxRows <= 0 || n <= m.maxRows {
+		return 0, n
+	}
+	lo := m.sel - m.maxRows/2
+	if hi := n - m.maxRows; lo > hi {
+		lo = hi
+	}
+	if lo < 0 {
+		lo = 0
+	}
+	return lo, lo + m.maxRows
+}
+
 // Query reports the active filter text (always "" unless WithFilter was set).
 func (m *Model) Query() string { return m.query }
 
@@ -123,11 +175,18 @@ func (m *Model) SetQuery(q string) {
 	m.sel = 0
 }
 
-// matches reports whether q (already lowercased) is a substring of the item's ID
-// or Name. Desc is deliberately excluded: it holds prose ("most capable",
-// "account default") that would match far too much.
+// matches reports whether q (already lowercased) is a substring of the item's
+// ID, Name, or Desc.
+//
+// Desc is included because the filter's contract is "narrow by what you can
+// see": a row's distinguishing detail — a branch, an age, a short id — lives in
+// Desc, and a query drawn from the visible label that matched nothing read as a
+// broken filter. ID stays searchable even when a row does not display it, which
+// is strictly extra reach and never surprises in the other direction.
 func matches(it Item, q string) bool {
-	return strings.Contains(strings.ToLower(it.ID), q) || strings.Contains(strings.ToLower(it.Name), q)
+	return strings.Contains(strings.ToLower(it.ID), q) ||
+		strings.Contains(strings.ToLower(it.Name), q) ||
+		strings.Contains(strings.ToLower(it.Desc), q)
 }
 
 // Selected reports the cursor index (into Filtered).
@@ -257,7 +316,11 @@ func (m *Model) choose(i int) {
 // numbered rows with the selected row highlighted, the current choice marked ✓,
 // and a keybind hint footer. Under WithFilter it gains a query line and drops
 // the row numbers (digits type into the query, so numbering would advertise a
-// jump that no longer exists).
+// jump that no longer exists). Under WithMaxRows it draws a scrolling window of
+// the rows instead of all of them, bracketed by the counts it hid.
+//
+// Every line is truncated to fit: the box wraps anything wider, and a wrapped
+// row breaks both the layout and the height budget.
 func (m *Model) View(width int) string {
 	boxW := width - 8
 	if boxW < 30 {
@@ -271,14 +334,23 @@ func (m *Model) View(width int) string {
 	}
 	lines := []string{lipgloss.NewStyle().Foreground(theme.TextBright).Bold(true).Render(title), ""}
 	if m.filter {
-		lines = append(lines, m.queryLine(boxW-2), "")
+		lines = append(lines, m.queryLine(boxW-boxChrome), "")
 	}
 	vis := m.Filtered()
 	if len(vis) == 0 {
 		lines = append(lines, lipgloss.NewStyle().Foreground(theme.TextMuted).Render("no matches"))
 	}
-	for i, r := range vis {
-		lines = append(lines, m.line(i, r, boxW-2))
+	// Hidden-row counts bracket the window, so a scrolled list never reads as the
+	// whole list — without them the user cannot tell there is more to reach.
+	lo, hi := m.visibleWindow(len(vis))
+	if lo > 0 {
+		lines = append(lines, moreLine(lo, "↑"))
+	}
+	for i := lo; i < hi; i++ {
+		lines = append(lines, m.line(i, vis[i], boxW-boxChrome))
+	}
+	if hi < len(vis) {
+		lines = append(lines, moreLine(len(vis)-hi, "↓"))
 	}
 	lines = append(lines, "", m.hints())
 	return lipgloss.NewStyle().
@@ -299,6 +371,12 @@ func (m *Model) queryLine(w int) string {
 	}
 	return clamp(prompt+lipgloss.NewStyle().Foreground(theme.TextBright).Render(m.query)+
 		lipgloss.NewStyle().Foreground(theme.TextDim).Render("▏"), w)
+}
+
+// moreLine renders a hidden-row count for one end of a scrolled window.
+func moreLine(n int, arrow string) string {
+	return "  " + lipgloss.NewStyle().Foreground(theme.TextMuted).
+		Render(arrow+" "+strconv.Itoa(n)+" more")
 }
 
 // hints renders the keybind footer for the active grammar.
@@ -341,8 +419,12 @@ func (m *Model) line(i int, r Item, w int) string {
 			lipgloss.NewStyle().Foreground(theme.TextBright).Bold(true).Render(r.Name) + suffix + desc
 		return lipgloss.NewStyle().Background(theme.Raised2).Width(w).Render(clamp(body, w))
 	}
-	return "  " + lipgloss.NewStyle().Foreground(theme.TextDim).Render(num) +
-		lipgloss.NewStyle().Foreground(theme.Malibu).Render(r.Name) + suffix + desc
+	// Every row is truncated, not just the selected one: an over-long row is
+	// WRAPPED by the enclosing box (which is Width-constrained, not overflow-
+	// hidden), and one wrapped row silently costs the list two or three lines of
+	// the height budget while looking like a rendering glitch.
+	return clamp("  "+lipgloss.NewStyle().Foreground(theme.TextDim).Render(num)+
+		lipgloss.NewStyle().Foreground(theme.Malibu).Render(r.Name)+suffix+desc, w)
 }
 
 // clamp truncates a styled line to w display columns (ANSI/grapheme-aware).

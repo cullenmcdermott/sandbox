@@ -138,6 +138,22 @@ done log.)
   file for pane byte-flow so the next occurrence is root-causeable — the TUI
   hides stderr, so child #1's byte stream was unobservable post-mortem.
 
+* **`sandbox worktree path` needs a kubeconfig it does not use** (found
+  2026-07-26 while fixing the picker; the T1 work landed with it).
+  `internal/cli/worktree_path.go:75` calls `newClient()`
+  (`internal/cli/root.go:128` → `client.New` → `k8s.New`), which fails with
+  "failed to connect to cluster" when no KUBECONFIG is set — before a single
+  line of the index is read. The command's own doc comment says resolution is
+  "offline (local index only) … deliberately: `cd` to a worktree must not
+  depend on the VPN being up", and `ResolveSessions` really is index-only, so
+  the contract is right and only the construction is wrong. It bites outside
+  the flox shell (which exports KUBECONFIG) and it silently kills
+  `completeSessionArg` (`internal/cli/completion.go`) the same way — a shell
+  completion that errors is a completion that returns nothing. Fix direction:
+  an offline construction path for the index-only commands (a `client.Offline()`
+  constructor, or make the k8s backend lazy so `New` never dials), pinned in
+  `sdktest/` if it lands on the public surface.
+
 * **The dashboard DROPS `rate_limit.updated` on the floor** (found 2026-07-26
   alongside the in-pane 5h/weekly fix, which is a different surface and is now
   done). The runner emits the event correctly
