@@ -504,10 +504,38 @@ type ExecResult struct {
 	ExitCode int    `json:"exitCode"`
 }
 
+// PortName names a logical endpoint inside a session pod. Forward requests and
+// the handles they produce are keyed by it, so a caller routes traffic by
+// meaning rather than by position in a slice.
+type PortName string
+
+const (
+	// PortRunner is the runner's HTTP+SSE API.
+	PortRunner PortName = "runner"
+	// PortSSH is the in-pod sshd used by Mutagen sync and Session.Shell.
+	PortSSH PortName = "ssh"
+	// PortOpencode is `opencode serve`'s HTTP/OpenAPI port.
+	PortOpencode PortName = "opencode"
+	// PortCodex is the codex app-server websocket port.
+	PortCodex PortName = "codex"
+)
+
+// Standard in-pod listen ports for the named endpoints above.
+const (
+	RunnerPort   = 8787
+	SSHPort      = 22
+	OpencodePort = 4096
+	CodexPort    = 8788
+)
+
 // PortSpec describes a port-forward request.
 type PortSpec struct {
-	Local  int `json:"local"`
-	Remote int `json:"remote"`
+	// Name identifies the logical endpoint this spec requests. Forwards is
+	// keyed by it, so a caller looks the resulting handle up by name rather
+	// than by its position in the request slice.
+	Name   PortName `json:"name"`
+	Local  int      `json:"local"`
+	Remote int      `json:"remote"`
 }
 
 // ForwardHandle represents an active port-forward.
@@ -518,4 +546,62 @@ type ForwardHandle interface {
 	Close() error
 	// Done returns a channel closed when the forward terminates.
 	Done() <-chan struct{}
+}
+
+// Forwards is the set of live port-forwards a Backend.PortForward opened, keyed
+// by the Name of the PortSpec that requested each one. Keying by name (rather
+// than returning a slice the caller indexes positionally) is what makes Backend
+// safely implementable outside this module: a backend cannot misroute traffic by
+// returning handles in an unexpected order.
+type Forwards map[PortName]ForwardHandle
+
+// Get returns the handle opened for name.
+func (f Forwards) Get(name PortName) (ForwardHandle, bool) {
+	h, ok := f[name]
+	return h, ok
+}
+
+// LocalPort returns the local port the named forward is listening on.
+func (f Forwards) LocalPort(name PortName) (int, bool) {
+	h, ok := f[name]
+	if !ok {
+		return 0, false
+	}
+	return h.LocalPort(), true
+}
+
+// Close closes every handle in the set. Handle Close is idempotent.
+func (f Forwards) Close() {
+	for _, h := range f {
+		h.Close()
+	}
+}
+
+// standardRemotePort resolves a PortName to its standard in-pod listen port.
+func standardRemotePort(name PortName) (int, bool) {
+	switch name {
+	case PortRunner:
+		return RunnerPort, true
+	case PortSSH:
+		return SSHPort, true
+	case PortOpencode:
+		return OpencodePort, true
+	case PortCodex:
+		return CodexPort, true
+	default:
+		return 0, false
+	}
+}
+
+// Forward builds the PortSpec list for the named standard endpoints, each with
+// an OS-assigned local port (Local: 0). Unknown names get Remote 0, which
+// Backend.PortForward rejects. Callers needing a fixed local port, or a
+// non-standard endpoint, construct PortSpec values directly.
+func Forward(names ...PortName) []PortSpec {
+	specs := make([]PortSpec, len(names))
+	for i, name := range names {
+		remote, _ := standardRemotePort(name)
+		specs[i] = PortSpec{Name: name, Local: 0, Remote: remote}
+	}
+	return specs
 }

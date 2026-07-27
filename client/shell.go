@@ -14,9 +14,6 @@ import (
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/term"
-
-	"github.com/cullenmcdermott/sandbox/internal/k8s"
-	"github.com/cullenmcdermott/sandbox/internal/session"
 )
 
 // SSHTarget is the connection material for reaching a session's pod over SSH:
@@ -67,22 +64,20 @@ func (s *Session) SSHTarget(ctx context.Context) (*SSHTarget, func(), error) {
 	}
 	// SSH-only forward: the runner HTTP and opencode ports are pure waste for a
 	// shell/scp session, mirroring DialRunner's runner-only forward in reverse.
-	handles, err := s.c.backend.PortForward(ctx, s.ref, []session.PortSpec{{Local: 0, Remote: k8s.SSHPort()}})
+	forwards, err := s.c.backend.PortForward(ctx, s.ref, Forward(PortSSH))
 	if err != nil {
 		return nil, nil, fmt.Errorf("ssh port-forward: %w", err)
 	}
-	if len(handles) == 0 {
-		return nil, nil, fmt.Errorf("ssh port-forward: no handle returned")
-	}
-	cleanup := func() {
-		for _, h := range handles {
-			h.Close()
-		}
+	cleanup := func() { forwards.Close() }
+	sshPort, ok := forwards.LocalPort(PortSSH)
+	if !ok {
+		cleanup()
+		return nil, nil, fmt.Errorf("sandbox: PortForward did not return a %q forward", PortSSH)
 	}
 	tgt := &SSHTarget{
 		Host:         "127.0.0.1",
 		User:         "root",
-		Port:         handles[0].LocalPort(),
+		Port:         sshPort,
 		IdentityFile: privPath,
 	}
 	return tgt, cleanup, nil

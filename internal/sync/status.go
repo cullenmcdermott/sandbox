@@ -3,6 +3,8 @@ package sync
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"os/exec"
 	"strings"
 )
 
@@ -87,23 +89,24 @@ type mutagenChange struct {
 
 // Conflict is one per-path sync conflict, resolved from mutagen's conflicts[]
 // JSON into a typed summary. Path is the workspace-relative path in conflict;
-// Alpha/Beta record which endpoint(s) changed it (alpha = local workspace, beta
-// = pod). Both true means each side edited the same path — the classic
-// two-way-safe standoff mutagen halts on.
+// Local/Remote record which endpoint(s) changed it (mutagen itself calls these
+// endpoints alpha and beta — Local/Remote is the vocabulary an SDK consumer
+// should not have to translate). Both true means each side edited the same
+// path — the classic two-way-safe standoff mutagen halts on.
 type Conflict struct {
-	Path  string
-	Alpha bool
-	Beta  bool
+	Path   string
+	Local  bool
+	Remote bool
 }
 
 // Describe renders a Conflict as a short human line for the sync detail pane.
 func (c Conflict) Describe() string {
 	switch {
-	case c.Alpha && c.Beta:
+	case c.Local && c.Remote:
 		return c.Path + " (both sides changed it)"
-	case c.Alpha:
+	case c.Local:
 		return c.Path + " (changed locally)"
-	case c.Beta:
+	case c.Remote:
 		return c.Path + " (changed on the pod)"
 	default:
 		return c.Path
@@ -198,24 +201,91 @@ func (m *Manager) StatusDetail(ctx context.Context, sessionID string) (SyncState
 	return worstState(sessions), ConflictSummary{Files: files, Total: len(files)}, nil
 }
 
+// Status is a session's typed file-sync health: the reduced state, the per-file
+// conflicts behind a SyncConflicted state, a resolution hint, and — when the
+// state is not self-explanatory — the reason.
+type Status struct {
+	State     SyncState
+	Conflicts []Conflict
+	// Hint is the one-line resolution reminder, set only when State is
+	// SyncConflicted.
+	Hint string
+	// Detail says WHY the state is what it is, for states that are otherwise an
+	// unexplained blank: an errored probe, or a definite "no sync session exists".
+	Detail string
+}
+
+// StatusReport returns a session's typed sync health in one `mutagen sync list`
+// exec. It is the shaping StatusDetail lacked: the conflict hint and the reason
+// behind an unknown state, which every caller was previously re-deriving.
+func (m *Manager) StatusReport(ctx context.Context, sessionID string) (Status, error) {
+	st, summary, err := m.StatusDetail(ctx, sessionID)
+	if err != nil {
+		return Status{State: SyncUnknown, Detail: probeErrDetail(err)}, err
+	}
+	report := Status{State: st}
+	switch st {
+	case SyncUnknown:
+		// A definite answer, not a failure to answer: mutagen knows of no sync for
+		// this session, so its files are not moving.
+		report.Detail = "no sync session — attach to create one"
+	case SyncConflicted:
+		report.Hint = ConflictResolutionHint
+		report.Conflicts = summary.Files
+	}
+	return report, nil
+}
+
+// probeDetailCap bounds the sync-health reason to something that fits the detail
+// pane's one-line KV value next to the status token.
+const probeDetailCap = 56
+
+// probeErrDetail renders a probe error as a short reason for the detail pane.
+// The raw error is a whole mutagen invocation plus its stderr — far too long and
+// too noisy for a KV row — so this keeps the part that tells the user what to do
+// and drops the argv echo. It never returns "", because an empty detail is what
+// made the swallowed error invisible in the first place.
+func probeErrDetail(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, exec.ErrNotFound) {
+		return "mutagen CLI not found"
+	}
+	msg := err.Error()
+	// ExecRunner formats "mutagen [<argv>]: <err>: <stderr>"; the argv echo is
+	// noise here, and the caller already knows which session it asked about.
+	if _, rest, ok := strings.Cut(msg, "]: "); ok {
+		msg = rest
+	}
+	msg = strings.Join(strings.Fields(msg), " ") // collapse newlines from stderr
+	if msg == "" {
+		return "sync status unavailable"
+	}
+	if len(msg) > probeDetailCap {
+		msg = msg[:probeDetailCap-1] + "…"
+	}
+	return msg
+}
+
 // conflictsFrom flattens every session's conflicts[] into a deduped, source-order
 // list of per-file Conflicts. A path that both endpoints changed merges into one
-// entry with Alpha && Beta. A conflict whose shape we couldn't parse (no paths)
+// entry with Local && Remote. A conflict whose shape we couldn't parse (no paths)
 // still yields a generic entry so the count stays honest (§1d defensive parsing).
 func conflictsFrom(sessions []mutagenSession) []Conflict {
 	byPath := map[string]int{} // path -> index into out
 	var out []Conflict
-	add := func(path string, alpha, beta bool) {
+	add := func(path string, local, remote bool) {
 		if path == "" {
 			path = "(path unavailable)"
 		}
 		if i, ok := byPath[path]; ok {
-			out[i].Alpha = out[i].Alpha || alpha
-			out[i].Beta = out[i].Beta || beta
+			out[i].Local = out[i].Local || local
+			out[i].Remote = out[i].Remote || remote
 			return
 		}
 		byPath[path] = len(out)
-		out = append(out, Conflict{Path: path, Alpha: alpha, Beta: beta})
+		out = append(out, Conflict{Path: path, Local: local, Remote: remote})
 	}
 	for _, s := range sessions {
 		for _, cf := range s.Conflicts {

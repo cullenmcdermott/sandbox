@@ -47,7 +47,33 @@ type (
 	BootstrapFile  = session.BootstrapFile
 	Resources      = session.Resources
 	ResumeOptions  = session.ResumeOptions
+	PortName       = session.PortName
+	PortSpec       = session.PortSpec
+	ForwardHandle  = session.ForwardHandle
+	Forwards       = session.Forwards
+	ReaperOptions  = session.ReaperOptions
 )
+
+// Named port-forward endpoints and their standard in-pod listen ports,
+// re-exported from internal/session so a Backend implementation and its
+// callers share one vocabulary. See Forward.
+const (
+	PortRunner   = session.PortRunner
+	PortSSH      = session.PortSSH
+	PortOpencode = session.PortOpencode
+	PortCodex    = session.PortCodex
+
+	RunnerPort   = session.RunnerPort
+	SSHPort      = session.SSHPort
+	OpencodePort = session.OpencodePort
+	CodexPort    = session.CodexPort
+)
+
+// Forward builds the PortSpec list for the named standard endpoints, each with
+// an OS-assigned local port (Local: 0). Unknown names get Remote 0, which
+// Backend.PortForward rejects. Callers needing a fixed local port, or a
+// non-standard endpoint, construct PortSpec values directly.
+func Forward(names ...PortName) []PortSpec { return session.Forward(names...) }
 
 // RunnerClient is the live connection to a session's in-pod runner: start and
 // interrupt turns (the opencode headless first-turn path), run one-shot
@@ -81,10 +107,14 @@ var _ RunnerClient = (*runner.Client)(nil)
 // unit-tested against an injected fake (see WithBackend). *internal/k8s.Backend
 // is the production implementation.
 //
-// Like WithBackend, this is not implementable by external modules today:
-// EnsureReaper's k8s.ReaperOptions cannot be named outside the main module
-// (tracked in TODO.md §8) — the seam's present value is in-module fake
-// injection, not a third-party backend.
+// Backend is implementable by external modules: every type it names (Ref, Spec,
+// State, StateEvent, ResumeOptions, PortSpec, Forwards, ReaperOptions) is
+// exported from this package. The intended use is faking the cluster in a
+// consumer's own tests — the same way this module's client/orchestration_test.go
+// fakes it internally — not (yet) a supported third-party production backend.
+// PortForward must return exactly one handle per requested spec, keyed by that
+// spec's PortSpec.Name in the returned Forwards: callers route by name, never by
+// position in the request slice.
 type Backend interface {
 	// Namespace is the namespace this backend addresses.
 	Namespace() string
@@ -105,13 +135,14 @@ type Backend interface {
 	Destroy(ctx context.Context, ref Ref) error
 	// StartWithProgress blocks until the pod is ready, reporting phase detail.
 	StartWithProgress(ctx context.Context, ref Ref, onPhase func(detail string)) error
-	// PortForward opens the requested local→pod forwards.
-	PortForward(ctx context.Context, ref Ref, ports []session.PortSpec) ([]session.ForwardHandle, error)
+	// PortForward opens the requested local→pod forwards, returning one handle
+	// per spec keyed by PortSpec.Name.
+	PortForward(ctx context.Context, ref Ref, ports []PortSpec) (Forwards, error)
 	// RunnerToken / OpencodePassword fetch per-session secrets Connect needs.
 	RunnerToken(ctx context.Context, ref Ref) (string, error)
 	OpencodePassword(ctx context.Context, ref Ref) (string, error)
 	// EnsureReaper installs the idle reaper (Connect's background phase).
-	EnsureReaper(ctx context.Context, ref Ref, opts k8s.ReaperOptions) error
+	EnsureReaper(ctx context.Context, ref Ref, opts ReaperOptions) error
 }
 
 // The concrete k8s backend satisfies the narrowed public interface.
@@ -862,21 +893,22 @@ func (c *Client) DialRunner(ctx context.Context, ref Ref) (RunnerClient, func(),
 	// One-shot runner calls only speak HTTP; the SSH forward exists solely for
 	// mutagen sync, which DialRunner never runs — so forward the runner port only
 	// rather than paying for an unused SSH SPDY stream.
-	handles, err := c.backend.PortForward(ctx, ref, k8s.ForwardSpecsRunnerOnly(0))
+	forwards, err := c.backend.PortForward(ctx, ref, Forward(PortRunner))
 	if err != nil {
 		return nil, nil, err
 	}
-	cleanup := func() {
-		for _, h := range handles {
-			h.Close()
-		}
+	cleanup := func() { forwards.Close() }
+	runnerPort, ok := forwards.LocalPort(PortRunner)
+	if !ok {
+		cleanup()
+		return nil, nil, fmt.Errorf("sandbox: PortForward did not return a %q forward", PortRunner)
 	}
 	token, err := c.backend.RunnerToken(ctx, ref)
 	if err != nil {
 		cleanup()
 		return nil, nil, fmt.Errorf("get runner token: %w", err)
 	}
-	rc := runner.New(fmt.Sprintf("http://127.0.0.1:%d", handles[0].LocalPort()), token)
+	rc := runner.New(fmt.Sprintf("http://127.0.0.1:%d", runnerPort), token)
 	return rc, cleanup, nil
 }
 

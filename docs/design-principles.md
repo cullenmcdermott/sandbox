@@ -76,9 +76,22 @@ them that.
 With transport handled by the kubeconfig, this is no longer justified by
 transport redirection. It is justified by **consumer testability**: someone
 building on this SDK cannot write tests for their own app without faking the
-cluster, and today they cannot — the interface names `internal/…` types, so it
-is uninhabitable outside this module. We use exactly that seam for our own
-orchestration tests; an external consumer deserves the same.
+cluster. We use exactly that seam for our own orchestration tests; an external
+consumer deserves the same.
+
+*Done 2026-07-27.* Every type in `client.Backend` is now exported from `client`
+(`PortName`, `PortSpec`, `ForwardHandle`, `Forwards`, `ReaperOptions`), and
+`sdktest/backend_test.go` implements the interface from the external module as
+the standing proof. Two things about the shape are load-bearing and should not
+be "simplified" back:
+
+- `PortForward` returns a **name-keyed `Forwards` map**, not an ordered slice.
+  An ordered slice pushes a correctness obligation onto the implementer that the
+  compiler cannot check — return the handles in a different order and opencode
+  traffic silently reaches the sshd port. Any future seam handing a consumer a
+  *set* of things should be keyed, not indexed, for the same reason.
+- A missing endpoint is an **explicit error**, never a fallback to some other
+  handle.
 
 ### Applying it
 
@@ -151,6 +164,16 @@ minus a panel, plus one of their own, and it still looks right at 80x24,
   trade (it makes `theme.Charple` a plain read at render time), but it means two
   differently-themed consumers cannot coexist, and the single-goroutine
   contract must be stated in the package doc, not just in an internal comment.
+  *Settled for `tui/theme` on 2026-07-27:* the contract is **stated, not
+  enforced** — synchronizing ~40 exported color **vars** would mean turning the
+  whole public token vocabulary into accessor funcs and would still not let two
+  themed consumers coexist. The ceiling is documented, and the escape hatch for
+  an embedder is named: `Theme` is an inert value, so `ByName` /
+  `DefaultForBackground` let a library derive styles without calling
+  `ApplyTheme` and clobbering its host. A stated contract has no signature to
+  pin, so `sdktest` pins the escape hatch instead. Any *new* process-global in
+  `tui/` owes the same treatment: state it, and pin whatever lets a consumer
+  opt out.
 
 ---
 

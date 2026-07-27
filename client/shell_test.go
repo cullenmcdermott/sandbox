@@ -10,9 +10,6 @@ import (
 	"testing"
 
 	"golang.org/x/crypto/ssh"
-
-	"github.com/cullenmcdermott/sandbox/internal/k8s"
-	"github.com/cullenmcdermott/sandbox/internal/session"
 )
 
 // TestSSHTarget pins the SSH-target seam Shell is built on: the material a
@@ -25,7 +22,7 @@ func TestSSHTarget(t *testing.T) {
 	t.Run("forwards the ssh port only and resolves the target", func(t *testing.T) {
 		be := newFakeBackend()
 		h := &closeSpyHandle{port: 2222, done: make(chan struct{})}
-		be.handles = []session.ForwardHandle{h}
+		be.handles = Forwards{PortSSH: h}
 		c, _, _ := fakeClient(t, be)
 
 		tgt, cleanup, err := c.Open("sess-1").SSHTarget(ctx)
@@ -34,7 +31,7 @@ func TestSSHTarget(t *testing.T) {
 		}
 
 		// Only the SSH port is forwarded — no runner HTTP / opencode waste.
-		want := []session.PortSpec{{Local: 0, Remote: k8s.SSHPort()}}
+		want := Forward(PortSSH)
 		if !reflect.DeepEqual(be.gotSpecs, want) {
 			t.Errorf("PortForward specs = %v, want ssh-only %v", be.gotSpecs, want)
 		}

@@ -1,6 +1,25 @@
 package session
 
-import "context"
+import (
+	"context"
+	"time"
+)
+
+// ReaperOptions configures a per-session reaper Job.
+type ReaperOptions struct {
+	// Image is the reaper container image (the sandbox binary).
+	Image string
+	// ImagePullPolicy overrides the reaper pod's imagePullPolicy (Always /
+	// IfNotPresent / Never). Empty selects a default: IfNotPresent for a
+	// digest-pinned Image, else Always. Mirrors session.Spec.ImagePullPolicy.
+	ImagePullPolicy string
+	// SessionNamespace is where the Sandbox/pod/secret live (agent-sessions).
+	SessionNamespace string
+	// IdleTimeout is how long a session must be idle before suspend.
+	IdleTimeout time.Duration
+	// PollInterval is how often the reaper polls the runner /idle endpoint.
+	PollInterval time.Duration
+}
 
 // ResumeOptions carries optional material a Resume applies to the session's
 // cluster resources before scaling the pod back up. It rides the Backend
@@ -50,8 +69,9 @@ type Backend interface {
 	Status(ctx context.Context, ref Ref) (State, error)
 
 	// PortForward establishes a kubectl port-forward to the runner pod's
-	// HTTP and SSH ports. Returns a handle for each.
-	PortForward(ctx context.Context, ref Ref, ports []PortSpec) ([]ForwardHandle, error)
+	// HTTP and SSH ports. Returns a handle for each requested spec, keyed by
+	// its Name.
+	PortForward(ctx context.Context, ref Ref, ports []PortSpec) (Forwards, error)
 
 	// List returns all known sessions in the namespace.
 	List(ctx context.Context) ([]State, error)

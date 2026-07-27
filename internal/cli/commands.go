@@ -10,8 +10,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/cullenmcdermott/sandbox/client"
 	"github.com/cullenmcdermott/sandbox/internal/session"
-	syncpkg "github.com/cullenmcdermott/sandbox/internal/sync"
 	"github.com/cullenmcdermott/sandbox/internal/tui/dashboard"
 )
 
@@ -79,7 +79,7 @@ func newAttachCmd() *cobra.Command {
 					newDashboardCreator(c, "", ""),
 					dashboard.SessionFromState(st),
 					"",
-					dashboard.RunOptions{TitleStore: indexTitleStore{}, SnapshotStore: indexSnapshotStore{}, ObserverConnector: newDashboardObserverConnector(c, ""), SyncProber: dashboardSyncProber(), SyncReaper: dashboardSyncReaper(), IdleTimeout: defaultReaperIdleTimeout, AccountStore: newDashboardAccountStore(), WorktreeOps: newWorktreeOps(c), RecentProjects: indexRecentProjects},
+					dashboard.RunOptions{TitleStore: indexTitleStore{}, SnapshotStore: indexSnapshotStore{}, ObserverConnector: newDashboardObserverConnector(c, ""), SyncProber: dashboardSyncProber(c), SyncReaper: dashboardSyncReaper(), IdleTimeout: defaultReaperIdleTimeout, AccountStore: newDashboardAccountStore(), WorktreeOps: newWorktreeOps(c), RecentProjects: indexRecentProjects, CredentialRefresher: newKubeExecRefresher()},
 				)
 			})
 		},
@@ -378,90 +378,6 @@ func newSyncCmd() *cobra.Command {
 	return cmd
 }
 
-// clusterLister is the subset of *client.Client the GC needs: the authoritative
-// live-session set for the current context. Kept as an interface so the orphan
-// selection is unit-testable without a cluster.
-type clusterLister interface {
-	List(ctx context.Context) ([]session.State, error)
-	// Namespace is the client's effective k8s namespace, used to scope the sync GC
-	// to the current namespace ([V28] — a sync stamped with a DIFFERENT namespace
-	// label belongs to a live session this namespace-scoped live set can't see).
-	Namespace() string
-}
-
-// selectOrphanSyncs picks the orphaned syncs to terminate. It is conservative:
-//   - considers only syncs whose transport is down (IsOrphanStatus) OR that are
-//     Paused ([V35] — a paused sync of a session that no longer exists, e.g. a
-//     `kubectl delete sandbox` on a suspended session, is otherwise immortal);
-//   - skips a sync whose session is still live in THIS context's cluster
-//     (running or suspended — it reconnects/resumes); this is what keeps a merely
-//     suspended (still-existing) session's paused syncs protected;
-//   - skips a sync a DIFFERENT kube context created (its sandbox-context label
-//     is set and != currentCtx) — the MF3 cross-context over-reap fix: the live
-//     set only covers the current context, so another context's session would
-//     otherwise look "gone" and be wrongly reaped;
-//   - skips a sync a DIFFERENT namespace created (its sandbox-namespace label is
-//     set and != currentNs) — [V28], the same shape as MF3 but for namespaces:
-//     the live set is namespace-scoped, so a same-context sync in another
-//     namespace would otherwise look "gone".
-//
-// A legacy sync with no sandbox-context / sandbox-namespace label ("" — created
-// before MF3 / [V28]) falls through to the live-set check: it is GC-able by
-// whichever context/namespace is running (so it never becomes immortal),
-// reproducing the pre-fix behavior. It is re-stamped with both labels the next
-// time the connect path (re)creates it, closing the migration window. Returns the
-// mutagen identifiers to terminate and a per-session orphan count for reporting.
-func selectOrphanSyncs(syncs []syncpkg.SyncSession, live map[string]bool, currentCtx, currentNs string) (orphanIDs []string, bySession map[string]int) {
-	bySession = map[string]int{}
-	for _, s := range syncs {
-		if !syncpkg.IsOrphanStatus(s.Status) && !syncpkg.IsPausedStatus(s.Status) {
-			continue // actively syncing / connected → keep
-		}
-		if s.Context != "" && s.Context != currentCtx {
-			continue // another kube context owns it — not ours to judge (MF3)
-		}
-		if s.Namespace != "" && s.Namespace != currentNs {
-			continue // another namespace owns it — not ours to judge ([V28])
-		}
-		if live[s.SessionID] {
-			continue // session still exists (running/suspended) → keep (reconnects/resumes)
-		}
-		orphanIDs = append(orphanIDs, s.Identifier)
-		bySession[s.SessionID]++
-	}
-	return orphanIDs, bySession
-}
-
-// gcResult is the outcome of one orphan-selection pass.
-type gcResult struct {
-	orphanIDs []string
-	bySession map[string]int
-}
-
-// syncGCCore runs one GC selection pass against the current context: list this
-// tool's syncs, confirm the live set from the cluster, and select orphans via
-// selectOrphanSyncs. It does NOT terminate — the caller decides (the command
-// prints/terminates; the best-effort startup sweep terminates silently). It
-// refuses to proceed if the cluster can't be listed: during an outage every pod
-// is unreachable, so every sync would look orphaned and an empty live set would
-// nuke them all.
-func syncGCCore(ctx context.Context, mgr *syncpkg.Manager, c clusterLister) (gcResult, error) {
-	syncs, err := mgr.List(ctx)
-	if err != nil {
-		return gcResult{}, fmt.Errorf("list syncs: %w", err)
-	}
-	states, err := c.List(ctx)
-	if err != nil {
-		return gcResult{}, fmt.Errorf("cannot list cluster sessions; refusing to run (an outage makes every sync look gone): %w", err)
-	}
-	live := make(map[string]bool, len(states))
-	for _, st := range states {
-		live[string(st.ID)] = true
-	}
-	orphanIDs, bySession := selectOrphanSyncs(syncs, live, mgr.CurrentContext(), c.Namespace())
-	return gcResult{orphanIDs: orphanIDs, bySession: bySession}, nil
-}
-
 // startupSyncGC fires the best-effort orphan-sync sweep (SF1) in the background
 // so it never delays the TUI opening, cleaning up syncs left by destroyed/
 // idle-reaped/dev-reset pods at launch instead of waiting for the first in-TUI
@@ -486,12 +402,7 @@ func runBestEffortSyncGC(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	mgr := syncManager()
-	res, err := syncGCCore(ctx, mgr, c)
-	if err != nil || len(res.orphanIDs) == 0 {
-		return
-	}
-	_ = mgr.TerminateByIdentifier(ctx, res.orphanIDs...)
+	_, _ = c.SyncGC(ctx, client.SyncGCOptions{})
 }
 
 // newSyncGCCmd terminates orphaned Mutagen sync sessions: this tool's syncs whose
@@ -518,7 +429,6 @@ func newSyncGCCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
-			mgr := syncManager()
 			// Authoritative live set. Refuse to proceed without it: during a cluster
 			// outage every pod is unreachable, so every sync would look orphaned and
 			// an empty live set would nuke them all.
@@ -526,26 +436,23 @@ func newSyncGCCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("sync gc needs cluster access to confirm live sessions: %w", err)
 			}
-			res, err := syncGCCore(ctx, mgr, c)
+			res, err := c.SyncGC(ctx, client.SyncGCOptions{DryRun: dryRun})
 			if err != nil {
 				return fmt.Errorf("sync gc: %w", err)
 			}
 			out := cmd.OutOrStdout()
-			if len(res.orphanIDs) == 0 {
+			if res.Orphans == 0 {
 				fmt.Fprintln(out, "sync gc: no orphaned sync sessions.")
 				return nil
 			}
-			for sid, n := range res.bySession {
+			for sid, n := range res.BySession {
 				fmt.Fprintf(out, "  %s — %d orphaned sync session(s)\n", sid, n)
 			}
 			if dryRun {
-				fmt.Fprintf(out, "sync gc: %d orphaned sync session(s) across %d gone session(s) (dry-run — re-run without --dry-run to terminate).\n", len(res.orphanIDs), len(res.bySession))
+				fmt.Fprintf(out, "sync gc: %d orphaned sync session(s) across %d gone session(s) (dry-run — re-run without --dry-run to terminate).\n", res.Orphans, len(res.BySession))
 				return nil
 			}
-			if err := mgr.TerminateByIdentifier(ctx, res.orphanIDs...); err != nil {
-				return fmt.Errorf("sync gc: terminate orphans: %w", err)
-			}
-			fmt.Fprintf(out, "sync gc: terminated %d orphaned sync session(s) across %d gone session(s).\n", len(res.orphanIDs), len(res.bySession))
+			fmt.Fprintf(out, "sync gc: terminated %d orphaned sync session(s) across %d gone session(s).\n", res.Orphans, len(res.BySession))
 			return nil
 		},
 	}

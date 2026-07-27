@@ -61,9 +61,21 @@ func (c *Client) SyncTerminate(ctx context.Context, id ID) error {
 	return nil
 }
 
-// SyncStatus returns the raw Mutagen status output for a session's sync sessions.
-func (c *Client) SyncStatus(ctx context.Context, id ID) ([]byte, error) {
-	return c.syncManager().Status(ctx, string(id))
+// SyncStatus reports a session's typed file-sync health: the reduced
+// SyncState, the per-file conflicts and resolution hint behind a
+// SyncConflicted state, and — when the state does not explain itself — the
+// reason in Detail. One `mutagen sync list` exec.
+//
+// SyncConflicted and SyncSafetyHalted both need a human: a safety halt must
+// NEVER be auto-resumed, since resuming one is mutagen's documented
+// CONFIRM-and-propagate action for a mass deletion (its root was emptied,
+// deleted, or changed type) — automating that would risk silently propagating
+// the deletion to the other side. SyncStalled and SyncPaused, by contrast, are
+// self-healable: a transport stall typically clears once the pod is reachable
+// again, and a pause clears on resume (see SyncResume) — both are safe to
+// retry without a human decision.
+func (c *Client) SyncStatus(ctx context.Context, id ID) (SyncStatus, error) {
+	return c.syncManager().StatusReport(ctx, string(id))
 }
 
 // RemoveLocalState removes a session's local artifacts: SSH alias, per-session
@@ -417,4 +429,108 @@ func waitOpencodeReady(ctx context.Context, url string) error {
 		case <-time.After(time.Second):
 		}
 	}
+}
+
+// SyncGCOptions parameterizes SyncGC.
+type SyncGCOptions struct {
+	// DryRun selects orphans and reports them without terminating anything.
+	DryRun bool
+}
+
+// SyncGCResult reports one orphaned-sync sweep.
+type SyncGCResult struct {
+	// Orphans is the number of orphaned mutagen sync sessions selected.
+	Orphans int
+	// BySession counts orphans per gone session id.
+	BySession map[ID]int
+	// Terminated reports whether this sweep actually issued the termination. It
+	// is false for a DryRun AND for a sweep that found nothing (Orphans == 0) —
+	// it says "syncs were terminated", not "this was not a dry run". Branch on
+	// SyncGCOptions.DryRun if what you want is the latter.
+	Terminated bool
+}
+
+// SyncGC terminates this install's orphaned Mutagen sync sessions: syncs whose
+// pod endpoint is gone (the session was destroyed, idle-reaped, dev-reset, or
+// kubectl-deleted) and that would otherwise retry the dead pod forever and pile
+// up in the host Mutagen daemon. It is conservative by construction — see
+// selectOrphanSyncs — and refuses to run at all if the cluster can't be listed,
+// since during an outage every sync would look orphaned and an empty live set
+// would nuke them all.
+func (c *Client) SyncGC(ctx context.Context, opts SyncGCOptions) (SyncGCResult, error) {
+	mgr := c.syncManager()
+	syncs, err := mgr.List(ctx)
+	if err != nil {
+		return SyncGCResult{}, fmt.Errorf("list syncs: %w", err)
+	}
+	states, err := c.List(ctx)
+	if err != nil {
+		return SyncGCResult{}, fmt.Errorf("cannot list cluster sessions; refusing to run (an outage makes every sync look gone): %w", err)
+	}
+	live := make(map[string]bool, len(states))
+	for _, st := range states {
+		live[string(st.ID)] = true
+	}
+	orphanIDs, bySessionRaw := selectOrphanSyncs(syncs, live, mgr.CurrentContext(), c.backend.Namespace())
+
+	bySession := make(map[ID]int, len(bySessionRaw))
+	for sid, n := range bySessionRaw {
+		bySession[ID(sid)] = n
+	}
+	result := SyncGCResult{Orphans: len(orphanIDs), BySession: bySession}
+	if opts.DryRun || len(orphanIDs) == 0 {
+		return result, nil
+	}
+	if err := mgr.TerminateByIdentifier(ctx, orphanIDs...); err != nil {
+		// No "sync gc:" prefix here: that is the CLI COMMAND's name, and a library
+		// error has no business naming the command that happened to call it. The
+		// caller adds its own context (the CLI wraps every SyncGC error in
+		// "sync gc: %w"); prefixing here produced "sync gc: sync gc: …".
+		return result, fmt.Errorf("terminate orphans: %w", err)
+	}
+	result.Terminated = true
+	return result, nil
+}
+
+// selectOrphanSyncs picks the orphaned syncs to terminate. It is conservative:
+//   - considers only syncs whose transport is down (IsOrphanStatus) OR that are
+//     Paused ([V35] — a paused sync of a session that no longer exists, e.g. a
+//     `kubectl delete sandbox` on a suspended session, is otherwise immortal);
+//   - skips a sync whose session is still live in THIS context's cluster
+//     (running or suspended — it reconnects/resumes); this is what keeps a merely
+//     suspended (still-existing) session's paused syncs protected;
+//   - skips a sync a DIFFERENT kube context created (its sandbox-context label
+//     is set and != currentCtx) — the MF3 cross-context over-reap fix: the live
+//     set only covers the current context, so another context's session would
+//     otherwise look "gone" and be wrongly reaped;
+//   - skips a sync a DIFFERENT namespace created (its sandbox-namespace label is
+//     set and != currentNs) — [V28], the same shape as MF3 but for namespaces:
+//     the live set is namespace-scoped, so a same-context sync in another
+//     namespace would otherwise look "gone".
+//
+// A legacy sync with no sandbox-context / sandbox-namespace label ("" — created
+// before MF3 / [V28]) falls through to the live-set check: it is GC-able by
+// whichever context/namespace is running (so it never becomes immortal),
+// reproducing the pre-fix behavior. It is re-stamped with both labels the next
+// time the connect path (re)creates it, closing the migration window. Returns the
+// mutagen identifiers to terminate and a per-session orphan count for reporting.
+func selectOrphanSyncs(syncs []syncpkg.SyncSession, live map[string]bool, currentCtx, currentNs string) (orphanIDs []string, bySession map[string]int) {
+	bySession = map[string]int{}
+	for _, s := range syncs {
+		if !syncpkg.IsOrphanStatus(s.Status) && !syncpkg.IsPausedStatus(s.Status) {
+			continue // actively syncing / connected → keep
+		}
+		if s.Context != "" && s.Context != currentCtx {
+			continue // another kube context owns it — not ours to judge (MF3)
+		}
+		if s.Namespace != "" && s.Namespace != currentNs {
+			continue // another namespace owns it — not ours to judge ([V28])
+		}
+		if live[s.SessionID] {
+			continue // session still exists (running/suspended) → keep (reconnects/resumes)
+		}
+		orphanIDs = append(orphanIDs, s.Identifier)
+		bySession[s.SessionID]++
+	}
+	return orphanIDs, bySession
 }

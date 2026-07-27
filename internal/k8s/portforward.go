@@ -35,8 +35,18 @@ func (h *forwardHandle) Done() <-chan struct{} { return h.done }
 
 // PortForward establishes port-forwards to the session's runner pod. Each
 // PortSpec maps a local port to a remote pod port. If Local is 0, a random
-// free local port is chosen.
-func (b *Backend) PortForward(ctx context.Context, ref session.Ref, ports []session.PortSpec) ([]session.ForwardHandle, error) {
+// free local port is chosen. The returned Forwards is keyed by each spec's
+// Name.
+func (b *Backend) PortForward(ctx context.Context, ref session.Ref, ports []session.PortSpec) (session.Forwards, error) {
+	// Fail-closed validation BEFORE opening anything: an empty/duplicate Name or
+	// a non-positive Remote is a caller bug that would otherwise misroute traffic
+	// (an unnamed or colliding entry can't be looked up unambiguously by name) or
+	// silently port-forward to pod port 0. Nothing has been opened yet, so there
+	// is nothing to close on this path.
+	if err := validatePortSpecs(ports); err != nil {
+		return nil, err
+	}
+
 	sb, err := b.agents.AgentsV1alpha1().Sandboxes(b.namespace).Get(ctx, string(ref.ID), metav1.GetOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("k8s: get Sandbox %s for port-forward: %w", ref.ID, err)
@@ -49,10 +59,11 @@ func (b *Backend) PortForward(ctx context.Context, ref session.Ref, ports []sess
 	// Establish every forward concurrently rather than serially: each forwardPort
 	// blocks up to ~5s waiting for its listener to bind, so the runner-HTTP and
 	// SSH forwards done in parallel collapse two serial ready-waits into one (§5).
-	// Results land in a fixed-index slice so the returned handles keep their
-	// caller-visible order (handles[0]=HTTP, [1]=SSH, …) regardless of which
-	// finishes first. On any failure the derived context cancels the siblings'
-	// establishment and every handle that did come up is closed before returning.
+	// Results land in a fixed-index slice (by request order) so a failure can
+	// close whatever came up regardless of which finished first, then the caller-
+	// visible map is built keyed by Name. On any failure the derived context
+	// cancels the siblings' establishment and every handle that did come up is
+	// closed before returning.
 	handles := make([]session.ForwardHandle, len(ports))
 	g, gctx := errgroup.WithContext(ctx)
 	for i, ps := range ports {
@@ -74,7 +85,32 @@ func (b *Backend) PortForward(ctx context.Context, ref session.Ref, ports []sess
 		}
 		return nil, err
 	}
-	return handles, nil
+	fwds := make(session.Forwards, len(ports))
+	for i, ps := range ports {
+		fwds[ps.Name] = handles[i]
+	}
+	return fwds, nil
+}
+
+// validatePortSpecs enforces the fail-closed PortForward request contract: every
+// spec must carry a non-empty, unique Name (Forwards is keyed by it, so an empty
+// or colliding Name would make a handle unreachable or silently overwrite a
+// sibling) and a positive Remote (0 would port-forward to no pod port at all).
+func validatePortSpecs(ports []session.PortSpec) error {
+	seen := make(map[session.PortName]struct{}, len(ports))
+	for _, ps := range ports {
+		if ps.Name == "" {
+			return fmt.Errorf("k8s: port-forward spec for remote %d has an empty Name", ps.Remote)
+		}
+		if _, dup := seen[ps.Name]; dup {
+			return fmt.Errorf("k8s: port-forward spec Name %q is duplicated", ps.Name)
+		}
+		seen[ps.Name] = struct{}{}
+		if ps.Remote <= 0 {
+			return fmt.Errorf("k8s: port-forward spec %q has a non-positive Remote %d", ps.Name, ps.Remote)
+		}
+	}
+	return nil
 }
 
 func (b *Backend) forwardPort(ctx context.Context, pod *corev1.Pod, ps session.PortSpec) (*forwardHandle, error) {
@@ -402,51 +438,18 @@ func freePort() (int, error) {
 var _ session.ForwardHandle = (*forwardHandle)(nil)
 
 // RunnerPort returns the runner HTTP port constant for callers that need it.
-func RunnerPort() int { return portRunner }
+func RunnerPort() int { return session.RunnerPort }
 
 // SSHPort returns the SSH port constant for callers that need it.
-func SSHPort() int { return portSSH }
+func SSHPort() int { return session.SSHPort }
 
 // OpencodePort returns the `opencode serve` port constant for callers that
 // need it (opencode-server sessions).
-func OpencodePort() int { return portOpencode }
+func OpencodePort() int { return session.OpencodePort }
 
 // CodexPort returns the `codex app-server` websocket port constant for callers
 // that need it (codex-app-server sessions).
-func CodexPort() int { return portCodex }
-
-// ForwardSpecs is a helper that builds the standard port-forward specs for
-// a session: runner HTTP and SSH.
-func ForwardSpecs(httpLocal, sshLocal int) []session.PortSpec {
-	return []session.PortSpec{
-		{Local: httpLocal, Remote: portRunner},
-		{Local: sshLocal, Remote: portSSH},
-	}
-}
-
-// ForwardSpecsRunnerOnly forwards just the runner HTTP port. Used by the
-// dashboard's background status observers (and any read-only attach that never
-// runs mutagen sync), so the SSH forward — needed only for sync — is not opened.
-// Halves the SPDY stream count per backgrounded session at launch.
-func ForwardSpecsRunnerOnly(httpLocal int) []session.PortSpec {
-	return []session.PortSpec{
-		{Local: httpLocal, Remote: portRunner},
-	}
-}
-
-// ForwardSpecsWithOpencode is ForwardSpecs plus the opencode serve port. Used
-// for opencode-server sessions where the local `opencode attach` client needs a
-// forward to port 4096. The returned handles are ordered HTTP, SSH, opencode.
-func ForwardSpecsWithOpencode(httpLocal, sshLocal, opencodeLocal int) []session.PortSpec {
-	return append(ForwardSpecs(httpLocal, sshLocal), session.PortSpec{Local: opencodeLocal, Remote: portOpencode})
-}
-
-// ForwardSpecsWithCodex is ForwardSpecs plus the codex app-server websocket
-// port. Used for codex-app-server sessions where the local codex client needs a
-// forward to port 8788. The returned handles are ordered HTTP, SSH, codex.
-func ForwardSpecsWithCodex(httpLocal, sshLocal, codexLocal int) []session.PortSpec {
-	return append(ForwardSpecs(httpLocal, sshLocal), session.PortSpec{Local: codexLocal, Remote: portCodex})
-}
+func CodexPort() int { return session.CodexPort }
 
 // Ensure the Backend satisfies the session.Backend interface.
 var _ session.Backend = (*Backend)(nil)

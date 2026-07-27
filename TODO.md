@@ -64,13 +64,16 @@
 > tree on that date).
 >
 > **Pick from here — open, unblocked, no decision needed:**
-> - §8 `[P1-1]`+`[P1-6]` — make `client.Backend` externally implementable
->   (two type aliases + a public `ReaperOptions` + named endpoints). Small,
->   self-contained, sdktest-pinned.
-> - §8 `[P1-0a]` — `tea.Exec` terminal handover for mid-session credential
->   refresh. Precedent already in-tree.
-> - §8 `[P2-7]` — state or finish the `tui/theme` concurrency contract.
 > - §7c table-driven CLI smoke; §10 `[T4]`/`[T9]` observability tails.
+> - §0 the `probeErrDetail` coverage gap (small, self-contained).
+>
+> **2026-07-27 SDK-usability batch — CLOSED.** `[P1-1]`+`[P1-6]`+`[P1-7]`
+> (named endpoints, `client.Backend` externally implementable), `[P1-0a]`
+> (`tea.Exec` credential handover), `[P2-7]`+`[P2-8]` (`tui/theme` contract),
+> and the client-level capability gaps (titles + typed `SyncStatus` + `SyncGC`)
+> all landed; detail in the done log, judgment calls in §0's
+> "Decisions taken without sign-off". Everything §8 still holds is the panel
+> workstream below.
 >
 > **The one large workstream — plan it whole before writing code:**
 > - §8 **the panel workstream** (`[P2-2]`/`[P2-3]`/`[P2-4]` merged with §2e
@@ -107,10 +110,171 @@
 
 ## 0) Inbox — human notes, needs triage
 
+### Decisions taken without sign-off (agent run, 2026-07-27)
+
+Judgment calls made while burning down the §8 SDK-usability batch, recorded so
+they can be verified or reversed. Each says what was chosen, what was rejected,
+why, and where to change it.
+
+- **[D0] This session could not commit — no git, no Go.** The pod's `.git`
+  points at a host path (`fatal: not a git repository`), so every change is
+  UNCOMMITTED in the worktree; the maintainer commits. Worse, the runner image
+  ships **no Go toolchain at all** — `go`/`gofmt` are absent from `$PATH` and
+  from disk, so `just check` cannot run in-pod as CLAUDE.md's "before you call
+  it done" assumes. Worked around by downloading go1.26.2 to `/tmp/goroot`
+  (egress to go.dev + proxy.golang.org is open) and running the gates from
+  there. `just` is absent too, so each `check` recipe was run by hand; the `gen`
+  gate's `git diff` was substituted with an md5 before/after comparison. The
+  `-race` half of `scripts/verify.sh` needed a C toolchain that also wasn't
+  present — `apt-get install gcc libc6-dev` fixed that and the gate then passed
+  twice, clean. **Every runnable gate passed**; only `golangci-lint` is
+  unrun, which is the same skip you get on the Nix host.
+  *Change if you disagree:* add Go, `just`, gcc + libc6-dev to
+  `runner/Dockerfile`, or state in CLAUDE.md that verification is host-side only.
+  **Self-inflicted side effect, already repaired — check it anyway:** warming
+  the cache with `go mod download all` (not plain `go mod download`) rewrote
+  **both** `go.sum` files with the full module graph — 324→208 lines in the root
+  and 319→195 in `sdktest/` once repaired. `cd sdktest && go mod tidy -diff` (the
+  `sdk-conformance` gate) caught it. Both modules were re-tidied and re-verified
+  under the default, `e2e`, and `integration` tags. If `git diff` still shows
+  `go.sum` churn unrelated to this batch's actual dependency set, that is the
+  residue and it is safe to discard.
+- **[D3] Named forwards are a `map`, not an ordered slice** (`[P1-1]`/`[P1-6]`).
+  `Backend.PortForward` now returns `Forwards = map[PortName]ForwardHandle`.
+  Rejected the smaller change — keep `[]ForwardHandle` and document
+  "handles[i] corresponds to ports[i]" — because it only MOVES the hazard: a
+  third-party backend that returns handles in a different order still compiles
+  and still misroutes opencode traffic to sshd, which is the exact bug the item
+  exists to prevent. A name-keyed map makes the misroute impossible to express,
+  and turns "handle absent" into an explicit error instead of a silent
+  wrong-port dial. *Change if you disagree:* `internal/session/types.go`
+  (`Forwards`) + `client/client.go` (`Backend.PortForward`).
+- **[D4] One variadic `Forward(names...)` replaces the four `ForwardSpecs*`
+  helpers** (folds in `[P1-7]`). `k8s.ForwardSpecs`/`…RunnerOnly`/
+  `…WithOpencode`/`…WithCodex` are deleted, not re-exported: every in-tree call
+  site passed `0` for every local port, so the local-port parameters they
+  existed to carry were dead weight, and re-exporting four combinators would
+  freeze a combinatorial surface as public API. A consumer needing a fixed local
+  port or a non-standard endpoint builds a `PortSpec` directly — the standard
+  remote ports are exported (`client.RunnerPort` etc.) for exactly that.
+  *Change if you disagree:* `internal/session/types.go` (`Forward`).
+- **[D5] `ReaperOptions` moved to `internal/session`, aliased in both
+  directions.** The struct holds no k8s types, so it moved wholesale and
+  `k8s.ReaperOptions` is now `= session.ReaperOptions`. Rejected declaring a
+  separate public `client.ReaperOptions` with a conversion: a parallel struct is
+  two things to keep in sync and the conversion would be pure ceremony. Go
+  aliases are type identity, matching how the rest of the public model is
+  re-exported. *Change if you disagree:* `internal/session/backend.go` +
+  `internal/k8s/reaper.go`.
+- **[D6] One defect found reviewing the delegated diff and fixed, not accepted.**
+  The post-publish "PortSSH missing" path used a bare `handles.Close()` where
+  every sibling error path uses `s.closeHandles()` — that closes the forwards
+  but leaves the published runner client in place, so `Runner()` would hand back
+  a client over dead forwards. Only reachable from a third-party `Backend` that
+  returns an incomplete `Forwards`, i.e. exactly the case this change enables.
+  Fixed at `client/session.go` (the `sshPort, ok := handles.LocalPort(PortSSH)`
+  branch).
+- **[D7] Titles: promote the local index, do NOT add a title field on the
+  runner.** The item offered both shapes; the decisive argument is that a title
+  must be settable for a **suspended** session, whose runner is not running —
+  and parking a session is exactly when you rename it. A runner-side title is
+  unreachable precisely when you need it, and `sandbox rename` works offline
+  today. Secondary: `client.SessionMatch` already exposes `Title` on the READ
+  side (`client/resolve.go`), so promoting the write side is the consistent and
+  much smaller change, where a runner field needs a route + protocol bump +
+  wire break. **Cost accepted:** titles are per-install, not cross-machine —
+  the session ID is the identity that travels. That trade is written into the
+  `client.Title` doc comment so nobody rediscovers it at integration time.
+  *Change if you disagree:* `client/title.go`.
+- **[D8] The raw-bytes `Client.SyncStatus` is deleted, not kept alongside.** It
+  returned `[]byte` of mutagen CLI output and had **zero callers repo-wide** —
+  dead public API. Replaced outright; no `SyncStatusRaw` retained. Rejected
+  keeping a raw accessor because nothing consumed it and publishing one is a
+  promise to keep mutagen's output shape stable forever. *Change if you
+  disagree:* `client/sync.go`.
+- **[D9] `Conflict.Alpha`/`Beta` renamed to `Local`/`Remote`.** alpha/beta is
+  *mutagen's* vocabulary. Principle 3's spirit — don't make a consumer learn
+  the implementation — applies to field names, not just k8s types. The doc
+  comment still records the mutagen mapping for anyone reading its output.
+  *Change if you disagree:* `internal/sync/status.go`.
+- **[D10] Promoted the orphan-GC POLICY, not just the classification.** The item
+  says the classification is stuck in `internal/sync`, but `IsOrphanStatus` was
+  only half the problem: the policy using it — four separately hard-won guards
+  (MF3 cross-context, `[V28]` cross-namespace, `[V35]` paused-orphan, and the
+  refuse-when-the-cluster-is-unlistable guard) — lived in `internal/cli`, where
+  no importer could reach it. Exposing the predicate alone would have invited
+  every consumer to re-derive the policy and get one of the four wrong. Promoted
+  as `Client.SyncGC`, comments intact; the CLI copies are deleted.
+  *Change if you disagree:* `client/sync.go` (`SyncGC`, `selectOrphanSyncs`).
+- **[D11] Added a handover budget to `[P1-0a]` that the design did not ask
+  for.** Found reviewing the delegated diff: the in-flight latch stops
+  *concurrent* handovers but not *sequential* ones, so a plugin that exits ZERO
+  while leaving the credential bad (logged into the wrong cluster/role) loops
+  forever — handover → re-seed → same failure → handover — taking the terminal
+  over each time and making the dashboard unusable. A cancelled login was
+  already safe (non-zero exit ⇒ surface, don't re-seed); this covers the other
+  half. Cap is 2 consecutive handovers, re-armed only by an **observed cluster
+  success**, never by a successful handover ("the plugin ran" is not evidence
+  the credential works — counting it re-opens the loop). Pinned by two tests
+  that I verified fail when the guard is removed. *Change if you disagree:*
+  `maxCredRefreshAttempts`, `internal/tui/dashboard/credrefresh.go`.
+- **[D12] `[P1-0a]` ships with NO sdktest pin, and that is the finding, not an
+  omission.** The whole feature lands in `internal/tui/dashboard`, which is not
+  a public package, so there is no seam an external module can name. Per the
+  rule ("if the pin can't be written, the seam isn't real"), the honest reading
+  is that the dashboard's extension points are not yet real public seams — which
+  is precisely what THE PANEL WORKSTREAM exists to fix, and is out of scope
+  here. When `RunOptions` is publicized, `CredentialRefresher` is one of the
+  fields that gets pinned. *Change if you disagree:* fold a `RunOptions` pin
+  into the panel workstream's acceptance list.
+- **[D13] Dropped the `"sync gc:"` prefix from `Client.SyncGC`'s error.** The CLI
+  wraps every `SyncGC` error in `"sync gc: %w"`, so the promoted code's own
+  prefix produced `"sync gc: sync gc: terminate orphans: …"`. Fixed at the
+  library end rather than the CLI end: `sync gc` is the name of a *cobra
+  command*, and a library error has no business naming the command that
+  happened to call it. Caller adds context, callee describes what it was doing.
+  *Change if you disagree:* `client/sync.go` (`SyncGC`'s terminate path).
+- **[D1] `tui/theme`: state the contract, do not finish the hardening**
+  (`[P2-7]`/`[P2-8]`). Chose documenting the single-goroutine + one-palette-
+  per-process contract in the package doc and on `ApplyTheme`/`Register`/
+  `Cycle`/`OnChange`/`Epoch`/`Active` and on the token block. Rejected mirroring
+  `tui/kit`'s `atomic.Pointer`: the ~40 tokens are exported **vars**, so making
+  them race-free means turning every one into an accessor func — a break of the
+  entire public token vocabulary and every render site — and it would still not
+  fix `[P2-8]`, because two consumers sharing one global palette clobber each
+  other race-free-ly. Synchronization buys memory-model correctness for a
+  configuration that stays semantically wrong. Verified the contract is honored
+  in-tree first (every `ApplyTheme`/`Cycle` call site is package `init()` or a
+  Bubble Tea `Update`; no `tea.Cmd` closure or `go func()` reads a token), so
+  this documents reality rather than papering over a live race.
+  *Change if you disagree:* `tui/theme/theme.go` package doc + `ApplyTheme`.
+- **[D2] No sdktest pin exists for [D1], by construction.** A documented
+  contract has no signature to break. Instead pinned the **escape hatch** the
+  contract points at — `theme.ByName` / `theme.DefaultForBackground` returning
+  an inert `Theme` a consumer can derive styles from *without* calling
+  `ApplyTheme` — plus `Register`/`Cycle`/`Active`, in
+  `sdktest/tui_surface_test.go`. That is the only mechanically checkable part of
+  the decision; if the escape hatch goes, the documented workaround goes with
+  it. *Change if you disagree:* `sdktest/tui_surface_test.go` theme block.
+
 Raw maintainer notes. Triage = either promote into a numbered section with
 pointers, or answer inline and archive. (Resolved investigations moved to the
 done log.)
 
+- [ ] **`internal/sync`'s `probeErrDetail` has an untested defensive branch,
+  found 2026-07-27 while promoting it out of `internal/cli`.** The helper's
+  fallback for an error whose message carries no `"]: "` argv marker (it returns
+  the message as-is, or `"sync status unavailable"` when empty) is unreachable
+  through the real `ExecRunner`, which always wraps failures as
+  `mutagen [<argv>]: <err>: <msg>`. The old `internal/cli` unit test called it
+  directly and covered that case; the ported end-to-end test
+  (`TestSyncProberSurfacesUnderlyingProbeErrorReason`, driving a fake `mutagen`
+  on `PATH`) covers the other four and structurally cannot reach this one.
+  `internal/sync/status_test.go` has **no** coverage of `StatusReport`'s error
+  branch at all. **Fix direction:** a direct unit test of `probeErrDetail` in
+  `internal/sync` (it is unexported but the test is in-package), plus a
+  `StatusReport` error case. Small; it is coverage that existed and was lost in
+  the move, which is the kind of thing worth not leaving implicit.
 - [ ] **The idle reaper never fires while the dashboard is running: detach
   (ctrl+]) leaves the pane WebSocket attached forever.** Diagnosed live
   2026-07-27 on `claude-pane-df80e6-031396fb` — agent's last real work was
@@ -1300,45 +1464,19 @@ loopback, but any bypass transport must make it transport-conditional **in the
 same change**. Do not start any of it without the maintainer taking up the
 bypass option.
 
-- [ ] **[P1-1] + [P1-6] Make `client.Backend` externally implementable — one
-  change, not two.** *(Justification revised 2026-07-27: not transport — that's
-  handled by the kubeconfig — but **consumer testability**. An external consumer
-  building on this SDK cannot fake the cluster to test their own app; we use
-  exactly this seam for ours, `client/orchestration_test.go:126,145`.)*
-  Three types block it, not the one the docs claim:
-  `session.PortSpec` + `session.ForwardHandle` (`client/client.go:109`) and
-  `k8s.ReaperOptions` (`:114`). The first two are plain declarations
-  (`internal/session/types.go:507-514`) and only need adding to the alias block
-  at `client/client.go:31-50`; `ReaperOptions` needs a real public type.
-  **But do not export alone:** `Connect` indexes handles *positionally*
-  (`handles[0]` `client/session.go:417`, `handles[2]` `:548`) against an
-  ordering documented only on the internal helper
-  (`internal/k8s/portforward.go:438`). An external implementer would compile
-  fine and misroute opencode traffic to the sshd port. Change the seam to
-  **named** endpoints in the same change, then correct the undercounted caveat
-  at `client/client.go:84-87` and `sdktest/surface_test.go:15-18`, and add an
-  sdktest pin where an *external* type satisfies `client.Backend` (that pin is
-  the proof the principle holds). Folds in **[P1-7]**: export the standard
-  forward specs too, since public paths already call the internal helpers
-  (`client/client.go:865`, `client/session.go:400-404`).
+- [x] **[P1-1] + [P1-6] Make `client.Backend` externally implementable — done
+  2026-07-27** (done log): named `PortName`/`Forward`/`Forwards` replace
+  positional handle indexing everywhere (`client`, `internal/k8s`,
+  `internal/cli/trace.go`); `ReaperOptions` moved to `internal/session` and is
+  re-exported; `sdktest/backend_test.go` pins a full external `fakeBackend` plus
+  a behavioral name-routing test. Folds in `[P1-7]`.
 
-- [ ] **[P1-0a] Hand the terminal back for a mid-session credential refresh.**
-  Found while validating the Teleport flow. Interactive kubeconfig `exec:`
-  plugins (`tsh kube credentials`) are fine at *startup* — client-go runs them
-  lazily at first request, and the CLI finishes its cluster work before
-  `tea.NewProgram` (`internal/tui/dashboard/app.go:376,392`), so the prompt gets
-  a real terminal. The gap is **expiry while the dashboard is running**: it
-  makes live cluster calls for its whole lifetime (`List`/`Watch`/`Suspend`/
-  `Resume`/`Destroy`, `internal/tui/dashboard/actions.go:24-30`, plus background
-  observer port-forwards and forward re-resolve), and a `tsh` cert TTL is easily
-  shorter than a left-open session — so the plugin prompts underneath an
-  alt-screen raw-mode program and the auth silently fails or corrupts the
-  display. **The pattern already exists:** subscription login hands the terminal
-  to a child via `tea.Exec`
-  (`internal/tui/dashboard/account_picker.go:301-310`, wired `app.go:477`).
-  Apply the same handover to a credential-refresh failure. Small, self-contained,
-  and it makes `tsh` a first-class path rather than one needing tbot to work
-  around.
+- [x] **[P1-0a] Hand the terminal back for a mid-session credential refresh.**
+  Mirrored the subscription-login `tea.Exec` handover: `dashboard.CredentialRefresher`
+  seam (`internal/tui/dashboard/credrefresh.go`) + `internal/cli/credrefresh.go`'s
+  kubeconfig-`exec:`-plugin impl, wired via `RunOptions.CredentialRefresher` at
+  all three dashboard entry points. Detail in
+  `docs/archive/done-log-2026-07.md` ("Mid-session credential-plugin handover").
 
 - [ ] **THE PANEL WORKSTREAM — `[P2-2]`+`[P2-3]`+`[P2-4]` merged with §2e
   `[L5]`/A/F. The big one.**
@@ -1401,23 +1539,13 @@ bypass option.
   **Plan the whole cluster before writing code** — this is the one item in the
   file where a piecemeal start is actively harmful.
 
-- [ ] **[P2-7] + [P2-8] State (or finish) the `tui/theme` concurrency
-  contract.** `tui/kit` moved its palette behind an `atomic.Pointer`
-  specifically so "multiple tea.Programs sharing this process never race"
-  (`tui/kit/palette.go:4,35`) — but its upstream `theme.ApplyTheme`
-  (`tui/theme/theme.go:199`) writes ~40 plain package globals (`:107-158`) plus
-  `activeTheme`/`changeHooks`/`themeEpoch` (`:161,166,184`) unsynchronized, and
-  is what calls `kit.SetANSITable`/`SetComponentColors` — so kit's hardening is
-  defeated one layer up. The single-goroutine contract lives only in a comment
-  on an unexported var, while the package doc advertises "reusable across TUI
-  applications" (`theme.go:7-11`). Also `OnChange`'s unsubscribe writes
-  `changeHooks[idx] = nil` (`:176`) unguarded. Either state the contract in the
-  package doc and on `ApplyTheme`/`Register`/`OnChange`, or finish the
-  hardening to match `kit` — the current split is the thing that's wrong.
-  Same edit should document `[P2-8]`: one palette per *process* is a real
-  customization ceiling (two differently-themed consumers can't coexist) and
-  should be a stated decision, not a surprise found at integration time.
-  Independent of every other item here.
+- [x] **[P2-7] + [P2-8] `tui/theme` concurrency contract — STATED, done
+  2026-07-27** (done log): single-goroutine + one-palette-per-process contract
+  written into the package doc and onto `ApplyTheme`/`Register`/`Cycle`/
+  `OnChange`/`Epoch`/`Active` and the token block, with the "derive from an
+  inert `Theme` instead of applying one" escape hatch for embedders; hardening
+  deliberately NOT done (rationale + reversal pointer in §0 `[D1]`/`[D2]`).
+  Verified no in-tree consumer reads a token off the tea goroutine.
 
 - [ ] **[L6] Decide: public pane-viewer widget? (2026-07-20).** *(2026-07-27:
   the principle-2 decision answers this — a pane viewer IS in scope; fold this
@@ -1433,9 +1561,7 @@ bypass option.
 - [x] **Narrow public `client.Backend` interface — done 2026-07-11** (done
   log): 12-method interface (exactly the orchestration call sites),
   `WithBackend` takes it, concrete backend pinned by assertion + sdktest.
-  NOT yet externally implementable — `EnsureReaper` names
-  `internal/k8s.ReaperOptions`; export/replace that type when a third-party
-  backend is real (documented in the interface comment).
+  Externally implementable as of 2026-07-27 — see `[P1-1]`+`[P1-6]` below.
 - [x] **De-Claude coordinated break — done 2026-07-12** (done log):
   `ApprovalPolicy` enum (wire strings unchanged), `Connection.External`/
   `ExternalCreds`, `State.AgentSessionID` (+ index Load migration),
@@ -1551,14 +1677,15 @@ bypass option.
   `tui/transcript`, and `cmd/chatdemo` on 2026-07-20 with the custom claude
   renderer they served (see §2/§3); the surviving public `tui/` surface is
   kit / list / picker / anim / theme / composer / chrome / terminal.)*
-- [ ] **Remaining client-level capability gaps** (overlaps
-  `docs/public-api-importability-plan.md`, which is TUI/auth focused):
-  session titles/rename are `internal/index`-only
-  (`internal/cli/rename.go:24`); `Client.SyncStatus` returns raw bytes with
-  the conflict/orphan classification stuck in `internal/sync`
-  (`internal/cli/sync_support.go:90`). Both need API design (index
-  promotion vs a title field on the runner; a typed SyncStatus) before
-  dispatch.
+- [x] **Remaining client-level capability gaps — done 2026-07-27** (done log):
+  titles promoted to `client.Title` + `Client.Title/SetTitle/SetAutoTitle`
+  (local index, works offline — rationale for index-over-runner in §0 `[D7]`);
+  `Client.SyncStatus` now returns a typed `SyncStatus` (state + conflicts +
+  hint + reason) with the raw-bytes version deleted as dead API (`[D8]`),
+  `Conflict.Alpha/Beta` renamed `Local/Remote` (`[D9]`), and the orphan-GC
+  *policy* — not just the predicate — promoted as `Client.SyncGC` (`[D10]`).
+  `internal/cli` rewired to consume all three, its private copies deleted;
+  sdktest pins the surface plus an offline rename round-trip.
 
 ## 9) Unbuilt features
 

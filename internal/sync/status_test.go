@@ -1,6 +1,11 @@
 package sync
 
-import "testing"
+import (
+	"context"
+	"io"
+	"strings"
+	"testing"
+)
 
 func TestParseStagingPhase(t *testing.T) {
 	cases := []struct {
@@ -83,22 +88,22 @@ func TestConflictsFrom(t *testing.T) {
 		{
 			name: "both-sides-same-path",
 			json: `[{"status":"Watching for changes","conflicts":[{"alphaChanges":[{"path":"a.go"}],"betaChanges":[{"path":"a.go"}]}]}]`,
-			want: []Conflict{{Path: "a.go", Alpha: true, Beta: true}},
+			want: []Conflict{{Path: "a.go", Local: true, Remote: true}},
 		},
 		{
 			name: "local-only",
 			json: `[{"conflicts":[{"alphaChanges":[{"path":"b.go"}]}]}]`,
-			want: []Conflict{{Path: "b.go", Alpha: true}},
+			want: []Conflict{{Path: "b.go", Local: true}},
 		},
 		{
 			name: "pod-only",
 			json: `[{"conflicts":[{"betaChanges":[{"path":"c.go"}]}]}]`,
-			want: []Conflict{{Path: "c.go", Beta: true}},
+			want: []Conflict{{Path: "c.go", Remote: true}},
 		},
 		{
 			name: "two-distinct-paths-order-preserved",
 			json: `[{"conflicts":[{"alphaChanges":[{"path":"z.go"}],"betaChanges":[{"path":"z.go"}]},{"betaChanges":[{"path":"a.go"}]}]}]`,
-			want: []Conflict{{Path: "z.go", Alpha: true, Beta: true}, {Path: "a.go", Beta: true}},
+			want: []Conflict{{Path: "z.go", Local: true, Remote: true}, {Path: "a.go", Remote: true}},
 		},
 		{
 			// Defensive: an unrecognized/older shape (root-only, no changes) still
@@ -133,9 +138,9 @@ func TestConflictDescribe(t *testing.T) {
 		c    Conflict
 		want string
 	}{
-		{Conflict{Path: "a.go", Alpha: true, Beta: true}, "a.go (both sides changed it)"},
-		{Conflict{Path: "a.go", Alpha: true}, "a.go (changed locally)"},
-		{Conflict{Path: "a.go", Beta: true}, "a.go (changed on the pod)"},
+		{Conflict{Path: "a.go", Local: true, Remote: true}, "a.go (both sides changed it)"},
+		{Conflict{Path: "a.go", Local: true}, "a.go (changed locally)"},
+		{Conflict{Path: "a.go", Remote: true}, "a.go (changed on the pod)"},
 		{Conflict{Path: "a.go"}, "a.go"},
 	}
 	for _, c := range cases {
@@ -143,4 +148,101 @@ func TestConflictDescribe(t *testing.T) {
 			t.Errorf("Describe(%+v) = %q, want %q", c.c, got, c.want)
 		}
 	}
+}
+
+// jsonRunner is a fake Runner that always answers `sync list ... --template
+// {{json .}}` with a canned JSON payload (or an error), for StatusReport tests.
+type jsonRunner struct {
+	out string
+	err error
+}
+
+func (j *jsonRunner) Output(_ context.Context, _ io.Reader, _ ...string) ([]byte, error) {
+	if j.err != nil {
+		return nil, j.err
+	}
+	return []byte(j.out), nil
+}
+
+func TestStatusReport(t *testing.T) {
+	t.Run("no sync session — definite unknown, not a failure to answer", func(t *testing.T) {
+		m := New(&jsonRunner{out: `[]`})
+		got, err := m.StatusReport(context.Background(), "sess-1")
+		if err != nil {
+			t.Fatalf("StatusReport: %v", err)
+		}
+		if got.State != SyncUnknown {
+			t.Errorf("State = %v, want SyncUnknown", got.State)
+		}
+		if got.Detail == "" {
+			t.Error("Detail must explain the unknown state, not be blank")
+		}
+		if got.Hint != "" {
+			t.Errorf("Hint = %q, want empty for a non-conflicted state", got.Hint)
+		}
+	})
+
+	t.Run("synced — no detail, no hint, no conflicts", func(t *testing.T) {
+		m := New(&jsonRunner{out: `[{"status":"Watching for changes"}]`})
+		got, err := m.StatusReport(context.Background(), "sess-1")
+		if err != nil {
+			t.Fatalf("StatusReport: %v", err)
+		}
+		if got.State != SyncSynced {
+			t.Errorf("State = %v, want SyncSynced", got.State)
+		}
+		if got.Detail != "" {
+			t.Errorf("Detail = %q, want empty for a self-explanatory synced state", got.Detail)
+		}
+		if got.Hint != "" {
+			t.Errorf("Hint = %q, want empty", got.Hint)
+		}
+		if len(got.Conflicts) != 0 {
+			t.Errorf("Conflicts = %+v, want none", got.Conflicts)
+		}
+	})
+
+	t.Run("conflicted — hint set and ALL conflicts present, uncapped", func(t *testing.T) {
+		// 6 distinct conflicting paths — more than any presentation cap (5) so this
+		// proves StatusReport itself does not cap; that's the caller's job.
+		out := `[{"status":"Watching for changes","conflicts":[
+			{"alphaChanges":[{"path":"a.go"}]},
+			{"alphaChanges":[{"path":"b.go"}]},
+			{"alphaChanges":[{"path":"c.go"}]},
+			{"alphaChanges":[{"path":"d.go"}]},
+			{"alphaChanges":[{"path":"e.go"}]},
+			{"alphaChanges":[{"path":"f.go"}]}
+		]}]`
+		m := New(&jsonRunner{out: out})
+		got, err := m.StatusReport(context.Background(), "sess-1")
+		if err != nil {
+			t.Fatalf("StatusReport: %v", err)
+		}
+		if got.State != SyncConflicted {
+			t.Errorf("State = %v, want SyncConflicted", got.State)
+		}
+		if got.Hint != ConflictResolutionHint {
+			t.Errorf("Hint = %q, want %q", got.Hint, ConflictResolutionHint)
+		}
+		if len(got.Conflicts) != 6 {
+			t.Fatalf("Conflicts = %d, want all 6 (uncapped)", len(got.Conflicts))
+		}
+	})
+
+	t.Run("exec error — Detail shaped AND error returned", func(t *testing.T) {
+		m := New(&jsonRunner{err: &fakeError{msg: "mutagen [sync list ...]: exit status 1: daemon not running"}})
+		got, err := m.StatusReport(context.Background(), "sess-1")
+		if err == nil {
+			t.Fatal("expected the exec error to be returned")
+		}
+		if got.State != SyncUnknown {
+			t.Errorf("State = %v, want SyncUnknown on error", got.State)
+		}
+		if got.Detail == "" {
+			t.Error("Detail must be shaped from the error, not blank")
+		}
+		if strings.Contains(got.Detail, "mutagen [sync list") {
+			t.Errorf("Detail = %q, argv echo should have been stripped", got.Detail)
+		}
+	})
 }

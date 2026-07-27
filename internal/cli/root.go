@@ -77,15 +77,16 @@ func NewRoot() *cobra.Command {
 			creator := newDashboardCreator(c, "", "")
 			return afterTUI(func() error {
 				return dashboard.Run(newClientLifecycleBackend(c, backend), connector, creator, dashboard.RunOptions{
-					TitleStore:        indexTitleStore{},
-					SnapshotStore:     indexSnapshotStore{},
-					ObserverConnector: newDashboardObserverConnector(c, ""),
-					SyncProber:        dashboardSyncProber(),
-					SyncReaper:        dashboardSyncReaper(),
-					IdleTimeout:       defaultReaperIdleTimeout,
-					AccountStore:      newDashboardAccountStore(),
-					WorktreeOps:       newWorktreeOps(c),
-					RecentProjects:    indexRecentProjects,
+					TitleStore:          indexTitleStore{},
+					SnapshotStore:       indexSnapshotStore{},
+					ObserverConnector:   newDashboardObserverConnector(c, ""),
+					SyncProber:          dashboardSyncProber(c),
+					SyncReaper:          dashboardSyncReaper(),
+					IdleTimeout:         defaultReaperIdleTimeout,
+					AccountStore:        newDashboardAccountStore(),
+					WorktreeOps:         newWorktreeOps(c),
+					RecentProjects:      indexRecentProjects,
+					CredentialRefresher: newKubeExecRefresher(),
 				})
 			})
 		},

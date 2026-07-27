@@ -2,9 +2,6 @@ package client
 
 import (
 	"context"
-
-	"github.com/cullenmcdermott/sandbox/internal/k8s"
-	"github.com/cullenmcdermott/sandbox/internal/session"
 )
 
 // offlineBackend keeps Client structurally valid while making accidental
@@ -28,7 +25,7 @@ func (offlineBackend) Destroy(context.Context, Ref) error               { return
 func (offlineBackend) StartWithProgress(context.Context, Ref, func(string)) error {
 	return ErrOffline
 }
-func (offlineBackend) PortForward(context.Context, Ref, []session.PortSpec) ([]session.ForwardHandle, error) {
+func (offlineBackend) PortForward(context.Context, Ref, []PortSpec) (Forwards, error) {
 	return nil, ErrOffline
 }
 func (offlineBackend) RunnerToken(context.Context, Ref) (string, error) {
@@ -37,7 +34,7 @@ func (offlineBackend) RunnerToken(context.Context, Ref) (string, error) {
 func (offlineBackend) OpencodePassword(context.Context, Ref) (string, error) {
 	return "", ErrOffline
 }
-func (offlineBackend) EnsureReaper(context.Context, Ref, k8s.ReaperOptions) error {
+func (offlineBackend) EnsureReaper(context.Context, Ref, ReaperOptions) error {
 	return ErrOffline
 }
 

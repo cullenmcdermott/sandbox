@@ -109,8 +109,8 @@ func (h *fakeForwardHandle) Close() error          { h.closed = true; return nil
 func (h *fakeForwardHandle) Done() <-chan struct{} { return h.done }
 
 // TestSyncForwardAlive pins the SSH-forward liveness readout a library supervisor
-// uses to detect (and heal) a dead sync transport. handles[1] is the SSH forward
-// by construction (k8s.ForwardSpecs order); an Observer publishes only handles[0].
+// uses to detect (and heal) a dead sync transport. The SSH forward is looked up
+// by name (PortSSH); an Observer connection simply has no PortSSH entry.
 func TestSyncForwardAlive(t *testing.T) {
 	// Never connected: no handles → false.
 	s := &Session{}
@@ -118,16 +118,16 @@ func TestSyncForwardAlive(t *testing.T) {
 		t.Error("a never-connected session must report the sync forward not alive")
 	}
 
-	// Observer connection: runner HTTP forward only (len 1, no SSH) → false.
+	// Observer connection: runner HTTP forward only (no SSH entry) → false.
 	httpH := newFakeForwardHandle(1)
-	s.handles = []session.ForwardHandle{httpH}
+	s.handles = Forwards{PortRunner: httpH}
 	if s.SyncForwardAlive() {
 		t.Error("an observer connection (runner-only forward) has no SSH forward → not alive")
 	}
 
-	// Full connection: [runner HTTP, SSH]; the SSH forward's done is open → alive.
+	// Full connection: runner HTTP + SSH; the SSH forward's done is open → alive.
 	sshH := newFakeForwardHandle(2)
-	s.handles = []session.ForwardHandle{httpH, sshH}
+	s.handles = Forwards{PortRunner: httpH, PortSSH: sshH}
 	if !s.SyncForwardAlive() {
 		t.Error("a full connection with a live SSH forward must report alive")
 	}
@@ -155,7 +155,7 @@ func TestConnectCloseRaceDoesNotResurrect(t *testing.T) {
 	be := newFakeBackend()
 	be.statusState = State{ID: "claude-sdk-x", Status: session.StatusRunning, ProjectPath: "/w"}
 	handle := newFakeForwardHandle(12345)
-	be.handles = []session.ForwardHandle{handle}
+	be.handles = Forwards{PortRunner: handle}
 
 	entered := make(chan struct{})
 	release := make(chan struct{})
@@ -261,7 +261,7 @@ func TestConnectTokenErrorTearsDownForward(t *testing.T) {
 	handle := newFakeForwardHandle(12345)
 	be := newFakeBackend()
 	be.statusState = State{ID: "claude-sdk-x", Status: session.StatusRunning, ProjectPath: "/w"}
-	be.handles = []session.ForwardHandle{handle}
+	be.handles = Forwards{PortRunner: handle}
 	be.tokenErr = errors.New("no token")
 	c, _, _ := fakeClient(t, be)
 

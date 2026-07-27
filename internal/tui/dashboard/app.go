@@ -159,6 +159,30 @@ type App struct {
 	// Secret bytes never cross this interface.
 	accountStore AccountStore
 
+	// credRefresher hands the terminal to an interactive kubeconfig `exec:`
+	// credential plugin when a live cluster call fails mid-session because the
+	// credential expired (credrefresh.go, TODO §8 P1-0a). nil disables the
+	// handover entirely: such a failure just surfaces as it does today.
+	credRefresher CredentialRefresher
+
+	// credRefreshing latches while a credential-refresh terminal handover is in
+	// flight, so an error storm (List + Watch + an action all failing at once
+	// from the same expired credential) spawns at most one concurrent handover.
+	credRefreshing bool
+
+	// credRefreshAttempts counts consecutive handovers since the last observed
+	// cluster success, capped at maxCredRefreshAttempts. credRefreshing alone
+	// only stops CONCURRENT handovers; this is what stops SEQUENTIAL ones from
+	// thrashing the terminal when the plugin keeps exiting zero without actually
+	// fixing the credential.
+	credRefreshAttempts int
+
+	// credRefreshErr is the error from the last credential-refresh handover
+	// attempt (nil on success). Surfaced via the same connectErr detail-pane
+	// path as a connector failure; kept separately too so tests can assert on
+	// the handover's own outcome independent of where it's rendered.
+	credRefreshErr error
+
 	// workDir is the dashboard process's canonical working directory — the
 	// directory picker's leading row and the pre-picker default (T10). ""
 	// when the cwd could not be determined (the picker then leads with recents).
@@ -329,6 +353,14 @@ type RunOptions struct {
 	// impl (internal/cli) reads the local session index; the dashboard never
 	// imports internal/index. nil means the picker offers only cwd + free-text.
 	RecentProjects func() []string
+
+	// CredentialRefresher hands the terminal to an interactive kubeconfig
+	// `exec:` credential plugin (e.g. `tsh kube credentials`) when a live
+	// cluster call fails mid-session because the credential expired
+	// (credrefresh.go, TODO §8 P1-0a). The concrete impl (internal/cli) reads
+	// the active kubeconfig's exec plugin config; nil disables the handover
+	// entirely, so such a failure just surfaces as it does today.
+	CredentialRefresher CredentialRefresher
 }
 
 // applyOpts threads RunOptions into the dashboard model.
@@ -365,6 +397,9 @@ func (a *App) applyOpts(opts []RunOptions) {
 	}
 	if opts[0].RecentProjects != nil {
 		a.recentProjects = opts[0].RecentProjects
+	}
+	if opts[0].CredentialRefresher != nil {
+		a.credRefresher = opts[0].CredentialRefresher
 	}
 }
 
@@ -414,7 +449,42 @@ func (a *App) Init() tea.Cmd {
 
 // Update routes messages to the active screen. Global keys (quit) are
 // intercepted before delegation.
+//
+// Ahead of that normal dispatch it also runs the credential-refresh check
+// (credrefresh.go, TODO §8 P1-0a): if a CredentialRefresher is injected, no
+// handover is already in flight, and msg carries an error the refresher
+// recognizes as an expired credential, it latches credRefreshing and hands the
+// terminal over via tea.Exec. That command is BATCHED with — not substituted
+// for — msg's normal dispatch, so the message still reaches its usual handler
+// and the error still surfaces exactly as it does today if the handover itself
+// fails.
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var refreshCmd tea.Cmd
+	if err, outcome := credErrorFrom(msg); outcome {
+		switch {
+		case err == nil:
+			// A cluster call just succeeded, so the credential works: re-arm the
+			// handover budget spent on whatever was failing before.
+			a.credRefreshAttempts = 0
+		case a.credRefresher != nil && !a.credRefreshing &&
+			a.credRefreshAttempts < maxCredRefreshAttempts &&
+			a.credRefresher.NeedsRefresh(err):
+			a.credRefreshing = true
+			a.credRefreshAttempts++
+			refreshCmd = a.startCredRefresh()
+		}
+	}
+	model, cmd := a.dispatch(msg)
+	if refreshCmd != nil {
+		return model, tea.Batch(refreshCmd, cmd)
+	}
+	return model, cmd
+}
+
+// dispatch is Update's original per-message routing, split out so Update can
+// run the credential-refresh check ahead of it without threading an extra
+// return value through every case in this switch.
+func (a *App) dispatch(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		a.width = msg.Width
@@ -500,6 +570,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case leaderTimeoutMsg:
 		return a.handleLeaderTimeout(msg)
+
+	case credRefreshDoneMsg:
+		return a.handleCredRefreshDone(msg)
 	}
 	// Keep the dashboard's notion of the attached session current so background
 	// attention toasts never fire for the session the user is already viewing.
