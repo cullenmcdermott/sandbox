@@ -47,7 +47,11 @@ func completeSessionArg(cmd *cobra.Command, args []string, toComplete string) ([
 // completeSessions is the shared body: resolve, then format. Every failure mode
 // returns "no suggestions" rather than an error — see the package note.
 func completeSessions(cmd *cobra.Command, toComplete string) ([]string, cobra.ShellCompDirective) {
-	c, err := newClient()
+	// Offline construction is what makes the "no apiserver round-trip on every
+	// TAB" property above real. newClient would resolve a kubeconfig first and
+	// fail without one — and because every failure here is swallowed into "no
+	// suggestions", that failure was invisible: TAB simply went dead.
+	c, err := newOfflineClient()
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}

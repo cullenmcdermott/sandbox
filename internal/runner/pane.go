@@ -89,6 +89,15 @@ func (c *Client) AttachPane(ctx context.Context, ref session.Ref, cols, rows int
 	if c.token != "" {
 		hdr.Set("Authorization", "Bearer "+c.token)
 	}
+	// [T4] Carry the connect-flow correlation id into the pane attach, the same
+	// header every other runner request already sets. Without it a connect id
+	// from client/trace.go dead-ended at the HTTP routes: the pane — the primary
+	// backend's whole interaction — could not be followed from it. Our dialer can
+	// set handshake headers, so no query-param fallback is needed here (the
+	// runner accepts one for clients that cannot).
+	if c.traceID != "" {
+		hdr.Set("X-Sandbox-Trace-Id", c.traceID)
+	}
 	conn, resp, err := websocket.DefaultDialer.DialContext(ctx, u, hdr)
 	if err != nil {
 		// A pre-upgrade rejection (401/404/409) arrives as ErrBadHandshake with

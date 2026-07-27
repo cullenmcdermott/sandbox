@@ -82,6 +82,13 @@ them as anchors, not exact addresses.
 ## Observability
 
 - **C10 [HIGH] Minimal observability: no structured logging or metrics in the runner.**
+  **LOGGING HALF DONE 2026-07-27** ([T2], done log): `runner/src/log.ts` —
+  level/ts/component/sessionId, `child()` for traceId, text by default and ndjson
+  under `SANDBOX_LOG_FORMAT=json`, `SANDBOX_LOG_LEVEL` gating; all 32 `console.*`
+  sites migrated with `no-console` as the ESLint guard; full HTTP request logging.
+  No pino/winston dependency was added — the logger is ~50 lines and dependency-free,
+  matching the repo's existing no-framework posture. **Metrics remain open**, tracked
+  as [T5] in `TODO.md`. Original entry follows as provenance:
   Only `console.log`/`console.error`. No structured (JSON, session/turn/event/latency
   fields) logging, no metrics. Suggested: a small structured logger (pino/winston) keyed
   by session ID / turn ID / event type / latency; `--debug`/`LOG_LEVEL` on the CLI.

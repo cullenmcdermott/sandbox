@@ -354,6 +354,66 @@ cd runner && npm install --ignore-scripts && ./node_modules/.bin/tsc --noEmit
 | `sandbox completion <shell>` | Generate a shell completion script (bash/zsh/fish/powershell). Session-taking commands then complete session ids from the local index, annotated with title and branch — offline, so TAB never waits on the cluster |
 | `sandbox destroy <id>` | Delete the session and its PVC (irreversible) |
 
+## Injecting your own config into sessions (Go SDK)
+
+The config sync above carries *your* Claude Code setup into a session. If you
+are running sandbox **for a team** — standing up sessions from your own tooling
+rather than from your laptop — you often need to seed something the user did not
+bring: a tool's endpoint URL, a PAT the agent's `git push` will need, a
+house-style `CLAUDE.md`. Three `client.CreateOptions` fields cover that, so you
+never need a bespoke field per tool:
+
+```go
+sess, err := c.Create(ctx, client.CreateOptions{
+    ProjectPath: "/home/me/src/api",
+    Backend:     client.BackendClaudePane,
+
+    // Plain env — visible to the agent. Never put secrets here.
+    ExtraEnv: map[string]string{"ACME_API_URL": "https://acme.internal"},
+
+    // Secret env — rides the per-session Secret, reaches the pod only as a
+    // SecretKeyRef, and is redacted from the event log and audit trail.
+    ExtraSecretEnv: map[string][]byte{"GITLAB_TOKEN": pat},
+
+    // Files, written before any agent starts.
+    BootstrapFiles: []client.BootstrapFile{
+        {Path: "~/.config/acme/config.toml", Content: cfg, Mode: 0o600},
+    },
+})
+```
+
+**`ExtraSecretEnv` is deliberately visible to the agent.** That is the point —
+a PAT the agent cannot read is a PAT its `git push` cannot use. It is protected
+*in transit and at rest* (Secret-backed, never an inline pod-spec value, never
+serialized, redacted from logs), not from the agent itself. Anything the agent
+must not see does not belong in a session.
+
+**`BootstrapFiles` land outside your repo, by design.** Paths must be absolute
+or `~/`-relative and resolve inside the pod's `HOME` or `/session/state` — both
+disjoint from the synced workspace. Writing into the workspace would sync the
+file back to the user's laptop and into their git status, so Create rejects it
+rather than doing something surprising. Files are written **write-if-changed**:
+a pod restart will not clobber an edit the agent made in place unless you
+rotated the seed.
+
+Everything is validated fail-closed at `Create`, before any cluster call, with a
+typed sentinel per failure — reserved or malformed env names
+(`ErrReservedEnvName`, `ErrInvalidExtraEnvName`), a name in both env maps
+(`ErrDuplicateExtraEnv`), paths that escape the allowed roots
+(`ErrBootstrapPathOutsideRoots`), and the summed-size caps that keep both
+surfaces under the ~1 MiB Secret limit (`ErrExtraSecretEnvTooLarge`,
+`ErrBootstrapFilesTooLarge`). All three fields are create-time-only material and
+apply to every backend; they reconcile on a re-create, and dropped variables use
+Optional `SecretKeyRef`s so removing one cannot brick a resume.
+
+If the tool you are injecting talks to an endpoint outside the cluster, the
+session's egress allowlist has to permit it too — see
+`k8s/networkpolicy-egress-fqdn.yaml.example`, which carries a worked example and
+the caveat that opening egress for a tool also opens its token's exfiltration
+path. Mechanics and the design rationale are in
+[`docs/architecture.md`](docs/architecture.md) and
+[`docs/design-pod-bootstrap-and-tool-injection.md`](docs/design-pod-bootstrap-and-tool-injection.md).
+
 ## Testing
 
 `just check` is **the** gate — CI runs exactly the same recipe

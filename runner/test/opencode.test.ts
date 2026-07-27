@@ -43,8 +43,16 @@ const PROC_TCP = `  sl  local_address rem_address   st tx_queue rx_queue tr tm->
 `;
 
 test('counts only ESTABLISHED connections on the target port', () => {
-  const reader = (p: string) => (p === '/proc/net/tcp' ? PROC_TCP : (() => { throw new Error('no tcp6'); })());
-  assert.equal(establishedConnections(4096, reader as unknown as typeof import('node:fs').readFileSync), 1);
+  const reader = (p: string) =>
+    p === '/proc/net/tcp'
+      ? PROC_TCP
+      : (() => {
+          throw new Error('no tcp6');
+        })();
+  assert.equal(
+    establishedConnections(4096, reader as unknown as typeof import('node:fs').readFileSync),
+    1,
+  );
 });
 
 test('external client count subtracts runner-owned opencode sockets', () => {
@@ -57,13 +65,47 @@ test('external client count subtracts runner-owned opencode sockets', () => {
    1: 0100007F:C001 0100007F:1000 01 0 0 0 0 0 111
    2: 0100007F:1000 0100007F:C002 01 0 0 0 0 0 333
 `;
-  const one = (p: string) => (p === '/proc/net/tcp' ? observerOnly : (() => { throw new Error('no tcp6'); })());
-  const two = (p: string) => (p === '/proc/net/tcp' ? observerPlusAttach : (() => { throw new Error('no tcp6'); })());
+  const one = (p: string) =>
+    p === '/proc/net/tcp'
+      ? observerOnly
+      : (() => {
+          throw new Error('no tcp6');
+        })();
+  const two = (p: string) =>
+    p === '/proc/net/tcp'
+      ? observerPlusAttach
+      : (() => {
+          throw new Error('no tcp6');
+        })();
   const readdir = () => ['3'] as string[];
   const readlink = () => 'socket:[111]';
-  assert.equal(runnerOwnedConnections(4096, one as unknown as typeof import('node:fs').readFileSync, readdir as unknown as typeof import('node:fs').readdirSync, readlink as unknown as typeof import('node:fs').readlinkSync), 1);
-  assert.equal(externalClientConnections(4096, one as unknown as typeof import('node:fs').readFileSync, readdir as unknown as typeof import('node:fs').readdirSync, readlink as unknown as typeof import('node:fs').readlinkSync), 0);
-  assert.equal(externalClientConnections(4096, two as unknown as typeof import('node:fs').readFileSync, readdir as unknown as typeof import('node:fs').readdirSync, readlink as unknown as typeof import('node:fs').readlinkSync), 1);
+  assert.equal(
+    runnerOwnedConnections(
+      4096,
+      one as unknown as typeof import('node:fs').readFileSync,
+      readdir as unknown as typeof import('node:fs').readdirSync,
+      readlink as unknown as typeof import('node:fs').readlinkSync,
+    ),
+    1,
+  );
+  assert.equal(
+    externalClientConnections(
+      4096,
+      one as unknown as typeof import('node:fs').readFileSync,
+      readdir as unknown as typeof import('node:fs').readdirSync,
+      readlink as unknown as typeof import('node:fs').readlinkSync,
+    ),
+    0,
+  );
+  assert.equal(
+    externalClientConnections(
+      4096,
+      two as unknown as typeof import('node:fs').readFileSync,
+      readdir as unknown as typeof import('node:fs').readdirSync,
+      readlink as unknown as typeof import('node:fs').readlinkSync,
+    ),
+    1,
+  );
 });
 
 test('runner-owned socket scan tolerates disappearing fds', () => {
@@ -71,29 +113,69 @@ test('runner-owned socket scan tolerates disappearing fds', () => {
    0: 0100007F:1000 0100007F:C001 01 0 0 0 0 0 222
    1: 0100007F:C001 0100007F:1000 01 0 0 0 0 0 111
 `;
-  const reader = (p: string) => (p === '/proc/net/tcp' ? proc : (() => { throw new Error('no tcp6'); })());
+  const reader = (p: string) =>
+    p === '/proc/net/tcp'
+      ? proc
+      : (() => {
+          throw new Error('no tcp6');
+        })();
   const readdir = () => ['3', '4'] as string[];
   const readlink = (p: string) => {
     if (p.endsWith('/3')) throw new Error('ENOENT');
     return 'socket:[111]';
   };
-  assert.equal(runnerOwnedConnections(4096, reader as unknown as typeof import('node:fs').readFileSync, readdir as unknown as typeof import('node:fs').readdirSync, readlink as unknown as typeof import('node:fs').readlinkSync), 1);
-  assert.equal(externalClientConnections(4096, reader as unknown as typeof import('node:fs').readFileSync, readdir as unknown as typeof import('node:fs').readdirSync, readlink as unknown as typeof import('node:fs').readlinkSync), 0);
+  assert.equal(
+    runnerOwnedConnections(
+      4096,
+      reader as unknown as typeof import('node:fs').readFileSync,
+      readdir as unknown as typeof import('node:fs').readdirSync,
+      readlink as unknown as typeof import('node:fs').readlinkSync,
+    ),
+    1,
+  );
+  assert.equal(
+    externalClientConnections(
+      4096,
+      reader as unknown as typeof import('node:fs').readFileSync,
+      readdir as unknown as typeof import('node:fs').readdirSync,
+      readlink as unknown as typeof import('node:fs').readlinkSync,
+    ),
+    0,
+  );
 });
 
 test('returns 0 when the port has only a LISTEN socket', () => {
   const listenOnly = `  sl  local_address rem_address   st\n   0: 00000000:1000 00000000:0000 0A 0\n`;
-  const reader = (p: string) => (p === '/proc/net/tcp' ? listenOnly : (() => { throw new Error('no tcp6'); })());
-  assert.equal(establishedConnections(4096, reader as unknown as typeof import('node:fs').readFileSync), 0);
+  const reader = (p: string) =>
+    p === '/proc/net/tcp'
+      ? listenOnly
+      : (() => {
+          throw new Error('no tcp6');
+        })();
+  assert.equal(
+    establishedConnections(4096, reader as unknown as typeof import('node:fs').readFileSync),
+    0,
+  );
 });
 
 test('missing proc files yield 0, not a throw', () => {
-  const reader = () => { throw new Error('ENOENT'); };
-  assert.equal(establishedConnections(4096, reader as unknown as unknown as typeof import('node:fs').readFileSync), 0);
+  const reader = () => {
+    throw new Error('ENOENT');
+  };
+  assert.equal(
+    establishedConnections(
+      4096,
+      reader as unknown as unknown as typeof import('node:fs').readFileSync,
+    ),
+    0,
+  );
 });
 
 test('buildOpencodeConfig enables only providers present in env', () => {
-  const cfg = buildOpencodeConfig({ ANTHROPIC_API_KEY: 'x', OPENCODE_DEFAULT_MODEL: 'kimi' } as NodeJS.ProcessEnv);
+  const cfg = buildOpencodeConfig({
+    ANTHROPIC_API_KEY: 'x',
+    OPENCODE_DEFAULT_MODEL: 'kimi',
+  } as NodeJS.ProcessEnv);
   assert.ok((cfg.provider as Record<string, unknown>).anthropic);
   assert.equal((cfg.provider as Record<string, unknown>).openai, undefined);
   assert.equal(cfg.model, 'kimi');
@@ -117,13 +199,33 @@ test('buildOpencodeConfig enables exactly the single injected provider', () => {
   }
 });
 
+// The workspace guide only reaches an opencode agent if the generated config
+// points at it — opencode has no CLAUDE.md-style implicit pickup for a file in
+// our pod-local config dir, so an unregistered guide is a guide nobody reads.
+test('buildOpencodeConfig registers the workspace guide in instructions', () => {
+  const cfg = buildOpencodeConfig({
+    OPENCODE_CONFIG: '/session/state/opencode/opencode.json',
+  } as NodeJS.ProcessEnv);
+  assert.deepEqual(cfg.instructions, ['/session/state/opencode/AGENTS.md']);
+});
+
+// Off-pod (no OPENCODE_CONFIG) there is no config dir to hang the guide on; the
+// key must be absent rather than present-and-empty or pointing at a bad path.
+test('buildOpencodeConfig omits instructions when there is no config path', () => {
+  const cfg = buildOpencodeConfig({} as NodeJS.ProcessEnv);
+  assert.equal(cfg.instructions, undefined);
+});
+
 // REGRESSION (O3): the supervisor must FAIL CLOSED rather than bind an
 // unauthenticated agent-with-shell to 0.0.0.0. Without OPENCODE_SERVER_PASSWORD
 // it must throw before spawning; with it, it spawns `opencode serve` bound to
 // the configured port. The previous code spawned unconditionally.
 test('refuses to start opencode serve without a server password', () => {
   let spawned = 0;
-  const spy = (() => { spawned++; return fakeChild(); }) as unknown as typeof import('node:child_process').spawn;
+  const spy = (() => {
+    spawned++;
+    return fakeChild();
+  }) as unknown as typeof import('node:child_process').spawn;
   assert.throws(
     () => startOpencodeSupervisor({ OPENCODE_PORT: '4096' } as NodeJS.ProcessEnv, spy),
     /OPENCODE_SERVER_PASSWORD is unset/,
@@ -134,9 +236,17 @@ test('refuses to start opencode serve without a server password', () => {
 test('starts opencode serve when a server password is present', async () => {
   const calls: Array<{ cmd: string; args: string[] }> = [];
   let child: FakeChild | undefined;
-  const spy = ((cmd: string, args: string[]) => { calls.push({ cmd, args }); child = fakeChild(); return child; }) as unknown as SpawnFn;
+  const spy = ((cmd: string, args: string[]) => {
+    calls.push({ cmd, args });
+    child = fakeChild();
+    return child;
+  }) as unknown as SpawnFn;
   const sup = startOpencodeSupervisor(
-    { OPENCODE_PORT: '4096', OPENCODE_SERVER_PASSWORD: 's3cret', ANTHROPIC_API_KEY: 'k' } as NodeJS.ProcessEnv,
+    {
+      OPENCODE_PORT: '4096',
+      OPENCODE_SERVER_PASSWORD: 's3cret',
+      ANTHROPIC_API_KEY: 'k',
+    } as NodeJS.ProcessEnv,
     spy,
   );
   try {
@@ -156,11 +266,17 @@ test('starts opencode serve when a server password is present', async () => {
 test('stop() SIGTERMs the child and resolves only after it exits', async () => {
   const child = fakeChild();
   const sup = startOpencodeSupervisor(
-    { OPENCODE_PORT: '4096', OPENCODE_SERVER_PASSWORD: 's3cret', ANTHROPIC_API_KEY: 'k' } as NodeJS.ProcessEnv,
+    {
+      OPENCODE_PORT: '4096',
+      OPENCODE_SERVER_PASSWORD: 's3cret',
+      ANTHROPIC_API_KEY: 'k',
+    } as NodeJS.ProcessEnv,
     (() => child) as unknown as SpawnFn,
   );
   let resolved = false;
-  const p = sup.stop().then(() => { resolved = true; });
+  const p = sup.stop().then(() => {
+    resolved = true;
+  });
   assert.deepEqual(child.signals, ['SIGTERM'], 'stop() must SIGTERM the child');
   await Promise.resolve(); // flush microtasks
   assert.equal(resolved, false, 'stop() must not resolve before the child exits');
@@ -176,9 +292,17 @@ test('stop() SIGTERMs the child and resolves only after it exits', async () => {
 test('a spawn error does not crash the supervisor and schedules exactly one respawn', async () => {
   mock.timers.enable({ apis: ['setTimeout'] });
   const children: FakeChild[] = [];
-  const spy = (() => { const c = fakeChild(); children.push(c); return c; }) as unknown as SpawnFn;
+  const spy = (() => {
+    const c = fakeChild();
+    children.push(c);
+    return c;
+  }) as unknown as SpawnFn;
   const sup = startOpencodeSupervisor(
-    { OPENCODE_PORT: '4096', OPENCODE_SERVER_PASSWORD: 's3cret', ANTHROPIC_API_KEY: 'k' } as NodeJS.ProcessEnv,
+    {
+      OPENCODE_PORT: '4096',
+      OPENCODE_SERVER_PASSWORD: 's3cret',
+      ANTHROPIC_API_KEY: 'k',
+    } as NodeJS.ProcessEnv,
     spy,
   );
   try {
@@ -205,7 +329,11 @@ test('stop() escalates to SIGKILL when the child ignores SIGTERM', async () => {
   try {
     const child = fakeChild();
     const sup = startOpencodeSupervisor(
-      { OPENCODE_PORT: '4096', OPENCODE_SERVER_PASSWORD: 's3cret', ANTHROPIC_API_KEY: 'k' } as NodeJS.ProcessEnv,
+      {
+        OPENCODE_PORT: '4096',
+        OPENCODE_SERVER_PASSWORD: 's3cret',
+        ANTHROPIC_API_KEY: 'k',
+      } as NodeJS.ProcessEnv,
       (() => child) as unknown as SpawnFn,
     );
     const p = sup.stop();

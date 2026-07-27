@@ -77,7 +77,11 @@ class FakeSocket implements PaneSocket {
   }
 }
 
-function makeSpawner(): { spawn: PaneSpawner; spawns: PaneSpawnOptions[]; ptys: FakePty[] } {
+function makeSpawner(): {
+  spawn: PaneSpawner;
+  spawns: PaneSpawnOptions[];
+  ptys: FakePty[];
+} {
   const spawns: PaneSpawnOptions[] = [];
   const ptys: FakePty[] = [];
   const spawn: PaneSpawner = (opts) => {
@@ -89,7 +93,11 @@ function makeSpawner(): { spawn: PaneSpawner; spawns: PaneSpawnOptions[]; ptys: 
   return { spawn, spawns, ptys };
 }
 
-function makePersistence(initial = ''): { get: () => string; set: (u: string) => void; sets: string[] } {
+function makePersistence(initial = ''): {
+  get: () => string;
+  set: (u: string) => void;
+  sets: string[];
+} {
   let v = initial;
   const sets: string[] = [];
   return {
@@ -101,6 +109,21 @@ function makePersistence(initial = ''): { get: () => string; set: (u: string) =>
     sets,
   };
 }
+
+/**
+ * The "this session has no settings.json" read seam — what every supervisor test
+ * that is not specifically about permission modes wants.
+ *
+ * It must be passed EXPLICITLY: `readSettings` defaults to the real
+ * `readFileSync` (correct for production), and `env: {}` makes
+ * paneDefaultPermissionMode fall back to the shared CLAUDE_CONFIG_DIR constant —
+ * which inside a claude-pane session pod is a live config dir whose settings.json
+ * really does say `bypassPermissions`. Left implicit, the argv assertions here
+ * were answered by the machine running the suite rather than by the fixture.
+ */
+const noSettings = (): string => {
+  throw new Error('no settings.json (hermetic test seam)');
+};
 
 // --- scrollback ring ------------------------------------------------------
 
@@ -178,8 +201,14 @@ test('paneDefaultPermissionMode returns "" for missing file / key / unknown mode
     '',
   );
   // Missing key.
-  assert.equal(paneDefaultPermissionMode({}, () => '{}'), '');
-  assert.equal(paneDefaultPermissionMode({}, () => JSON.stringify({ permissions: {} })), '');
+  assert.equal(
+    paneDefaultPermissionMode({}, () => '{}'),
+    '',
+  );
+  assert.equal(
+    paneDefaultPermissionMode({}, () => JSON.stringify({ permissions: {} })),
+    '',
+  );
   // Unrecognized / non-string mode.
   assert.equal(
     paneDefaultPermissionMode({}, () => JSON.stringify({ permissions: { defaultMode: 'yolo' } })),
@@ -190,7 +219,10 @@ test('paneDefaultPermissionMode returns "" for missing file / key / unknown mode
     '',
   );
   // Malformed JSON.
-  assert.equal(paneDefaultPermissionMode({}, () => 'not json'), '');
+  assert.equal(
+    paneDefaultPermissionMode({}, () => 'not json'),
+    '',
+  );
 });
 
 test('supervisor re-applies the settings permission mode on the resume spawn', () => {
@@ -216,7 +248,13 @@ test('supervisor re-applies the settings permission mode on the resume spawn', (
 // repaint (scrollback is a byte tail, not a screen model). A fresh spawn does not.
 test('reattach to a running child forces a repaint; a fresh spawn does not', () => {
   const { spawn, ptys } = makeSpawner();
-  const sup = createClaudePaneSupervisor({ cwd: '/w', env: {}, persistence: makePersistence('u'), spawn });
+  const sup = createClaudePaneSupervisor({
+    cwd: '/w',
+    env: {},
+    persistence: makePersistence('u'),
+    spawn,
+    readSettings: noSettings,
+  });
 
   // Fresh spawn: the child paints itself, so attach performs no repaint jiggle.
   sup.attach(new FakeSocket());
@@ -240,6 +278,7 @@ test('onOutput fires for every PTY chunk, before the ring/socket forward', () =>
   const { spawn, ptys } = makeSpawner();
   let taps = 0;
   const sup = createClaudePaneSupervisor({
+    readSettings: noSettings,
     cwd: '/w',
     env: {},
     persistence: makePersistence('u'),
@@ -257,6 +296,7 @@ test('supervisor generates + persists a uuid on first spawn, resumes it after ex
   const persistence = makePersistence('');
   let n = 0;
   const sup = createClaudePaneSupervisor({
+    readSettings: noSettings,
     cwd: '/work/proj',
     env: {},
     persistence,
@@ -286,6 +326,7 @@ test('supervisor with a pre-persisted uuid resumes without generating', () => {
   const { spawn, spawns } = makeSpawner();
   let generated = 0;
   const sup = createClaudePaneSupervisor({
+    readSettings: noSettings,
     cwd: '/w',
     env: {},
     persistence: makePersistence('existing-uuid'),
@@ -343,10 +384,15 @@ test('buildClaudePaneEnv is a strict allowlist and leaks no runner secrets', () 
     assert.equal(k in out, false, `${k} must not leak into the pane child`);
   }
   // Exactly the allowlisted keys, nothing more.
-  assert.deepEqual(
-    Object.keys(out).sort(),
-    ['CLAUDE_CONFIG_DIR', 'COLORTERM', 'HOME', 'IS_SANDBOX', 'LANG', 'PATH', 'TERM'],
-  );
+  assert.deepEqual(Object.keys(out).sort(), [
+    'CLAUDE_CONFIG_DIR',
+    'COLORTERM',
+    'HOME',
+    'IS_SANDBOX',
+    'LANG',
+    'PATH',
+    'TERM',
+  ]);
 });
 
 test('buildClaudePaneEnv defaults CLAUDE_CONFIG_DIR to the PVC config dir', () => {
@@ -383,7 +429,11 @@ test('buildClaudePaneEnv admits marker-named ExtraEnv/ExtraSecretEnv but still w
   assert.equal('RUNNER_TOKEN' in out, false, 'RUNNER_TOKEN must never reach the pane child');
   assert.equal('CLAUDE_CREDENTIALS_JSON' in out, false, 'pane credential material stays withheld');
   assert.equal('SANDBOX_EXTRA_ENV_NAMES' in out, false, 'the marker var is not passed through');
-  assert.equal('SANDBOX_EXTRA_SECRET_ENV_NAMES' in out, false, 'the marker var is not passed through');
+  assert.equal(
+    'SANDBOX_EXTRA_SECRET_ENV_NAMES' in out,
+    false,
+    'the marker var is not passed through',
+  );
 });
 
 // --- single-attacher preemption -------------------------------------------
@@ -391,6 +441,7 @@ test('buildClaudePaneEnv admits marker-named ExtraEnv/ExtraSecretEnv but still w
 test('a new attach preempts the previous socket and reroutes output', () => {
   const { spawn, ptys } = makeSpawner();
   const sup = createClaudePaneSupervisor({
+    readSettings: noSettings,
     cwd: '/w',
     env: {},
     persistence: makePersistence('u'), // pre-persisted → single resume child
@@ -409,7 +460,10 @@ test('a new attach preempts the previous socket and reroutes output', () => {
   // Second attach preempts `a` with close 4001 and replays scrollback to `b`.
   const b = new FakeSocket();
   sup.attach(b);
-  assert.deepEqual(a.closed, { code: 4001, reason: 'replaced by a new pane attach' });
+  assert.deepEqual(a.closed, {
+    code: 4001,
+    reason: 'replaced by a new pane attach',
+  });
   assert.equal(sup.current(), b);
   assert.equal(b.sent.length, 1, 'scrollback replayed as one binary frame');
   assert.equal(b.sent[0].toString(), 'hello');
@@ -427,7 +481,13 @@ test('a new attach preempts the previous socket and reroutes output', () => {
 
 test('a socket buffered over the cap is evicted 4003 on the next send', () => {
   const { spawn, ptys } = makeSpawner();
-  const sup = createClaudePaneSupervisor({ cwd: '/w', env: {}, persistence: makePersistence('u'), spawn });
+  const sup = createClaudePaneSupervisor({
+    cwd: '/w',
+    env: {},
+    persistence: makePersistence('u'),
+    spawn,
+    readSettings: noSettings,
+  });
   const s = new FakeSocket();
   sup.attach(s);
 
@@ -462,7 +522,13 @@ test('a socket buffered over the cap is evicted 4003 on the next send', () => {
 
 test('a socket buffered at or under the cap is not evicted', () => {
   const { spawn, ptys } = makeSpawner();
-  const sup = createClaudePaneSupervisor({ cwd: '/w', env: {}, persistence: makePersistence('u'), spawn });
+  const sup = createClaudePaneSupervisor({
+    cwd: '/w',
+    env: {},
+    persistence: makePersistence('u'),
+    spawn,
+    readSettings: noSettings,
+  });
   const s = new FakeSocket();
   sup.attach(s);
 
@@ -475,7 +541,13 @@ test('a socket buffered at or under the cap is not evicted', () => {
 
 test('write and resize forward to the running child', () => {
   const { spawn, ptys } = makeSpawner();
-  const sup = createClaudePaneSupervisor({ cwd: '/w', env: {}, persistence: makePersistence('u'), spawn });
+  const sup = createClaudePaneSupervisor({
+    cwd: '/w',
+    env: {},
+    persistence: makePersistence('u'),
+    spawn,
+    readSettings: noSettings,
+  });
   sup.attach(new FakeSocket());
 
   sup.write(Buffer.from('keystrokes'));
@@ -487,7 +559,13 @@ test('write and resize forward to the running child', () => {
 
 test('detachAll drops the socket with close 1000 but leaves the child running', () => {
   const { spawn } = makeSpawner();
-  const sup = createClaudePaneSupervisor({ cwd: '/w', env: {}, persistence: makePersistence('u'), spawn });
+  const sup = createClaudePaneSupervisor({
+    cwd: '/w',
+    env: {},
+    persistence: makePersistence('u'),
+    spawn,
+    readSettings: noSettings,
+  });
   const s = new FakeSocket();
   sup.attach(s);
   sup.detachAll();
@@ -500,6 +578,7 @@ test('child exit records the outcome, closes the socket 4002, and notifies onExi
   const { spawn, ptys } = makeSpawner();
   const exits: PaneExitInfo[] = [];
   const sup = createClaudePaneSupervisor({
+    readSettings: noSettings,
     cwd: '/w',
     env: {},
     persistence: makePersistence('u'),
@@ -524,6 +603,7 @@ test('stop kills the child and refuses further attaches', () => {
   const { spawn, ptys } = makeSpawner();
   let stopped = 0;
   const sup = createClaudePaneSupervisor({
+    readSettings: noSettings,
     cwd: '/w',
     env: {},
     persistence: makePersistence('u'),

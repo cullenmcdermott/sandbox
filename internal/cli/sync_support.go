@@ -242,7 +242,13 @@ func (reaperAdapter) ListOrphans(ctx context.Context) ([]dashboard.OrphanSync, e
 	currentNs := effectiveNamespace()
 	var orphans []dashboard.OrphanSync
 	for _, s := range sessions {
-		if !syncpkg.IsOrphanStatus(s.Status) {
+		// [V35] Paused syncs are listed too, tagged so the dashboard's grace logic
+		// can apply the right rule: a transport-down sync is judged on whether a pod
+		// is up, a paused one on whether the session exists at all. Before this the
+		// dashboard could not tell a suspended session's legitimately-paused syncs
+		// from a deleted session's immortal ones, so it listed neither.
+		paused := syncpkg.IsPausedStatus(s.Status)
+		if !syncpkg.IsOrphanStatus(s.Status) && !paused {
 			continue
 		}
 		if s.Context != "" && s.Context != currentCtx {
@@ -254,6 +260,7 @@ func (reaperAdapter) ListOrphans(ctx context.Context) ([]dashboard.OrphanSync, e
 		orphans = append(orphans, dashboard.OrphanSync{
 			Identifier: s.Identifier,
 			SessionID:  session.ID(s.SessionID),
+			Paused:     paused,
 		})
 	}
 	return orphans, nil

@@ -214,6 +214,78 @@ test('statusline maps usage/rate-limit/model/title with duplicate suppression', 
   assert.deepEqual(started[1].payload, { model: 'claude-sonnet-5', cwd: '' });
 });
 
+// Compaction was invisible before PreCompact was provisioned: Claude Code
+// auto-compacts by default, so a long pane session's ctx% would simply drop
+// with nothing in the feed saying why.
+test('PreCompact emits a context.compacted marker carrying trigger + pre-compaction size', () => {
+  const { deps, emitted, statuses } = fakeDeps();
+  const core = createPaneObserverCore(deps);
+
+  core.handleHook({ hook_event_name: 'UserPromptSubmit', prompt: 'long conversation' });
+  core.handleStatusline({
+    model: { id: 'claude-opus-4-8' },
+    context_window: {
+      context_window_size: 200000,
+      current_usage: {
+        input_tokens: 1000,
+        output_tokens: 500,
+        cache_read_input_tokens: 120000,
+        cache_creation_input_tokens: 60000,
+      },
+    },
+  });
+  core.handleHook({ hook_event_name: 'PreCompact', trigger: 'auto', custom_instructions: '' });
+
+  const compacted = emitted.filter((e) => e.type === 'context.compacted');
+  assert.equal(compacted.length, 1);
+  // preTokens is the ctx% NUMERATOR (input + cache-read + cache-write), so the
+  // feed's "N→" matches the number the user was watching — not output_tokens,
+  // which does not occupy the window.
+  assert.deepEqual(compacted[0].payload, { trigger: 'auto', preTokens: 181000 });
+  // postTokens must be ABSENT: PreCompact fires BEFORE compaction and carries
+  // no counts, and the Go reducer treats a 0 as "leave the gauge alone". A
+  // fabricated 0 here would be indistinguishable but is not what we mean.
+  assert.ok(!('postTokens' in compacted[0].payload));
+  // A marker only: the turn stays open and the session stays busy.
+  assert.equal(compacted[0].turnId, 't-1');
+  assert.deepEqual(statuses, ['busy']);
+});
+
+test('PreCompact defaults trigger and reports 0 when no statusline has been seen', () => {
+  const { deps, emitted } = fakeDeps();
+  const core = createPaneObserverCore(deps);
+
+  // No turn and no statusline yet — compaction can precede both.
+  core.handleHook({ hook_event_name: 'PreCompact' });
+
+  const compacted = emitted.filter((e) => e.type === 'context.compacted');
+  assert.equal(compacted.length, 1);
+  assert.equal(compacted[0].turnId, undefined);
+  // `trigger` is required by the schema, so an absent one falls back to the
+  // common case rather than emitting an empty string.
+  assert.deepEqual(compacted[0].payload, { trigger: 'auto', preTokens: 0 });
+});
+
+test('PreCompact preTokens tracks the latest statusline even when usage is deduped', () => {
+  const { deps, emitted } = fakeDeps();
+  const core = createPaneObserverCore(deps);
+  const sample = (input: number) => ({
+    model: { id: 'claude-opus-4-8' },
+    context_window: { current_usage: { input_tokens: input } },
+  });
+
+  core.handleStatusline(sample(10));
+  core.handleStatusline(sample(50));
+  core.handleStatusline(sample(50)); // consecutive duplicate → usage.updated suppressed
+  assert.equal(types(emitted).filter((t) => t === 'usage.updated').length, 2);
+
+  core.handleHook({ hook_event_name: 'PreCompact', trigger: 'manual' });
+  const compacted = emitted.filter((e) => e.type === 'context.compacted');
+  // The occupancy is a LEVEL, not an event: dedupe suppresses the re-emit but
+  // must not stall the tracked value.
+  assert.deepEqual(compacted[0].payload, { trigger: 'manual', preTokens: 50 });
+});
+
 // The statusline is the ONLY place the real context window is observable: the
 // Go side otherwise infers it from the model id, which overstated Claude's
 // window 5× (models.dev says 1M, Claude Code runs 200k) and made ctx% read 20%

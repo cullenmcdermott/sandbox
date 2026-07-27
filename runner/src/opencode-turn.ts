@@ -38,6 +38,9 @@ import { appendEvent } from './events.js';
 import { appendAudit } from './audit.js';
 import { getRegistry, type RunnerConfig } from './session.js';
 import type { EventType } from './types.js';
+import { createLogger } from './log.js';
+
+const log = createLogger('opencode-turn');
 
 const DEFAULT_PORT = 4096;
 
@@ -828,9 +831,9 @@ export async function warmupOpencodeSession(env: NodeJS.ProcessEnv = process.env
     // headless first turn's ensureSession is already creating a session, adopt it
     // rather than racing a second create whose empty session could win the head.
     const id = await establishOpencodeSession(client, ctrl.signal, reg);
-    console.log(`opencode: pre-created session ${id}`);
+    log.info('pre-created session', { opencodeSessionId: id });
   } catch (e) {
-    console.error('opencode warmup: session pre-create failed; turn path will retry:', e);
+    log.error('warmup: session pre-create failed; turn path will retry', { err: e });
   } finally {
     clearTimeout(timer);
   }

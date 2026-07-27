@@ -74,8 +74,10 @@ func newWorktreePathCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Resolution is offline (local index only), so this command works with
 			// no cluster reachable — deliberately: `cd` to a worktree must not
-			// depend on the VPN being up.
-			c, err := newClient()
+			// depend on the VPN being up. newOfflineClient (not newClient) is what
+			// makes that true: the latter resolves a kubeconfig at construction and
+			// fails without one, long before the index is read.
+			c, err := newOfflineClient()
 			if err != nil {
 				return err
 			}

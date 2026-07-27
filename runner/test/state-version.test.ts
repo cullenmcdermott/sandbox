@@ -42,8 +42,12 @@ test('a fresh/empty parse seeds every field from env at the current version', ()
   assert.equal(loaded.status, 'idle');
 });
 
+// [T2]: these two capture process.stderr rather than console.error — the runner
+// logs through src/log.ts now, which writes warn/error straight to the stream.
+// Asserting on the stream is also the stronger check: it pins what an operator
+// actually sees in `kubectl logs`, not which function produced it.
 test('a newer-versioned file warns loudly and preserves unknown fields', () => {
-  const errors = mock.method(console, 'error', () => {});
+  const errors = mock.method(process.stderr, 'write', () => true);
   try {
     const parsed = {
       state_version: STATE_VERSION + 1,
@@ -74,7 +78,7 @@ test('a newer-versioned file warns loudly and preserves unknown fields', () => {
 });
 
 test('a same-version file loads silently', () => {
-  const errors = mock.method(console, 'error', () => {});
+  const errors = mock.method(process.stderr, 'write', () => true);
   try {
     const loaded = reviveSessionState({ state_version: STATE_VERSION }, cfg);
     assert.equal(errors.mock.callCount(), 0);

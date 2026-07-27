@@ -25,6 +25,9 @@
 import { appendEvent } from './events.js';
 import { getRegistry } from './session.js';
 import type { EventType } from './types.js';
+import { createLogger } from './log.js';
+
+const log = createLogger('codex-observer');
 
 // Backoff before reconnecting after the socket closes — `codex app-server`
 // restarts ~1s after any exit (codex.ts), so a tight respin would just spam
@@ -337,7 +340,7 @@ export function startCodexObserver(env: NodeJS.ProcessEnv = process.env): CodexO
       try {
         core.handle(frame);
       } catch (err) {
-        console.error('codex observer: frame handling error:', err);
+        log.error('frame handling error', { err });
       }
     });
     const onGone = (): void => {

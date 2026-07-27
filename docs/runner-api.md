@@ -384,10 +384,43 @@ Enable it:
 - **CLI:** pass `--debug` (e.g. `sandbox --debug trace <id>`) or set
   `SANDBOX_DEBUG=1`.
 
-> The runner (`runner/src/**`) does **not** emit structured debug logs today —
-> only ad-hoc `console.log`/`console.error`. Structured runner logging is
-> tracked as **C10** in `docs/oss-launch/HARDENING-BACKLOG.md`; do not rely on
-> `SANDBOX_DEBUG` taking effect inside the pod.
+For the TUI entry points (`sandbox attach`, `sandbox claude`, …) the records go
+to a **per-session file** instead of stderr —
+`~/.local/share/sandbox/remote-sessions/<id>/debug.jsonl`, appended across
+commands and stamped with the session id ([T1]). The dashboard owns the
+alt-screen, so stderr there is both unreadable and actively corrupting; the file
+is the only sink for the duration of the TUI. Non-TUI commands are unchanged and
+still write to stderr.
+
+The **runner** has its own structured logger (`runner/src/log.ts`, [T2] — this
+closes **C10** in `docs/oss-launch/HARDENING-BACKLOG.md`). It is separate from
+the CLI's: `SANDBOX_DEBUG` still has no effect inside the pod. Its knobs are:
+
+| env | values | default | effect |
+|---|---|---|---|
+| `SANDBOX_LOG_LEVEL` | `debug` \| `info` \| `warn` \| `error` | `info` | minimum level emitted |
+| `SANDBOX_LOG_FORMAT` | `text` \| `json` | `text` | line format |
+
+`text` is the default because `kubectl logs` is the primary reader — one line
+per record, structure as trailing `key=value` pairs:
+
+```
+2026-07-27T10:11:12.000Z INFO  opencode: config written; starting serve port=4096
+2026-07-27T10:11:13.000Z ERROR events: failed to persist event event=turn.started err="disk full"
+```
+
+`json` emits the same fields as newline-delimited objects (`ts`, `level`,
+`component`, `sessionId`, `msg`, plus the record's own fields) for an ingester.
+Every record carries the pod's `sessionId`; `warn`/`error` go to stderr and the
+rest to stdout. HTTP requests are logged on response finish with method, path,
+status, and duration — at `debug` for 2xx/3xx, `warn` for 4xx, and `error` for
+5xx, so a busy pod stays readable while faults stand out. When the caller stamps
+`X-Sandbox-Trace-Id`, the request line carries it as `traceId`, tying the line
+back to the CLI's connect span.
+
+A bare `console.*` in `runner/src/` is an ESLint error (`no-console`); the one
+documented exception is `logRaw`, which the `SANDBOX_TRACE` spans use to keep
+their pre-existing greppable `trace: …` envelope unwrapped.
 
 Each line is a single JSON object with this schema:
 
@@ -396,7 +429,7 @@ Each line is a single JSON object with this schema:
 | `time` | string (RFC3339) | when the record was emitted |
 | `level` | string | `DEBUG` \| `INFO` \| `WARN` \| `ERROR` |
 | `msg` | string | short, stable, human-readable event label |
-| `component` | string | `cli` — so interleaved logs are attributable (runner emits no structured logs today; see C10) |
+| `component` | string | `cli` — so interleaved logs are attributable. The runner's own logger uses the same field, naming the subsystem (`http`, `events`, `opencode`, …) |
 | *(extra)* | any | arbitrary structured key/values (e.g. `session`, `seq`, `count`) |
 
 Example:

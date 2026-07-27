@@ -6,12 +6,15 @@
 
 import Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, statSync, statfsSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { ServerResponse } from 'node:http';
 import type { Event, EventType } from './types.js';
 import { EVENTS_DB_PATH, STATE_DIR } from './types.js';
 import { redactSecrets } from './redact.js';
+import { createLogger } from './log.js';
+
+const log = createLogger('events');
 
 type AnyPayload = Record<string, unknown>;
 
@@ -350,7 +353,7 @@ export function appendEvent(
     // R11: SQLite write failure must not crash the turn loop. Log and continue
     // with seq=0. Callers (mapMessage, appendBlock) are fire-and-forget; a
     // missed event in the log is preferable to a killed turn.
-    console.error(`appendEvent: failed to persist ${type}:`, err);
+    log.error('failed to persist event', { event: type, err });
   }
   // E4: once a turn completes, compact away the now-worthless streaming deltas of
   // turns older than the last N. Best-effort and AFTER the persist above: a
@@ -360,7 +363,7 @@ export function appendEvent(
     try {
       compactDeltas(d, sessionId);
     } catch (err) {
-      console.error(`appendEvent: delta compaction failed for ${sessionId}:`, err);
+      log.error('delta compaction failed', { err });
     }
   }
   const evt: Event = {
@@ -441,38 +444,15 @@ export function readEventsAfter(sessionId: string, afterSeq: number): Event[] {
   }));
 }
 
-/** The terminal outcome of a settled turn, read from the event log. Used by the
- * autopilot driver on turn completion to scan the just-completed assistant text
- * for the sentinel and to classify the outcome (completed vs failed vs
- * interrupted). Returns the most-recent terminal event for `turnId`, or undefined
- * when none exists yet (e.g. a runTurn that threw before emitting any terminal).
- * resultText is the SDK result text on completed, the failure message on failed,
- * and '' on interrupted. */
-export function readTurnOutcome(
-  sessionId: string,
-  turnId: string,
-): { status: 'completed' | 'failed' | 'interrupted'; resultText: string } | undefined {
-  const d = getDb();
-  const row = prepared(
-    d,
-    "SELECT type, payload FROM events WHERE session_id = ? AND turn_id = ? AND " +
-      "type IN ('turn.completed','turn.failed','turn.interrupted') ORDER BY seq DESC LIMIT 1",
-  ).get(sessionId, turnId) as { type: string; payload: string } | undefined;
-  if (!row) return undefined;
-  const p = JSON.parse(row.payload) as { result?: unknown; message?: unknown };
-  if (row.type === 'turn.completed') {
-    return { status: 'completed', resultText: typeof p.result === 'string' ? p.result : '' };
-  }
-  if (row.type === 'turn.failed') {
-    return { status: 'failed', resultText: typeof p.message === 'string' ? p.message : '' };
-  }
-  return { status: 'interrupted', resultText: '' };
-}
-
-/** Sum input+output tokens across a session's usage.updated events. Backs the
- * autopilot token_budget guard (a hard token ceiling). Log-derived so it is
- * correct across a runner restart; called once per turn completion (low
- * frequency), so the scan cost is acceptable.
+/** Sum input+output tokens across a session's usage.updated events.
+ *
+ * Written for the autopilot token_budget guard (a hard token ceiling), which
+ * claude-pane-first deleted — so nothing in src/ calls this today; its only
+ * caller is the [V39] regression test below. Kept rather than deleted because
+ * the double-counting rule it encodes is the non-obvious part and the §10
+ * observability work wants exactly this number. Log-derived, so it is correct
+ * across a runner restart; the scan cost assumed a once-per-turn-completion
+ * caller.
  *
  * [V39] Count ONLY the terminal (result) usage row of each turn, not the
  * per-assistant-message rows. Every turn emits one usage.updated per assistant
@@ -607,10 +587,10 @@ function broadcast(evt: Event): void {
     // client reconnects and replays from its last seq). Only the LIVE path caps
     // this way — replay awaits `drain`, which is its own backpressure.
     if (res.writableLength > MAX_SSE_CLIENT_BUFFER_BYTES) {
-      console.error(
-        `broadcast: SSE client buffered ${res.writableLength}B > ${MAX_SSE_CLIENT_BUFFER_BYTES}B cap; ` +
-          'destroying wedged stream (it can reconnect and replay from its last seq)',
-      );
+      log.error('SSE client over the buffer cap; destroying wedged stream (it can reconnect and replay from its last seq)', {
+        bufferedBytes: res.writableLength,
+        capBytes: MAX_SSE_CLIENT_BUFFER_BYTES,
+      });
       res.destroy();
       client.cleanup();
       continue;
@@ -788,7 +768,7 @@ export function attachSseClient(
   // (e.g. DB closed under a disconnecting client) must not become an unhandled
   // rejection that crashes the runner, so it falls through to cleanup.
   void streamReplayThenAttach(client, sessionId, () => cleanedUp).catch((err) => {
-    console.error(`attachSseClient: replay failed for ${sessionId}:`, err);
+    log.error('sse replay failed', { err });
     cleanup();
   });
 
@@ -799,4 +779,77 @@ export function attachSseClient(
 export function shortId(prefix: string): string {
   const id = randomUUID().split('-')[0];
   return `${prefix}-${id}`;
+}
+
+// --- Storage gauges ([T6]) --------------------------------------------------
+
+/** A point-in-time sample of what this session is consuming on the PVC.
+ * `freeBytes`/`totalBytes` are 0 when the filesystem could not be stat'd. */
+export interface StorageStats {
+  /** Size of events.db on disk (the -wal/-shm siblings are counted separately). */
+  eventLogBytes: number;
+  /** Row count in the events table. */
+  eventLogRows: number;
+  /** Bytes available to an unprivileged writer on the state volume. */
+  pvcFreeBytes: number;
+  /** Total size of the state volume. */
+  pvcTotalBytes: number;
+}
+
+/** Filesystem seam so the sampler is testable without a real PVC. */
+export interface StorageStatsDeps {
+  sizeOf?: (path: string) => number;
+  statfs?: (path: string) => { bavail: number; blocks: number; bsize: number };
+  countRows?: () => number;
+}
+
+/**
+ * Sample the event log's on-disk footprint and the state volume's free space.
+ *
+ * [T6]: `events.ts` deliberately never VACUUMs (it would block the single
+ * writer) and `RETENTION_MAX_EVENTS` is opt-in and OFF by default, so the event
+ * log grows monotonically with nothing watching it — on the same volume as
+ * session.json, the audit log, and the agent's own state. This is part (a) of
+ * that item: MEASURE first. Whether the retention default should change is part
+ * (b), and it should be decided from these numbers rather than from a guess.
+ *
+ * Best-effort: any failure yields 0 for that field rather than throwing. A gauge
+ * that crashes the runner is worse than a gauge that reads 0.
+ */
+export function sampleStorageStats(deps: StorageStatsDeps = {}): StorageStats {
+  const sizeOf = deps.sizeOf ?? ((p: string): number => statSync(p).size);
+  const fsStat = deps.statfs ?? ((p: string) => statfsSync(p));
+
+  let eventLogBytes = 0;
+  // The WAL can dwarf the main file between checkpoints, so a gauge that ignored
+  // it would under-report exactly when the log is growing fastest.
+  for (const suffix of ['', '-wal', '-shm']) {
+    try {
+      eventLogBytes += sizeOf(EVENTS_DB_PATH + suffix);
+    } catch {
+      /* absent (no WAL yet, or no log at all) */
+    }
+  }
+
+  let eventLogRows = 0;
+  try {
+    eventLogRows =
+      deps.countRows?.() ??
+      (getDb().prepare('SELECT COUNT(*) AS n FROM events').get() as { n: number }).n;
+  } catch {
+    /* db not open / not readable */
+  }
+
+  let pvcFreeBytes = 0;
+  let pvcTotalBytes = 0;
+  try {
+    const st = fsStat(STATE_DIR);
+    // bavail, not bfree: reserved blocks are not usable by the runner.
+    pvcFreeBytes = st.bavail * st.bsize;
+    pvcTotalBytes = st.blocks * st.bsize;
+  } catch {
+    /* not a real filesystem (tests) or stat unsupported */
+  }
+
+  return { eventLogBytes, eventLogRows, pvcFreeBytes, pvcTotalBytes };
 }

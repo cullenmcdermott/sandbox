@@ -21,7 +21,7 @@ import {
   __setSessionJsonPathForTest,
   type RunnerConfig,
 } from '../src/session.js';
-import { startTurn, setTurnSettledHandler } from '../src/turns.js';
+import { startTurn } from '../src/turns.js';
 import type { SessionState } from '../src/types.js';
 import type { Agent } from '../src/agent.js';
 
@@ -66,7 +66,6 @@ test('V42: a throw during registerTurn frees the turn slot (not wedged forever)'
   db.exec(CREATE_SQL);
   __setEventLogForTest(db);
   __setSessionJsonPathForTest(join(dir, 'session.json'));
-  setTurnSettledHandler(null);
 
   // runTurn must never fire when registration throws before it.
   let ranTurn = 0;
@@ -101,8 +100,7 @@ test('V42: a throw during registerTurn frees the turn slot (not wedged forever)'
     assert.ok('turnId' in res, `expected a fired turn, got ${JSON.stringify(res)}`);
     assert.equal(ranTurn, 1, 'the recovery turn fired its runTurn');
   } finally {
-    setTurnSettledHandler(null);
-    __setEventLogForTest(null);
+      __setEventLogForTest(null);
     __setSessionJsonPathForTest(null);
     try {
       db.close();

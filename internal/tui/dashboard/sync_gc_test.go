@@ -166,3 +166,91 @@ func TestSyncGC_NoReaperIsNoop(t *testing.T) {
 		t.Error("gcListOrphansCmd must be nil without a reaper")
 	}
 }
+
+// [V35] residual: paused syncs are judged on session EXISTENCE, not pod liveness.
+//
+// The two rules point opposite ways for the same Suspended session, which is why
+// the dashboard listed no paused syncs at all until now:
+//   - its transport-down syncs SHOULD be reaped (thrashing a pod that isn't there);
+//   - its paused syncs must NOT be (suspend is what paused them; resume unpauses).
+//
+// Only a paused sync whose session is gone entirely is garbage — and nothing else
+// would ever collect it, since IsOrphanStatus does not consider paused syncs.
+func TestReapOrphans_PausedSyncsJudgedByExistenceNotLiveness(t *testing.T) {
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	cur := base
+	defer func(orig func() time.Time) { nowFunc = orig }(nowFunc)
+	nowFunc = func() time.Time { return cur }
+
+	reaper := &fakeReaper{}
+	m := New(nil)
+	m.WithSyncReaper(reaper)
+	// "susp-1" exists but is Suspended: known, not running. "gone-1" is absent
+	// from both sets — deleted out of band while suspended.
+	m.gcRunning = map[session.ID]bool{}
+	m.gcKnown = map[session.ID]bool{"susp-1": true}
+
+	orphans := []OrphanSync{
+		{Identifier: "paused_suspended", SessionID: "susp-1", Paused: true},
+		{Identifier: "down_suspended", SessionID: "susp-1"},
+		{Identifier: "paused_gone", SessionID: "gone-1", Paused: true},
+	}
+	exec := func() {
+		if c := m.reapOrphans(orphans); c != nil {
+			c()
+		}
+	}
+
+	exec()
+	if _, ok := m.orphanSince["paused_suspended"]; ok {
+		t.Error("a suspended session's PAUSED sync must never enter the grace map — resume unpauses it")
+	}
+	if _, ok := m.orphanSince["down_suspended"]; !ok {
+		t.Error("a suspended session's transport-DOWN sync should still start the grace clock")
+	}
+	if _, ok := m.orphanSince["paused_gone"]; !ok {
+		t.Error("a gone session's paused sync should start the grace clock (nothing else collects it)")
+	}
+
+	// Past the grace window: exactly the two whose sessions justify it.
+	cur = base.Add(syncGCGrace + time.Second)
+	exec()
+	if len(reaper.terminated) != 1 {
+		t.Fatalf("expected one terminate batch, got %v", reaper.terminated)
+	}
+	got := map[string]bool{}
+	for _, id := range reaper.terminated[0] {
+		got[id] = true
+	}
+	if !got["down_suspended"] || !got["paused_gone"] {
+		t.Errorf("expected down_suspended + paused_gone reaped, got %v", reaper.terminated[0])
+	}
+	if got["paused_suspended"] {
+		t.Error("reaped a suspended session's paused sync — suspend/resume would silently lose its file sync")
+	}
+}
+
+// gcKnownSet answers existence, which is a different question from gcRunningSet's
+// liveness — the distinction the paused-sync rule rests on.
+func TestGCKnownSetIncludesEverythingButGone(t *testing.T) {
+	states := []session.State{
+		{ID: "run-1", Status: session.StatusRunning},
+		{ID: "susp-1", Status: session.StatusSuspended},
+		{ID: "fail-1", Status: session.StatusFailed},
+		{ID: "gone-1", Status: session.StatusGone},
+	}
+	known := gcKnownSet(states)
+	for _, id := range []session.ID{"run-1", "susp-1", "fail-1"} {
+		if !known[id] {
+			t.Errorf("%s should be known (it still exists)", id)
+		}
+	}
+	if known["gone-1"] {
+		t.Error("StatusGone must not count as known — that is the whole point of the set")
+	}
+	// And it is genuinely broader than the liveness set, or the rule is a no-op.
+	running := gcRunningSet(states)
+	if running["susp-1"] {
+		t.Error("gcRunningSet must not include Suspended (would re-protect thrashing syncs)")
+	}
+}

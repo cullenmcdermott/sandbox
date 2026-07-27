@@ -72,7 +72,7 @@ func newAttachCmd() *cobra.Command {
 			// port-forward, health, sync, and reaper, and doubles as the
 			// transcript's reconnect callback; the list loads underneath so esc
 			// detaches to it.
-			return afterTUI(func() error {
+			return afterTUIForSession(string(id), func() error {
 				return dashboard.RunAttached(
 					newClientLifecycleBackend(c, backend),
 					newDashboardConnector(c, ""),
@@ -116,9 +116,12 @@ func newSuspendCmd() *cobra.Command {
 			probeCancel()
 			// Suspend pauses file sync as part of the lifecycle (the pod's SSH
 			// forward is gone while suspended).
+			dbg("suspend requested", "session", args[0])
 			if err := c.Suspend(ctx, session.ID(args[0])); err != nil {
+				dbg("suspend failed", "session", args[0], "err", err.Error())
 				return err
 			}
+			dbg("suspend complete", "session", args[0])
 			fmt.Fprintf(cmd.OutOrStdout(), "Suspended session %q (pod terminated, PVC kept).\n", args[0])
 			return nil
 		},
@@ -138,9 +141,12 @@ func newResumeCmd() *cobra.Command {
 			}
 			// Resume re-enables file sync paused at suspend time; the next attach
 			// re-establishes the port-forward the sync sessions ride on.
+			dbg("resume requested", "session", args[0])
 			if err := c.Resume(cmd.Context(), session.ID(args[0])); err != nil {
+				dbg("resume failed", "session", args[0], "err", err.Error())
 				return err
 			}
+			dbg("resume complete", "session", args[0])
 			fmt.Fprintf(cmd.OutOrStdout(), "Resumed session %q.\n", args[0])
 			return nil
 		},
@@ -239,9 +245,12 @@ func newDestroyCmd() *cobra.Command {
 			}
 			// Destroy tears down the cluster resources, then the file sync and all
 			// local state (SSH alias, key dir, index entry).
+			dbg("destroy requested", "session", id)
 			if err := c.Destroy(ctx, session.ID(id)); err != nil {
+				dbg("destroy failed", "session", id, "err", err.Error())
 				return err
 			}
+			dbg("destroy complete", "session", id)
 			fmt.Fprintf(cmd.OutOrStdout(), "Destroyed session %q and its PVC.\n", id)
 			return nil
 		},

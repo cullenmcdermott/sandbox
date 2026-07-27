@@ -2,6 +2,12 @@ module github.com/cullenmcdermott/sandbox
 
 go 1.26.2
 
+// The runner is a TypeScript tree, but npm deps can ship Go packages of their
+// own (flatted vendors one), and `./...` was picking them up — so `go test
+// ./...` was not the package set the gate thinks it is, and a dep shipping a
+// FAILING Go test would have failed our build. Keep the pattern ours.
+ignore runner/node_modules
+
 require (
 	charm.land/bubbles/v2 v2.1.0
 	charm.land/bubbletea/v2 v2.0.7

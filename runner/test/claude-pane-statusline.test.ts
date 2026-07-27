@@ -16,7 +16,15 @@
 import { strict as assert } from 'node:assert';
 import { after, before, test } from 'node:test';
 import { spawn } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -40,6 +48,27 @@ process.stdin.on('end', () => {
 });
 `;
 
+/**
+ * Build a user-statusline fixture as a node script that drains stdin and then
+ * runs `body`.
+ *
+ * Fixtures are node rather than `#!/bin/sh` on purpose: the chain search is
+ * exercised over a HERMETIC PATH (see pathDir) on which `node` is the only
+ * executable, so a shell fixture calling `cat`/`sleep` would silently not do
+ * what it says. That was a live bug in the `sleep 5` timeout fixture — with an
+ * unresolvable `sleep`, `printf` (a shell builtin) still ran, so the "user
+ * script that is too slow" case actually tested a user script that returned
+ * instantly.
+ */
+function userScript(body: string): string {
+  return `#!/usr/bin/env node
+process.stdin.on('data', () => {});
+process.stdin.on('end', () => {
+${body}
+});
+`;
+}
+
 const posts: Array<{ auth: string | undefined; body: string }> = [];
 let server: Server;
 let observerUrl = '';
@@ -59,6 +88,27 @@ before(async () => {
 });
 
 const tempDirs: string[] = [];
+
+// A PATH containing exactly one executable: a `node` symlink to the running
+// interpreter, which the fixture scripts' `#!/usr/bin/env node` shebang needs.
+//
+// These tests used to inherit the ambient PATH, which made them read the
+// machine they ran on: `sandbox-user-statusline` on PATH is candidate 3 of the
+// chain the script searches, and a claude-pane session pod ships exactly that at
+// /usr/local/bin. So "no user statusline anywhere" was FALSE in-pod — the five
+// built-in-line cases chained to the real host statusline and compared its ANSI
+// output against the plain built-in string. Candidates 1 and 2 are resolved
+// relative to the script's own dir (a fresh temp config dir), so PATH was the
+// only leak. Note /usr/local/bin is also node's own dir here, so pointing PATH
+// at dirname(process.execPath) would reintroduce the problem — hence a private
+// dir with a single symlink.
+let pathDir = '';
+
+before(() => {
+  pathDir = mkdtempSync(join(tmpdir(), 'pane-statusline-path-'));
+  tempDirs.push(pathDir);
+  symlinkSync(process.execPath, join(pathDir, 'node'));
+});
 
 after(() => {
   server.close();
@@ -91,14 +141,19 @@ function writeExecutable(path: string, content: string): void {
 async function runStatusline(
   configDir: string,
   opts: { pathPrepend?: string; timeoutMs?: number; stdin?: string } = {},
-): Promise<{ line: string; posted: Array<{ auth: string | undefined; body: string }> }> {
+): Promise<{
+  line: string;
+  posted: Array<{ auth: string | undefined; body: string }>;
+}> {
   const seen = posts.length;
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     SANDBOX_OBSERVER_URL: observerUrl,
     SANDBOX_STATUSLINE_TIMEOUT_MS: String(opts.timeoutMs ?? 1000),
   };
-  if (opts.pathPrepend) env.PATH = opts.pathPrepend + delimiter + (process.env.PATH ?? '');
+  // Hermetic PATH (see pathDir): never the ambient one, so a stray
+  // sandbox-user-statusline on the host cannot answer for a fixture.
+  env.PATH = opts.pathPrepend ? opts.pathPrepend + delimiter + pathDir : pathDir;
   const child = spawn(process.execPath, [join(configDir, 'pane-observer', 'statusline.js')], {
     env,
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -133,7 +188,10 @@ test('config-dir drop-in chains (and wins over a PATH candidate); POST still fir
   const cfg = freshConfigDir();
   writeExecutable(join(cfg, 'pane-observer', 'user-statusline'), CHAINED_USER_SCRIPT);
   const bin = tempBinDir();
-  writeExecutable(join(bin, 'sandbox-user-statusline'), '#!/bin/sh\ncat >/dev/null\nprintf FROM-PATH\n');
+  writeExecutable(
+    join(bin, 'sandbox-user-statusline'),
+    userScript("  process.stdout.write('FROM-PATH');"),
+  );
   const { line, posted } = await runStatusline(cfg, { pathPrepend: bin });
   assert.equal(line, 'USER[Opus 4.8]'); // stdin JSON piped through, trailing \n trimmed
   assert.equal(posted.length, 1);
@@ -144,7 +202,10 @@ test('host-synced statusline/ sibling chains; a non-executable drop-in falls thr
   // Present but NOT executable → EACCES → next candidate, not the builtin.
   writeFileSync(join(cfg, 'pane-observer', 'user-statusline'), CHAINED_USER_SCRIPT);
   mkdirSync(join(cfg, 'statusline'));
-  writeExecutable(join(cfg, 'statusline', 'user-statusline'), '#!/bin/sh\ncat >/dev/null\nprintf FROM-SYNC\n');
+  writeExecutable(
+    join(cfg, 'statusline', 'user-statusline'),
+    userScript("  process.stdout.write('FROM-SYNC');"),
+  );
   const { line, posted } = await runStatusline(cfg);
   assert.equal(line, 'FROM-SYNC');
   assert.equal(posted.length, 1);
@@ -153,7 +214,10 @@ test('host-synced statusline/ sibling chains; a non-executable drop-in falls thr
 test('sandbox-user-statusline on PATH chains (the future flox binary hook)', async () => {
   const cfg = freshConfigDir();
   const bin = tempBinDir();
-  writeExecutable(join(bin, 'sandbox-user-statusline'), '#!/bin/sh\ncat >/dev/null\nprintf FROM-PATH\n');
+  writeExecutable(
+    join(bin, 'sandbox-user-statusline'),
+    userScript("  process.stdout.write('FROM-PATH');"),
+  );
   const { line, posted } = await runStatusline(cfg, { pathPrepend: bin });
   assert.equal(line, 'FROM-PATH');
   assert.equal(posted.length, 1);
@@ -161,7 +225,10 @@ test('sandbox-user-statusline on PATH chains (the future flox binary hook)', asy
 
 test('nonzero exit → built-in line (user output discarded); POST still fires', async () => {
   const cfg = freshConfigDir();
-  writeExecutable(join(cfg, 'pane-observer', 'user-statusline'), '#!/bin/sh\necho garbage\nexit 3\n');
+  writeExecutable(
+    join(cfg, 'pane-observer', 'user-statusline'),
+    userScript("  process.stdout.write('garbage');\\n  process.exit(3);"),
+  );
   const { line, posted } = await runStatusline(cfg);
   assert.equal(line, BUILTIN_LINE);
   assert.equal(posted.length, 1);
@@ -171,7 +238,7 @@ test('timeout → built-in line; POST still fires', async () => {
   const cfg = freshConfigDir();
   writeExecutable(
     join(cfg, 'pane-observer', 'user-statusline'),
-    '#!/bin/sh\ncat >/dev/null\nsleep 5\nprintf late\n',
+    userScript("  setTimeout(() => process.stdout.write('late'), 5000);"),
   );
   const started = Date.now();
   const { line, posted } = await runStatusline(cfg, { timeoutMs: 250 });
@@ -183,7 +250,7 @@ test('timeout → built-in line; POST still fires', async () => {
 
 test('empty stdout with exit 0 → built-in line (a blank statusline is useless)', async () => {
   const cfg = freshConfigDir();
-  writeExecutable(join(cfg, 'pane-observer', 'user-statusline'), '#!/bin/sh\ncat >/dev/null\nexit 0\n');
+  writeExecutable(join(cfg, 'pane-observer', 'user-statusline'), userScript('  process.exit(0);'));
   const { line, posted } = await runStatusline(cfg);
   assert.equal(line, BUILTIN_LINE);
   assert.equal(posted.length, 1);
@@ -209,8 +276,14 @@ test('rate_limits in the payload → 5h + weekly windows on the built-in line', 
     model: { id: 'claude-opus-4-8', display_name: 'Opus 4.8' },
     context_window: { used_percentage: 16 },
     rate_limits: {
-      five_hour: { used_percentage: 41.4, resets_at: now + 2 * 3600 + 12 * 60 + 59 },
-      seven_day: { used_percentage: 4, resets_at: now + 3 * 86400 + 4 * 3600 + 59 * 60 },
+      five_hour: {
+        used_percentage: 41.4,
+        resets_at: now + 2 * 3600 + 12 * 60 + 59,
+      },
+      seven_day: {
+        used_percentage: 4,
+        resets_at: now + 3 * 86400 + 4 * 3600 + 59 * 60,
+      },
     },
   });
   const { line, posted } = await runStatusline(cfg, { stdin });
@@ -234,7 +307,12 @@ test('an already-elapsed resets_at prints no countdown (never a negative one)', 
   const cfg = freshConfigDir();
   const stdin = JSON.stringify({
     model: { display_name: 'Opus 4.8' },
-    rate_limits: { seven_day: { used_percentage: 88, resets_at: Math.floor(Date.now() / 1000) - 60 } },
+    rate_limits: {
+      seven_day: {
+        used_percentage: 88,
+        resets_at: Math.floor(Date.now() / 1000) - 60,
+      },
+    },
   });
   const { line } = await runStatusline(cfg, { stdin });
   assert.equal(line, 'Opus 4.8 · wk 88%');

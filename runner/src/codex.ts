@@ -22,6 +22,9 @@ import { type AuthFs, realAuthFs, writeAuthFile0600 } from './agent-auth.js';
 import { sanitizedExecEnv } from './exec.js';
 import { externalClientConnections } from './opencode.js';
 import { getRegistry, setExternalActivityProbe } from './session.js';
+import { createLogger } from './log.js';
+
+const log = createLogger('codex');
 
 /** Default loopback port `codex app-server --listen ws://127.0.0.1:<port>` binds.
  * Distinct from opencode's 4096 so the two backends never collide on a pod. */
@@ -170,9 +173,9 @@ export function seedCodexConfig(
   try {
     fs.mkdirSync(codexHomeDir(env), { recursive: true });
     fs.writeFileSync(path, CODEX_YOLO_CONFIG, { mode: 0o600 });
-    console.log(`codex: seeded ${path} (approval_policy=never, sandbox_mode=danger-full-access)`);
+    log.info('seeded config.toml (approval_policy=never, sandbox_mode=danger-full-access)', { path });
   } catch (err) {
-    console.error(`codex: could not seed config.toml at ${path} — codex will prompt for approvals`, err);
+    log.error('could not seed config.toml — codex will prompt for approvals', { path, err });
   }
 }
 
@@ -224,7 +227,7 @@ export function startCodexSupervisor(
 ): CodexSupervisor {
   const port = parseInt(env.CODEX_PORT ?? String(DEFAULT_PORT), 10);
   const listen = `ws://127.0.0.1:${port}`;
-  console.log(`codex: starting app-server on ${listen}`);
+  log.info('starting app-server', { listen });
   // Feed /idle synchronously off live loopback ws clients (the interactive codex
   // TUI). The observer's own ws client is runner-owned and subtracted out.
   setExternalActivityProbe(() => externalClientConnections(port) > 0);
@@ -260,7 +263,7 @@ export function startCodexSupervisor(
     const scheduleRespawn = (why: string): void => {
       if (stopped || respawnScheduled) return;
       respawnScheduled = true;
-      console.error(`codex app-server ${why}; restarting in 1s`);
+      log.error('app-server stopped; restarting in 1s', { why });
       setTimeout(() => {
         if (!stopped) child = spawnServe();
       }, 1000);

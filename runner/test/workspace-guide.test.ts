@@ -13,6 +13,7 @@ import {
   GUIDE_END,
   classifyGit,
   guideBlock,
+  guideTargetFor,
   spliceGuide,
   writeWorkspaceGuide,
 } from '../src/workspace-guide.js';
@@ -29,7 +30,10 @@ function tmp(prefix: string): string {
 }
 
 /** A workspace whose .git is a pointer file at `target` (created or not). */
-function worktreeWorkspace(targetExists: boolean): { ws: string; target: string } {
+function worktreeWorkspace(targetExists: boolean): {
+  ws: string;
+  target: string;
+} {
   const root = tmp('guide-wt-');
   const ws = join(root, 'workspace');
   mkdirSync(ws);
@@ -106,15 +110,27 @@ test('splice replaces the managed block and preserves everything around it', () 
   assert.ok(second.includes('Always use tabs.'), 'user content lost on rewrite');
 });
 
-test('writeWorkspaceGuide writes CLAUDE.md into the config dir, not the workspace', () => {
+test('writeWorkspaceGuide writes into the config dir, not the workspace', () => {
   const { ws } = worktreeWorkspace(false);
   const cfg = tmp('guide-cfg-');
-  const kind = writeWorkspaceGuide({ workspaceDir: ws, configDir: cfg });
+  const kind = writeWorkspaceGuide({
+    workspaceDir: ws,
+    path: join(cfg, 'CLAUDE.md'),
+  });
   assert.equal(kind, 'detached-worktree');
   const written = readFileSync(join(cfg, 'CLAUDE.md'), 'utf8');
   assert.ok(written.includes('git worktree'), written);
   // The workspace syncs to the user's machine; the guide must never land there.
   assert.throws(() => readFileSync(join(ws, 'CLAUDE.md'), 'utf8'));
+});
+
+// The target dir may not exist yet on a fresh PVC (codex/opencode state dirs are
+// created by their own boot steps, which may run after the guide).
+test('writeWorkspaceGuide creates missing parent dirs', () => {
+  const { ws } = worktreeWorkspace(false);
+  const path = join(tmp('guide-mk-'), 'a', 'b', 'AGENTS.md');
+  assert.equal(writeWorkspaceGuide({ workspaceDir: ws, path }), 'detached-worktree');
+  assert.ok(readFileSync(path, 'utf8').includes('git worktree'));
 });
 
 test('writeWorkspaceGuide is best-effort: an unwritable config dir does not throw', () => {
@@ -123,5 +139,46 @@ test('writeWorkspaceGuide is best-effort: an unwritable config dir does not thro
   const root = tmp('guide-bad-');
   const notADir = join(root, 'file');
   writeFileSync(notADir, 'x');
-  assert.equal(writeWorkspaceGuide({ workspaceDir: ws, configDir: join(notADir, 'claude') }), null);
+  assert.equal(
+    writeWorkspaceGuide({
+      workspaceDir: ws,
+      path: join(notADir, 'claude', 'CLAUDE.md'),
+    }),
+    null,
+  );
+});
+
+// Every backend must learn about the dangling .git, not just claude-pane: an
+// opencode/codex session used to discover it by running git and failing.
+test('guideTargetFor resolves the file each backend actually reads', () => {
+  assert.equal(
+    guideTargetFor('claude-pane', {
+      CLAUDE_CONFIG_DIR: '/session/state/claude',
+    }),
+    '/session/state/claude/CLAUDE.md',
+  );
+  assert.equal(
+    guideTargetFor('codex-app-server', { CODEX_HOME: '/session/state/codex' }),
+    '/session/state/codex/AGENTS.md',
+  );
+  assert.equal(
+    guideTargetFor('opencode-server', {
+      OPENCODE_CONFIG: '/session/state/opencode/opencode.json',
+    }),
+    '/session/state/opencode/AGENTS.md',
+  );
+});
+
+test('guideTargetFor falls back to the shared claude config dir, never the workspace', () => {
+  const target = guideTargetFor('claude-pane', {});
+  assert.ok(target && target.endsWith('/CLAUDE.md'), String(target));
+  assert.ok(!target!.includes('/session/workspace'), 'guide aimed at the synced workspace');
+});
+
+// No config-dir env means nowhere pod-local to put it — a quiet no-op beats
+// guessing a path, and above all beats writing into the synced workspace.
+test('guideTargetFor returns null for an unconfigured or unknown backend', () => {
+  assert.equal(guideTargetFor('codex-app-server', {}), null);
+  assert.equal(guideTargetFor('opencode-server', {}), null);
+  assert.equal(guideTargetFor('claude-sdk', { CLAUDE_CONFIG_DIR: '/x' }), null);
 });

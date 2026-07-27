@@ -568,6 +568,7 @@ func ApplyRunnerEvent(sess *Session, ev session.Event) bool {
 		session.EventTurnInterrupted,
 		session.EventTurnFailed,
 		session.EventUsageUpdated,
+		session.EventRateLimitUpdated,
 		session.EventContextCompacted:
 		// Shared read-model reducer (the embedded sessionReadModel.ApplyEvent):
 		// six-state status, model/ctx-limit, usage/cost, git branch,

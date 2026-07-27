@@ -41,6 +41,9 @@ import {
 } from './opencode-turn.js';
 import { getRegistry } from './session.js';
 import type { EventType } from './types.js';
+import { createLogger } from './log.js';
+
+const log = createLogger('opencode-observer');
 
 // Backoff before re-subscribing after the stream ends — `opencode serve` restarts
 // ~1s after any exit (opencode.ts), so a tight respin would just spam `fetch
@@ -354,7 +357,7 @@ export function startOpencodeObserver(env: NodeJS.ProcessEnv = process.env): Ope
           try {
             core.handle(ev);
           } catch (err) {
-            console.error('opencode observer: event handling error:', err);
+            log.error('event handling error', { err });
           }
         }
       } catch {
@@ -371,7 +374,7 @@ export function startOpencodeObserver(env: NodeJS.ProcessEnv = process.env): Ope
       if (stopped) break;
       await new Promise((r) => setTimeout(r, RECONNECT_BACKOFF_MS));
     }
-  })().catch((err) => console.error('opencode observer loop crashed:', err));
+  })().catch((err) => log.error('observer loop crashed', { err }));
 
   return {
     async stop(): Promise<void> {

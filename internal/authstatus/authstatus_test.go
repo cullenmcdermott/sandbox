@@ -15,6 +15,15 @@ func env(m map[string]string) Env {
 	return func(k string) string { return m[k] }
 }
 
+// noEnv is the explicit "nothing is configured in the environment" Env. Every
+// case that means it MUST pass one: a nil Env falls through to os.Getenv
+// (envOr, providers.go), so an ambient CLAUDE_CONFIG_DIR / ANTHROPIC_API_KEY /
+// OPENAI_API_KEY would decide the assertion instead of the fixture. That is not
+// hypothetical — a claude-pane session pod exports
+// CLAUDE_CONFIG_DIR=/session/state/claude with a live .credentials.json, which
+// turns the "empty home" cases green-on-a-lie.
+func noEnv() Env { return env(map[string]string{}) }
+
 // makeJWT builds an unsigned JWT carrying only an exp claim (for expiry tests).
 func makeJWT(exp int64) string {
 	payload := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"exp":%d}`, exp)))
@@ -69,7 +78,7 @@ func TestClaudeProvider(t *testing.T) {
 		{
 			name: "darwin keychain hit is the primary source",
 			build: func(t *testing.T) ClaudeProvider {
-				return ClaudeProvider{GOOS: "darwin", Home: t.TempDir(), Keychain: keychain(true)}
+				return ClaudeProvider{GOOS: "darwin", Home: t.TempDir(), Keychain: keychain(true), Env: noEnv()}
 			},
 			wantMethod: MethodOAuth, wantLevel: LevelOK, wantDetail: "host Claude Code login (Keychain)",
 		},
@@ -88,7 +97,7 @@ func TestClaudeProvider(t *testing.T) {
 			build: func(t *testing.T) ClaudeProvider {
 				home := t.TempDir()
 				writeClaudeCreds(t, filepath.Join(home, ".claude"))
-				return ClaudeProvider{GOOS: "darwin", Home: home, Keychain: keychain(false)}
+				return ClaudeProvider{GOOS: "darwin", Home: home, Keychain: keychain(false), Env: noEnv()}
 			},
 			wantMethod: MethodNone, wantLevel: LevelBad, wantDetail: "no host Claude Code login",
 		},
@@ -97,7 +106,7 @@ func TestClaudeProvider(t *testing.T) {
 			build: func(t *testing.T) ClaudeProvider {
 				home := t.TempDir()
 				writeClaudeCreds(t, filepath.Join(home, ".claude"))
-				return ClaudeProvider{GOOS: "darwin", Home: home, Keychain: keychainUnavailable}
+				return ClaudeProvider{GOOS: "darwin", Home: home, Keychain: keychainUnavailable, Env: noEnv()}
 			},
 			wantMethod: MethodOAuth, wantLevel: LevelOK, wantDetail: "host Claude Code login (.credentials.json)",
 		},
@@ -106,7 +115,7 @@ func TestClaudeProvider(t *testing.T) {
 			build: func(t *testing.T) ClaudeProvider {
 				home := t.TempDir()
 				writeClaudeCreds(t, filepath.Join(home, ".claude"))
-				return ClaudeProvider{GOOS: "linux", Home: home, Keychain: noKeychain(t)}
+				return ClaudeProvider{GOOS: "linux", Home: home, Keychain: noKeychain(t), Env: noEnv()}
 			},
 			wantMethod: MethodOAuth, wantLevel: LevelOK, wantDetail: ".credentials.json",
 		},
@@ -157,7 +166,7 @@ func TestClaudeProvider(t *testing.T) {
 		{
 			name: "nothing anywhere",
 			build: func(t *testing.T) ClaudeProvider {
-				return ClaudeProvider{GOOS: "linux", Home: t.TempDir(), Keychain: noKeychain(t)}
+				return ClaudeProvider{GOOS: "linux", Home: t.TempDir(), Keychain: noKeychain(t), Env: noEnv()}
 			},
 			wantMethod: MethodNone, wantLevel: LevelBad, wantDetail: "run `claude` and log in",
 		},
@@ -194,11 +203,11 @@ func TestSystemLoginProbeCore(t *testing.T) {
 	// delegated core on the platform-independent file path instead.
 	home := t.TempDir()
 	writeClaudeCreds(t, filepath.Join(home, ".claude"))
-	present, source := ClaudeProvider{GOOS: "linux", Home: home}.systemLoginPresent()
+	present, source := ClaudeProvider{GOOS: "linux", Home: home, Env: noEnv()}.systemLoginPresent()
 	if !present || source != ".credentials.json" {
 		t.Errorf("systemLoginPresent = %v/%q, want true/.credentials.json", present, source)
 	}
-	if absent, _ := (ClaudeProvider{GOOS: "linux", Home: t.TempDir()}).systemLoginPresent(); absent {
+	if absent, _ := (ClaudeProvider{GOOS: "linux", Home: t.TempDir(), Env: noEnv()}).systemLoginPresent(); absent {
 		t.Error("systemLoginPresent should be false for an empty home")
 	}
 }
@@ -226,7 +235,7 @@ func TestCodexProviderAuthFile(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			home := t.TempDir()
 			writeCodexAuth(t, home, tt.mode, tt.token)
-			got := CodexProvider{Home: home, Now: func() time.Time { return now }}.Status(context.Background())
+			got := CodexProvider{Home: home, Env: noEnv(), Now: func() time.Time { return now }}.Status(context.Background())
 			if got.Method != tt.wantMethod {
 				t.Errorf("method = %q, want %q", got.Method, tt.wantMethod)
 			}

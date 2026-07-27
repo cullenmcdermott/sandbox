@@ -26,6 +26,10 @@
 //   PreToolUse        → tool.started (+ audit; resolves a pending permission)
 //   PostToolUse       → tool.completed
 //   PermissionRequest → permission.requested (→ dashboard waiting/attention)
+//   PreCompact        → context.compacted {trigger, preTokens} — a MARKER for
+//                       the feed, not a gauge reset: the hook carries no token
+//                       counts and fires before compaction, so postTokens is
+//                       omitted and the next statusline sample fixes ctx%.
 //   Stop              → message.completed + turn.completed {result} (+ idle)
 //   SessionEnd        → turn.interrupted for an open turn (+ idle)
 //   child exit        → turn.interrupted for an open turn (+ idle)
@@ -138,6 +142,11 @@ export function createPaneObserverCore(deps: PaneObserverDeps): PaneObserverCore
   let lastRateLimitJson = '';
   let lastTitle = '';
   let lastModel = '';
+  // Last context occupancy seen on a statusline sample, in the SAME units the
+  // dashboard's ctx% numerator uses (input + cache-read + cache-write —
+  // dashboard/session.go). PreCompact carries no token counts of its own, so
+  // this is what lets context.compacted report a real preTokens instead of 0.
+  let lastContextTokens = 0;
   // Provisional-busy bookkeeping (L8a): the pending revert timer armed on
   // UserPromptSubmit, and whether it already fired for the open turn (so a
   // LATE first activity — think/first-token latency past the window — can put
@@ -297,6 +306,28 @@ export function createPaneObserverCore(deps: PaneObserverDeps): PaneObserverCore
         closeTurn('completed', finalText !== '' ? { result: finalText } : {});
         break;
       }
+      case 'PreCompact': {
+        // The conversation is about to be compacted. Claude Code auto-compacts
+        // by default, and without this the only visible effect is ctx% dropping
+        // with no explanation and nothing in the feed recording why.
+        //
+        // This is a MARKER, not a gauge reset. PreCompact's hook input carries
+        // session_id/transcript_path/trigger/custom_instructions and NO token
+        // counts, and it fires BEFORE compaction runs, so the post-compaction
+        // size is unknowable here: postTokens is omitted, which the Go reducer
+        // reads as "leave the counters alone" (readmodel.go) and the next
+        // statusline sample corrects the gauge within seconds.
+        //
+        // preTokens is the last statusline occupancy rather than 0 so the
+        // feed's "N→" matches the number the user was just watching.
+        // `trigger` is claude's own ('auto' | 'manual'), which is what lets the
+        // feed distinguish auto-compaction from a user's /compact.
+        deps.emit(turnId ?? undefined, 'context.compacted', {
+          trigger: str(payload.trigger) || 'auto',
+          preTokens: lastContextTokens,
+        });
+        break;
+      }
       case 'SessionEnd': {
         closeTurn('interrupted', {
           reason: `claude session ended (${str(payload.reason) || 'unknown'})`,
@@ -358,6 +389,9 @@ export function createPaneObserverCore(deps: PaneObserverDeps): PaneObserverCore
         totalCostUsd: num(cost?.total_cost_usd),
         ...(limit > 0 ? { contextLimitTokens: limit } : {}),
       };
+      // Kept even when the usage payload is a consecutive duplicate: it is a
+      // level, not an event, and PreCompact needs the latest one.
+      lastContextTokens = usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
       const key = JSON.stringify(usage);
       if (key !== lastUsageJson) {
         lastUsageJson = key;
@@ -582,6 +616,7 @@ export const PROVISIONED_HOOK_EVENTS: ReadonlyArray<{ event: string; matcher: bo
   { event: 'PermissionRequest', matcher: false },
   { event: 'PermissionDenied', matcher: false },
   { event: 'MessageDisplay', matcher: false },
+  { event: 'PreCompact', matcher: true },
   { event: 'Stop', matcher: false },
   { event: 'SessionEnd', matcher: false },
 ];

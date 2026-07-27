@@ -41,6 +41,9 @@ import { join } from 'node:path';
 import { resolveWorkspaceDir } from './exec.js';
 import { getRegistry, setExternalActivityProbe, type RunnerConfig } from './session.js';
 import { CLAUDE_CONFIG_DIR } from './types.js';
+import { createLogger } from './log.js';
+
+const log = createLogger('claude-pane');
 
 /** Default scrollback retained and replayed to a (re)attaching pane, in bytes. */
 export const SCROLLBACK_BYTES = 256 * 1024;
@@ -509,10 +512,10 @@ class Supervisor implements ClaudePaneSupervisor {
     // PTY output rate; close it instead — the child keeps running, the ring
     // keeps accumulating, and a reattach replays the scrollback.
     if (socket.bufferedAmount > MAX_PANE_CLIENT_BUFFER_BYTES) {
-      console.error(
-        `claude-pane: socket buffered ${socket.bufferedAmount}B > ${MAX_PANE_CLIENT_BUFFER_BYTES}B cap; ` +
-          'closing wedged pane (a reattach replays from the scrollback ring)',
-      );
+      log.error('socket over the buffer cap; closing wedged pane (a reattach replays from the scrollback ring)', {
+        bufferedBytes: socket.bufferedAmount,
+        capBytes: MAX_PANE_CLIENT_BUFFER_BYTES,
+      });
       this.socket = null;
       try {
         socket.close(CLOSE_BACKPRESSURE, 'pane client not reading (backpressure)');
@@ -562,7 +565,7 @@ export function startClaudePaneSupervisor(
       // Pod-log visibility first, then the observer (which closes any open
       // synthetic turn as interrupted — Stop/SessionEnd hooks are graceful-only
       // and never fire on a crash).
-      console.log(`claude-pane: interactive child exited (code=${info.code} signal=${info.signal})`);
+      log.info('interactive child exited', { code: info.code, signal: info.signal });
       onExit?.(info);
     },
     onStop: () => setExternalActivityProbe(null),

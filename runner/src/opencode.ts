@@ -19,6 +19,10 @@ import { assertOpencodeAuthUsable, materializeOpencodeAuth, realAuthFs } from '.
 import { serializeBlockedPatterns } from './guards.js';
 import { sanitizedExecEnv } from './exec.js';
 import { getRegistry, setExternalActivityProbe } from './session.js';
+import { guideTargetFor } from './workspace-guide.js';
+import { createLogger } from './log.js';
+
+const log = createLogger('opencode');
 
 const DEFAULT_PORT = 4096;
 
@@ -140,7 +144,11 @@ export function externalClientConnections(
   readdir = readdirSync,
   readlink = readlinkSync,
 ): number {
-  return Math.max(0, establishedConnections(port, readFile) - runnerOwnedConnections(port, readFile, readdir, readlink));
+  return Math.max(
+    0,
+    establishedConnections(port, readFile) -
+      runnerOwnedConnections(port, readFile, readdir, readlink),
+  );
 }
 
 /** Provider env var -> opencode provider id, used to decide what to enable. */
@@ -186,6 +194,17 @@ export function buildOpencodeConfig(env: NodeJS.ProcessEnv = process.env): Recor
   }
   if (env.OPENCODE_SMALL_MODEL) {
     config.small_model = env.OPENCODE_SMALL_MODEL;
+  }
+  // Point opencode at the runner-written workspace guide (the AGENTS.md beside
+  // this config — workspace-guide.ts). `instructions` takes explicit file paths,
+  // which is why the guide is registered here rather than parked in opencode's
+  // global config dir and hoped for: an absolute path sidesteps both the
+  // global-dir lookup and any cwd-relative resolution. Listed unconditionally —
+  // opencode tolerates an instructions entry that does not resolve, and the
+  // guide write is best-effort, so a missing file must not break serve.
+  const guide = guideTargetFor('opencode-server', env);
+  if (guide) {
+    config.instructions = [guide];
   }
   return config;
 }
@@ -264,13 +283,13 @@ export function writeOpencodeGuardrailPlugin(env: NodeJS.ProcessEnv = process.en
   try {
     mkdirSync(dirname(file), { recursive: true });
     writeFileSync(file, guardrailPluginSource(), 'utf8');
-    console.log(`opencode: Bash guardrail plugin installed at ${file}`);
+    log.info('Bash guardrail plugin installed', { path: file });
     return pathToFileURL(file).href;
   } catch (err) {
-    console.error(
-      'opencode: FAILED to install the Bash guardrail plugin — in-agent tool use will NOT be ' +
-        'gated (defense-in-depth only; NetworkPolicy + absent SA token remain the real boundary):',
-      err instanceof Error ? err.message : err,
+    log.error(
+      'FAILED to install the Bash guardrail plugin — in-agent tool use will NOT be gated ' +
+        '(defense-in-depth only; NetworkPolicy + absent SA token remain the real boundary)',
+      { err: err instanceof Error ? err : String(err) },
     );
     return null;
   }
@@ -340,7 +359,7 @@ export function startOpencodeSupervisor(
   assertOpencodeAuthUsable(env, realAuthFs);
   const port = parseInt(env.OPENCODE_PORT ?? String(DEFAULT_PORT), 10);
   const configPath = writeOpencodeConfig(env);
-  console.log(`opencode: config written to ${configPath ?? '(none)'}; starting serve on :${port}`);
+  log.info('config written; starting serve', { configPath: configPath ?? '(none)', port });
   setExternalActivityProbe(() => externalClientConnections(port) > 0);
 
   let stopped = false;
@@ -360,11 +379,11 @@ export function startOpencodeSupervisor(
   // A1: strip RUNNER_TOKEN from the serve child (keep serve's own creds).
   const childEnv = buildOpencodeServeEnv(env);
   const spawnServe = (): ChildProcess => {
-    const proc = spawnFn(
-      'opencode',
-      ['serve', '--hostname', '0.0.0.0', '--port', String(port)],
-      { stdio: 'inherit', env: childEnv, cwd: env.PROJECT_PATH ?? process.cwd() },
-    );
+    const proc = spawnFn('opencode', ['serve', '--hostname', '0.0.0.0', '--port', String(port)], {
+      stdio: 'inherit',
+      env: childEnv,
+      cwd: env.PROJECT_PATH ?? process.cwd(),
+    });
     // B1: a spawn failure (ENOENT `opencode`, EAGAIN) emits 'error' on the child
     // with NO 'exit'; with no listener Node re-throws it as an uncaught exception
     // that kills the whole runner (no /healthz, /idle, event log). Both 'error'
@@ -375,7 +394,7 @@ export function startOpencodeSupervisor(
     const scheduleRespawn = (why: string): void => {
       if (stopped || respawnScheduled) return;
       respawnScheduled = true;
-      console.error(`opencode serve ${why}; restarting in 1s`);
+      log.error('serve stopped; restarting in 1s', { why });
       setTimeout(() => {
         if (!stopped) child = spawnServe();
       }, 1000);

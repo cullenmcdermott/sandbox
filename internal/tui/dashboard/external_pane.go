@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -812,6 +813,11 @@ func (p *ExternalPane) statusRow() string {
 	if s.TotalCostUSD > 0 {
 		segs = append(segs, fmt.Sprintf("$%.4f", s.TotalCostUSD))
 	}
+	// claude.ai plan windows (5h / weekly), only once the agent has actually
+	// reported them — see sessionReadModel.RateLimitOK. This is the surface that
+	// replaced the deleted transcript status line as the place plan usage is
+	// visible, which matters most exactly when it is nearly exhausted.
+	segs = append(segs, s.rateLimitSegs(time.Now())...)
 	left += muted.Render(" · " + strings.Join(segs, " · "))
 	right := kit.Kbd("^]", "dash")
 	if p.scrollOffset > 0 {

@@ -305,3 +305,73 @@ func TestPaneCloseSendsCloseFrame(t *testing.T) {
 		t.Fatal("server never observed the close")
 	}
 }
+
+// [T4] The pane attach must carry the connect-flow correlation id, like every
+// other runner request. Without it a connect id from client/trace.go dead-ended
+// at the HTTP routes and could not be followed into the pane — which for the
+// claude-pane backend is the entire interaction.
+func TestAttachPaneCarriesTraceID(t *testing.T) {
+	gotTrace := make(chan []string, 1)
+	up := websocket.Upgrader{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotTrace <- r.Header["X-Sandbox-Trace-Id"]
+		conn, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		// Hold the socket open long enough for the client to finish attaching.
+		_, _, _ = conn.ReadMessage()
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "tok")
+	c.SetTraceID("3f9a1c2b")
+	ps, err := c.AttachPane(context.Background(), session.Ref{ID: "s1"}, 0, 0)
+	if err != nil {
+		t.Fatalf("AttachPane: %v", err)
+	}
+	defer ps.Close()
+
+	select {
+	case hdr := <-gotTrace:
+		if len(hdr) != 1 || hdr[0] != "3f9a1c2b" {
+			t.Fatalf("X-Sandbox-Trace-Id on the pane handshake: got %v, want [3f9a1c2b]", hdr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("server never saw the handshake")
+	}
+}
+
+// An unset trace id must not send an empty header — a blank value would parse as
+// a real id server-side and pollute the log with an unmatchable correlation key.
+func TestAttachPaneOmitsEmptyTraceID(t *testing.T) {
+	gotTrace := make(chan []string, 1)
+	up := websocket.Upgrader{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotTrace <- r.Header["X-Sandbox-Trace-Id"]
+		conn, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _, _ = conn.ReadMessage()
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "tok")
+	ps, err := c.AttachPane(context.Background(), session.Ref{ID: "s1"}, 0, 0)
+	if err != nil {
+		t.Fatalf("AttachPane: %v", err)
+	}
+	defer ps.Close()
+
+	select {
+	case hdr := <-gotTrace:
+		if hdr != nil {
+			t.Fatalf("expected no trace header when unset, got %v", hdr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("server never saw the handshake")
+	}
+}

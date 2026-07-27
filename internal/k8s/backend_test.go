@@ -590,6 +590,46 @@ func TestCreateSessionStampsOpencodeCredsFreshness(t *testing.T) {
 	}
 }
 
+// A SEEDED opencode session (its auth.json rides its own per-session Secret) must
+// not be stamped against the SHARED opencode-credentials Secret it never reads.
+// Stamping it made warnIfOpencodeCredsRotated fire spuriously: rotating the
+// shared key would tell the operator the pod authenticates with a stale key,
+// when that pod's credentials live somewhere else entirely and did not change.
+func TestCreateSessionDoesNotStampSeededOpencodeSession(t *testing.T) {
+	ctx := context.Background()
+	b := newTestBackend(t)
+	// The shared Secret is present and readable — the ONLY thing keeping the
+	// seeded session unstamped is the seeded check, not a missing Secret.
+	if _, err := b.core.CoreV1().Secrets("agent-sessions").Create(ctx, &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: opencodeSecretName, Namespace: "agent-sessions"},
+		Data:       map[string][]byte{opencodeSecretKeyAnthropic: []byte("sk-ant-shared-key")},
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("seed secret: %v", err)
+	}
+
+	if _, err := b.CreateSession(ctx, session.Spec{
+		ID: "opencode-server-seeded", ProjectPath: "/tmp", Backend: session.BackendOpenCode,
+		RunnerImage: "test:latest", OpencodeAuthJSON: []byte(`{"anthropic":{"type":"api","key":"sk-ant-seeded"}}`),
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	sb, err := b.agents.AgentsV1alpha1().Sandboxes("agent-sessions").Get(ctx, "opencode-server-seeded", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get sandbox: %v", err)
+	}
+	if got, ok := sb.Annotations[annotationOpencodeCredsHash]; ok {
+		t.Errorf("seeded session must not carry a shared-Secret creds stamp, got %q", got)
+	}
+	if got, ok := sb.Annotations[annotationOpencodeProvider]; ok {
+		t.Errorf("seeded session must not carry a shared-Secret provider stamp, got %q", got)
+	}
+	// Consequence of the above, asserted directly: the rotation warning is the
+	// thing this prevents, so prove it stays silent for a seeded session.
+	if out := captureStderr(t, func() { b.warnIfOpencodeCredsRotated(ctx, sb) }); out != "" {
+		t.Errorf("seeded session must not warn about shared-Secret rotation, got: %s", out)
+	}
+}
+
 // TestOpencodeCredsHash: the fingerprint is a stable 8-hex prefix of sha256 of
 // the SELECTED provider's key, and empty when that key is absent.
 func TestOpencodeCredsHash(t *testing.T) {
