@@ -388,6 +388,24 @@ func (s Session) branchLabel() string {
 // homeDir is resolved once; the sub-line collapses it to "~" for compactness.
 var homeDir, _ = os.UserHomeDir()
 
+// worktreeDetail renders the local directory that holds this session's changes,
+// home-collapsed and fitted to maxW, for the detail panel's "worktree" row.
+//
+// The source is State.WorkspacePath — the pod's cwd and both Mutagen sync
+// endpoints, which is the per-session git worktree whenever one exists. It
+// returns "" (so the row is skipped) when there is no worktree to point at:
+// either the field is unset, or it equals ProjectPath, which is how a non-git
+// or --worktree=off session is represented — there the repo root IS the
+// workspace and a second identical path under a different label tells the user
+// nothing.
+func worktreeDetail(s Session, maxW int) string {
+	wt := s.State.WorkspacePath
+	if wt == "" || wt == s.State.ProjectPath {
+		return ""
+	}
+	return fitPathTail(shortProjectPath(wt), maxW)
+}
+
 // shortProjectPath renders the project directory home-collapsed ("~/git/foo")
 // for the list row's sub-line. Empty input yields "".
 func shortProjectPath(p string) string {

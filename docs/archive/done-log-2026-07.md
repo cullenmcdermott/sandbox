@@ -3344,3 +3344,75 @@ unless a config for it is checked in.** If the wrap-width split ever becomes
 annoying, the fix is to pick a formatter repo-wide and commit its config, not to
 reflow files piecemeal — which is how you get a tree where each file is
 consistent with itself and with nothing else.
+
+## Mouse capture cost text selection on every screen (2026-07-27)
+
+**Reported as "I can't select text to copy from the dashboard TUI."** The cause
+was one line: `App.View` set `v.MouseMode = tea.MouseModeCellMotion`
+unconditionally, for every screen.
+
+**Why that takes selection away is not our choice — the granularity is.** The
+mode bubbletea emits for `MouseModeCellMotion` is DECSET 1002 (button-event
+tracking) + 1006 (SGR), and 1002 is a *single* switch covering click, release,
+wheel and drag-while-held. There is no wheel-only mouse mode to ask for, so any
+app that wants the wheel also takes click-drag, and the terminal responds by
+handing the app every mouse event and stopping its own selection. `shift+drag`
+is the conventional bypass and the only way out. That part is the protocol.
+
+**What WAS our bug: we paid that price on screens that consume nothing.**
+`handleMouse` is reachable from `updateExternalScreen` (`app.go:962`) and
+nowhere else — not the session list, not the feed, not the pickers, and
+`zones.go` is layout, not hit-testing. On those screens every captured event was
+dropped, so the user got neither drag-select **nor** a working wheel: strictly
+worse than not capturing at all.
+
+**Fix:** capture only on `ScreenExternal`. Off the pane the terminal handles the
+mouse itself again — native selection returns, and in the alt screen the wheel
+is translated to Up/Down, which the list already binds to navigation
+(`model_input.go:439`, `keymap.go:51`). So those screens gained selection *and*
+scroll from the same change.
+
+**The pane keeps capture, because there it is paid for:** the wheel drives pane
+scrollback and a child that enables its own tracking (opencode sets DECSET
+1000/1002/1003 + SGR 1006) needs clicks re-encoded onto its PTY — its requests
+reach only the emulator, since the host terminal's mouse mode belongs to the
+outer program. Removing capture here would reintroduce the known bug where the
+host turned the wheel into arrow keys that the child read as prompt history.
+`shift+drag` is therefore still the way to select inside the pane, and since
+that is invisible from the UI it is now documented: `keymapCategories` gains a
+static **Mouse** category (the one help group not derived from `FullHelp`,
+because terminal behavior is not a keybinding).
+
+**Verified** by a per-screen table test asserting `MouseModeNone` on
+list/feed/connecting and `MouseModeCellMotion` on the pane, plus a test that the
+decision is re-made per frame rather than latched. The negative half is the
+load-bearing one: a regression that re-enables global capture still renders and
+still passes every other test, and the only symptom is silently losing
+selection.
+
+## Detail panel now shows the local worktree path (2026-07-27)
+
+**Asked for as "show the local worktree path that has a session's changes in
+it."** No plumbing was needed: `State.WorkspacePath` is the pod's cwd and both
+Mutagen sync endpoints — i.e. the per-session git worktree whenever one exists —
+and `statusFromSandbox` already recovers it from pod env on every read
+(`internal/k8s/backend.go:1457`), so it was already on the dashboard's `Session`.
+
+**The row is suppressed rather than duplicated** when `WorkspacePath` is empty or
+equals `ProjectPath`, which is exactly how a non-git or `--worktree=off` session
+is represented: there the repo root *is* the workspace, and one path under two
+labels is noise.
+
+**Two things the render surfaced, neither obvious from reading:**
+
+- `kit.KV` truncates the KEY but never the VALUE. Project paths are short enough
+  to have never hit this; a ~78-column worktree path is not, and would have
+  overflowed the panel. Values are now fitted to `width - detailKVWidth - 1`.
+- `detailKVWidth` was 7, sized to `created`/`project`. `worktree` is 8, so the
+  new row rendered its own label as `worktr…`. Widened to 8.
+
+**Paths are cut from the LEFT** (`fitPathTail`), dropping whole segments and
+marking the elision `…/`. Worktree paths share a long prefix and differ only in
+the final segment, so a right-truncation would render every session's as the
+same `~/.local/share/sandbox/remote-ses…` and lose the only identifying part.
+`project` is home-collapsed through the same helper for consistency.

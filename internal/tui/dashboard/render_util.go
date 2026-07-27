@@ -51,6 +51,30 @@ func toolArg(tool string, input json.RawMessage) string {
 	return ""
 }
 
+// fitPathTail fits p into maxW display columns by dropping WHOLE leading path
+// segments and marking the cut with "…/".
+//
+// Cutting from the left rather than the right is the point: a worktree path is
+// <stateDir>/worktrees/<session-id>, so every session's differs only in its
+// final segment. Right-truncation (the plain truncate helper) would render them
+// all as the same "~/.local/share/sandbox/remote-ses…" and lose exactly the part
+// that identifies the session. Whole segments are dropped rather than characters
+// so what remains is still a readable path suffix.
+func fitPathTail(p string, maxW int) string {
+	if maxW <= 0 || lipgloss.Width(p) <= maxW {
+		return truncate(p, maxW)
+	}
+	parts := strings.Split(p, "/")
+	for i := 1; i < len(parts); i++ {
+		if cand := "…/" + strings.Join(parts[i:], "/"); lipgloss.Width(cand) <= maxW {
+			return cand
+		}
+	}
+	// Even the bare final segment overflows the column: fall back to a plain
+	// character truncation of it, which is all the width can carry.
+	return truncate(parts[len(parts)-1], maxW)
+}
+
 // shortenPath trims a long absolute path to its last two segments.
 func shortenPath(p string) string {
 	parts := strings.Split(strings.TrimRight(p, "/"), "/")
