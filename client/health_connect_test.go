@@ -94,7 +94,8 @@ func TestWaitHealthyContextCancelled(t *testing.T) {
 // all reachable through fakeBackend, and are pinned here.
 
 // fakeForwardHandle is a no-op session.ForwardHandle so PortForward can return a
-// usable handle (Connect reads handles[0].LocalPort()) without a live forward.
+// usable handle (Connect looks the runner forward up by name and reads its
+// LocalPort()) without a live forward.
 type fakeForwardHandle struct {
 	port   int
 	closed bool

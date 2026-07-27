@@ -345,10 +345,12 @@ questions answered; Option B's transport is settled:**
    prompt. **Add the OpenAI/ChatGPT auth + API hosts to the egress allowlist
    NetworkPolicy** (token refresh + inference) — without it codex can't refresh or
    call the model.
-4. **`internal/k8s/portforward.go`** — add `ForwardSpecsWithCodex(httpLocal,
-   sshLocal, codexLocal)` (or generalize `ForwardSpecsWithOpencode` to take an
-   extra backend port). If the spike picks unix-over-SSH, no extra forward — reuse
-   the SSH forward.
+4. **`client/session.go`** — request the codex forward on the connect path:
+   `Forward(PortRunner, PortSSH, PortCodex)` (the named endpoint and its
+   standard port already exist; the `ForwardSpecs*` helpers this step used to
+   name were deleted on 2026-07-27 — see TODO §0 `[D4]`). Read the handle back
+   by name via `Forwards.LocalPort(PortCodex)`. If the spike picks
+   unix-over-SSH, no extra forward — reuse the SSH forward.
 5. **`runner/src/codex.ts`** — a supervisor modeled on `opencode.ts`:
    - fail-closed if neither the codex-auth `auth.json` nor `OPENAI_API_KEY` is present;
    - spawn `codex remote-control start` (or daemon + enable-remote-control),

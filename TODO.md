@@ -261,6 +261,32 @@ Raw maintainer notes. Triage = either promote into a numbered section with
 pointers, or answer inline and archive. (Resolved investigations moved to the
 done log.)
 
+- [ ] **`credExpiryMarkers` is broader than the messages it is meant to catch
+  (found 2026-07-27 reviewing `[P1-0a]` before merge).** `"unauthorized"` and
+  `"exec: executable"` (`internal/cli/credrefresh.go:66-91`) are matched against
+  the whole error chain of every cluster-outcome message
+  (`credErrorFrom`, `internal/tui/dashboard/credrefresh.go:60-84`) — but
+  `actionResultMsg` and `attachFailedMsg` can carry a **runner** 401 or a pane
+  dial failure, not a kube-api one, and a runner-token error saying
+  "unauthorized" would hand the terminal to `tsh` for a problem `tsh` cannot
+  fix. Bounded, not harmless: `maxCredRefreshAttempts` caps it at 2 handovers
+  and it needs a kubeconfig `exec:` plugin to be configured at all. **Fix
+  direction:** classify at the source instead of by substring — have the
+  cluster-call paths tag their errors as kube-api-origin (or match only errors
+  unwrapping to a client-go/`exec` auth type), and drop the two generic
+  substrings. Verify against a live `tsh` expiry, which nothing has done yet:
+  `[P1-0a]` shipped test-verified only.
+- [ ] **Verification cannot run inside a session pod (found 2026-07-27; see §0
+  `[D0]`).** The runner image ships no Go toolchain, no `just`, and no C
+  toolchain, so an in-pod agent cannot run `just check` as CLAUDE.md's "before
+  you call it done" assumes — the `[D0]` run worked around it by downloading
+  go1.26.2 to `/tmp/goroot` and `apt-get`ing gcc, and by hand-running each
+  recipe. That workaround is not reproducible policy. **Decide one:** add Go +
+  `just` + gcc/libc6-dev to `runner/Dockerfile` (image size cost, and it puts a
+  compiler in the agent sandbox), or state in `CLAUDE.md` that verification is
+  host-side only and in-pod agents hand off unverified. Related trap recorded in
+  `[D0]`: `go mod download all` (vs plain `go mod download`) rewrites both
+  `go.sum` files with the full module graph.
 - [ ] **`internal/sync`'s `probeErrDetail` has an untested defensive branch,
   found 2026-07-27 while promoting it out of `internal/cli`.** The helper's
   fallback for an error whose message carries no `"]: "` argv marker (it returns
