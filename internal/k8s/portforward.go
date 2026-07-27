@@ -13,6 +13,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/httpstream"
 	"k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/transport/spdy"
 
@@ -306,17 +307,32 @@ func (b *Backend) runForward(ctx context.Context, pod *corev1.Pod, localPort, re
 	}
 }
 
+// shouldFallbackToSPDY matches kubectl's transport fallback: old API servers
+// and HTTPS proxies may reject the WebSocket upgrade, while unrelated network
+// and authentication failures should be surfaced rather than retried through a
+// second transport.
+func shouldFallbackToSPDY(err error) bool {
+	return httpstream.IsUpgradeFailure(err) || httpstream.IsHTTPSProxyError(err)
+}
+
 // forwardOnce runs a single ForwardPorts() session and returns when it exits.
 func (b *Backend) forwardOnce(ctx context.Context, pod *corev1.Pod, localPort, remotePort int, ready chan struct{}) error {
-	// Build the SPDY transport from the rest config.
+	// Prefer the WebSocket-tunneled transport used by current kubectl. Legacy
+	// SPDY streams can remain nominally alive while one stream silently stalls;
+	// WebSockets avoid that failure mode. Fall back for older API servers and
+	// incompatible HTTPS proxies.
 	transport, upgrader, err := spdy.RoundTripperFor(b.config)
 	if err != nil {
 		return fmt.Errorf("spdy transport: %w", err)
 	}
 
 	u := b.restURLForPodPortForward(pod)
-
-	dialer := spdy.NewDialer(upgrader, &http.Client{Transport: transport}, "POST", u)
+	websocketDialer, err := portforward.NewSPDYOverWebsocketDialer(u, b.config)
+	if err != nil {
+		return fmt.Errorf("websocket port-forward dialer: %w", err)
+	}
+	spdyDialer := spdy.NewDialer(upgrader, &http.Client{Transport: transport}, "POST", u)
+	dialer := portforward.NewFallbackDialer(websocketDialer, spdyDialer, shouldFallbackToSPDY)
 
 	ports := []string{fmt.Sprintf("%d:%d", localPort, remotePort)}
 

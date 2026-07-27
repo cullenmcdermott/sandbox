@@ -10,6 +10,11 @@ import (
 // stable error vocabulary for the package — the idiomatic Go alternative to a
 // subprocess JSON error-code envelope.
 var (
+	// ErrOffline is returned when a cluster-backed method is called on a Client
+	// built by Offline. Local index resolution and worktree operations remain
+	// available without kubeconfig.
+	ErrOffline = errors.New("sandbox: client is offline")
+
 	// ErrSessionGone reports that a session no longer exists in the cluster (its
 	// Sandbox CRD was deleted). It is permanent and non-retryable. Returned by
 	// Connect against a gone session; re-exported from the session model so

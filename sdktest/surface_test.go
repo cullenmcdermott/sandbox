@@ -31,6 +31,7 @@ import (
 
 var (
 	_ func(...client.Option) (*client.Client, error) = client.New
+	_ func(...client.Option) (*client.Client, error) = client.Offline
 
 	_ func(string) client.Option        = client.WithContext
 	_ func(string) client.Option        = client.WithNamespace

@@ -156,8 +156,99 @@ func TestExternalPaneInitDialFailure(t *testing.T) {
 	}
 	msg := cmd()
 	fin, ok := msg.(externalPaneFinishedMsg)
-	if !ok || !errors.Is(fin.err, wantErr) {
+	if !ok || fin.pane != p || !errors.Is(fin.err, wantErr) {
 		t.Fatalf("Init cmd = %#v, want externalPaneFinishedMsg carrying the dial error", msg)
+	}
+}
+
+func TestExternalPaneStartupReadFirstOutputWins(t *testing.T) {
+	p := &ExternalPane{
+		out:            make(chan ptyChunk, 1),
+		startupTimeout: time.Second,
+	}
+	p.out <- ptyChunk{data: []byte("paint"), ok: true}
+
+	msg := p.startupReadCmd()()
+	out, ok := msg.(ptyOutputMsg)
+	if !ok || out.pane != p || string(out.chunk.data) != "paint" {
+		t.Fatalf("startup read = %#v, want first pane output", msg)
+	}
+}
+
+func TestExternalPaneStartupReadTimesOut(t *testing.T) {
+	p := &ExternalPane{
+		out:            make(chan ptyChunk),
+		startupTimeout: time.Millisecond,
+	}
+
+	msg := p.startupReadCmd()()
+	timedOut, ok := msg.(paneStartupTimeoutMsg)
+	if !ok || timedOut.pane != p {
+		t.Fatalf("startup read = %#v, want timeout for pane", msg)
+	}
+}
+
+func TestAppPaneStartupTimeoutRetriesOnceAndIgnoresStaleMessages(t *testing.T) {
+	var dials int
+	var transports []*fakePaneTransport
+	dial := func(cols, rows int) (PaneTransport, error) {
+		dials++
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatalf("pipe: %v", err)
+		}
+		t.Cleanup(func() { _ = r.Close(); _ = w.Close() })
+		tr := &fakePaneTransport{ReadWriteCloser: struct {
+			io.Reader
+			io.Writer
+			io.Closer
+		}{r, w, r}}
+		transports = append(transports, tr)
+		return tr, nil
+	}
+
+	old := NewExternalPaneTransport(Session{}, "claude", dial, nil)
+	old.startupTimeout = time.Hour
+	if cmd := old.Init(); cmd == nil {
+		t.Fatal("initial pane returned no read command")
+	}
+	closed := 0
+	old.transportClose = func() { closed++ }
+	app := NewApp(nil, nil, nil)
+	app.external = old
+	app.screen = ScreenExternal
+
+	_, cmd := app.handlePaneStartupTimeout(paneStartupTimeoutMsg{pane: old})
+	if cmd == nil || app.external == old || dials != 2 {
+		t.Fatalf("recovery: cmd=%v replacement=%v dials=%d, want replacement and two dials", cmd != nil, app.external != old, dials)
+	}
+	if !app.external.startupRecoveryAttempted {
+		t.Fatal("replacement did not record the bounded recovery attempt")
+	}
+	if closed != 0 || app.external.transportClose == nil {
+		t.Fatalf("connection close ownership: called=%d replacement owns=%v", closed, app.external.transportClose != nil)
+	}
+
+	// The old timer and old reader can both arrive after replacement; neither
+	// may affect the live pane.
+	replacement := app.external
+	app.Update(paneStartupTimeoutMsg{pane: old})
+	app.Update(externalPaneFinishedMsg{pane: old, err: errors.New("stale")})
+	if app.external != replacement || app.screen != ScreenExternal {
+		t.Fatal("stale old-pane message tore down the replacement")
+	}
+
+	// A timeout from the replacement is disarmed rather than spawning forever.
+	// In production Init never schedules this message; explicitly delivering one
+	// must still leave the attempt stable.
+	app.Update(paneStartupTimeoutMsg{pane: replacement})
+	if dials != 2 || app.external != replacement {
+		t.Fatalf("second timeout retried: dials=%d replacement changed=%v", dials, app.external != replacement)
+	}
+
+	app.handleExternalPaneFinished(externalPaneFinishedMsg{pane: replacement})
+	if closed != 1 {
+		t.Fatalf("connection close called %d times, want exactly once", closed)
 	}
 }
 

@@ -71,31 +71,32 @@ func TestOfflineClientResolvesWithoutAKubeconfig(t *testing.T) {
 	}
 }
 
-// The offline backend must REFUSE cluster work, not silently succeed at it: a
-// future edit that reaches for a cluster operation from an index-only command
-// should fail loudly at the call rather than quietly reintroduce the kubeconfig
-// dependency this file exists to remove.
-func TestOfflineBackendRefusesClusterOperations(t *testing.T) {
-	b := offlineBackend{}
-	ctx := context.Background()
-	ref := client.Ref{}
+// The CLI's offline client must REFUSE cluster work, not silently succeed at
+// it: a future edit that reaches for a cluster operation from an index-only
+// command should fail loudly at the call rather than quietly reintroduce the
+// kubeconfig dependency these commands exist without.
+//
+// This asserts the CLI's own wiring — that newOfflineClient really hands back an
+// offline client — through the PUBLIC client.ErrOffline. The backend itself is
+// an unexported SDK detail (client/offline.go), and its per-method refusals are
+// pinned there by TestOfflineDoesNotLoadKubeconfigAndClusterMethodsFailTyped;
+// duplicating that method-by-method here would just re-test the SDK.
+func TestOfflineClientRefusesClusterOperations(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("KUBECONFIG", filepath.Join(home, "no-such-kubeconfig.yaml"))
 
-	if _, err := b.List(ctx); !errors.Is(err, errOffline) {
-		t.Errorf("List err = %v, want errOffline", err)
+	c, err := newOfflineClient()
+	if err != nil {
+		t.Fatalf("newOfflineClient: %v", err)
 	}
-	if _, err := b.Status(ctx, ref); !errors.Is(err, errOffline) {
-		t.Errorf("Status err = %v, want errOffline", err)
+	ctx := context.Background()
+
+	if _, err := c.List(ctx); !errors.Is(err, client.ErrOffline) {
+		t.Errorf("List err = %v, want client.ErrOffline", err)
 	}
-	if err := b.Destroy(ctx, ref); !errors.Is(err, errOffline) {
-		t.Errorf("Destroy err = %v, want errOffline", err)
-	}
-	if err := b.Suspend(ctx, ref); !errors.Is(err, errOffline) {
-		t.Errorf("Suspend err = %v, want errOffline", err)
-	}
-	if _, err := b.RunnerToken(ctx, ref); !errors.Is(err, errOffline) {
-		t.Errorf("RunnerToken err = %v, want errOffline", err)
-	}
-	if _, err := b.Watch(ctx); !errors.Is(err, errOffline) {
-		t.Errorf("Watch err = %v, want errOffline", err)
+	if _, err := c.Watch(ctx); !errors.Is(err, client.ErrOffline) {
+		t.Errorf("Watch err = %v, want client.ErrOffline", err)
 	}
 }

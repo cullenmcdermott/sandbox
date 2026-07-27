@@ -119,10 +119,20 @@ type ExternalPane struct {
 	w, h   int
 	exited bool
 	err    error
+
+	// startupTimeout bounds the interval from a successful transport dial to
+	// its first byte. A silent stream is otherwise indistinguishable from a
+	// healthy one and can leave a blank pane indefinitely. Recovery is attempted
+	// once per user attach; the replacement sets startupRecoveryAttempted so a
+	// legitimately quiet client cannot enter a respawn loop.
+	startupTimeout           time.Duration
+	startupRecoveryAttempted bool
 }
 
 // minSize keeps the emulator non-degenerate before the first WindowSizeMsg.
 const extDefaultW, extDefaultH = 80, 24
+
+const paneStartupTimeout = 20 * time.Second
 
 // Chunk-coalescing bounds (P1, mirroring the SSE E5 batch drain): apply
 // non-blockingly drains chunks already buffered in p.out and feeds the
@@ -182,6 +192,11 @@ type ptyOutputMsg struct {
 	chunk ptyChunk
 }
 
+// paneStartupTimeoutMsg reports that a successfully dialed pane produced no
+// bytes before its first-frame deadline. The pane identity prevents an old
+// timer from replacing a newer attachment.
+type paneStartupTimeoutMsg struct{ pane *ExternalPane }
+
 // NewExternalPane builds the opencode pane: a local `opencode attach` child in
 // an OS PTY, dialed with the connector's creds.
 func NewExternalPane(sess Session, creds OpencodeCreds, liveSession func() Session) *ExternalPane {
@@ -192,7 +207,11 @@ func NewExternalPane(sess Session, creds OpencodeCreds, liveSession func() Sessi
 // the seam the claude-pane WebSocket stream plugs into (ConnectResult.PaneDial)
 // and a future codex pane will reuse. label names the client in the status row.
 func NewExternalPaneTransport(sess Session, label string, dial PaneDial, liveSession func() Session) *ExternalPane {
-	return &ExternalPane{sess: sess, label: label, dial: dial, liveSession: liveSession, w: extDefaultW, h: extDefaultH, activeModes: make(map[ansi.DECMode]bool)}
+	return &ExternalPane{
+		sess: sess, label: label, dial: dial, liveSession: liveSession,
+		w: extDefaultW, h: extDefaultH, activeModes: make(map[ansi.DECMode]bool),
+		startupTimeout: paneStartupTimeout,
+	}
 }
 
 // session returns the live read-model Session when a liveSession accessor is set
@@ -249,7 +268,7 @@ func (p *ExternalPane) Init() tea.Cmd {
 	tr, err := p.dial(cols, rows)
 	if err != nil {
 		p.exited, p.err = true, err
-		return func() tea.Msg { return externalPaneFinishedMsg{err: p.err} }
+		return func() tea.Msg { return externalPaneFinishedMsg{pane: p, err: p.err} }
 	}
 	p.transport = tr
 	p.out = make(chan ptyChunk, 256)
@@ -337,7 +356,31 @@ func (p *ExternalPane) Init() tea.Cmd {
 		}
 	}()
 
+	if !p.startupRecoveryAttempted && p.startupTimeout > 0 {
+		return p.startupReadCmd()
+	}
 	return p.readCmd()
+}
+
+// startupReadCmd waits for the first transport byte or the attach liveness
+// deadline. Only the first read is timed: an already-painted pane may remain
+// quiet indefinitely without being unhealthy.
+func (p *ExternalPane) startupReadCmd() tea.Cmd {
+	out := p.out
+	timeout := p.startupTimeout
+	return func() tea.Msg {
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		select {
+		case chunk, ok := <-out:
+			if !ok {
+				chunk = ptyChunk{ok: false}
+			}
+			return ptyOutputMsg{pane: p, chunk: chunk}
+		case <-timer.C:
+			return paneStartupTimeoutMsg{pane: p}
+		}
+	}
 }
 
 // readCmd blocks on the next transport chunk and wraps it as a ptyOutputMsg.

@@ -18,12 +18,16 @@ import (
 // `sandbox turn <id> --prompt …` against a session per backendCases row (`sandbox
 // opencode`/`claude`/`codex` launch a TUI, so they are never exec'd — the hidden
 // `turn` command is the headless seam: port-forward → runner token → StartTurn →
-// SSE Events → reply on STDOUT). Gated on expectRealReply:
+// SSE Events → reply on STDOUT). What each row asserts:
 //   - opencode drives runner turns on its free default model ($0), so this asserts
 //     a real reply: exit 0 AND non-empty STDOUT.
-//   - supervise-only backends (claude-pane, codex) reject the runner turn (POST
-//     /turns 409s), so the smoke only asserts the CLI settled the turn — the 409 —
-//     WITHOUT hanging (plumbing-only). This is how claude/codex fill the column.
+//   - supervise-only backends (claude-pane, codex) accept NO runner turn — POST
+//     /turns 409s — so their assertion is the mirror image: non-zero exit AND empty
+//     STDOUT, i.e. the CLI surfaced the rejection rather than hanging or printing a
+//     reply it cannot have. This is how claude/codex fill the column.
+//   - a keyed runner-turn backend with no provider key (dormant — no row sets
+//     needsKey today) only has to settle without hanging: its turn may legitimately
+//     fail.
 func TestCLISmoke(t *testing.T) {
 	if _, err := exec.LookPath("go"); err != nil {
 		t.Skip("go not on PATH; cannot build the sandbox binary") // gate-ok: integration-only, needs go to build the CLI binary
@@ -79,9 +83,24 @@ func TestCLISmoke(t *testing.T) {
 				}
 				return
 			}
-			// Plumbing-only (no provider key): we only require that the CLI drove the
-			// turn to a terminal without hanging — the turn itself may report a
-			// failure (asserted above: it did not hit the deadline).
+			if !bc.drivesRunnerTurns {
+				// Supervise-only: POST /turns answers 409 (runner/src/server.ts), so the
+				// column's real assertion is that the CLI SURFACES that rejection —
+				// StartTurn's error propagates out of `turn`'s RunE and main exits 1 with
+				// nothing on stdout (root.go silences cobra's own error/usage output, so
+				// stdout carries only assistant text). Swallowing the 409 (exit 0) or
+				// printing a "reply" are both bugs a bare no-hang check cannot see.
+				if err == nil {
+					t.Fatalf("sandbox turn exited 0 for a supervise-only backend — the 409 from POST /turns was swallowed\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+				}
+				if got := strings.TrimSpace(stdout.String()); got != "" {
+					t.Fatalf("sandbox turn printed a reply for a backend that accepts no runner turns:\n%s", got)
+				}
+				return
+			}
+			// Runner-turn backend without its provider key: the turn itself may report a
+			// failure, so we require only that the CLI drove it to a terminal without
+			// hanging (asserted above: it did not hit the deadline).
 			t.Logf("%s: plumbing-only — CLI seam drove the turn to a terminal", bc.name)
 		})
 	}
