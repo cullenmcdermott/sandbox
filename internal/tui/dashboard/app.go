@@ -87,7 +87,8 @@ type attachFailedMsg struct {
 // externalPaneFinishedMsg is returned when the opencode attach subprocess
 // exits, so the App can return to the dashboard.
 type externalPaneFinishedMsg struct {
-	err error
+	pane *ExternalPane
+	err  error
 }
 
 // connectUpdateMsg is one item from the connect goroutine's progress channel.
@@ -428,6 +429,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ptyOutputMsg:
 		return a.handlePtyOutput(msg)
 
+	case paneStartupTimeoutMsg:
+		return a.handlePaneStartupTimeout(msg)
+
 	case tea.BackgroundColorMsg:
 		// Adapt the whole palette to the detected terminal background. theme.ApplyTheme
 		// rebuilds the shared styles, so the next render of every screen adapts.
@@ -562,9 +566,43 @@ func (a *App) handlePtyOutput(msg ptyOutputMsg) (tea.Model, tea.Cmd) {
 	if finished {
 		// cmd here is any clipboard relay from the child's final output (O8); it
 		// must still run, so batch it ahead of the finished message.
-		return a, tea.Batch(cmd, func() tea.Msg { return externalPaneFinishedMsg{err: a.external.err} })
+		pane := a.external
+		return a, tea.Batch(cmd, func() tea.Msg { return externalPaneFinishedMsg{pane: pane, err: pane.err} })
 	}
 	return a, cmd
+}
+
+// handlePaneStartupTimeout replaces a transport that connected but produced no
+// first frame. The recovery is bounded to one attempt per explicit attach. If a
+// byte raced the timer and is already buffered, consume it instead of replacing
+// a healthy pane.
+func (a *App) handlePaneStartupTimeout(msg paneStartupTimeoutMsg) (tea.Model, tea.Cmd) {
+	old := a.external
+	if old == nil || msg.pane != old {
+		return a, nil
+	}
+	if old.startupRecoveryAttempted {
+		return a, old.readCmd()
+	}
+	select {
+	case chunk, ok := <-old.out:
+		if !ok {
+			chunk = ptyChunk{ok: false}
+		}
+		return a.handlePtyOutput(ptyOutputMsg{pane: old, chunk: chunk})
+	default:
+	}
+
+	replacement := NewExternalPaneTransport(old.sess, old.label, old.dial, old.liveSession)
+	replacement.w, replacement.h = old.w, old.h
+	replacement.startupRecoveryAttempted = true
+	// The connection-level forward belongs to the logical attachment, not one
+	// stream attempt. Transfer it before closing the silent transport.
+	replacement.transportClose = old.transportClose
+	old.transportClose = nil
+	old.close()
+	a.external = replacement
+	return a, replacement.Init()
 }
 
 // handleGlobalKey handles the screen-independent key intercepts (quit, connect
@@ -805,6 +843,9 @@ func (a *App) handleAttachFailed(msg attachFailedMsg) (tea.Model, tea.Cmd) {
 // and returns to the dashboard, restarting the background SSE for the external
 // session (B2) and surfacing a non-nil exit error inline.
 func (a *App) handleExternalPaneFinished(msg externalPaneFinishedMsg) (tea.Model, tea.Cmd) {
+	if msg.pane != nil && msg.pane != a.external {
+		return a, nil
+	}
 	var restoreCmd tea.Cmd
 	if a.external != nil {
 		restoreCmd = a.dashboard.startLiveSSECmd(a.dashboard.sessionByID(a.external.sess.ID()))

@@ -18,15 +18,28 @@ import (
 // is defined as "what this machine recorded", so faking the store would test a
 // different function than the one that ships.
 
-// resolveClient builds a Client rooted at a temp state dir with a fake backend
-// (resolution never touches the cluster).
+// resolveClient builds an offline Client rooted at a temp state dir.
 func resolveClient(t *testing.T) *Client {
 	t.Helper()
-	c, err := New(WithBackend(newFakeBackend()), WithStateDir(t.TempDir()))
+	c, err := Offline(WithStateDir(t.TempDir()))
 	if err != nil {
-		t.Fatalf("New: %v", err)
+		t.Fatalf("Offline: %v", err)
 	}
 	return c
+}
+
+func TestOfflineDoesNotLoadKubeconfigAndClusterMethodsFailTyped(t *testing.T) {
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "missing"))
+	c, err := Offline(WithStateDir(t.TempDir()))
+	if err != nil {
+		t.Fatalf("Offline loaded kubeconfig: %v", err)
+	}
+	if _, err := c.ResolveSessions(context.Background(), ""); err != nil {
+		t.Fatalf("offline ResolveSessions: %v", err)
+	}
+	if _, err := c.List(context.Background()); !errors.Is(err, ErrOffline) {
+		t.Fatalf("offline List error = %v, want ErrOffline", err)
+	}
 }
 
 // seed writes one index entry, failing the test if the write does.

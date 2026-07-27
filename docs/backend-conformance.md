@@ -21,6 +21,7 @@ each shared harness's table and make the rows green.
 |---|---|---|---|
 | `assertMapperInvariants(events)` | backend (unit) | `runner/test/backend-contract.ts` | feeding the backend's captured observer/mapper output through it |
 | `backendCases` table | backend (live) | `internal/k8sit/local_test.go` | appending a `backendCase` row |
+| `TestCLISmoke` | CLI↔runner seam (live) | `internal/k8sit/cli_smoke_test.go` | — (the same `backendCases` row fills it: a runner-turn backend asserts a real reply, a supervise-only one asserts the surfaced 409) |
 | feed goldens + App nav tests | frontend | `internal/tui/dashboard/feed_test.go` (TestGoldenFeed, TestAppViewFeedNavigation) | extending the backend-parameterized cases |
 | pane e2e smoke | seam | `internal/e2e/pane_e2e_test.go` (`//go:build e2e`) | — (transport-level; backend-agnostic) |
 
@@ -79,7 +80,9 @@ into the normalized model (`schema/events.json`).
       `finishTurn` always runs; settle-once; abort does not double-emit
       `turn.interrupted`; an absolute deadline backstops hangs.
 - [ ] **409 contract (every other backend)** — `POST /turns` and any
-      programmatic-control route answer 409 for supervise-only backends.
+      programmatic-control route answer 409 for supervise-only backends, and the
+      CLI *surfaces* that 409 (non-zero exit, nothing on stdout) instead of
+      hanging or printing a reply (live: `TestCLISmoke`).
 
 ### Auth seed (opencode)
 

@@ -3,6 +3,7 @@ package k8s
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -10,6 +11,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/httpstream"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
@@ -46,6 +48,26 @@ func TestRestURLForPodPortForwardTrailingSlashHost(t *testing.T) {
 		if u.Host != "api.example.com" {
 			t.Errorf("host %q: url host = %q, want api.example.com", host, u.Host)
 		}
+	}
+}
+
+func TestShouldFallbackToSPDY(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "upgrade failure", err: &httpstream.UpgradeFailureError{Cause: errors.New("websocket rejected")}, want: true},
+		{name: "wrapped upgrade failure", err: fmt.Errorf("dial: %w", &httpstream.UpgradeFailureError{Cause: errors.New("websocket rejected")}), want: true},
+		{name: "ordinary network failure", err: errors.New("connection reset")},
+		{name: "nil", err: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldFallbackToSPDY(tt.err); got != tt.want {
+				t.Fatalf("shouldFallbackToSPDY(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
 	}
 }
 

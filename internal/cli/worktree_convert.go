@@ -65,7 +65,7 @@ func newWorktreeConvertCmd() *cobra.Command {
 		Args:              cobra.MaximumNArgs(1),
 		ValidArgsFunction: completeSessionArg,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := newClient()
+			c, err := newOfflineClient()
 			if err != nil {
 				return err
 			}

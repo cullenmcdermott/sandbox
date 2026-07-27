@@ -301,6 +301,27 @@ func New(opts ...Option) (*Client, error) {
 		backend = b
 	}
 
+	return clientFromOptions(o, backend)
+}
+
+// Offline builds a Client for local-index and local-worktree operations without
+// loading kubeconfig. Cluster-backed methods return ErrOffline. New retains its
+// fail-fast cluster construction semantics; callers must opt into offline mode.
+func Offline(opts ...Option) (*Client, error) {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
+	if o.backend != nil || o.kubeconfigPath != "" || o.contextName != "" || o.restConfig != nil {
+		return nil, fmt.Errorf("%w: cluster backend options are not valid", ErrOffline)
+	}
+	if err := validateImagePullPolicy(o.reaperPullPolicy); err != nil {
+		return nil, err
+	}
+	return clientFromOptions(o, offlineBackend{namespace: o.namespace})
+}
+
+func clientFromOptions(o options, backend Backend) (*Client, error) {
 	stateDir := o.stateDir
 	if stateDir == "" {
 		root, err := index.DefaultRoot()
@@ -309,7 +330,6 @@ func New(opts ...Option) (*Client, error) {
 		}
 		stateDir = root
 	}
-
 	runnerImage := o.runnerImage
 	if runnerImage == "" {
 		runnerImage = DefaultRunnerImage

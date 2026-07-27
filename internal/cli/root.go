@@ -134,6 +134,17 @@ func newClient(opts ...client.Option) (*client.Client, error) {
 	return c, nil
 }
 
+// newOfflineClient builds the local-index/worktree client used by commands that
+// must work with no kubeconfig or reachable cluster.
+func newOfflineClient(opts ...client.Option) (*client.Client, error) {
+	base := []client.Option{client.WithNamespace(namespaceFlag)}
+	c, err := client.Offline(append(base, opts...)...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open local session index: %w", err)
+	}
+	return c, nil
+}
+
 // newBackend creates a k8s Backend scoped to the root --namespace flag. Used by
 // the in-cluster reaper and the read-only trace path that don't need the full
 // client.
