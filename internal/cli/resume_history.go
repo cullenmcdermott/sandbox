@@ -26,6 +26,26 @@ import (
 // transcripts have synced down. The picker refresh is non-fatal: its failure is
 // logged but the TUI's own exit error is what propagates.
 func afterTUI(fn func() error) error {
+	return afterTUIForSession("", fn)
+}
+
+// afterTUIForSession is afterTUI for an entry point that already knows which
+// session it is opening. It additionally routes --debug records to that
+// session's debug.jsonl for the duration of the TUI ([T1]).
+//
+// File-only, not a tee: the dashboard owns the alt-screen, so a stderr write
+// mid-run scribbles over the UI. Writing debug records to stderr here is the
+// specific thing that made --debug useless in the primary workflow.
+func afterTUIForSession(sessionID string, fn func() error) error {
+	if sessionID != "" {
+		if derr := attachDebugFileSink(sessionID, false); derr != nil {
+			// Advisory only — a debug log we cannot open must not stop the
+			// session the user asked for. Printed BEFORE the TUI starts, so it
+			// does not corrupt the alt-screen.
+			fmt.Fprintf(os.Stderr, "warning: debug log: %v\n", derr)
+		}
+		defer closeDebugFileSink()
+	}
 	err := fn()
 	if herr := syncResumeHistory(); herr != nil {
 		fmt.Fprintf(os.Stderr, "warning: refresh resume history: %v\n", herr)

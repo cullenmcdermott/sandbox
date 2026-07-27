@@ -24,10 +24,14 @@ import { runExec } from './exec.js';
 import { appendAudit } from './audit.js';
 import { bashCommandBlocked } from './guards.js';
 import { bearerTokenOk } from './auth.js';
+import { createLogger } from './log.js';
+
+const httpLog = createLogger('http');
 
 // Re-exported for the turn-gate unit tests (turn-gate.test.ts), which import it
-// from './server.js'. The definition moved to ./turns.ts so the shared
-// startTurn path and the autopilot driver reuse the exact same 409 gate.
+// from './server.js'. The definition moved to ./turns.ts when the shared
+// startTurn path was introduced, so every turn entry point runs the same 409
+// gate.
 export { turnRejectReason };
 
 // --- Auth -----------------------------------------------------------------
@@ -113,9 +117,26 @@ export function evaluatePaneUpgrade(
   return { ok: true };
 }
 
+/** [S5] Upper bound on a pane resize in either dimension. The lower bound was
+ * always enforced (>0); without an upper one, an authenticated-but-buggy or
+ * hostile client could ask node-pty for a 2-billion-column terminal and make the
+ * runner allocate on its behalf. 2000 is far above any real display (a 5120px
+ * ultrawide at a 6px cell is ~850 columns) while keeping the ioctl sane. */
+export const MAX_PANE_DIMENSION = 2000;
+
+/** [S5] Cap on a single inbound pane WebSocket frame. Inbound frames are
+ * keystrokes, pasted text, and tiny resize control messages — 1 MiB is orders of
+ * magnitude above a realistic paste while bounding what one frame can make the
+ * runner buffer. `ws` closes the socket with 1009 when a frame exceeds it. */
+export const MAX_PANE_FRAME_BYTES = 1024 * 1024;
+
 /** Parse a pane text control frame. Currently only a resize:
  * `{"type":"resize","cols":N,"rows":N}`. Returns null for anything invalid so a
- * malformed frame is ignored rather than throwing on the socket. Pure/exported. */
+ * malformed frame is ignored rather than throwing on the socket — including an
+ * out-of-range dimension ([S5]), which is dropped rather than clamped: a client
+ * asking for an impossible geometry is confused, and silently honoring half of
+ * its request would leave the two ends disagreeing about the pane size.
+ * Pure/exported. */
 export function parsePaneControl(text: string): { type: 'resize'; cols: number; rows: number } | null {
   let msg: unknown;
   try {
@@ -130,6 +151,7 @@ export function parsePaneControl(text: string): { type: 'resize'; cols: number; 
   const rows = m.rows;
   if (typeof cols !== 'number' || typeof rows !== 'number') return null;
   if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols <= 0 || rows <= 0) return null;
+  if (cols > MAX_PANE_DIMENSION || rows > MAX_PANE_DIMENSION) return null;
   return { type: 'resize', cols, rows };
 }
 
@@ -176,7 +198,9 @@ function paneSocketAdapter(ws: WebSocket): PaneSocket {
  * are JSON control (resize). Only wired when a pane supervisor is present.
  */
 function attachPaneUpgrade(server: Server, cfg: ReturnType<typeof loadConfig>, pane: ClaudePaneSupervisor): void {
-  const wss = new WebSocketServer({ noServer: true });
+  // [S5] maxPayload bounds a single inbound frame; without it `ws` defaults to
+  // 100 MiB, which one authenticated client could make the runner buffer at will.
+  const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_PANE_FRAME_BYTES });
   server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     const url = new URL(req.url ?? '/', `http://localhost:${PORT}`);
     const outcome = evaluatePaneUpgrade(url.pathname, cfg.sessionId, cfg.backend, authOk(req));
@@ -189,8 +213,19 @@ function attachPaneUpgrade(server: Server, cfg: ReturnType<typeof loadConfig>, p
       socket.destroy();
       return;
     }
+    // [T4] Correlate the pane attach with the CLI's connect span. The header is
+    // the primary source (our own dialer sets it); the `traceId` query param is
+    // the fallback for any client that cannot set headers on a WebSocket
+    // handshake — browsers, notably. Same validation either way, since both are
+    // untrusted input headed for a log line.
+    const paneTraceId =
+      traceIDFromHeader(req.headers['x-sandbox-trace-id']) ||
+      traceIDFromHeader(url.searchParams.get('traceId') ?? undefined);
+    const paneLog = paneTraceId !== '' ? httpLog.child({ traceId: paneTraceId }) : httpLog;
+
     wss.handleUpgrade(req, socket, head, (ws) => {
       const adapter = paneSocketAdapter(ws);
+      paneLog.info('pane attached');
       pane.attach(adapter);
       ws.on('message', (data: RawData, isBinary: boolean) => {
         if (isBinary) {
@@ -204,7 +239,10 @@ function attachPaneUpgrade(server: Server, cfg: ReturnType<typeof loadConfig>, p
         // Only clear if we're still the active socket — a later attach may have
         // preempted us (the supervisor already closed us with 4001), and its own
         // close must not detach the newcomer.
-        if (pane.current() === adapter) pane.detachAll();
+        if (pane.current() === adapter) {
+          paneLog.info('pane detached');
+          pane.detachAll();
+        }
       };
       ws.on('close', onGone);
       ws.on('error', onGone);
@@ -248,6 +286,35 @@ export function createRunnerServer(
   paneObserver: PaneObserverHandle | null = null,
 ): Server {
   const server = createServer((req, res) => {
+    // [T2]: the HTTP surface had NO request logging — one `listening` line was
+    // the only thing this server ever emitted, so a 401 storm or a slow route
+    // was invisible without reproducing it. Log on response finish (so status
+    // and duration are known); the event-stream routes are long-lived by design
+    // and would otherwise report a misleading multi-hour "duration", so they are
+    // logged at open instead. The trace id, when the caller stamped one, ties
+    // the line back to the CLI's connect span.
+    const startedAt = Date.now();
+    const traceId = traceIDFromHeader(req.headers['x-sandbox-trace-id']);
+    const reqLog = traceId !== '' ? httpLog.child({ traceId }) : httpLog;
+    const path = (req.url ?? '/').split('?')[0];
+    let logged = false;
+    const logOnce = (status: number, note?: string): void => {
+      if (logged) return;
+      logged = true;
+      // 5xx is ours, 4xx is theirs, 2xx/3xx is noise at info — hence debug for
+      // the happy path so a busy pod's log stays readable by eye.
+      const level = status >= 500 ? 'error' : status >= 400 ? 'warn' : 'debug';
+      reqLog[level]('request', {
+        method: req.method ?? '',
+        path,
+        status,
+        durationMs: Date.now() - startedAt,
+        ...(note !== undefined ? { note } : {}),
+      });
+    };
+    res.on('finish', () => logOnce(res.statusCode));
+    res.on('close', () => logOnce(res.statusCode, 'client disconnected'));
+
     handle(req, res, cfg, agent, paneObserver).catch((err) => {
       const message = err instanceof Error ? err.message : String(err);
       // B9: readBody's typed rejections are client faults, not server bugs — map
@@ -255,6 +322,9 @@ export function createRunnerServer(
       // 500. Anything else stays a 500.
       const status =
         err instanceof BodyTooLargeError ? 413 : err instanceof InvalidJsonError ? 400 : 500;
+      // A 500 is a runner bug — surface the error itself, which previously went
+      // only into the response body the client may never show anyone.
+      if (status === 500) reqLog.error('unhandled request error', { method: req.method ?? '', path, err });
       if (!res.headersSent) {
         res.writeHead(status, { 'Content-Type': 'application/json' });
       }
@@ -277,7 +347,7 @@ export function startServer(
   const cfg = loadConfig();
   const server = createRunnerServer(cfg, agent, pane, paneObserver);
   server.listen(PORT, () => {
-    console.log(`runner listening on :${PORT} (session=${cfg.sessionId})`);
+    httpLog.info('runner listening', { port: PORT });
     // Fires once the socket is actually accepting, not when listen() was
     // initiated — index.ts closes its boot.listen trace phase here.
     onListening?.();
@@ -394,10 +464,10 @@ async function handle(req: IncomingMessage, res: ServerResponse, cfg: ReturnType
     }
     // R4/B2: reject concurrent turns — two overlapping query() calls against one
     // Claude session interleave events, and a headless POST into a busy opencode
-    // session drives the same session concurrently. startTurn runs the same 409
-    // gate (turnRejectReason) the autopilot driver uses, then reserves the slot
-    // synchronously (no await between check and registerTurn) — callers must
-    // interrupt the active turn first, then POST a new one.
+    // session drives the same session concurrently. startTurn runs the 409 gate
+    // (turnRejectReason), then reserves the slot synchronously (no await between
+    // check and registerTurn) — callers must interrupt the active turn first,
+    // then POST a new one.
     const started = startTurn(cfg, agent, body.prompt, {
       ...(body.resume ? { resume: body.resume } : {}),
       ...(body.allowedTools ? { allowedTools: body.allowedTools } : {}),

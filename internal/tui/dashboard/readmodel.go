@@ -2,6 +2,8 @@ package dashboard
 
 import (
 	"encoding/json"
+	"strconv"
+	"time"
 
 	"github.com/cullenmcdermott/sandbox/client/models"
 	"github.com/cullenmcdermott/sandbox/internal/session"
@@ -66,6 +68,27 @@ type sessionReadModel struct {
 	PendingPermissionID   string
 	PendingPermissionTool string
 	PendingPermissionArg  string
+
+	// claude.ai plan usage windows from rate_limit.updated (the claude-pane
+	// statusline tap; API-key/Bedrock/Vertex sessions never report them).
+	//
+	// RateLimitOK is the render gate and is deliberately NOT the same question as
+	// "are the utilizations zero": a session that has never reported a window and
+	// a session genuinely at 0% are indistinguishable in the numbers, and showing
+	// "5h 0%" for the former invents a fact. It is set only by an event whose
+	// Available is true, so the windows render only once the agent has actually
+	// said what they are.
+	//
+	// ResetsAt are parsed here rather than at render time — the payload carries
+	// RFC3339 strings, and a status row redrawn on every pane frame must not
+	// re-parse them. A zero value means the window has no known reset instant
+	// (the payload omits it), which renders as a bare percentage.
+	RateLimitOK           bool
+	FiveHourUtil          float64
+	FiveHourResetsAt      time.Time
+	SevenDayUtil          float64
+	SevenDayResetsAt      time.Time
+	RateLimitSubscription string
 }
 
 // clearPendingPermission resets the pending-permission descriptor (on resolution
@@ -174,6 +197,23 @@ func (rm *sessionReadModel) ApplyEvent(ev session.Event) readModelResult {
 			rm.CtxLimit = p.ContextLimitTokens
 		}
 
+	case session.EventRateLimitUpdated:
+		var p session.RateLimitPayload
+		_ = json.Unmarshal(ev.Payload, &p)
+		// Only an AVAILABLE report opens the render gate. An unavailable one
+		// (API-key/Bedrock/Vertex auth) closes it again rather than freezing the
+		// last known windows, which would keep showing plan usage for a session
+		// that no longer has a plan.
+		rm.RateLimitOK = p.Available
+		if !p.Available {
+			break
+		}
+		rm.RateLimitSubscription = p.SubscriptionType
+		rm.FiveHourUtil = p.FiveHourUtil
+		rm.SevenDayUtil = p.SevenDayUtil
+		rm.FiveHourResetsAt = parseResetsAt(p.FiveHourResetsAt)
+		rm.SevenDayResetsAt = parseResetsAt(p.SevenDayResetsAt)
+
 	case session.EventContextCompacted:
 		var p session.ContextCompactedPayload
 		_ = json.Unmarshal(ev.Payload, &p)
@@ -233,4 +273,78 @@ func (rm *sessionReadModel) ApplyEvent(ev session.Event) readModelResult {
 		rm.clearPendingPermission()
 	}
 	return res
+}
+
+// parseResetsAt turns a RateLimitPayload reset instant into a time. The payload
+// documents these as RFC3339 and permits them to be absent, so anything
+// unparseable becomes the zero time — which the renderer reads as "no known
+// reset", printing a bare percentage rather than a bogus countdown.
+func parseResetsAt(s string) time.Time {
+	if s == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+// rateLimitSegs renders the plan usage windows for the pane status row: "5h 42%"
+// / "wk 18%", each with a reset countdown when one is known ("5h 42% ⟳2h").
+// Empty when no available report has arrived — see RateLimitOK.
+//
+// now is passed in rather than read from the clock so the formatting is testable
+// and so a row redrawn many times per second is consistent within one frame.
+func (rm *sessionReadModel) rateLimitSegs(now time.Time) []string {
+	if !rm.RateLimitOK {
+		return nil
+	}
+	seg := func(label string, util float64, resets time.Time) string {
+		s := label + " " + strconv.Itoa(clampPct(util)) + "%"
+		if d := until(resets, now); d != "" {
+			s += " ⟳" + d
+		}
+		return s
+	}
+	return []string{
+		seg("5h", rm.FiveHourUtil, rm.FiveHourResetsAt),
+		seg("wk", rm.SevenDayUtil, rm.SevenDayResetsAt),
+	}
+}
+
+// clampPct rounds a 0-100 utilization to a whole percent, refusing to render
+// anything outside that range: the window is a fraction of a plan allowance, so
+// a provider reporting 103 or -1 is a bug on their side that must not become a
+// bug in our status bar.
+func clampPct(v float64) int {
+	switch {
+	case v <= 0:
+		return 0
+	case v >= 100:
+		return 100
+	default:
+		return int(v + 0.5)
+	}
+}
+
+// until renders how long remains before t in one compact token ("45m", "2h",
+// "3d"). It returns "" for an unknown (zero) reset and for one that has already
+// elapsed — a window whose reset time has passed is about to be refreshed by the
+// next statusline sample, and "⟳-1h" is worse than no countdown at all.
+func until(t, now time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	d := t.Sub(now)
+	switch {
+	case d <= 0:
+		return ""
+	case d < time.Hour:
+		return strconv.Itoa(int(d.Minutes())+1) + "m"
+	case d < 24*time.Hour:
+		return strconv.Itoa(int(d.Hours())) + "h"
+	default:
+		return strconv.Itoa(int(d.Hours()/24)) + "d"
+	}
 }

@@ -11,6 +11,9 @@ import { dirname } from 'node:path';
 import type { EventType, IdleStatus, SessionState, StatusResponse } from './types.js';
 import { PROTOCOL_VERSION, SESSION_JSON_PATH } from './types.js';
 import { appendEvent, sseClientCount, setClientsChangedHandler, maxTurnNumber, hasTurnTerminal } from './events.js';
+import { createLogger } from './log.js';
+
+const log = createLogger('session');
 
 let externalActivityProbe: (() => boolean) | null = null;
 
@@ -45,7 +48,7 @@ export function loadConfig(): RunnerConfig {
   const model = process.env.SANDBOX_MODEL ?? '';
   if (!runnerToken) {
     // Auth is still enforced (token === '' rejects all non-healthz), but warn.
-    console.warn('RUNNER_TOKEN not set: all non-healthz requests will be rejected');
+    log.warn('RUNNER_TOKEN not set: all non-healthz requests will be rejected');
   }
   return { sessionId, backend, projectPath, runnerToken, ...(model ? { model } : {}) };
 }
@@ -176,9 +179,10 @@ export function orphanedTurnBootEvents(
 export function reviveSessionState(parsed: Partial<SessionState>, cfg: RunnerConfig): SessionState {
   const onDisk = parsed.state_version ?? 1;
   if (onDisk > STATE_VERSION) {
-    console.error(
-      `session.json state_version ${onDisk} is newer than this runner supports (${STATE_VERSION}); ` +
-        'loading best-effort (unknown fields preserved). Use a runner image at least as new as the one that last wrote this session.',
+    log.error(
+      'session.json is newer than this runner supports; loading best-effort (unknown fields preserved). ' +
+        'Use a runner image at least as new as the one that last wrote this session',
+      { onDiskVersion: onDisk, supportedVersion: STATE_VERSION },
     );
   }
   return {
@@ -216,7 +220,7 @@ export interface LoadedSession {
  * the bad file aside (session.json.corrupt-<ts> — Date.now() is fine in the
  * runner) and return null so the caller falls through to fresh emptyState seeding
  * and the pod comes up. The moved-aside copy is preserved for post-mortem. Loud
- * console.error so the incident is visible in pod logs, not silently swallowed.
+ * error-level log so the incident is visible in pod logs, not silently swallowed.
  * Exported for unit tests (production callers use SESSION_JSON_PATH).
  */
 export function readSessionFile(path: string): Partial<SessionState> | null {
@@ -231,10 +235,11 @@ export function readSessionFile(path: string): Partial<SessionState> | null {
     } catch {
       /* best-effort: if we can't move it aside, still fall through to reseed */
     }
-    console.error(
-      `session.json at ${path} is corrupt (${err instanceof Error ? err.message : String(err)}); ` +
-        `moved aside to ${aside} and reseeding a fresh empty session so the pod can boot`,
-    );
+    log.error('session.json is corrupt; moved aside and reseeding an empty session so the pod can boot', {
+      path,
+      aside,
+      err: err instanceof Error ? err : String(err),
+    });
     return null;
   }
 }
@@ -386,11 +391,9 @@ class SessionRegistry {
    */
   recomputeIdle(): void {
     if (this.state.status === 'busy' && this.syntheticBusyStale()) {
-      console.warn(
-        `session ${this.state.sandbox_session_id}: synthetic 'busy' went stale ` +
-          `(no observer events for >=${SYNTHETIC_BUSY_STALE_MS}ms); ` +
-          "releasing to 'idle' (emits session.status_changed)",
-      );
+      log.warn("synthetic 'busy' went stale; releasing to 'idle' (emits session.status_changed)", {
+        staleAfterMs: SYNTHETIC_BUSY_STALE_MS,
+      });
       // Recurses once with status 'idle'; that pass performs the idleSince
       // bookkeeping below.
       this.setStatus('idle');

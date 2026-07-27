@@ -1,10 +1,14 @@
-// Shared turn-start path. Both the POST /sessions/:id/turns route and the
-// runner-side autopilot driver reserve the single turn slot and fire a backend
-// turn through THIS function, so both go through the SAME 409 gate
-// (turnRejectReason) and the SAME completion signal (turnSettledHandler) rather
-// than the driver HTTP-looping back to the server. Keeping the gate + fire in one
-// place is what makes a self-submitted turn indistinguishable from a manual one
-// downstream (idle clock, event log, audit).
+// Shared turn-start path: reserve the single turn slot behind the 409 gate
+// (turnRejectReason) and fire a backend turn.
+//
+// It had two callers — POST /sessions/:id/turns and the runner-side autopilot
+// driver, which is why the gate and the fire live in one place rather than the
+// driver HTTP-looping back to the server. claude-pane-first deleted the driver
+// (and the SDK turn engine with it), so the route is now the ONLY caller and its
+// only live consumer is the opencode headless first-turn adapter. The
+// single-place structure is kept anyway: it is what makes any future
+// self-submitted turn indistinguishable from a manual one downstream (idle
+// clock, event log, audit).
 
 import { appendEvent } from './events.js';
 import { getRegistry } from './session.js';
@@ -79,27 +83,12 @@ export interface StartTurnOptions {
 /** A turn was reserved and fired (turnId), or the 409 gate rejected it. */
 export type StartTurnResult = { turnId: string } | { rejected: string };
 
-// The autopilot driver hooks turn completion here. Called AFTER a turn fully
-// settles (agent.runTurn resolved/rejected AND its own finally ran finishTurn),
-// for every turn started through startTurn — manual POST /turns turns included,
-// so a manual turn transparently counts as a free loop iteration (ADR H2). A
-// single handler is enough (one session per pod). Null when no driver is wired
-// (non-claude backends).
-let turnSettledHandler: ((turnId: string) => void) | null = null;
-
-/** Register (or clear with null) the turn-settled handler. The autopilot wiring
- * sets this at driver creation; tests clear it in cleanup. */
-export function setTurnSettledHandler(fn: ((turnId: string) => void) | null): void {
-  turnSettledHandler = fn;
-}
-
 /**
  * Reserve the single turn slot and fire the backend turn (fire-and-forget),
  * returning the assigned turnId — or a `rejected` reason when the 409 gate says
  * a turn is already active. The check-and-reserve is synchronous (no await
  * between turnRejectReason and registerTurn) so two near-simultaneous starts
- * can't both observe an empty slot (TOCTOU / R4). On settle, notifies the
- * autopilot driver via turnSettledHandler.
+ * can't both observe an empty slot (TOCTOU / R4).
  */
 export function startTurn(
   cfg: RunnerConfig,
@@ -122,17 +111,6 @@ export function startTurn(
         const message = err instanceof Error ? err.message : String(err);
         appendEvent(cfg.sessionId, turnId, 'error', { message });
         reg.finishTurn(turnId);
-      })
-      .finally(() => {
-        // The turn has fully settled (runTurn's finally already ran finishTurn).
-        // Notify the autopilot driver so it can increment iterations / scan the
-        // sentinel / schedule the next tick (or retry). Best-effort: a throwing
-        // handler must not become an unhandled rejection.
-        try {
-          turnSettledHandler?.(turnId);
-        } catch (err) {
-          console.error('turnSettledHandler threw (non-fatal):', err);
-        }
       });
   } catch (err) {
     // [V42] registerTurn does activeTurns.set THEN setStatus('busy'), which

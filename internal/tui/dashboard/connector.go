@@ -117,20 +117,40 @@ type SyncProber func(ctx context.Context, id session.ID) SyncHealth
 type OrphanSync struct {
 	Identifier string
 	SessionID  session.ID
+	// Paused distinguishes an INTENTIONALLY paused sync (suspend, `sandbox sync
+	// --pause`) from one whose transport is down ([V35]). The two need opposite
+	// protection rules: a transport-down sync of a Suspended session should be
+	// reaped (it is thrashing a pod that isn't there), while a PAUSED sync of that
+	// same session must be kept — pausing is exactly what suspend is supposed to
+	// do, and resume unpauses it. Only a paused sync whose session no longer
+	// exists at all is reapable; without this flag the dashboard could not tell
+	// those two apart, which is why it did not list paused syncs before.
+	Paused bool
 }
 
-// SyncReaper lists this tool's mutagen sync sessions whose pod endpoint is
-// unreachable (orphan candidates) and terminates specific ones by identifier.
-// Decoupled from internal/sync, like SyncProber.
+// SyncReaper lists this tool's mutagen sync sessions that are candidates for
+// collection — transport-down (pod endpoint unreachable) or intentionally Paused
+// — and terminates specific ones by identifier. Decoupled from internal/sync,
+// like SyncProber.
 //
-// The dashboard's GC (piggybacked on the periodic cluster reconcile) terminates
-// an orphan ONLY when its session's pod is NOT up per the latest authoritative
-// snapshot — i.e. the session is gone, Suspended, or Failed (a Suspended session's
-// sync thrashes because the in-cluster idle reaper can't pause the host daemon) —
-// AND it has stayed that way past a grace window. So a Running session's sync
-// (even mid-blip) and a fresh session still scheduling are never touched. A
-// terminated sync is harmless to lose: the connect path re-creates it idempotently
-// (and resumes it if it was merely paused) on the next attach.
+// The dashboard's GC (piggybacked on the periodic cluster reconcile) terminates a
+// candidate only after it has stayed eligible past a grace window, and
+// eligibility depends on which kind it is ([V35]):
+//
+//   - TRANSPORT-DOWN: eligible when the session's pod is NOT up per the latest
+//     authoritative snapshot — gone, Suspended, or Failed. (A Suspended session's
+//     sync thrashes, because the in-cluster idle reaper cannot pause the host
+//     daemon.) A Running session's sync, even mid-blip, and a fresh session still
+//     scheduling are never touched.
+//   - PAUSED: eligible only when the session does not EXIST at all. Suspend is
+//     what paused it and resume unpauses it, so a paused sync of a merely
+//     suspended session is working as intended; reaping it would silently drop
+//     that session's file sync. Only a paused sync left behind by a deleted
+//     session (`kubectl delete sandbox` on a suspended one) is garbage — and
+//     nothing else collects it, since it is not transport-down.
+//
+// A terminated sync is harmless to lose: the connect path re-creates it
+// idempotently (and resumes it if it was merely paused) on the next attach.
 type SyncReaper interface {
 	ListOrphans(ctx context.Context) ([]OrphanSync, error)
 	Terminate(ctx context.Context, identifiers []string) error

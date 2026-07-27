@@ -11,18 +11,24 @@
 // turn discovering it, and worse, may conclude the repo is broken and start
 // "repairing" it.
 //
-// So: state it up front. This module writes a CLAUDE.md into CLAUDE_CONFIG_DIR
-// (pod-local, on the PVC — NOT the workspace, which syncs back to the user's
-// machine and must not grow files they did not write). Claude Code reads that
-// path as user memory, so the agent has it before its first turn.
+// So: state it up front. This module writes the guide into a POD-LOCAL config
+// dir (on the PVC — NOT the workspace, which syncs back to the user's machine
+// and must not grow files they did not write), at whatever path the session's
+// backend reads ambient instructions from, so the agent has it before its first
+// turn. Every backend gets the same block: the hazard is a property of the
+// workspace, not of the agent looking at it.
 //
 // The file is written as a MARKED BLOCK: content outside the markers is
-// preserved verbatim across boots, so an operator-supplied CLAUDE.md (bootstrap
-// files can target this same path) survives, and the block itself is rewritten
+// preserved verbatim across boots, so an operator-supplied guide (bootstrap
+// files can target these same paths) survives, and the block itself is rewritten
 // each boot so it never describes a stale workspace.
+//
+// This module is deliberately a LEAF — it imports nothing from the backend
+// supervisors, so `opencode.ts` can import guideTargetFor to register the file
+// in its generated config without an import cycle.
 
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { isAbsolute, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { CLAUDE_CONFIG_DIR } from './types.js';
 
 /** Injectable filesystem surface (mirrors bootstrap.ts's BootstrapFs) so the
@@ -35,7 +41,13 @@ export interface GuideFs {
   statSync: typeof statSync;
 }
 
-const realGuideFs: GuideFs = { existsSync, readFileSync, writeFileSync, mkdirSync, statSync };
+const realGuideFs: GuideFs = {
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  statSync,
+};
 
 /** Fences around the runner-owned region of CLAUDE.md. Anything outside them is
  * another author's and is preserved byte-for-byte. */
@@ -108,7 +120,7 @@ export function guideBlock(workspaceDir: string, git: GitKind): string {
       '- You cannot commit, branch, stash, diff against HEAD, or read git history.',
       '- Read files directly to see the current state; you have no `git status`, so',
       '  track what you changed as you go and say so explicitly when you report back.',
-      '- Committing is the **user\'s** step, on their machine, where the worktree is a',
+      "- Committing is the **user's** step, on their machine, where the worktree is a",
       '  real checkout. Leave the work uncommitted here and describe it.',
       '',
     );
@@ -140,23 +152,58 @@ export function spliceGuide(existing: string, block: string): string {
   return block + '\n\n' + existing;
 }
 
+/**
+ * Where a given backend's agent reads ambient instructions from — always a
+ * pod-local config dir, never the workspace.
+ *
+ * - `claude-pane` → `$CLAUDE_CONFIG_DIR/CLAUDE.md` (Claude Code's user memory).
+ * - `codex-app-server` → `$CODEX_HOME/AGENTS.md` (codex's global AGENTS.md;
+ *   CODEX_HOME is the documented relocation of ~/.codex and the pod always sets
+ *   it to the PVC-persisted state dir).
+ * - `opencode-server` → an `AGENTS.md` beside the generated opencode config,
+ *   registered explicitly in that config's `instructions` array
+ *   (buildOpencodeConfig) rather than relying on opencode's global-dir lookup.
+ *
+ * Returns null when the backend is unknown or its config-dir env var is unset —
+ * off-pod dev, mostly. The guide is best-effort, so "nowhere to put it" is a
+ * quiet no-op, not an error: deliberately NOT falling back to the workspace,
+ * which syncs to the user's machine.
+ */
+export function guideTargetFor(
+  backend: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  switch (backend) {
+    case 'claude-pane':
+      return join(env.CLAUDE_CONFIG_DIR?.trim() || CLAUDE_CONFIG_DIR, 'CLAUDE.md');
+    case 'codex-app-server': {
+      const home = env.CODEX_HOME?.trim();
+      return home ? join(home, 'AGENTS.md') : null;
+    }
+    case 'opencode-server': {
+      const cfg = env.OPENCODE_CONFIG?.trim();
+      return cfg ? join(dirname(cfg), 'AGENTS.md') : null;
+    }
+    default:
+      return null;
+  }
+}
+
 export interface WriteGuideOpts {
   /** The agent's working tree (resolveWorkspaceDir(projectPath)). */
   workspaceDir: string;
-  /** Target config dir (defaults to $CLAUDE_CONFIG_DIR, else the shared constant). */
-  configDir?: string;
+  /** Absolute path of the guide file to write (guideTargetFor(backend)). */
+  path: string;
   fs?: GuideFs;
-  env?: NodeJS.ProcessEnv;
 }
 
 /** Write (or refresh) the workspace guide. Best-effort by design: a guide the
  * runner could not write is a less-informed agent, never a failed boot — unlike
  * credentials, nothing downstream depends on this file existing. */
 export function writeWorkspaceGuide(opts: WriteGuideOpts): GitKind | null {
-  const env = opts.env ?? process.env;
   const fs = opts.fs ?? realGuideFs;
-  const dir = opts.configDir ?? (env.CLAUDE_CONFIG_DIR || CLAUDE_CONFIG_DIR);
-  const path = join(dir, 'CLAUDE.md');
+  const path = opts.path;
+  const dir = dirname(path);
   try {
     const git = classifyGit(opts.workspaceDir, fs);
     let existing = '';

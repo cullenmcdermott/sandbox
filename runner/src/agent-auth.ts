@@ -17,6 +17,9 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { createLogger } from './log.js';
+
+const log = createLogger('agent-auth');
 
 /** Injectable filesystem surface for the auth-materialization helpers so the
  * seeding + fail-closed logic is unit-testable off-pod (production uses node:fs).
@@ -35,7 +38,7 @@ export const realAuthFs: AuthFs = { readFileSync, writeFileSync, mkdirSync };
  * credential documents, or hashes thereof). */
 export function writeAuthFile0600(fs: AuthFs, path: string, content: string, label: string): void {
   fs.writeFileSync(path, content, { mode: 0o600 });
-  console.log(`${label} materialized at ${path} (mode 0600)`);
+  log.info('credential materialized (mode 0600)', { credential: label, path });
 }
 
 /** sha256 hex of a string. Used to fingerprint per-provider seed entries so an

@@ -234,6 +234,13 @@ type Model struct {
 	// forever (the original 634-leak, re-labeled "gone"→"suspended").
 	gcRunning map[session.ID]bool
 
+	// gcKnown is the set of session ids the last authoritative reconcile knew about
+	// AT ALL (Suspended and Failed included; only StatusGone excluded). PAUSED
+	// orphan syncs are protected by this set rather than gcRunning ([V35]): suspend
+	// is SUPPOSED to pause a session's syncs and resume unpauses them, so a paused
+	// sync is only garbage once its session no longer exists.
+	gcKnown map[session.ID]bool
+
 	// idleTimeout is the reaper idle-timeout, used to render the warm session
 	// "suspends in ~X" hint. Zero hides the hint.
 	idleTimeout time.Duration
@@ -581,6 +588,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// whose per-session Status can be stale) means a watch-missed-but-running
 		// session is still protected, and a Suspended/gone one is correctly reaped.
 		m.gcRunning = gcRunningSet(states)
+		m.gcKnown = gcKnownSet(states)
 		// Piggyback the orphaned-sync GC on the same snapshot. gcListOrphansCmd is
 		// nil without a reaper, so this is a no-op in tests.
 		return m, m.gcListOrphansCmd()

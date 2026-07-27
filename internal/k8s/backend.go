@@ -2354,9 +2354,17 @@ func opencodeCredsHash(data map[string][]byte, provider string) string {
 // key in the live opencode-credentials Secret. Best-effort: a read failure or an
 // absent key leaves the Sandbox unstamped (the fail-closed SecretKeyRef already
 // surfaces a missing key at pod start), so this never fails CreateSession. Only
-// meaningful for opencode-server sessions.
+// meaningful for opencode-server sessions on the SHARED-Secret fallback path.
+//
+// A SEEDED session (spec.OpencodeAuthJSON non-empty) carries its credentials in
+// its OWN per-session Secret and never reads opencode-credentials, so stamping it
+// against that shared Secret would fingerprint bytes the pod does not use: a
+// later rotation of the shared key would make warnIfOpencodeCredsRotated tell the
+// operator their pod is authenticating with a stale key when nothing about that
+// session changed. Leave seeded sessions unstamped — warnIfOpencodeCredsRotated
+// and refreshOpencodeCredsStamp both no-op without the annotations.
 func (b *Backend) stampOpencodeCredsFreshness(ctx context.Context, sb *agentv1alpha1.Sandbox, spec session.Spec) {
-	if spec.Backend != session.BackendOpenCode {
+	if spec.Backend != session.BackendOpenCode || len(spec.OpencodeAuthJSON) > 0 {
 		return
 	}
 	sec, err := b.core.CoreV1().Secrets(spec.Namespace).Get(ctx, opencodeSecretName, metav1.GetOptions{})

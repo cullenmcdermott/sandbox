@@ -22,6 +22,12 @@ export default tseslint.config(
     },
     rules: {
       '@typescript-eslint/no-floating-promises': 'error',
+      // [T2]: diagnostics go through the structured logger (src/log.ts), which
+      // stamps level/ts/component/sessionId and can emit JSON. A bare console.*
+      // is unlevelled, uncorrelated, and un-ingestible. log.ts itself is the one
+      // place allowed to touch the underlying streams — it writes to
+      // process.stdout/stderr directly, so it needs no exemption here.
+      'no-console': 'error',
     },
   },
 );

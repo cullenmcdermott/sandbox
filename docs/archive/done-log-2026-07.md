@@ -2536,3 +2536,811 @@ it for one object).
 
 **`just check` green on main afterwards** — the first run that actually
 exercised the widened typecheck.
+
+## `internal/authstatus` tests were not hermetic — they read the developer's environment (2026-07-27)
+
+Triaged out of the §0 inbox. `TestClaudeProvider/nothing_anywhere`,
+`TestClaudeProvider/darwin_keychain_miss_is_final`, and
+`TestSystemLoginProbeCore` built providers with `Home: t.TempDir()` to mean
+"nothing is configured", but left `Env` nil — and `envOr(nil)` returns
+`os.Getenv` (`internal/authstatus/providers.go:14-19`), so both
+`systemLoginPresent`'s `CLAUDE_CONFIG_DIR` lookup and `Status`'s
+`CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY` fallbacks consulted the REAL
+environment. A test asserting "nothing is configured" was letting the host
+decide the answer.
+
+**Why it had never been seen:** CI and a laptop shell set none of those vars.
+Every claude-pane session pod does — `CLAUDE_CONFIG_DIR=/session/state/claude`
+with a live `.credentials.json` — so the suite only fails when run from inside
+the product, which is exactly where it was found.
+
+**Fix:** a `noEnv()` helper (`env(map[string]string{})`, the existing
+constructor) passed explicitly at all six previously-nil construction sites,
+plus `CodexProvider`'s auth-file table (which reads a fixture `auth.json` today,
+but would silently fall back to an ambient `OPENAI_API_KEY` if that read ever
+regressed). The comment on the helper names the pod env as the concrete hazard.
+Production code untouched — `envOr`'s os.Getenv default is correct for real
+callers; only the tests were wrong to rely on it.
+
+**Verified** with a Go 1.26.2 toolchain fetched into `/tmp` (the runner image
+ships no Go): green under a clean env AND under the hostile pod-shaped env
+(`CLAUDE_CONFIG_DIR` pointing at a dir with `.credentials.json`, plus all three
+token vars set). Behavioral counter — reverting just the `noEnv()` injections
+and re-running under the same hostile env fails exactly the three named cases
+(`method = "oauth-subscription", want "none"`; `systemLoginPresent should be
+false for an empty home`), so the fix is load-bearing rather than incidental.
+
+## `go test ./...` walked into `runner/node_modules` (2026-07-27)
+
+§0b loose end. `flatted`, a transitive npm dependency of the runner, vendors a
+Go package (`runner/node_modules/flatted/golang/pkg/flatted`), and the root
+module's `./...` pattern matched it — so every `just build` / `vet` / `test`
+recipe was operating on a package set that included someone else's code.
+Harmless in practice (that package has no test files) but the gate was not
+testing what it claimed to, and an npm dep shipping a *failing* Go test would
+have turned our build red for reasons entirely outside the repo.
+
+**Fix:** one line in `go.mod` — `ignore runner/node_modules`, the directive Go
+1.25 added for exactly this. Chosen over the alternative in the TODO note
+(narrowing each recipe's package pattern in the `justfile`) because an explicit
+package list drifts the moment a new top-level directory is added, whereas the
+directive is declared once and cannot go stale. Available unconditionally here:
+`go.mod` already requires go 1.26.2, so no toolchain that can build this repo
+predates the directive.
+
+**Verified:** `go list ./...` drops from 24 packages to 23 — the npm one is
+gone and all 23 of ours remain; `go build ./...` and `go vet ./...` green;
+`go mod tidy` leaves `go.mod` byte-identical (the directive survives a tidy).
+Also confirmed on a scratch module that an `ignore` path which does not exist
+on disk is a no-op, so Go gates that run before `npm install` — CI ordering —
+are unaffected.
+
+## The workspace guide reached only claude-pane sessions (2026-07-27)
+
+§0 inbox item. `runner/src/workspace-guide.ts` writes the "your `.git` is a
+pointer at a host path, git fails here by design, do not try to repair it" block
+— but only to `$CLAUDE_CONFIG_DIR/CLAUDE.md`, which nothing but Claude Code
+reads. An opencode or codex session still discovered the dangling worktree the
+expensive way: by running git, failing, and possibly concluding the repo needed
+fixing. The hazard is a property of the workspace, not of the agent looking at
+it, so every backend now gets the same block.
+
+**Fix:** a new `guideTargetFor(backend, env)` in `workspace-guide.ts` resolves
+the file each backend actually reads — `$CLAUDE_CONFIG_DIR/CLAUDE.md`
+(claude-pane), `$CODEX_HOME/AGENTS.md` (codex), and an `AGENTS.md` beside the
+generated opencode config (opencode). `writeWorkspaceGuide` now takes an
+explicit `path` instead of a `configDir` + hardcoded `CLAUDE.md`; `classifyGit`,
+`guideBlock` and the marked-block `spliceGuide` were already backend-agnostic
+and are untouched. The call moved out of the claude-pane branch in `index.ts` to
+a single backend-dispatched call right after `materializeBootstrapFiles()`, so an
+operator-seeded guide at the same path is spliced around rather than raced with.
+
+**opencode needed one extra step:** unlike Claude Code it has no implicit pickup
+for a file in our pod-local config dir, so an unregistered guide is a guide
+nobody reads. `buildOpencodeConfig` now emits `instructions: [<guide path>]` —
+an absolute path, which sidesteps both opencode's global-dir lookup and any
+cwd-relative resolution. The field is `Config.instructions?: Array<string>`
+("Additional instruction files or patterns to include"), verified against the
+PINNED `@opencode-ai/sdk` types rather than the docs.
+
+**Module structure:** `workspace-guide.ts` is kept a LEAF (imports only node +
+`types.js`), which is what lets `opencode.ts` import `guideTargetFor` without a
+cycle — `codex.ts` already imports `opencode.ts`, so hanging the path resolution
+off the supervisors instead would have closed a loop.
+
+**Null rather than a guess:** a backend whose config-dir env var is unset (off-pod
+dev) resolves to null and the guide is quietly skipped. Deliberately NOT falling
+back to the workspace — that tree syncs to the user's machine and must not grow
+files they did not write.
+
+**Verified:** both tsconfigs typecheck; six new runner tests green (per-backend
+target resolution, the null cases, parent-dir creation, and both
+`instructions` cases) plus the existing guide suite. NOT live-validated: that
+codex reads `$CODEX_HOME/AGENTS.md` rests on CODEX_HOME being the documented
+relocation of `~/.codex`, and the opencode `instructions` wiring on the schema
+type — both want an eyeball on a real session (see the TODO residual).
+
+**Unrelated pre-existing breakage observed while running the suite:** 7 runner
+tests fail *inside a session pod* for the same ambient-environment reason as the
+`internal/authstatus` item above — see the next entry.
+
+## Seven runner tests read the machine they ran on (2026-07-27)
+
+Found by running `npm test` inside a claude-pane session pod during the
+workspace-guide work. Same family as the `internal/authstatus` entry above, and
+the reason it matters is the same: these tests are green on CI and on a laptop
+and red inside the product, which is the one place a runner test is most likely
+to be run by an agent doing runner work.
+
+**Cluster 1 — the statusline chain (5 tests, `claude-pane-statusline.test.ts`).**
+`runStatusline` spread `...process.env` and only overrode PATH when a test asked
+for a prepend. But `sandbox-user-statusline` on PATH is candidate 3 of the chain
+the provisioned script searches, and a session pod ships exactly that at
+`/usr/local/bin` — so "no user statusline anywhere" was false in-pod, and the
+five built-in-line cases chained to the real host statusline, then compared its
+ANSI output against the plain built-in string. Fixed with a hermetic PATH: a
+private temp dir holding a single `node` symlink to `process.execPath`, used for
+every run. Note `dirname(process.execPath)` would NOT have worked — node lives in
+`/usr/local/bin` here too, alongside the very binary being excluded.
+
+**The fixtures had to change with it.** Four were `#!/bin/sh` scripts calling
+`cat`/`sleep`, which are PATH lookups. They had been passing by accident:
+`printf` is a shell builtin, so with `cat` unresolvable the script still produced
+the right stdout. Under a truly hermetic PATH the accident stopped working — and
+exposed that the timeout fixture (`cat >/dev/null; sleep 5; printf late`) was
+never testing a slow script at all: with `sleep` gone it printed instantly. All
+fixtures are now node scripts built by a `userScript(body)` helper, so they
+depend on nothing but the interpreter already required by the shebang.
+
+**Cluster 2 — supervisor argv (2 tests, `claude-pane.test.ts`).** The tests pass
+`env: {}`, which makes `paneDefaultPermissionMode` fall back to the shared
+`CLAUDE_CONFIG_DIR` constant — a live config dir in-pod — while `readSettings`
+defaulted to the real `readFileSync`. The pod's `settings.json` says
+`bypassPermissions`, so the argv assertions were answered by the environment.
+Added an explicit `noSettings` throwing seam to all 11 supervisor call sites that
+were not already injecting one (the permission-mode test keeps its own stub).
+
+**Verified:** the full runner suite is green in-pod — 314 tests, 0 failures —
+where it was 7 red before. Both tsconfigs typecheck.
+
+**Process note / self-inflicted:** while finishing this batch I ran
+`npx prettier --write` over the seven files I had touched. This repo has NO
+prettier dependency and no prettier config — it is hand-formatted — so that
+reflowed them to prettier's defaults. Re-running with `--single-quote
+--print-width 100` restored the repo's quote convention and approximate width,
+but the original hand-wrapping in those files is not recoverable from inside a
+session pod (the worktree's git is a dangling pointer by design). See the TODO
+inbox entry; recovery is a host-side `git diff`/`git checkout`.
+
+## `sandbox worktree path` (and completion) required a kubeconfig they never used (2026-07-27)
+
+§0 inbox item. Both commands resolve sessions from the LOCAL index only —
+`client.ResolveSessions` touches nothing but `~/.local/share/sandbox/…` — and
+both document that as load-bearing: `cd $(sandbox worktree path …)` must work
+with the VPN down, and a TAB press must not wait on an apiserver. Yet both were
+built with `newClient()`, which goes `client.New` → `k8s.New` → kubeconfig
+resolution and fails with "failed to connect to cluster" before a single line of
+the index is read. The contract was right; only the construction was wrong.
+
+**Completion failed worse than the command.** `completeSessions` swallows every
+error into `ShellCompDirectiveNoFileComp`, so the kubeconfig failure was
+invisible: TAB just went dead with no diagnostic. It only ever worked inside the
+flox shell, which exports KUBECONFIG.
+
+**Fix:** `internal/cli/offline.go` — `newOfflineClient()` builds the same
+`*client.Client` with an `offlineBackend` injected through the EXISTING public
+`client.WithBackend` seam, so no kubeconfig is ever resolved. Chosen over the
+TODO's two sketched options deliberately: a `client.Offline()` constructor would
+add public SDK surface (and an sdktest pin) for a CLI-local problem, and making
+the k8s backend lazy would move EVERY command's connection error from
+construction to first use — a behavior change well outside this item. `sdktest`
+passes unchanged, which is the proof no public surface moved.
+
+**The stub refuses rather than no-ops.** All 14 `client.Backend` methods return
+`errOffline`, whose message names the cause ("this command resolves sessions
+from the local index only and cannot reach the cluster") rather than the
+symptom. Reaching it means an index-only command grew a cluster dependency —
+a bug in the caller, not a misconfiguration on the user's machine.
+
+**Verified** against a real binary, not just units: with `KUBECONFIG` unset and
+a HOME containing no `~/.kube`, `sandbox worktree path demo` prints
+`/home/u/wt/demo`, `cd $(…)` substitutes correctly, `--json` still emits its
+array, and `__complete attach ""` offers the seeded session with its
+title—branch description. Behavioral counter under the IDENTICAL environment:
+`sandbox status`, which still uses `newClient()`, fails with "failed to connect
+to cluster: k8s: load kubeconfig: invalid configuration" — so the fix is what
+carries the offline paths, not the environment. Two regression tests in
+`offline_test.go` pin it (resolution under a KUBECONFIG pointing at a
+nonexistent file; the backend refusing cluster calls). Full Go suite green
+(21 packages), gofmt clean.
+
+## The dashboard dropped `rate_limit.updated` on the floor (2026-07-27)
+
+§0 inbox item. Every piece existed except the wiring: the runner emits the event
+off the statusline payload's `rate_limits`
+(`runner/src/claude-pane-observer.ts`), `session.RateLimitPayload` is fully
+defined, and the SSE stream delivered it — but `sessionReadModel.ApplyEvent` had
+no case and `ApplyRunnerEvent` did not list the type, so the payload was parsed
+by nobody. The renderer that used to show the windows
+(`internal/tui/dashboard/statusline.go`) went with the chat stack in a935541,
+and the data path was never re-pointed at a surface that still exists.
+
+**Read model:** `RateLimitOK` plus the two utilizations and their reset instants.
+The reset instants are parsed to `time.Time` IN THE REDUCER — the payload carries
+RFC3339 strings and the pane status row is redrawn on every frame, so parsing at
+render time would put a date parse on the hot path.
+
+**The gate is a flag, not a value check**, which is what the TODO asked for: a
+session that has never reported a window and one genuinely at 0% are
+indistinguishable in the numbers, so rendering "5h 0%" for the former invents a
+fact. `RateLimitOK` is set only by a report whose `Available` is true. An
+unavailable report (API-key/Bedrock/Vertex auth) CLOSES the gate again rather
+than freezing the last known windows — a session that lost its plan must stop
+showing plan usage.
+
+**Render:** `5h 42% ⟳2h · wk 18%` appended to the pane status row
+(`external_pane.go` `statusRow`) beside ctx%/cost — the surface that inherited
+the deleted status line's job. Countdowns are omitted for an unknown reset AND
+for one already elapsed ("⟳-1h" is worse than nothing); utilizations are rounded
+and clamped to 0-100, so a provider reporting 103 is their bug and not ours.
+
+**Verified:** seven new tests (`ratelimit_test.go`) covering the read-model path,
+the never-reported / unavailable / genuine-0% gate cases, countdown formatting
+across m/h/d plus both no-countdown cases, out-of-range clamping, a malformed
+timestamp degrading to a bare percentage, and the rendered status row.
+Behavioral counter: deleting the one `session.EventRateLimitUpdated` line from
+`ApplyRunnerEvent`'s dispatch — the exact omission that was the bug — fails four
+of them. Full Go suite green (21 packages), dashboard goldens unaffected (no
+fixture reports a window, so nothing new renders), gofmt clean, sdktest passes.
+
+## "Is auto-compact on in pane sessions?" — answered (2026-07-27)
+
+A maintainer note carried in the inbox twice (top-of-file list and §0b),
+untriaged. **Answer: yes, it is on, and nothing needs seeding.** Claude Code
+auto-compacts by default and the sandbox does not touch the setting at any
+layer — verified across all four places it could have been changed:
+
+- `buildClaudePaneEnv` (`runner/src/claude-pane.ts`) — the strict allowlist
+  passes TERM/COLORTERM/CLAUDE_CONFIG_DIR/IS_SANDBOX plus PATH/HOME/LANG and the
+  operator-declared ExtraEnv names. Nothing compaction-related.
+- `mergeSettings` (`runner/src/claude-pane-observer.ts`) — owns `statusLine` and
+  `sandbox.enabled`, seeds `permissions.defaultMode`. Nothing else.
+- `claude-config.ts` — seeds `WORKSPACE_TRUST_SEED` + `hasCompletedOnboarding`.
+- A grep of the whole tree for `autoCompact`/`auto_compact` returns nothing.
+
+Confirmed empirically rather than by absence-of-code alone: a LIVE claude-pane
+pod's `/session/state/claude/.claude.json` has no `autoCompactEnabled: false`
+(the key is written only when a user turns the toggle OFF, so its absence is the
+ON default) and does carry an `autoCompactWindowsCache` key, i.e. the feature is
+live in that session.
+
+**Finding attached, promoted to a new §0b item:** compaction is INVISIBLE to the
+dashboard. `context.compacted` is emitted by nobody — `schema/events.json` states
+this outright — while the entire Go consumer side is wired and waiting
+(read-model case, `ApplyRunnerEvent` dispatch, feed marker). The gap is one entry
+in `PROVISIONED_HOOK_EVENTS`: `PreCompact` is not provisioned, so the observer
+never learns that a compaction happened. The user-visible symptom is a ctx% that
+drops with no explanation on a long session. Caveat recorded with the item:
+PreCompact's hook input carries no token counts, so the payload's
+`preTokens`/`postTokens` would be 0 — harmless (the reducer skips its reset at 0
+and ctx% self-corrects from the next statusline sample) but it means the value is
+the marker, not the gauge reset.
+
+## Autopilot residue in the runner (2026-07-27)
+
+§0 inbox item: ~10 stale references left by §1e's 2026-07-20 deletion of
+autopilot, plus an open "keep vs drop `capabilities.autopilot`" question.
+
+**The keep/drop question was already decided — the item was stale on that
+point.** Both `internal/session/types.go:449` ("Autopilot is always false since
+claude-pane-first removed the server-side driver; the runner keeps reporting the
+key so old clients still decode /status") and an sdktest pin
+(`surface_test.go`, `client.State{Capabilities: ...}`) document KEEP,
+always-false, deliberately. No change made, and none should be: dropping the key
+would be a wire change against a pinned public surface for no gain.
+
+**Two dead seams found, beyond the comments the item anticipated:**
+
+- `turnSettledHandler` / `setTurnSettledHandler` (`turns.ts`) — nothing in
+  `src/` ever registered a handler after the driver was deleted, so the
+  `.finally()` hook on every turn was calling `null?.()`. Removed, along with
+  the now-empty `.finally`. The only references were a test clearing it in
+  setup/cleanup, which was updated.
+- `readTurnOutcome` (`events.ts`) — ZERO references anywhere, not even a test.
+  Removed per the CLAUDE.md hygiene directive.
+- `sumTokens` (`events.ts`) — called only by its own [V39] regression test.
+  KEPT rather than deleted: the double-counting rule it encodes (count only each
+  turn's terminal usage row) is the non-obvious part and §10's observability work
+  wants exactly this number. Its doc comment now says plainly that nothing in
+  `src/` calls it.
+
+**Comments corrected** in `turns.ts` (module header now says the driver is gone
+and the route is the only caller, its live consumer being the opencode headless
+first-turn adapter), `server.ts` ×2, and `index.ts` (the `boot_prep` phase list
+mentioned "agent/autopilot setup"; it now names the workspace guide and agent
+selection, which is what that phase actually covers).
+
+**Verified:** both tsconfigs clean, runner suite green (314 tests, 0 fail).
+CAVEAT — `start-turn-guard.test.ts`, the file whose imports were edited, is among
+the 49 that SELF-SKIP in this environment: better-sqlite3's native addon is not
+built (no C compiler in the runner pod, so `npm rebuild` fails), and the suite
+skips cleanly rather than lying. Its edit is therefore verified statically only —
+which is meaningful here, since a dangling reference to the removed export would
+have failed `tsc -p tsconfig.test.json`. CI rebuilds the addon and sets
+RUNNER_REQUIRE_SQLITE=1, so it runs there for real.
+
+## §4 measure-first perf items: measured, one declined and one fixed (2026-07-27)
+
+Both items said "measure before optimizing" and neither had numbers.
+`perf_bench_test.go` supplies them (amd64, `-benchtime=2s`, verified stable
+across `-count=2`). The bar throughout is a 60fps frame: 16.6ms for everything
+the dashboard does.
+
+**`visibleSessions()` re-filters+re-sorts 4+ times per frame — DECLINED, do not
+memoize.**
+
+| case | n=8 | n=50 | n=200 |
+|---|---|---|---|
+| no filter, no attention sort | 5.7ns | 5.7ns | 5.7ns |
+| attention-first only | 5.0µs | 30µs | — |
+| filter active | 13µs | 77µs | 275µs |
+| worst case ×4 per frame | 48µs | 364µs | ~1.1ms |
+
+The default view is FREE and flat in n — `FilterSessions` returns the input
+slice on an empty query and `sortByAttention` is a passthrough when
+`attentionFirst` is off, so the common case is a couple of function calls. Even
+the worst realistic configuration (50 sessions, filter active AND attention
+sorting on, four calls) is ~0.36ms — about 2% of a frame. Memoization would add
+an invalidation surface (every session mutation, filter keystroke, and mode
+toggle) to buy back 2% in a case that only exists while the user is holding down
+a filter query. Not worth it; item closed as measured-and-declined rather than
+left open forever.
+
+**`fitModal` two ANSI width scans per line — FIXED, ~26%.** This one did earn a
+change: 1.35ms per call on a tall feed (h=120, w=200), ~8% of a frame budget,
+for ONE call. The loop measured each line twice — once directly, once inside
+`padRight` — so it now computes the width once and pads inline. Measured
+1.35ms → 1.00ms (120×200) and 89µs → 65µs (20×80).
+
+**~26%, not the 50% the scan count implies** — the remainder is `strings.Split`/
+`Join` and the padding `Repeat`, i.e. allocation, not measurement. That is
+recorded in the code comment specifically so the next reader does not repeat the
+experiment expecting a halving, and knows further micro-optimizing this loop
+would have to target allocations instead.
+
+Output is byte-identical: the full dashboard suite including the golden fixtures
+passes unchanged. An over-wide line is deliberately re-measured after
+`ansi.Truncate`, since grapheme clusters can land it below `w` and that shortfall
+is what the padding must cover.
+
+## [P7] feed streaming O(n²) — measured, declined (2026-07-27)
+
+Filed "LOW, only if felt". Measured with `BenchmarkFeedAssistantStream`
+(amd64, `-benchtime=2s`); numbers are for one COMPLETE assistant message, not
+per frame:
+
+| message | deltas | total | per delta |
+|---|---|---|---|
+| 4 KB | 200 | 0.59ms | 2.9µs |
+| 32 KB | 200 | 1.05ms | 5.2µs |
+| 32 KB | 1600 | 5.03ms | 3.1µs |
+
+**3-5µs per delta** — ~0.03% of a 60fps frame, for work that happens at network
+cadence (tens of deltas per second), not once per frame. Not felt, and it would
+take a message orders of magnitude larger to become so.
+
+The third row is the one that settles it. Holding the message at 32 KB and
+cutting the delta count 8× made it 4.8× faster, while holding deltas at 200 and
+cutting bytes 8× made it only 1.8× faster. So the cost tracks the PER-DELTA
+constants (json.Unmarshal, the item allocations) far more than the O(L) rebuild
+the item was about — the quadratic term is real but sub-dominant at every
+realistic size. Optimizing the rebuild (the [E7] trick: length-keyed change
+detection instead of full-string compare) would therefore buy back a minority of
+an already-negligible cost.
+
+Declined and closed rather than left open. The benchmark stays so a future
+change that makes messages much larger, or adds per-delta work, shows up here.
+
+## Compaction is visible: PreCompact → `context.compacted` (2026-07-27)
+
+Claude Code auto-compacts by default (answered 2026-07-27), and it happened
+INVISIBLY: ctx% dropped with no explanation and nothing in the feed recorded it.
+The whole Go side was already built and waiting — `EventContextCompacted`,
+`ContextCompactedPayload`, the `readmodel.go` reducer case, the feed marker —
+and `schema/events.json` said outright that no backend emitted it. The gap was
+provisioning: `PROVISIONED_HOOK_EVENTS` did not list `PreCompact`, the hook
+Claude Code fires on compaction.
+
+Added `{ event: 'PreCompact', matcher: true }` plus its case in the observer's
+ingest switch (`runner/src/claude-pane-observer.ts`).
+
+Two judgement calls worth recording:
+
+- **It is a MARKER, not a gauge reset.** PreCompact's hook input carries
+  `session_id`/`transcript_path`/`trigger`/`custom_instructions` and no token
+  counts, and it fires BEFORE compaction runs, so the post-compaction size is
+  unknowable at that point. `postTokens` is therefore omitted, which the Go
+  reducer already reads as "leave the counters alone"; the next statusline
+  sample corrects ctx% within seconds anyway.
+- **`preTokens` is real, not 0.** The TODO item predicted 0 for both counts. The
+  observer already sees context occupancy on every statusline sample, so it now
+  tracks the latest as a level (`lastContextTokens`, deliberately updated even
+  when the `usage.updated` emit is deduped — it is a level, not an event) in the
+  SAME units as the dashboard's ctx% numerator (`input + cache-read +
+  cache-write`, `dashboard/session.go:183`). The feed's "N→" therefore matches
+  the number the user was just watching.
+
+`trigger` is carried through as claude's own `auto`/`manual`, which is what lets
+the feed distinguish an auto-compaction from a user's `/compact`; it defaults to
+`auto` when absent since the schema requires it.
+
+Three tests in `runner/test/claude-pane-observer.test.ts` pin the payload, the
+absent `postTokens`, the no-turn/no-statusline defaults, and that dedupe cannot
+stall the tracked occupancy. The existing provisioning test iterates
+`PROVISIONED_HOOK_EVENTS`, so the new hook's settings entry is covered by
+construction. **Needs a runner image rebuild to reach live sessions** — batch it
+with the §0b ctx% part-B rebuild.
+
+## [T3] dead `startTurnTrace` deleted (2026-07-27)
+
+`runner/src/trace.ts`'s per-turn trace had zero production callers — the SDK turn
+engine that drove it (`runTurn`) was deleted by claude-pane-first — and survived
+only because `runner/test/trace.test.ts` exercised it in three cases. Removed the
+function, its `TurnTrace` interface, and the `NOOP` const along with those tests.
+
+`traceTurnLink`, `traceIDFromHeader`, and `startBootTrace` all stay — each is
+wired. Two consequential tidies rather than a bare deletion: the shared options
+type was renamed `TurnTraceOptions` → `TraceOptions` (it now serves only the boot
+and link traces, and nothing outside `trace.ts` referenced the name), and the
+module header plus `traceTurnLink`'s doc were corrected — both described
+`turn.*` milestone lines that no longer exist. The header now records why the
+turn trace went and what a replacement would have to hang off (the observer's
+event path; there is no driving loop any more).
+
+Runner suite: 6 pass in `trace.test.ts` (was 9), `just typecheck` clean.
+
+## §7a seeded opencode sessions no longer stamped against the shared Secret (2026-07-27)
+
+`stampOpencodeCredsFreshness` fingerprinted the shared `opencode-credentials`
+Secret for EVERY opencode session, including seeded ones whose credentials ride
+their own per-session Secret and which never read the shared one. Rotating a
+shared provider key would then make `warnIfOpencodeCredsRotated` tell the
+operator their pod was authenticating with a stale key, when nothing about that
+session's credentials had changed.
+
+One-line gate: `len(spec.OpencodeAuthJSON) > 0` returns early, which is the same
+seeded-vs-fallback discriminator `opencodeEnv` and the re-create reconcile
+already key off. Leaving the annotations off is sufficient — both
+`warnIfOpencodeCredsRotated` and `refreshOpencodeCredsStamp` no-op without them.
+
+`TestCreateSessionDoesNotStampSeededOpencodeSession` pins it, with the shared
+Secret present and readable so the seeded check is the only thing under test, and
+asserts the CONSEQUENCE (the warning stays silent) rather than only the
+annotations. Counter-checked by reverting the gate: both annotations reappear and
+the test fails. Note the fix is create-time — a seeded session created before it
+still carries a stamp and can still warn spuriously until recreated.
+
+## README: operator injection surface documented (2026-07-27)
+
+The §8 part-A/part-B docs closeout residual. `ExtraEnv` / `ExtraSecretEnv` /
+`BootstrapFiles` were fully built and covered in `docs/architecture.md` and the
+design doc, but the README — the only doc an operator reads first — never
+mentioned them. Added "Injecting your own config into sessions (Go SDK)" between
+Commands and Testing (the README had no SDK section at all before this).
+
+Written for the operator standing sessions up from their own tooling, not the
+laptop user, and organized around the two things that surprise people:
+
+- **`ExtraSecretEnv` is deliberately agent-visible.** Stated plainly, with the
+  reason (a PAT the agent cannot read is a PAT its `git push` cannot use) and the
+  honest boundary: it is protected in transit and at rest, not from the agent —
+  so anything the agent must not see does not belong in a session at all.
+- **`BootstrapFiles` are rejected inside the synced workspace.** Framed as *why*
+  rather than as a rule: a file written there syncs back to the user's laptop and
+  into their git status.
+
+Also the fail-closed sentinel list, the write-if-changed restart behavior, and a
+cross-reference to `k8s/networkpolicy-egress-fqdn.yaml.example` — an injected
+tool that talks to an outside endpoint needs egress opened too, which is the
+natural next wall to hit.
+
+The Go example is **compile-checked, not eyeballed**: it was built as a
+temporary file inside the `sdktest` module (which imports `client` as a genuine
+external consumer) and `go vet` run over it, then removed. That caught a real
+bug — the draft used `session.BackendClaudePane`, from the `internal/session`
+package no external consumer can import. The public spelling is
+`client.BackendClaudePane`.
+
+## [T8] audit.jsonl size-capped with one retained generation (2026-07-27)
+
+The unbounded-growth half of [T8]. `runner/src/audit.ts` appended forever to a
+PVC that also holds `events.db`, `session.json`, and the agent's own state, with
+no cap and no rotation — and [T6] had already flagged that nothing watches PVC
+fill either, so the failure mode was a full volume with no warning.
+
+Now rotates at `SANDBOX_AUDIT_MAX_BYTES` (default 8 MiB, matching the [E8-E10]
+host event-cache tail cap; `0` disables) keeping exactly ONE previous generation
+as `audit.jsonl.1`, so worst-case usage is 2× the cap rather than a growing
+`.1/.2/.3` chain.
+
+Three decisions the tests pin, because each has a wrong-looking alternative:
+
+- **Rotate AFTER the write, not before.** The row that crosses the cap lands in
+  the generation that was current when it happened, so no row is ever split
+  across two files and a failed rotation cannot lose the row that triggered it.
+- **Seed the byte counter from the file at boot**, not from 0. A session that
+  restarts often would otherwise reset the counter every boot and never reach the
+  cap — the exact long-lived sessions the cap exists for.
+- **A failed rename keeps appending.** An unbounded log is a much better failure
+  mode than a dropped audit row, so `rotate()` swallows the error and retries on
+  the next append.
+
+Rotation is a safety net, not routine: 8 MiB is far above any plausible session's
+tool volume. The honest cost is stated in SECURITY.md rather than buried — the
+log is append-only *within a generation*, but retention is bounded, so a session
+producing more than ~16 MiB of audit rows loses its oldest, and an operator who
+needs a complete trail should raise the cap or set `0`.
+
+Testing needed a seam: `AUDIT_JSONL_PATH` is a hardcoded const pointing at the
+pod's live state dir, so a test exercising the real `appendAudit` would have
+written into the running session's own audit log. Added `createAuditWriter(deps)`
+(path/maxBytes/fs functions injectable, mirroring `PaneObserverFs`) with
+`appendAudit` as the module-level default instance over it — no call-site
+changes. `runner/test/audit-rotation.test.ts`: 7 tests over an in-memory fake fs,
+covering the no-rotate path, the 2× bound (asserting no `.2` is ever created),
+the triggering row's integrity, restart seeding, `maxBytes=0`, rename failure,
+and that rotation does not bypass redaction.
+
+**Still open (tracked on the item):** the reader half. The log is still never
+synced home and has no host-side reader, so it remains a file nobody can read.
+
+## [T2] runner structured logging (2026-07-27) — closes C10
+
+The runner's entire diagnostic surface was 32 ad-hoc `console.*` calls across 12
+files with no level, timestamp, session id, or correlation id — and
+`runner/src/server.ts` logged exactly ONE line ever (at listen), so the HTTP
+surface had zero request logging. A 401 storm, a slow route, or a 500 were all
+invisible without reproducing them locally.
+
+New `runner/src/log.ts`: `createLogger(component)` → `debug/info/warn/error`
+plus `child(fields)` for per-request pinning, `setLogSessionId()` called once at
+boot (in `index.ts`, immediately after `loadConfig`, so nothing but loadConfig's
+own warning can log without it).
+
+**Text is the default format, not JSON.** `kubectl logs` is the primary reader
+and the item's own constraint was "keep pod logs scannable by eye", so a record
+renders as one line with structure as trailing `key=value` pairs:
+
+```
+2026-07-27T10:11:12.000Z INFO  opencode: config written; starting serve port=4096
+2026-07-27T10:11:13.000Z ERROR events: failed to persist event event=turn.started err="disk full"
+```
+
+`SANDBOX_LOG_FORMAT=json` switches to ndjson with the same fields plus
+`sessionId` (deliberately omitted from text mode — one session per pod makes it
+constant noise there, while the multi-pod aggregator that reads json always
+needs it). `SANDBOX_LOG_LEVEL` gates both. Values containing whitespace are
+quoted so `key=value` survives both an eyeball and awk.
+
+Details worth keeping:
+
+- **Errors are unwrapped, not serialized.** An `err` field carrying an `Error`
+  JSON-serializes to `{}` — the single most common way a structured logger loses
+  the failure it was added to capture. `normalizeFields` takes `.message`, and
+  adds `.stack` only at debug level.
+- **HTTP request logging is level-graded**: debug for 2xx/3xx, warn for 4xx,
+  error for 5xx. A flat info would drown the log on a busy pod, which is how
+  request logging usually ends up disabled. Logged on response `finish` (status
+  and duration known), with a `close` fallback noting a client disconnect; a 500
+  additionally logs the error itself, which previously went only into a response
+  body nobody may ever read. `X-Sandbox-Trace-Id` rides as `traceId`, which is
+  the first half of what [T4] wants.
+- **`trace.ts` keeps its own envelope.** The `trace: <id> <name> <ms>ms` lines
+  are a documented, greppable contract that predates this logger; wrapping them
+  would break every grep recipe written against them. They go out through a
+  single `logRaw` exemption, commented as the only intended caller.
+- **`no-console` added to the runner ESLint config** as the durable guard — the
+  thing that keeps the migration from rotting one call site at a time.
+
+`runner/test/log.test.ts` (9 tests): text/json shapes, whitespace quoting, level
+filtering, stderr-vs-stdout routing, Error unwrapping and the debug-only stack,
+child pinning without parent mutation, per-record override.
+
+One pre-existing test needed repointing: `state-version.test.ts` mocked
+`console.error` to assert the "newer state_version" warning. It now mocks
+`process.stderr.write`, which is the stronger assertion anyway — it pins what an
+operator actually sees rather than which function produced it.
+
+`docs/runner-api.md` rewritten: the "runner emits no structured logs today"
+caveat is replaced by the env-knob table, the format examples, the request-log
+grading, and the `logRaw` exemption. **This closes C10** in
+`docs/oss-launch/HARDENING-BACKLOG.md`, and it is the prerequisite for [T7]
+(`sandbox logs`), which needs a log worth reading.
+
+## [S5] pane WebSocket payload + resize bounds (2026-07-27)
+
+Filed INFO with the instruction "when next touching `server.ts`", parked behind
+the §4 slow-link compression change. That change is still gated on RTT numbers
+from a real slow link, so it was holding a small hardening item hostage
+indefinitely; [T2]'s request-logging work touched exactly this surface, so [S5]
+rode that instead and the slow-link item no longer carries it.
+
+Two bounds, both on what ONE authenticated client can make the runner allocate
+(the pane socket is authenticated, so this is not a perimeter control):
+
+- **`MAX_PANE_FRAME_BYTES` = 1 MiB** on the pane `WebSocketServer`. `ws` defaults
+  `maxPayload` to 100 MiB; inbound pane frames are keystrokes, pasted text, and
+  tiny resize control messages, so 1 MiB is orders of magnitude above a realistic
+  paste. `ws` closes with 1009 past it.
+- **`MAX_PANE_DIMENSION` = 2000** in `parsePaneControl`. The lower bound (`>0`)
+  was always enforced; there was no upper one, so `{"cols":2147483647}` went
+  straight to a node-pty resize. 2000 clears any real display (a 5120px ultrawide
+  at a 6px cell is ~850 columns).
+
+The dimension check **rejects rather than clamps**, matching how every other
+malformed control frame is handled: a client asking for an impossible geometry is
+confused, and honoring half its request would leave the two ends disagreeing
+about the pane size — a worse failure than ignoring the frame.
+
+`runner/test/pane-control-bounds.test.ts` (5 tests). `parsePaneControl` had no
+test coverage at all before this, so the pre-existing shape and lower-bound
+checks are now pinned too, not just the new ceiling.
+
+## [T1] CLI debug log gets a per-session file sink (2026-07-27)
+
+`internal/cli/debug.go` was a real slog JSON-lines logger with a documented
+schema and exactly three call sites — and its only sink was stderr, which made it
+useless in the workflow people actually use. The dashboard owns the alt-screen,
+so `--debug` there either scrolls past invisibly or scribbles over the UI.
+
+`attachDebugFileSink(sessionID, alsoStderr)` writes records to
+`~/.local/share/sandbox/remote-sessions/<id>/debug.jsonl`, and
+`afterTUIForSession` — a session-aware wrapper over the existing `afterTUI`
+chokepoint — installs it for the TUI entry points (`sandbox attach`,
+`sandbox claude`).
+
+Decisions:
+
+- **File-only for the TUI, not a tee.** The item said "tee", but teeing to stderr
+  under an alt-screen is the exact behavior that made the flag unusable. Non-TUI
+  commands keep stderr and are unchanged; `alsoStderr` exists (and is tested) for
+  a future caller that wants both.
+- **Append, not truncate.** A session is debugged across several commands
+  (create, then attach, then suspend); truncating per attach would leave only the
+  last one's records.
+- **Failures are advisory and printed before the TUI starts**, so a debug log
+  that cannot be opened never blocks the session the user actually asked for, and
+  the warning itself cannot corrupt the screen it is warning about.
+- Records carry the session id, so a log found on disk is attributable without
+  reading the path it came from.
+
+Lifecycle instrumentation added at the CLI's own suspend/resume/destroy call
+sites (requested / complete / failed-with-error). 4 tests in `debug_test.go`
+cover the file contents, the session stamp, cross-command appending, the
+debug-off no-op (which must not create a stray directory), and tee mode.
+
+**Deliberately not done, and why.** The rest of the item's instrumentation list —
+port-forward establish and each reconnect, health-check attempts, sync
+create/flush, credential resolution — lives in `client/`, `internal/k8s`, and
+`internal/sync`. None of those can reach `internal/cli`'s unexported `dbg`, and
+wiring them means adding a logging seam to the PUBLIC client package (a
+`slog.Logger`/handler option on `client.New`). That is a public-API design
+decision with sdktest pins attached, not a mechanical edit, so it is left on the
+item to be decided alongside the §8 SDK surface work rather than guessed at here.
+
+**Unverified:** the item's own verification line is a live `--debug` dashboard
+run leaving a parseable file behind with no visible terminal corruption. The unit
+tests pin the file contents and the no-stderr-under-TUI property; the end-to-end
+run needs a cluster.
+
+## [T6] part (a): event-log and PVC storage gauges (2026-07-27)
+
+The event log deliberately never `VACUUM`s (it would block the single writer) and
+`RETENTION_MAX_EVENTS` is opt-in and off by default, so it grows monotonically on
+the same volume as `session.json`, `audit.jsonl`, and the agent's own state —
+with nothing watching it. Part (a) is explicitly "measure first"; part (b) (should
+the retention default change?) is meant to be decided from those numbers instead
+of a guess, and stays open.
+
+`sampleStorageStats()` in `runner/src/events.ts` reports four values, logged at
+boot and every `SANDBOX_STORAGE_GAUGE_MS` (default 15 minutes; `0` disables) via
+`startStorageGauge()` in `index.ts` through the [T2] logger. Fifteen minutes
+because storage moves slowly and these are for trend-spotting, not alerting — a
+tighter interval would just make a multi-day session's log unreadable.
+
+Two measurement details that would have made the numbers wrong:
+
+- **`eventLogBytes` counts `-wal` and `-shm`, not just `events.db`.** SQLite's WAL
+  can dwarf the main file between checkpoints, so a main-file-only gauge
+  under-reports precisely when the log is growing fastest — the case the gauge
+  exists to catch.
+- **Free space uses `bavail`, not `bfree`.** Root-reserved blocks are not writable
+  by the runner; reporting `bfree` would overstate the headroom it actually has.
+
+Best-effort throughout: a missing WAL, an unreadable db, or a filesystem without
+`statfs` yields 0 for that field rather than throwing. A gauge that crashes the
+runner is worse than a gauge that reads 0. The sampler takes an injectable
+fs/db seam, so `runner/test/storage-gauge.test.ts` (4 tests) pins the WAL
+summation, the missing-WAL case, the bavail-vs-bfree choice, and the
+degrade-to-zero contract without touching a real PVC.
+
+No retention behavior changed. Needs a runner image rebuild to reach live
+sessions — batch with the §0b rebuild.
+
+## §5 [V35] residual: dashboard reaps paused syncs, correctly (2026-07-27)
+
+The CLI-side half of [V35] landed 2026-07-18; the dashboard half was left open
+with a precise reason — its grace logic protects only Running/Creating, so it
+could not tell a suspended session's legitimately-paused syncs from a deleted
+session's immortal ones. Rather than get it wrong, it listed no paused syncs at
+all, which left the deleted-session case uncollected.
+
+The fix is the distinction itself. `OrphanSync` gains `Paused`, the CLI's
+`ListOrphans` now emits paused syncs tagged with it, and `reapOrphans` asks a
+different question per kind:
+
+| sync kind | protected while | rationale |
+|---|---|---|
+| transport-down | pod is up (`gcRunningSet`) | it is thrashing a pod that isn't there |
+| paused | session exists (`gcKnownSet`) | suspend paused it; resume unpauses it |
+
+`gcKnownSet` is new and deliberately broader than `gcRunningSet`: everything but
+`StatusGone`, so Suspended and Failed count as existing. That breadth is the
+whole point — the two sets disagree exactly on a Suspended session, which is the
+case the item was stuck on.
+
+The consequences for one suspended session, now both correct and opposite:
+its transport-down syncs are still reaped (the original 634-leak fix stands),
+while its paused syncs survive to be resumed. And a session deleted out of band
+while suspended finally has its paused syncs collected — nothing else ever
+would, since `IsOrphanStatus` excludes paused by design.
+
+Three tests in `sync_gc_test.go` cover the mixed case (one suspended session with
+both kinds, plus a gone session's paused sync), and pin `gcKnownSet`'s
+Gone-exclusion and that it is genuinely broader than the liveness set — a rule
+built on two identical sets would be a no-op. Counter-checked by deleting the
+paused branch: the suspended session's paused sync gets reaped, which is the
+silent-file-sync-loss bug the item was guarding against. The `SyncReaper`
+interface doc, which described only the old single rule, was rewritten.
+
+## [T4] pane trace correlation, both ends (2026-07-27)
+
+`X-Sandbox-Trace-Id` was consumed in exactly one place — `POST /turns`, the
+*opencode headless* path. The claude-pane WebSocket upgrade neither read nor
+propagated it, so a connect-flow id from `client/trace.go` dead-ended at the HTTP
+routes and could not be followed into pane activity. For the primary backend that
+is the entire interaction, which made the correlation id close to useless exactly
+where it mattered most.
+
+Both halves were missing, so both landed:
+
+- **Client** (`internal/runner/pane.go`): `AttachPane` sets the header on the
+  WebSocket handshake, the same one every other runner request already carried.
+  Skipped when unset — an empty header value would parse server-side as a real id
+  and pollute the log with an unmatchable correlation key.
+- **Runner** (`runner/src/server.ts`): the pane upgrade reads the header, with a
+  `traceId` query-param fallback for clients that cannot set handshake headers
+  (browsers), both through the same `traceIDFromHeader` validation since both are
+  untrusted input headed for a log line. The id is pinned onto a child logger and
+  stamped on `pane attached` / `pane detached` records — which also gives the pane
+  lifecycle its first logging of any kind.
+
+This is the payoff of doing [T2] first: correlation needed somewhere structured
+to land, and `child({traceId})` was already there.
+
+2 tests in `internal/runner/pane_test.go` (header present with the id; absent
+when unset). **Live verification still owed** — the item's own check is one
+`sandbox --trace attach` followed by grepping the connect id onto pane lines,
+which needs a cluster, and the runner half needs an image rebuild (batch with the
+§0b rebuild).
+
+## Unwanted prettier reflow on seven runner files — reviewed and kept (2026-07-27)
+
+While finishing the workspace-guide and test-hermeticity items, an agent ran
+`npx prettier --write` over `runner/src/{workspace-guide,opencode,index}.ts` and
+`runner/test/{workspace-guide,opencode,claude-pane,claude-pane-statusline}.test.ts`.
+That was a mistake: the repo has no prettier dependency and no prettier config,
+so there was nothing to say what "formatted" means here — the tree is
+hand-formatted. A second pass with `--single-quote --print-width 100` restored
+the quote style, but the original hand-wrapping was gone, and it is not
+recoverable in-pod (a session worktree's `.git` is a dangling pointer by design).
+
+Maintainer call: **keep the reflow.** The files were reviewed rather than
+reverted, and there is nothing wrong with them —
+
+- `eslint src test` (the repo's only checked-in style enforcement) is clean.
+- Both tsconfigs typecheck; the runner suite is green.
+- The style markers that survived match the rest of the tree: single quotes in
+  TS source, 2-space indent, semicolons, trailing commas in multiline literals.
+  The double quotes in `opencode.ts` `guardrailPluginSource()` are inside a
+  template literal — generated JS source, deliberately unlike the host file.
+- The one residual difference is wrap width: these seven wrap at 100, where the
+  rest of `runner/` runs to 130+ in places (`server.ts` peaks at 186). Tighter,
+  not wrong, and well inside what the tree already contains — 20 of the other
+  62 runner files also stay under 110.
+
+The guard that stands, and the actual lesson: **no formatter runs in this tree
+unless a config for it is checked in.** If the wrap-width split ever becomes
+annoying, the fix is to pick a formatter repo-wide and commit its config, not to
+reflow files piecemeal — which is how you get a tree where each file is
+consistent with itself and with nothing else.

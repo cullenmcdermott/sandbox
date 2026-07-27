@@ -22,6 +22,9 @@
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, normalize } from 'node:path';
+import { createLogger } from './log.js';
+
+const log = createLogger('bootstrap');
 
 /** Injectable filesystem surface so the materializer is unit-testable off-pod
  * (production uses node:fs). A superset of the auth helpers' AuthFs — the same
@@ -159,7 +162,7 @@ export function materializeBootstrapFiles(
     const entry = manifest[i];
     const target = resolveBootstrapTarget(entry.path, home);
     if (target === null) {
-      console.warn(`bootstrap: skipping file ${i}: path ${entry.path} is not inside $HOME or ${STATE_ROOT}`);
+      log.warn('skipping file: path is not inside $HOME or the state root', { index: i, path: entry.path, stateRoot: STATE_ROOT });
       continue;
     }
 
@@ -167,7 +170,7 @@ export function materializeBootstrapFiles(
     try {
       seed = fs.readFileSync(join(dir, String(i)), 'utf8') as string;
     } catch {
-      console.warn(`bootstrap: skipping ${target}: content key bootstrap-${i} is not present in the mount`);
+      log.warn('skipping file: its content key is not present in the mount', { target, key: `bootstrap-${i}` });
       continue;
     }
     const seedHash = sha256Hex(seed);
@@ -204,7 +207,7 @@ export function materializeBootstrapFiles(
       fs.mkdirSync(dirname(SIDECAR_PATH), { recursive: true });
       fs.writeFileSync(SIDECAR_PATH, JSON.stringify(nextHashes), { mode: 0o600 });
     } catch (err) {
-      console.warn(`bootstrap: could not persist seed-hash sidecar: ${(err as Error).message}`);
+      log.warn('could not persist seed-hash sidecar', { err: err as Error });
     }
   }
 }
@@ -214,5 +217,5 @@ export function materializeBootstrapFiles(
 function writeBootstrapFile(fs: BootstrapFs, target: string, content: string, mode: number): void {
   fs.mkdirSync(dirname(target), { recursive: true });
   fs.writeFileSync(target, content, { mode });
-  console.log(`bootstrap: materialized ${target} (mode ${mode.toString(8)})`);
+  log.info('materialized file', { target, mode: mode.toString(8) });
 }

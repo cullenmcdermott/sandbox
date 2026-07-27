@@ -80,10 +80,30 @@ func fitModal(s string, w, h int) string {
 		lines = append(lines, "")
 	}
 	for i, l := range lines {
-		if lipgloss.Width(l) > w {
+		// ONE width scan per line, not two. lipgloss.Width parses the whole line
+		// for SGR sequences, and the obvious spelling of this loop
+		// (`if Width(l) > w { truncate }; padRight(l, w)`) pays for that twice,
+		// since padRight measures again.
+		//
+		// Measured (BenchmarkFitModal, amd64): the tall-feed case (h=120,w=200)
+		// went 1.35ms → 1.00ms per call, and 20×80 89µs → 65µs — ~26% off, not
+		// the 50% the scan count suggests, because the rest is Split/Join and the
+		// padding Repeat rather than width measurement. Worth keeping (that case
+		// was ~8% of a 60fps frame budget) but NOT evidence that further
+		// micro-optimizing this loop pays; the remaining cost is allocation.
+		//
+		// An over-wide line is re-measured after truncation because ansi.Truncate
+		// lands at most at w — grapheme clusters mean it can land BELOW w, and
+		// that shortfall is exactly what the padding has to make up.
+		lw := lipgloss.Width(l)
+		if lw > w {
 			l = ansi.Truncate(l, w, "")
+			lw = lipgloss.Width(l)
 		}
-		lines[i] = padRight(l, w)
+		if lw < w {
+			l += strings.Repeat(" ", w-lw)
+		}
+		lines[i] = l
 	}
 	return strings.Join(lines, "\n")
 }

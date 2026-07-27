@@ -145,7 +145,9 @@ sequenceDiagram
 ```
 /session/state/sandbox/session.json   session state (mutable)
 /session/state/sandbox/events.db      SQLite append-only event log (replay source)
-/session/state/sandbox/audit.jsonl    PostToolUse audit entries
+/session/state/sandbox/audit.jsonl    PostToolUse audit entries (rotates at
+                                      SANDBOX_AUDIT_MAX_BYTES, default 8 MiB)
+/session/state/sandbox/audit.jsonl.1  the one retained previous generation
 /session/state/sandbox/outputs/       generated output files
 /session/state/claude/                CLAUDE_CONFIG_DIR
 /session/workspace/<workspace path>   workspace files in the PVC (legacy /session view)
@@ -285,11 +287,52 @@ that diverges. Scope is event payloads only — HTTP request/response bodies and
 Since claude-pane-first (protocolVersion 3) the vocabulary is pruned to what
 the observers actually produce: the SDK-engine types (`autopilot.state`,
 `models.available`, `todo.updated`, `tool.delta`, `tool.progress`) are gone;
-`workspace.status` and `context.compacted` remain with live Go consumers but
-no current producer (observers can re-emit them). The server-side autopilot
+`workspace.status` remains with a live Go consumer but no current producer.
+`context.compacted` gained one on 2026-07-27: the claude-pane observer maps
+Claude Code's `PreCompact` hook to it, so in-pane compaction is visible in the
+feed instead of ctx% silently dropping. That hook carries no token counts and
+fires *before* compaction, so the event is a marker — `preTokens` comes from the
+last statusline sample and `postTokens` is omitted, which the read-model treats
+as "leave the gauge alone" until the next sample. The server-side autopilot
 driver was removed with the SDK engine — the revival path is headless
 `claude -p --resume` (see `docs/archive/server-side-loop-adr.md` for the
 retired design).
+
+### Observer streams and the fleet cap
+
+The dashboard keeps a **live SSE observer stream per warm session** — that is
+what drives row status, attention routing, and the detached feed without
+attaching. Each one costs a port-forward, a goroutine, and an idle-probe timer,
+and every forward rides the same kube-apiserver: with no cap, N warm sessions pin
+N forwards, and apiserver port-forward pressure is the first thing to break
+(around 30 sessions). So the set is bounded — `defaultMaxObserverStreams = 16`
+(`internal/tui/dashboard/warm.go`), overridable via `RunOptions.MaxObserverStreams`
+/ `WithMaxObserverStreams`, chosen below the breakage point and above the warm
+soft limit so a normal working set never evicts.
+
+Two decisions govern it, and they are not the same question:
+
+- **Admission** (`admitObserver`) — whether to *start* a connect. An unprotected
+  session is admitted only while `established + in-flight < cap`; at the cap it
+  stays on its watch-derived lifecycle row and reconnects on demand when focused
+  or when it transitions into attention. This keeps a launch burst from paying N
+  connect costs only to evict most of them immediately.
+- **Eviction** (`enforceObserverCap`) — which established stream to drop when a
+  protected session pushes the set over. The victim is the *coldest* stream by
+  `observerActiveAt` recency (stamped on register, on every applied event, and on
+  focus), skipping protected ones.
+
+**Protection** (`observerProtected`) is where the subtlety lives. The attached
+session, `Waiting` (pending permission), and `Failed` are always protected. But
+`NeedsInput` is protected **only while it carries unseen output** (`lastSeq >
+seenSeq`). That condition is load-bearing: needs-input is the steady state of
+every session that ever finished a turn, so protecting it unconditionally
+admitted the entire fleet past the cap and made eviction a no-op — the [H1]
+finding. Once the user has seen the output, the row is evictable and focus
+reconnects it.
+
+An evicted row is not a broken row: it falls back to the watch-driven lifecycle
+status, losing live activity detail rather than correctness.
 
 ## Observability (`SANDBOX_TRACE`)
 

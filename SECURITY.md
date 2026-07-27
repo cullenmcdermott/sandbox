@@ -186,7 +186,13 @@ Each verified against code at the cited location:
   telemetry/audit tap persists alongside — not in place of — the user's own
   settings-defined hooks.
 - **Append-only audit log.** A `PostToolUse` hook writes `audit.jsonl`
-  (`runner/src/audit.ts`), redacted.
+  (`runner/src/audit.ts`), redacted. Append-only within a generation: the log
+  rotates to `audit.jsonl.1` at `SANDBOX_AUDIT_MAX_BYTES` (default 8 MiB, `0`
+  disables) and exactly one previous generation is kept, so a long-lived session
+  cannot fill the PVC. Rows are never truncated or rewritten in place — but note
+  that retention is bounded, so a session that generates more than ~16 MiB of
+  audit rows loses its oldest ones. Raise the cap (or set `0`) where a complete
+  audit trail matters more than the disk.
 - **Runner-infra secrets kept out of every child.** Two mechanisms, same goal.
   The `/exec` shell (with workspace git, which runs through it), the `opencode
   serve` child, and the `codex app-server` child get `sanitizedExecEnv`

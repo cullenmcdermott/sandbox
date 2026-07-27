@@ -245,6 +245,26 @@ func gcRunningSet(states []session.State) map[session.ID]bool {
 	return s
 }
 
+// gcKnownSet is the set of session ids the authoritative snapshot knows about AT
+// ALL — Suspended and Failed included, excluding only StatusGone. This is the
+// existence question, which is a different one from gcRunningSet's "is a pod up".
+//
+// [V35]: a PAUSED sync is protected by existence, not by liveness. Suspending a
+// session is supposed to pause its syncs, so a paused sync of a Suspended
+// session is working as designed and resume will unpause it; only when the
+// session is gone entirely (`kubectl delete sandbox` on a suspended session)
+// does that paused sync become garbage — and it is invisible to the
+// transport-down check, so nothing else would ever collect it.
+func gcKnownSet(states []session.State) map[session.ID]bool {
+	s := make(map[session.ID]bool, len(states))
+	for _, st := range states {
+		if st.Status != session.StatusGone {
+			s[st.ID] = true
+		}
+	}
+	return s
+}
+
 // reapOrphans applies the GC grace policy to the current orphan syncs and returns
 // a Cmd terminating those that are durably dead. An orphan is reaped only when (a)
 // its session's pod is NOT up per the latest authoritative snapshot (gcRunning) —
@@ -264,9 +284,15 @@ func (m *Model) reapOrphans(orphans []OrphanSync) tea.Cmd {
 	var due []string
 	for _, o := range orphans {
 		seen[o.Identifier] = true
-		// Protected: the session's pod is up (or scheduling) per the authoritative
-		// snapshot → its sync should be/become connected; never reap it.
-		if m.gcRunning[o.SessionID] {
+		// [V35] A paused sync asks a different question: not "is a pod up" but
+		// "does this session still exist". Pausing is what suspend does, and
+		// resume undoes it, so a paused sync is protected while its session is
+		// known at all — only one whose session is gone entirely is garbage.
+		protected := m.gcRunning[o.SessionID]
+		if o.Paused {
+			protected = m.gcKnown[o.SessionID]
+		}
+		if protected {
 			delete(m.orphanSince, o.Identifier)
 			continue
 		}

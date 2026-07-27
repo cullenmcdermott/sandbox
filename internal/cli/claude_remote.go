@@ -279,7 +279,7 @@ func runStartSession(cmd *cobra.Command, backendName, prompt, runnerImage, reape
 		ProjectPath: projectPath,
 		Status:      session.StatusRunning,
 	})
-	return afterTUI(func() error {
+	return afterTUIForSession(string(sid), func() error {
 		return dashboard.RunAttached(
 			newClientLifecycleBackend(c, backend),
 			newDashboardConnector(c, reaperImage),

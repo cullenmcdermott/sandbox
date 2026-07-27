@@ -5,7 +5,7 @@
 // resume the runner reloads session.json + events.db from the PVC and the
 // next turn continues the same Claude session via resume.
 
-import { openEventLog, appendEvent, closeEventLog } from './events.js';
+import { openEventLog, appendEvent, closeEventLog, sampleStorageStats } from './events.js';
 import { loadConfig, loadSessionState, initRegistry, getRegistry } from './session.js';
 import { startServer } from './server.js';
 import { selectAgent } from './agent.js';
@@ -23,11 +23,18 @@ import {
 import { startCodexObserver, type CodexObserver } from './codex-observer.js';
 import { startClaudePaneSupervisor, type ClaudePaneSupervisor } from './claude-pane.js';
 import { materializeClaudePaneConfig } from './claude-config.js';
-import { provisionPaneObserver, startClaudePaneObserver, type PaneObserverCore } from './claude-pane-observer.js';
+import {
+  provisionPaneObserver,
+  startClaudePaneObserver,
+  type PaneObserverCore,
+} from './claude-pane-observer.js';
 import { type PaneObserverHandle } from './server.js';
 import { materializeBootstrapFiles } from './bootstrap.js';
-import { writeWorkspaceGuide } from './workspace-guide.js';
+import { guideTargetFor, writeWorkspaceGuide } from './workspace-guide.js';
 import { startBootTrace } from './trace.js';
+import { setLogSessionId, createLogger } from './log.js';
+
+const log = createLogger('runner');
 
 // Seconds before SIGKILL, reported in session.terminating so the TUI can show
 // an accurate countdown. Mirrors the pod's terminationGracePeriodSeconds.
@@ -117,11 +124,54 @@ function shutdown(signal: string): void {
   // Give SSE writes a moment to flush to attached clients, then wait for the
   // opencode child to exit (so it never outlives us) and close cleanly.
   setTimeout(() => {
-    void Promise.all([opencodeStopped, observerStopped, codexStopped, codexObserverStopped]).finally(() => {
+    void Promise.all([
+      opencodeStopped,
+      observerStopped,
+      codexStopped,
+      codexObserverStopped,
+    ]).finally(() => {
       closeEventLog();
       process.exit(0);
     });
   }, 500);
+}
+
+/** How often to sample the PVC/event-log gauges ([T6]). Storage moves slowly and
+ * these numbers are for trend-spotting, not alerting, so the interval is long
+ * enough that the log stays readable over a multi-day session. Override with
+ * SANDBOX_STORAGE_GAUGE_MS; 0 disables. */
+const STORAGE_GAUGE_MS = ((): number => {
+  const raw = process.env.SANDBOX_STORAGE_GAUGE_MS;
+  if (raw === undefined) return 15 * 60_000;
+  const v = parseInt(raw, 10);
+  return Number.isFinite(v) && v > 0 ? v : 0;
+})();
+
+/**
+ * Periodically log the event-log size and PVC free space ([T6] part a).
+ *
+ * The event log never VACUUMs and its retention cap is off by default, so it
+ * grows monotonically on the same volume as session.json, the audit log, and the
+ * agent's state — and nothing watched it. This does not CHANGE any retention
+ * behavior; it measures, so that whether `RETENTION_MAX_EVENTS` should default
+ * non-zero (part b) can be decided from real numbers.
+ *
+ * Samples once at boot (so a pod that dies early still leaves one reading) and
+ * then on the interval. unref'd — a gauge must never hold the process open.
+ */
+function startStorageGauge(): void {
+  if (STORAGE_GAUGE_MS <= 0) return;
+  const sample = (): void => {
+    const s = sampleStorageStats();
+    log.info('storage', {
+      eventLogBytes: s.eventLogBytes,
+      eventLogRows: s.eventLogRows,
+      pvcFreeBytes: s.pvcFreeBytes,
+      pvcTotalBytes: s.pvcTotalBytes,
+    });
+  };
+  sample();
+  setInterval(sample, STORAGE_GAUGE_MS).unref?.();
 }
 
 function main(): void {
@@ -129,6 +179,10 @@ function main(): void {
   // slow pod start is attributable. No-op unless SANDBOX_TRACE is set.
   const boot = startBootTrace();
   const cfg = loadConfig();
+  // Stamp every subsequent log record with the session id. Done immediately
+  // after loadConfig so nothing but loadConfig's own warnings can log without
+  // it ([T2]).
+  setLogSessionId(cfg.sessionId);
   openEventLog();
   boot.phase('event_log');
 
@@ -192,6 +246,23 @@ function main(): void {
   materializeBootstrapFiles();
   boot.phase('bootstrap_files');
 
+  // Tell the agent what its tree actually is before it can guess wrong — most
+  // importantly that a per-session git worktree's .git points at a host path
+  // that does not exist here, so git commands fail by design. Backend-agnostic:
+  // the hazard belongs to the workspace, not to the agent looking at it, so
+  // every backend gets the same block at whatever path it reads (CLAUDE.md for
+  // claude-pane, AGENTS.md for codex/opencode — guideTargetFor). AFTER
+  // materializeBootstrapFiles so an operator-seeded guide at the same path is
+  // spliced around rather than raced with. Best-effort: a missing guide costs
+  // the agent context, not the boot.
+  const guidePath = guideTargetFor(reg.state.backend);
+  if (guidePath) {
+    writeWorkspaceGuide({
+      workspaceDir: resolveWorkspaceDir(cfg.projectPath),
+      path: guidePath,
+    });
+  }
+
   // opencode-server sessions: the runner stays the control plane and supervises
   // a child `opencode serve`; the local `opencode attach` client drives it. The
   // claude SDK turn path (server.ts /turns) is simply unused for these sessions.
@@ -233,12 +304,10 @@ function main(): void {
     // supervisor exists, so the first attach's lazy spawn finds a fully
     // authenticated, trust-seeded config dir. Fail-closed on missing/invalid
     // credential material (crash boot visibly, mirroring materializeCodexAuth).
-    materializeClaudePaneConfig({ workspaceDir: resolveWorkspaceDir(cfg.projectPath) });
-    // Tell the agent what its tree actually is before it can guess wrong — most
-    // importantly that a per-session git worktree's .git points at a host path
-    // that does not exist here, so git commands fail by design. Best-effort: a
-    // missing guide costs the agent context, not the boot.
-    writeWorkspaceGuide({ workspaceDir: resolveWorkspaceDir(cfg.projectPath) });
+    materializeClaudePaneConfig({
+      workspaceDir: resolveWorkspaceDir(cfg.projectPath),
+    });
+    // (the workspace guide is written for every backend above, not here)
     // Provision the observer surfaces (settings hooks + statusline + helper
     // scripts + scoped ingestion token) and build the mapping core; the
     // supervisor chains child exits into it for crash-terminal events.
@@ -250,9 +319,11 @@ function main(): void {
     );
   }
   // boot_prep covers everything between registry init and the listen call:
-  // orphaned-turn terminals, the session.started emit, agent/autopilot setup,
-  // and (opencode) supervisor/observer spawn initiation.
+  // orphaned-turn terminals, the session.started emit, the workspace guide,
+  // agent selection, and supervisor/observer spawn initiation.
   boot.phase('boot_prep');
+
+  startStorageGauge();
 
   startServer(
     agent,
