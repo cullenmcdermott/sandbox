@@ -13,6 +13,11 @@ func TestIndexTitleStoreAutoTitle(t *testing.T) {
 	// derived from os.UserHomeDir() ($HOME). Redirect HOME to a temp dir so the
 	// store reads/writes a hermetic index, not the real ~/.local/share.
 	t.Setenv("HOME", t.TempDir())
+	// The title store goes through a package-level cached offline client
+	// (offlineTitleClient); clear it so THIS test's client is bound to the
+	// $HOME just set above, not to whatever an earlier test in this package
+	// cached first.
+	resetTitleClientForTest()
 
 	var store indexTitleStore
 	id := session.ID("claude-sdk-store")

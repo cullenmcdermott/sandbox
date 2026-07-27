@@ -9,6 +9,15 @@ Actionable items are carried into `TODO.md` §8, which hosts both the client-API
 and the `tui/*` public-surface backlog. IDs `[P1-#]` / `[P2-#]` / `[P3-#]` are
 referenced from there.
 
+> **Burn-down, 2026-07-27 (same day).** `[P1-0a]`, `[P1-1]`, `[P1-6]`, `[P1-7]`,
+> `[P2-7]` and `[P2-8]` are **CLOSED** — see the done log. The findings below are
+> preserved as of review time and are deliberately NOT rewritten; read them for
+> the reasoning, not for current state. `[P1-2]`/`[P1-3]`/`[P1-5]`/`[P1-8]` were
+> already reclassified (not defects — the future bypass-transport work list), and
+> `[P1-4]` remains the security tripwire on it. **Still open: principle 2 above
+> the widget layer** — `[P2-2]`/`[P2-3]`/`[P2-4]`, i.e. THE PANEL WORKSTREAM.
+> Archive this document when that lands.
+
 **Headline.** Principle 3 is essentially met — the normalized model is
 genuinely Kubernetes-free, and the exceptions are the ones we decided to keep.
 Principle 1 is *mostly met in practice*: everything rides the kube-api, so a

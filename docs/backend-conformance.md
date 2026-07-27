@@ -162,7 +162,7 @@ plumbing only** and deliberately leaves most rows above red:
   `sandbox.cullen.dev/codex-account` label, **fail-closed** — the pod refuses to
   start if neither the account auth.json nor the shared `OPENAI_API_KEY` is
   present), `CODEX_HOME` PVC-persisted state, the `codex app-server` websocket
-  port-forward (`ForwardSpecsWithCodex`, port 8788), and the `sandbox codex`
+  port-forward (`client.Forward(client.PortCodex)`, port 8788), and the `sandbox codex`
   command. The pod supervises `codex app-server` (runner-side, landing
   separately); metrics come from a runner observer connection, and activity/idle
   is the runner's signal — same source every backend uses.

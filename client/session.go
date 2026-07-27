@@ -118,7 +118,7 @@ type Session struct {
 	worktreePath string
 
 	mu      sync.Mutex
-	handles []session.ForwardHandle
+	handles Forwards
 	runner  *runner.Client
 	// gen is the connection generation, bumped by every closeHandles (Close, a
 	// failed reconnect, or the top of a fresh Connect). Connect captures the
@@ -227,21 +227,22 @@ func (s *Session) Runner() RunnerClient {
 // healthy one.
 //
 // It returns false for a session that never Connected, an Observer connection
-// (which forwards only the runner HTTP port — no SSH — so len(handles) < 2), a
-// Closed session (handles cleared), and one whose SSH forward has terminated. By
-// construction (k8s.ForwardSpecs order) handles[1] is the SSH forward whenever a
-// full Connect established one; an Observer publishes only handles[0] (runner
-// HTTP). The healing action is a fresh Connect: it re-forwards on a new local
-// port, rewrites the ssh alias to it, and the existing mutagen syncs reconcile
-// onto the new transport.
+// (which forwards only the runner HTTP port — no SSH — so its Forwards has no
+// PortSSH entry), a Closed session (handles cleared), and one whose SSH forward
+// has terminated. The SSH forward is looked up by name (PortSSH), not position:
+// an Observer connection simply never has a PortSSH entry in its Forwards. The
+// healing action is a fresh Connect: it re-forwards on a new local port,
+// rewrites the ssh alias to it, and the existing mutagen syncs reconcile onto
+// the new transport.
 func (s *Session) SyncForwardAlive() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.handles) < 2 {
+	h, ok := s.handles.Get(PortSSH)
+	if !ok {
 		return false
 	}
 	select {
-	case <-s.handles[1].Done():
+	case <-h.Done():
 		return false
 	default:
 		return true
@@ -383,11 +384,12 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 	// Phase 1: a codex-app-server session has no external-pane forward here yet —
 	// it falls through to the default (runner HTTP + SSH) branch below, exactly
 	// like claude-sdk. The codex app-server port-forward + interactive pane land in
-	// a later wave (ForwardSpecsWithCodex exists but is not wired in yet), so a
+	// a later wave (the forward is expressible today as
+	// Forward(PortRunner, PortSSH, PortCodex), just not requested here), so a
 	// codex connect creates/health-checks without panicking, just without a codex
 	// turn path. Only opencode currently takes the external-service branch.
 	opencode := st.Backend == session.BackendOpenCode
-	var handles []session.ForwardHandle
+	var handles Forwards
 	var err error
 	fwdSpan := tr.start("connect.port_forward")
 	switch {
@@ -397,11 +399,11 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 		// waste — forward the runner HTTP port only, whatever the backend (C4:
 		// this case must be tested before the opencode one, or every background
 		// observer stream to an opencode session carries 3 forwards).
-		handles, err = s.c.backend.PortForward(ctx, s.ref, k8s.ForwardSpecsRunnerOnly(0))
+		handles, err = s.c.backend.PortForward(ctx, s.ref, Forward(PortRunner))
 	case opencode:
-		handles, err = s.c.backend.PortForward(ctx, s.ref, k8s.ForwardSpecsWithOpencode(0, 0, 0))
+		handles, err = s.c.backend.PortForward(ctx, s.ref, Forward(PortRunner, PortSSH, PortOpencode))
 	default:
-		handles, err = s.c.backend.PortForward(ctx, s.ref, k8s.ForwardSpecs(0, 0))
+		handles, err = s.c.backend.PortForward(ctx, s.ref, Forward(PortRunner, PortSSH))
 	}
 	fwdSpan.end()
 	if err != nil {
@@ -410,11 +412,16 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 	if !s.setHandlesGen(myGen, handles) {
 		// A concurrent Close/Connect superseded us between port-forward and now:
 		// close the forwards we just opened and abort rather than publishing them.
-		closeForwards(handles)
+		handles.Close()
 		return nil, errConnectSuperseded()
 	}
 
-	endpoint := fmt.Sprintf("http://127.0.0.1:%d", handles[0].LocalPort())
+	runnerPort, ok := handles.LocalPort(PortRunner)
+	if !ok {
+		s.closeHandles()
+		return nil, fmt.Errorf("sandbox: PortForward did not return a %q forward", PortRunner)
+	}
+	endpoint := fmt.Sprintf("http://127.0.0.1:%d", runnerPort)
 	token, err := s.c.backend.RunnerToken(ctx, s.ref)
 	if err != nil {
 		// Tear down the forward on every post-forward failure: leaving it (and
@@ -430,7 +437,7 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 	// (trace: <id> turn.link turn=…). No-op ("" → no header) when tracing is off.
 	rc.SetTraceID(tr.traceID())
 	if !s.setRunnerGen(myGen, rc) {
-		closeForwards(handles)
+		handles.Close()
 		return nil, errConnectSuperseded()
 	}
 	stage(StageRunner)
@@ -512,8 +519,18 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 			if w := s.sameDirSyncWarning(ctx, workspacePath, projectPath, string(s.ref.ID)); w != "" {
 				syncWarning = appendWarning(syncWarning, w)
 			}
+			sshPort, ok := handles.LocalPort(PortSSH)
+			if !ok {
+				// Post-publish failure, so tear down through closeHandles (not a bare
+				// handles.Close): the forwards AND the published runner client have to
+				// go, or Runner() keeps handing back a client over dead forwards. Only
+				// reachable from a third-party Backend that returns an incomplete
+				// Forwards — the k8s backend always opens PortSSH on this branch.
+				s.closeHandles()
+				return nil, fmt.Errorf("sandbox: PortForward did not return a %q forward", PortSSH)
+			}
 			syncSpan := tr.start("connect.project_sync")
-			created, spec, serr := s.c.startProjectSync(ctx, string(s.ref.ID), workspacePath, privPath, handles[1].LocalPort())
+			created, spec, serr := s.c.startProjectSync(ctx, string(s.ref.ID), workspacePath, privPath, sshPort)
 			syncSpan.end()
 			if serr != nil {
 				syncWarning = appendWarning(syncWarning, fmt.Sprintf("file sync unavailable: %v", serr))
@@ -526,7 +543,7 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 			// A concurrent Close/Connect superseded us while we were setting up
 			// background sync: startBackgroundSync refused to publish and cancelled
 			// its own context. Tear our forwards down and abort.
-			closeForwards(handles)
+			handles.Close()
 			return nil, errConnectSuperseded()
 		}
 	}
@@ -545,7 +562,12 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 			s.closeHandles()
 			return nil, fmt.Errorf("opencode password: %w", perr)
 		}
-		addr := fmt.Sprintf("127.0.0.1:%d", handles[2].LocalPort())
+		opencodePort, ok := handles.LocalPort(PortOpencode)
+		if !ok {
+			s.closeHandles()
+			return nil, fmt.Errorf("sandbox: PortForward did not return a %q forward", PortOpencode)
+		}
+		addr := fmt.Sprintf("127.0.0.1:%d", opencodePort)
 		stage(StageOpencode)
 		ocSpan := tr.start("connect.opencode_ready")
 		werr := waitOpencodeReady(ctx, "http://"+addr+"/")
@@ -817,16 +839,6 @@ func (s *Session) Close() error {
 	return nil
 }
 
-// closeForwards closes a set of port-forward handles the caller still owns (an
-// aborted Connect that never published them, or published-then-superseded ones).
-// Handle Close is idempotent, so a double close against a racing closeHandles is
-// safe.
-func closeForwards(handles []session.ForwardHandle) {
-	for _, h := range handles {
-		h.Close()
-	}
-}
-
 // errConnectSuperseded reports a Connect that a concurrent Close or a newer
 // Connect superseded mid-flight (V9). It wraps ErrNotConnected so a caller that
 // only cares "is this session usable?" can branch on errors.Is(err,
@@ -846,7 +858,7 @@ func (s *Session) currentGen() uint64 {
 // generation still matches gen (no concurrent Close/Connect has superseded this
 // Connect). It returns false when stale, in which case the caller must close its
 // own handles and abort — the superseding op already tore down whatever it found.
-func (s *Session) setHandlesGen(gen uint64, h []session.ForwardHandle) bool {
+func (s *Session) setHandlesGen(gen uint64, h Forwards) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.gen != gen {
@@ -898,9 +910,7 @@ func (s *Session) closeHandlesGen() uint64 {
 	}
 	s.syncTask = nil
 	s.mu.Unlock()
-	for _, h := range handles {
-		h.Close()
-	}
+	handles.Close()
 	return gen
 }
 

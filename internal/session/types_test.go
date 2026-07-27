@@ -296,3 +296,68 @@ func TestOpencodeProviderEntryKey(t *testing.T) {
 		}
 	}
 }
+
+// fwdTestHandle is a minimal ForwardHandle for exercising Forwards without a
+// live port-forward.
+type fwdTestHandle struct {
+	port int
+	done chan struct{}
+}
+
+func (h *fwdTestHandle) LocalPort() int        { return h.port }
+func (h *fwdTestHandle) Close() error          { return nil }
+func (h *fwdTestHandle) Done() <-chan struct{} { return h.done }
+
+// TestForward pins the standard-endpoint spec builder: each name gets its
+// standard remote port and an OS-assigned (0) local port, and an unknown name
+// gets Remote 0 (which PortForward rejects).
+func TestForward(t *testing.T) {
+	specs := Forward(PortRunner, PortSSH)
+	if len(specs) != 2 {
+		t.Fatalf("Forward(runner, ssh) = %d specs, want 2", len(specs))
+	}
+	if specs[0].Name != PortRunner || specs[0].Remote != RunnerPort || specs[0].Local != 0 {
+		t.Errorf("specs[0] = %+v, want {Name:runner Remote:%d Local:0}", specs[0], RunnerPort)
+	}
+	if specs[1].Name != PortSSH || specs[1].Remote != SSHPort || specs[1].Local != 0 {
+		t.Errorf("specs[1] = %+v, want {Name:ssh Remote:%d Local:0}", specs[1], SSHPort)
+	}
+
+	unknown := Forward(PortName("bogus"))
+	if len(unknown) != 1 || unknown[0].Remote != 0 {
+		t.Errorf("Forward(unknown) = %+v, want Remote 0", unknown)
+	}
+}
+
+// TestForwardsNameRouting pins the whole point of keying by name: a caller
+// looks a handle up by PortName regardless of map iteration/insertion order,
+// and a nil map (never-connected) is safe to query and Close.
+func TestForwardsNameRouting(t *testing.T) {
+	runnerH := &fwdTestHandle{port: 1111, done: make(chan struct{})}
+	sshH := &fwdTestHandle{port: 2222, done: make(chan struct{})}
+	fwds := Forwards{PortRunner: runnerH, PortSSH: sshH}
+
+	if p, ok := fwds.LocalPort(PortRunner); !ok || p != 1111 {
+		t.Errorf("LocalPort(runner) = (%d, %v), want (1111, true)", p, ok)
+	}
+	if p, ok := fwds.LocalPort(PortSSH); !ok || p != 2222 {
+		t.Errorf("LocalPort(ssh) = (%d, %v), want (2222, true)", p, ok)
+	}
+	if _, ok := fwds.LocalPort(PortOpencode); ok {
+		t.Error("LocalPort(opencode) on a runner+ssh set should be absent")
+	}
+	if h, ok := fwds.Get(PortRunner); !ok || h != runnerH {
+		t.Errorf("Get(runner) = (%v, %v), want (runnerH, true)", h, ok)
+	}
+
+	fwds.Close()
+
+	var nilFwds Forwards
+	if _, ok := nilFwds.Get(PortRunner); ok {
+		t.Error("Get on a nil Forwards must report absent, not panic")
+	}
+	if _, ok := nilFwds.LocalPort(PortRunner); ok {
+		t.Error("LocalPort on a nil Forwards must report absent, not panic")
+	}
+	nilFwds.Close() // must not panic
+}

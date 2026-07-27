@@ -10,7 +10,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/cullenmcdermott/sandbox/internal/k8s"
 	"github.com/cullenmcdermott/sandbox/internal/runner"
 	"github.com/cullenmcdermott/sandbox/internal/session"
 )
@@ -60,17 +59,17 @@ and --tool to focus on a single tool's events.`,
 				return fmt.Errorf("session %s is suspended; run `sandbox resume %s` first", ref.ID, ref.ID)
 			}
 
-			handles, err := backend.PortForward(ctx, ref, k8s.ForwardSpecs(0, 0))
+			forwards, err := backend.PortForward(ctx, ref, session.Forward(session.PortRunner, session.PortSSH))
 			if err != nil {
 				return fmt.Errorf("port-forward: %w", err)
 			}
-			defer func() {
-				for _, h := range handles {
-					_ = h.Close()
-				}
-			}()
+			defer forwards.Close()
 
-			endpoint := fmt.Sprintf("http://127.0.0.1:%d", handles[0].LocalPort())
+			runnerPort, ok := forwards.LocalPort(session.PortRunner)
+			if !ok {
+				return fmt.Errorf("port-forward: no %q forward returned", session.PortRunner)
+			}
+			endpoint := fmt.Sprintf("http://127.0.0.1:%d", runnerPort)
 			dbg("trace port-forward established", "session", ref.ID, "endpoint", endpoint)
 			token, err := backend.RunnerToken(ctx, ref)
 			if err != nil {

@@ -218,20 +218,23 @@ func createReadySession(t *testing.T, backend string, idTag string) (*k8s.Backen
 
 // runnerClientForRef port-forwards the runner HTTP port for ref and returns a
 // connected client plus a cleanup func. Mirrors internal/cli.runnerClientFor
-// but uses ForwardSpecsRunnerOnly (no SSH needed for a headless turn).
+// but forwards only session.PortRunner (no SSH needed for a headless turn).
 func runnerClientForRef(t *testing.T, backend *k8s.Backend, ref session.Ref) (*runner.Client, func()) {
 	t.Helper()
 	pfCtx, pfCancel := context.WithCancel(context.Background())
-	handles, err := backend.PortForward(pfCtx, ref, k8s.ForwardSpecsRunnerOnly(0))
+	forwards, err := backend.PortForward(pfCtx, ref, session.Forward(session.PortRunner))
 	if err != nil {
 		pfCancel()
 		t.Fatalf("PortForward %s: %v", ref.ID, err)
 	}
 	cleanup := func() {
-		for _, h := range handles {
-			h.Close()
-		}
+		forwards.Close()
 		pfCancel()
+	}
+	runnerPort, ok := forwards.LocalPort(session.PortRunner)
+	if !ok {
+		cleanup()
+		t.Fatalf("PortForward %s: no %q forward returned", ref.ID, session.PortRunner)
 	}
 	tokCtx, tokCancel := context.WithTimeout(pfCtx, 15*time.Second)
 	defer tokCancel()
@@ -240,7 +243,7 @@ func runnerClientForRef(t *testing.T, backend *k8s.Backend, ref session.Ref) (*r
 		cleanup()
 		t.Fatalf("RunnerToken %s: %v", ref.ID, err)
 	}
-	client := runner.New(httpLocalURL(handles[0].LocalPort()), token)
+	client := runner.New(httpLocalURL(runnerPort), token)
 	return client, cleanup
 }
 

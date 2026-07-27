@@ -3,12 +3,9 @@ package cli
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -54,6 +51,27 @@ func syncManager() *syncpkg.Manager {
 	return syncpkg.New(syncpkg.NewExecRunner(""))
 }
 
+// titleClientOnce/titleClient/titleClientErr back offlineTitleClient — built
+// once and reused across every dashboard title read/write rather than
+// reconstructed per call.
+var (
+	titleClientOnce sync.Once
+	titleClient     *client.Client
+	titleClientErr  error
+)
+
+// offlineTitleClient returns the OFFLINE public client backing indexTitleStore.
+// Offline is REQUIRED here, not incidental: `sandbox rename` must work with no
+// cluster reachable, since that is exactly the situation you rename a parked
+// (suspended, or cluster-unreachable) session in. It never loads a kubeconfig
+// or dials anything — titles are a local-index read/write (see client/title.go).
+func offlineTitleClient() (*client.Client, error) {
+	titleClientOnce.Do(func() {
+		titleClient, titleClientErr = client.Offline()
+	})
+	return titleClient, titleClientErr
+}
+
 // localSSHConfig returns the per-session SSH alias manager at the default state
 // root — the same include file the client package writes (the "ssh" dir INSIDE
 // the state root, Include'd from ~/.ssh/config) — without needing a
@@ -82,90 +100,52 @@ func localSSHConfig() (*syncpkg.SSHConfig, error) {
 const syncHealMinInterval = 30 * time.Second
 
 // syncProber is the stateful backing for the dashboard's sync-health probe. It
-// maps a SyncState to the dashboard's decoupled SyncHealth and, on a heal-eligible
-// reading (a transport stall or a paused-while-running sync — never a safety
-// halt; see healEligible), fires a debounced background self-heal (MF5) — the
-// layer that owns the prober, not the dashboard, drives the recovery.
+// maps a client.SyncStatus to the dashboard's decoupled SyncHealth and, on a
+// heal-eligible reading (a transport stall or a paused-while-running sync —
+// never a safety halt; see healEligible), fires a debounced background self-heal
+// (MF5) — the layer that owns the prober, not the dashboard, drives the
+// recovery.
 type syncProber struct {
+	c          *client.Client
 	mu         sync.Mutex
 	lastHealAt map[session.ID]time.Time
 }
 
-// probe reads a session's sync health, shapes the conflict detail, and triggers
-// the self-heal when the sync has stalled. It still degrades to "unknown" rather
-// than failing — the indicator must never block the UI — but it no longer
-// degrades SILENTLY: the reason rides along in Detail.
-//
-// "unknown" was previously the terminus of two unrelated situations, and losing
-// the difference is what let a broken sync masquerade as an unremarkable blank:
-//
-//   - StatusDetail errored — the mutagen CLI is missing, or its daemon is not
-//     answering. Nothing is known about ANY session's sync.
-//   - StatusDetail succeeded and reported no sync sessions at all. That is a
-//     definite answer, and a bad one: this session's files are not syncing.
+// probe reads a session's sync health via the public client, shapes the
+// conflict detail, and triggers the self-heal when the sync has stalled. It
+// still degrades to "unknown" rather than failing — the indicator must never
+// block the UI — but it no longer degrades SILENTLY: the reason rides along in
+// Detail. Both the error-shaping and the "no sync session — attach to create
+// one" text are now produced by client.SyncStatus (internal/sync's
+// StatusReport); this adapter only shapes the typed Status into the dashboard's
+// SyncHealth and applies the presentation cap on conflicts.
 func (p *syncProber) probe(ctx context.Context, id session.ID) dashboard.SyncHealth {
 	// conflictFileCap bounds how many conflicting files the detail pane lists
 	// before collapsing the rest into a "+N more" line, so a mass conflict can't
 	// flood the pane.
 	const conflictFileCap = 5
-	st, summary, err := syncManager().StatusDetail(ctx, string(id))
+	st, err := p.c.SyncStatus(ctx, client.ID(id))
 	if err != nil {
-		return dashboard.SyncHealth{Status: "unknown", Detail: probeErrDetail(err)}
+		// Still return the degraded reading — the indicator must never block the
+		// UI — but the reason (st.Detail) came from client.SyncStatus, which
+		// never returns "" for an errored probe.
+		return dashboard.SyncHealth{Status: st.State.String(), Detail: st.Detail}
 	}
-	if healEligible(st) {
+	if healEligible(st.State) {
 		p.maybeHeal(id)
 	}
-	h := dashboard.SyncHealth{Status: st.String()}
-	if st == syncpkg.SyncUnknown {
-		// A definite answer, not a failure to answer: mutagen knows of no sync for
-		// this session, so its files are not moving. True both for a session never
-		// attached from this install and for one whose sync was terminated/reaped —
-		// attaching is the fix for both, since connect recreates the syncs.
-		h.Detail = "no sync session — attach to create one"
-	}
-	if st == syncpkg.SyncConflicted && summary.Total > 0 {
-		for i, cf := range summary.Files {
+	h := dashboard.SyncHealth{Status: st.State.String(), Detail: st.Detail}
+	if st.State == client.SyncConflicted && len(st.Conflicts) > 0 {
+		for i, cf := range st.Conflicts {
 			if i >= conflictFileCap {
-				h.Conflicts = append(h.Conflicts, fmt.Sprintf("+%d more", summary.Total-conflictFileCap))
+				h.Conflicts = append(h.Conflicts, fmt.Sprintf("+%d more", len(st.Conflicts)-conflictFileCap))
 				break
 			}
 			h.Conflicts = append(h.Conflicts, cf.Describe())
 		}
-		h.Hint = syncpkg.ConflictResolutionHint
+		h.Hint = st.Hint
 	}
 	return h
-}
-
-// probeDetailCap bounds the sync-health reason to something that fits the detail
-// pane's one-line KV value next to the status token.
-const probeDetailCap = 56
-
-// probeErrDetail renders a probe error as a short reason for the detail pane.
-// The raw error is a whole mutagen invocation plus its stderr — far too long and
-// too noisy for a KV row — so this keeps the part that tells the user what to do
-// and drops the argv echo. It never returns "", because an empty detail is what
-// made the swallowed error invisible in the first place.
-func probeErrDetail(err error) string {
-	if err == nil {
-		return ""
-	}
-	if errors.Is(err, exec.ErrNotFound) {
-		return "mutagen CLI not found"
-	}
-	msg := err.Error()
-	// ExecRunner formats "mutagen [<argv>]: <err>: <stderr>"; the argv echo is
-	// noise here, and the caller already knows which session it asked about.
-	if _, rest, ok := strings.Cut(msg, "]: "); ok {
-		msg = rest
-	}
-	msg = strings.Join(strings.Fields(msg), " ") // collapse newlines from stderr
-	if msg == "" {
-		return "sync status unavailable"
-	}
-	if len(msg) > probeDetailCap {
-		msg = msg[:probeDetailCap-1] + "…"
-	}
-	return msg
 }
 
 // healEligible reports whether a sync state should trigger the debounced MF5
@@ -177,8 +157,8 @@ func probeErrDetail(err error) string {
 // / unknown / conflicted states need no transport heal. The prober only probes
 // running sessions, so healing a paused sync is safe (a deliberate `sync --pause`
 // self-resumes; a suspended session is not probed).
-func healEligible(st syncpkg.SyncState) bool {
-	return st == syncpkg.SyncStalled || st == syncpkg.SyncPaused
+func healEligible(st client.SyncState) bool {
+	return st == client.SyncStalled || st == client.SyncPaused
 }
 
 // maybeHeal fires a background Reconcile (ResumeAll+FlushAll) for a stalled
@@ -187,7 +167,9 @@ func healEligible(st syncpkg.SyncState) bool {
 // read, and swallows errors — a failed heal just leaves the stall visible for the
 // next probe to retry. It heals a stalled-but-existing sync while SSE is healthy,
 // the gap where nothing else re-runs sync setup; a genuinely terminated sync is
-// still recreated by the connect path on the next reconnect.
+// still recreated by the connect path on the next reconnect. Still goes through
+// syncManager().Reconcile directly — there is no public client equivalent of a
+// bare Reconcile, and this self-heal is TUI-internal plumbing, not SDK surface.
 func (p *syncProber) maybeHeal(id session.ID) {
 	p.mu.Lock()
 	now := time.Now()
@@ -205,15 +187,16 @@ func (p *syncProber) maybeHeal(id session.ID) {
 }
 
 // dashboardSyncProber builds the dashboard's per-session sync-health probe,
-// backed by the Mutagen sync manager. It maps a SyncState to its short token and
-// degrades to "unknown" — carrying the REASON in Detail, see probe — on any
-// error so the indicator never blocks the UI. For a
-// conflicted sync it also formats a capped per-file detail list + a resolution
-// hint (§1d), and for a stalled sync it fires a debounced self-heal (MF5) — the
-// internal/sync parsing/reconcile lives in the sync package; this adapter only
-// shapes the typed summary into the dashboard's decoupled SyncHealth.
-func dashboardSyncProber() dashboard.SyncProber {
-	p := &syncProber{lastHealAt: make(map[session.ID]time.Time)}
+// backed by the given client's SyncStatus. It maps a client.SyncStatus to its
+// short token and degrades to "unknown" — carrying the REASON in Detail, see
+// probe — on any error so the indicator never blocks the UI. For a conflicted
+// sync it also formats a capped per-file detail list + a resolution hint (§1d),
+// and for a stalled sync it fires a debounced self-heal (MF5) — the
+// internal/sync parsing/reconcile lives in the sync package (via the client);
+// this adapter only shapes the typed status into the dashboard's decoupled
+// SyncHealth and applies the presentation cap.
+func dashboardSyncProber(c *client.Client) dashboard.SyncProber {
+	p := &syncProber{c: c, lastHealAt: make(map[session.ID]time.Time)}
 	return p.probe
 }
 
@@ -288,38 +271,39 @@ func (reaperAdapter) Terminate(ctx context.Context, identifiers []string) error 
 	return syncManager().TerminateByIdentifier(ctx, identifiers...)
 }
 
-// indexTitleStore implements dashboard.TitleStore on top of the local session
-// index, so a session rename in the TUI persists across restart/reattach.
+// indexTitleStore implements dashboard.TitleStore on top of the public
+// client's title API (client/title.go), so a session rename in the TUI
+// persists across restart/reattach. All four title methods delegate to an
+// OFFLINE client (see offlineTitleClient) — titles must be readable/settable
+// with no cluster reachable, since renaming a parked session is exactly when
+// there is none.
 type indexTitleStore struct{}
 
 // LoadTitle returns the persisted user-chosen title for a session, or "".
 func (indexTitleStore) LoadTitle(id session.ID) string {
-	idx, err := newIndex()
+	c, err := offlineTitleClient()
 	if err != nil {
 		return ""
 	}
-	entry, err := idx.Load(string(id))
+	t, err := c.Title(client.ID(id))
 	if err != nil {
 		return ""
 	}
-	return entry.RenamedTitle
+	return t.Name
 }
 
-// SaveTitle persists the user-chosen title. [V7] It writes a PARTIAL entry (only
-// the identity fields Save needs plus the field it owns) and lets Save's locked
-// load-merge fill the rest, so a concurrent snapshot/driver write can't have its
-// newer LastEventSeq/Snapshot clobbered by a full entry this adapter loaded
-// earlier outside the lock.
+// SaveTitle persists the user-chosen title via client.SetTitle. The client now
+// owns the partial-entry write discipline that used to live here (see
+// client/title.go's SetTitle — it still writes a partial entry and lets the
+// index's locked load-merge fill the rest, so a concurrent snapshot/driver
+// write is never clobbered); this adapter stays best-effort and silently
+// ignores any error (an empty name, an unwritable index).
 func (indexTitleStore) SaveTitle(id session.ID, title string) {
-	idx, err := newIndex()
+	c, err := offlineTitleClient()
 	if err != nil {
 		return
 	}
-	_ = idx.Save(string(id), index.Entry{
-		SandboxSessionID: string(id),
-		SandboxName:      string(id),
-		RenamedTitle:     title,
-	})
+	_ = c.SetTitle(client.ID(id), title)
 }
 
 // SaveAgentSessionID persists the backend's resume id (the Claude SDK session
@@ -406,30 +390,27 @@ func appendTranscriptAudit(sandboxID, claudeID, projectPath string) {
 
 // LoadAutoTitle returns the persisted runner-generated auto title, or "".
 func (indexTitleStore) LoadAutoTitle(id session.ID) string {
-	idx, err := newIndex()
+	c, err := offlineTitleClient()
 	if err != nil {
 		return ""
 	}
-	entry, err := idx.Load(string(id))
+	t, err := c.Title(client.ID(id))
 	if err != nil {
 		return ""
 	}
-	return entry.AutoTitle
+	return t.Auto
 }
 
-// SaveAutoTitle persists the runner-generated auto title, preserving the rest of
-// the entry (notably any user-chosen RenamedTitle).
+// SaveAutoTitle persists the runner-generated auto title via
+// client.SetAutoTitle, preserving the rest of the entry (notably any
+// user-chosen Name — see client/title.go's SetAutoTitle) and the partial-entry
+// write discipline — see SaveTitle.
 func (indexTitleStore) SaveAutoTitle(id session.ID, title string) {
-	idx, err := newIndex()
+	c, err := offlineTitleClient()
 	if err != nil {
 		return
 	}
-	// [V7] Partial entry + Save's locked merge — see SaveTitle.
-	_ = idx.Save(string(id), index.Entry{
-		SandboxSessionID: string(id),
-		SandboxName:      string(id),
-		AutoTitle:        title,
-	})
+	_ = c.SetAutoTitle(client.ID(id), title)
 }
 
 // indexSnapshotStore implements dashboard.SnapshotStore on top of the local

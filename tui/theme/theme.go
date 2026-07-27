@@ -10,6 +10,40 @@
 // active tokens and register a rebuild via OnChange so they re-skin on a theme
 // swap.
 //
+// # Concurrency and process scope
+//
+// This package holds ONE active theme per process, in plain package-level
+// variables, and it is NOT safe for concurrent use. Both halves of that are
+// deliberate, and both are load-bearing for a consumer:
+//
+//   - Single-goroutine contract. Register, ApplyTheme, Cycle, OnChange (and the
+//     unsubscribe func it returns) mutate package state; the exported color
+//     tokens, Epoch, and Active read it. Every one of those calls must happen on
+//     one goroutine — in practice the goroutine that runs the Bubble Tea update
+//     and render loop, or program startup before that loop begins. Reading a
+//     token from a background goroutine while another applies a theme is a data
+//     race. Route theme changes through your program's message loop
+//     (tea.Program.Send) rather than calling ApplyTheme from a worker.
+//
+//     Tokens are plain vars, not accessor funcs, precisely so that a render-time
+//     read is a bare memory load; synchronizing them would mean turning ~40
+//     exported names into function calls at every render site. That trade is the
+//     reason the contract is stated rather than enforced.
+//
+//   - One palette per process. The active theme is global, so two independently
+//     themed consumers cannot coexist in one binary — the second ApplyTheme wins
+//     for both, and the same applies to the kit component palette and ANSI table
+//     this package drives. A library that embeds a theme-swapping TUI should
+//     expose theme selection to its host rather than applying a theme itself. If
+//     you need per-program palettes, this package is not the seam; derive your
+//     own styles from a Theme value (which is an inert table of colors) and pass
+//     them down explicitly.
+//
+// (tui/kit holds its own palette behind an atomic.Pointer. That protects the
+// kit's internal, unexported palette against a torn read; it does not lift this
+// contract, because the tokens below are still plain vars and ApplyTheme still
+// writes them unsynchronized.)
+//
 // Token semantics (use the right rung — don't reach for `Dim` to mean
 // "secondary text"):
 //
@@ -104,6 +138,9 @@ var themes = []Theme{
 // These are exported so consuming applications derive their own styles from the
 // active palette. They are swapped in place by ApplyTheme; read them at render
 // time (not at package-init time) so a theme swap is observed.
+//
+// They are plain vars with no synchronization: read them only from the goroutine
+// that calls ApplyTheme (see the package doc's concurrency contract).
 var (
 	Charple color.Color
 	Hazy    color.Color
@@ -170,6 +207,11 @@ var changeHooks []func()
 // Apps register their style-rebuild function here. It returns an unsubscribe
 // func that removes the hook; calling it more than once is harmless. The return
 // value may be ignored by hooks that live for the whole process.
+//
+// Not safe for concurrent use: OnChange, the unsubscribe func it returns, and
+// the hooks themselves all run on the single theme goroutine (package doc).
+// Register hooks at startup, and unsubscribe from the same goroutine that drives
+// ApplyTheme.
 func OnChange(fn func()) func() {
 	changeHooks = append(changeHooks, fn)
 	idx := len(changeHooks) - 1
@@ -185,9 +227,13 @@ var themeEpoch uint64
 
 // Epoch returns a counter that increments on every theme swap. Fold it into a
 // render cache's key so the cache invalidates when the palette changes.
+//
+// Read from the theme goroutine only (package doc) — like the tokens it guards,
+// it is a plain global.
 func Epoch() uint64 { return themeEpoch }
 
-// Active returns the name of the currently applied theme.
+// Active returns the name of the currently applied theme. Read from the theme
+// goroutine only (package doc).
 func Active() string { return activeTheme }
 
 func init() { ApplyTheme(themes[0]) }
@@ -196,6 +242,12 @@ func init() { ApplyTheme(themes[0]) }
 // the next render of every screen adapts. Accents swap too (e.g. Daylight tones
 // them down for contrast on a light terminal). Registered OnChange hooks run
 // last so app-side styles re-skin.
+//
+// Not safe for concurrent use, and process-global: it writes the exported tokens
+// (plus the kit ANSI/component palettes) unsynchronized, and there is one active
+// palette per process, so two independently themed programs in one binary
+// clobber each other. Call it only from the goroutine that reads the tokens —
+// your render loop, or startup before it begins. See the package doc.
 func ApplyTheme(t Theme) {
 	activeTheme = t.Name
 	themeEpoch++
@@ -292,8 +344,10 @@ func ansiTableFor(t Theme) [16]color.RGBA {
 // ApplyTheme (or Cycle to it) to make it active, at which point every OnChange
 // hook re-skins from its palette like any built-in theme.
 //
-// Not safe for concurrent use with ApplyTheme or the other registry readers;
-// register themes during startup, before the render loop begins.
+// Not safe for concurrent use with ApplyTheme or the other registry readers
+// (ByName, Cycle, DefaultForBackground): the registry is a plain package slice.
+// Register themes during startup, before the render loop begins — same
+// single-goroutine contract as the rest of the package (package doc).
 func Register(t Theme) {
 	for i := range themes {
 		if strings.EqualFold(themes[i].Name, t.Name) {
@@ -337,7 +391,8 @@ func DefaultForBackground(isDark bool) Theme {
 func ApplyForBackground(isDark bool) { ApplyTheme(DefaultForBackground(isDark)) }
 
 // Cycle applies the next theme in the registry (wrapping), for the /theme
-// command.
+// command. It calls ApplyTheme, so it carries the same single-goroutine,
+// one-palette-per-process contract (package doc).
 func Cycle() {
 	idx := 0
 	for i, t := range themes {

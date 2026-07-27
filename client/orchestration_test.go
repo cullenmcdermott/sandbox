@@ -48,7 +48,7 @@ type fakeBackend struct {
 	suspendErr  error
 	resumeErr   error
 	destroyErr  error
-	handles     []session.ForwardHandle
+	handles     Forwards
 	portErr     error
 	// portForwardHook, if set, runs at the start of PortForward — a test seam to
 	// stall Connect mid-flight (e.g. to race Close against it).
@@ -123,7 +123,7 @@ func (f *fakeBackend) StartWithProgress(_ context.Context, ref Ref, _ func(strin
 	return nil
 }
 
-func (f *fakeBackend) PortForward(_ context.Context, ref Ref, ports []session.PortSpec) ([]session.ForwardHandle, error) {
+func (f *fakeBackend) PortForward(_ context.Context, ref Ref, ports []session.PortSpec) (Forwards, error) {
 	if f.portForwardHook != nil {
 		f.portForwardHook()
 	}
@@ -559,7 +559,7 @@ func TestDialRunner(t *testing.T) {
 	t.Run("forwards the runner port only and cleans up", func(t *testing.T) {
 		be := newFakeBackend()
 		h := &closeSpyHandle{port: 12345, done: make(chan struct{})}
-		be.handles = []session.ForwardHandle{h}
+		be.handles = Forwards{PortRunner: h}
 		be.token = "tok"
 		c, _, _ := fakeClient(t, be)
 
@@ -572,7 +572,7 @@ func TestDialRunner(t *testing.T) {
 		}
 		// #3: only the runner HTTP port is forwarded — the SSH port (used solely by
 		// mutagen sync, which DialRunner never runs) is not.
-		if want := k8s.ForwardSpecsRunnerOnly(0); !reflect.DeepEqual(be.gotSpecs, want) {
+		if want := Forward(PortRunner); !reflect.DeepEqual(be.gotSpecs, want) {
 			t.Errorf("PortForward specs = %v, want runner-only %v", be.gotSpecs, want)
 		}
 		cleanup()
@@ -584,7 +584,7 @@ func TestDialRunner(t *testing.T) {
 	t.Run("token error tears down the forward and returns the error", func(t *testing.T) {
 		be := newFakeBackend()
 		h := &closeSpyHandle{port: 12345, done: make(chan struct{})}
-		be.handles = []session.ForwardHandle{h}
+		be.handles = Forwards{PortRunner: h}
 		be.tokenErr = errors.New("no secret")
 		c, _, _ := fakeClient(t, be)
 

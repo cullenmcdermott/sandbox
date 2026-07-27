@@ -35,21 +35,11 @@ const (
 	DefaultReaperImage = "ghcr.io/cullenmcdermott/sandbox-reaper:latest"
 )
 
-// ReaperOptions configures a per-session reaper Job.
-type ReaperOptions struct {
-	// Image is the reaper container image (the sandbox binary).
-	Image string
-	// ImagePullPolicy overrides the reaper pod's imagePullPolicy (Always /
-	// IfNotPresent / Never). Empty selects a default: IfNotPresent for a
-	// digest-pinned Image, else Always. Mirrors session.Spec.ImagePullPolicy.
-	ImagePullPolicy string
-	// SessionNamespace is where the Sandbox/pod/secret live (agent-sessions).
-	SessionNamespace string
-	// IdleTimeout is how long a session must be idle before suspend.
-	IdleTimeout time.Duration
-	// PollInterval is how often the reaper polls the runner /idle endpoint.
-	PollInterval time.Duration
-}
+// ReaperOptions configures a per-session reaper Job. Moved to internal/session
+// (ReaperOptions has no k8s dependency — just time) so client.Backend can name
+// it without importing internal/k8s; this alias keeps every existing internal
+// call site compiling unchanged.
+type ReaperOptions = session.ReaperOptions
 
 // EnsureReaper creates a reaper Job for the session if one is not already
 // watching with the desired spec. The Job polls the runner's /idle endpoint and

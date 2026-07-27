@@ -3416,3 +3416,238 @@ marking the elision `…/`. Worktree paths share a long prefix and differ only i
 the final segment, so a right-truncation would render every session's as the
 same `~/.local/share/sandbox/remote-ses…` and lose the only identifying part.
 `project` is home-collapsed through the same helper for consistency.
+
+## tui/theme concurrency contract — stated, not enforced (2026-07-27, §8 [P2-7]+[P2-8])
+
+**The complaint the item recorded was real and precise:** `tui/kit` moved its
+palette behind an `atomic.Pointer` so "multiple tea.Programs sharing this
+process never race" (`tui/kit/palette.go:4,35`), but the layer *above* it —
+`theme.ApplyTheme` — writes ~40 plain exported package vars plus `activeTheme`,
+`changeHooks` and `themeEpoch` unsynchronized, and is what calls
+`kit.SetANSITable`/`SetComponentColors`. So the hardening was defeated one layer
+up, and the single-goroutine contract lived only in a comment on an unexported
+var while the package doc advertised "reusable across TUI applications". The
+split was the wrong part.
+
+**Resolved by stating the contract, not by finishing the hardening.** The reason
+is that the tokens are exported **vars**, not accessors. `theme.Charple` is a
+bare memory load at render time, by design, and that is the whole reason the
+package can be read from a hot render path without ceremony. Making the ~40 of
+them race-free means turning every one into a function call — a break of the
+entire public token vocabulary and of every render site in the tree — and after
+paying that, `[P2-8]` is still unfixed: the palette is one per *process*, so two
+independently themed consumers in one binary clobber each other whether or not
+the writes are atomic. Synchronization would have bought memory-model
+correctness for a configuration that stays semantically wrong. `tui/kit` keeps
+its `atomic.Pointer` — it guards an *unexported* palette with no var surface, so
+it costs its consumers nothing.
+
+**Checked that this documents reality rather than papering over a live race**
+before writing it: every `ApplyTheme`/`Cycle`/`ApplyForBackground` call site is
+either package `init()` or a Bubble Tea `Update` (`app.go:438`,
+`cmd/tuikit-demo/{chat,picker}.go`), both `OnChange` registrations are startup
+(`internal/tui/dashboard/styles.go:36` in `init()`,
+`cmd/tuikit-demo/main.go:116` before `.Run()`), and no `go func()` body or
+`func() tea.Msg` closure in `internal/tui/dashboard`, `tui/`, `internal/cli` or
+`cmd/` reads a `theme.*` token, `Epoch()` or `Active()`. The three PTY reader
+goroutines in `external_pane.go` move raw bytes only; `notify.go:113` computes
+its styled fields *before* building the `tea.Cmd` closure.
+
+**What the doc now says**, in the package doc under "Concurrency and process
+scope" and repeated on `ApplyTheme`, `Register`, `Cycle`, `OnChange`, `Epoch`,
+`Active` and the token block: one goroutine — in practice the one running
+Update/View, or startup before the loop begins; route theme changes through
+`tea.Program.Send` rather than calling `ApplyTheme` from a worker; and one
+palette per process, so **a library embedding a theme-swapping TUI should expose
+theme selection to its host rather than applying a theme itself**. The escape
+hatch is named explicitly: `Theme` is an inert table of colors, so
+`ByName`/`DefaultForBackground` let an embedder derive its own styles without
+ever calling `ApplyTheme`.
+
+**The sdktest pin is the escape hatch, because the contract has none.** A stated
+contract has no signature to break, which is exactly the "if the pin can't be
+written, the seam isn't real" case — so what got pinned in
+`sdktest/tui_surface_test.go` is the only mechanically checkable half:
+`theme.ByName`, `theme.DefaultForBackground`, `theme.Register`, `theme.Cycle`
+and `theme.Active`. If the inert-`Theme` path disappears, the documented
+workaround for the process-global ceiling disappears with it, and the pin fails.
+
+## `client.Backend` made externally implementable (2026-07-27, §8 `[P1-1]`+`[P1-6]`, folds in `[P1-7]`)
+
+Two things blocked an outside module from implementing `client.Backend`:
+`EnsureReaper`'s argument was `internal/k8s.ReaperOptions` (unnameable outside
+the main module), and `PortForward`/`Connect` indexed the returned handle slice
+*positionally* (`handles[0]` the runner endpoint, `handles[1]` SSH,
+`handles[2]` opencode) against an ordering documented only on an internal
+helper — an external implementer could compile fine and still misroute traffic
+by returning handles in a different order.
+
+**Fixed both in one change**, since exporting the type alone would have shipped
+a seam that silently miscompiles into cross-wired ports. `internal/session`
+gained `PortName` (`PortRunner`/`PortSSH`/`PortOpencode`/`PortCodex`) and the
+standard-port constants, a `PortSpec.Name` field, a `Forwards` map type
+(`map[PortName]ForwardHandle` with `Get`/`LocalPort`/`Close`), and a `Forward(names
+...PortName) []PortSpec` builder. `Backend.PortForward` now returns `Forwards`
+instead of `[]ForwardHandle`; `internal/k8s.Backend.PortForward` validates
+fail-closed *before opening anything* (empty/duplicate `Name`, non-positive
+`Remote`) and builds the returned map keyed by each spec's `Name`. The four
+`k8s.ForwardSpecs*` helpers are deleted; every caller (`client/session.go`
+Connect's three port-forward branches, `client/client.go` DialRunner,
+`client/shell.go` SSHTarget, `internal/cli/trace.go`, `internal/k8sit/local_test.go`)
+now calls `Forward(PortRunner, ...)` and looks its handle up by name.
+`ReaperOptions` moved from `internal/k8s` to `internal/session` (a plain
+declaration with no k8s dependency); `internal/k8s.ReaperOptions` is now a type
+alias so every internal call site kept compiling unchanged. `client/client.go`
+re-exports `PortName`/`PortSpec`/`ForwardHandle`/`Forwards`/`ReaperOptions` and
+the port constants, and adds `client.Forward`.
+
+`Session.SyncForwardAlive` — previously "`handles[1]` is the SSH forward by
+construction" — now does a name lookup (`Get(PortSSH)`); an Observer connection
+simply has no `PortSSH` entry rather than a shorter slice.
+
+**The sdktest pin is the point of the change**, not an afterthought:
+`sdktest/backend_test.go` builds a `fakeBackend` from scratch in the separate
+`sdktest` module using only types exported from `client` (`Ref`, `Spec`,
+`State`, `StateEvent`, `ResumeOptions`, `PortSpec`, `Forwards`,
+`ReaperOptions`), pins `var _ client.Backend = (*fakeBackend)(nil)`, and a
+behavioral test (`TestDialRunnerRoutesByName`) proves the routing contract: the
+fake's `PortForward` returns a `Forwards` with the `PortRunner` handle pointed
+at a real `httptest` server and a decoy `PortSSH` handle (different name,
+different port) pointed at a server that always 500s; `client.DialRunner` +
+`RunnerClient.Health` must reach the real server regardless of map iteration
+order. `client.Backend`'s doc comment and `sdktest/surface_test.go`'s header
+caveat were rewritten — the interface is implementable outside the module now,
+intended for faking the cluster in a consumer's own tests.
+
+## Mid-session credential-plugin handover (2026-07-27, §8 `[P1-0a]`)
+
+Mirrored the existing subscription-login `tea.Exec` handover
+(`account_picker.go`'s `startSubscriptionLogin`/`accountLoginDoneMsg`, wired in
+`app.go`) for the Teleport gap: an interactive kubeconfig `exec:` plugin
+(`tsh kube credentials`) authenticates fine at CLI startup but the dashboard
+holds the terminal in alt-screen raw mode for its whole live-cluster-call
+lifetime, so a cert TTL shorter than a left-open session makes the plugin
+prompt underneath the TUI and silently fail or corrupt the display.
+
+New seam in `internal/tui/dashboard/credrefresh.go`: a `CredentialRefresher`
+interface (`NeedsRefresh(err) bool`, `Refresh() (tea.ExecCommand, func() error)`)
+injected via `RunOptions.CredentialRefresher` (nil disables it — behavior is
+unchanged today). `App.Update` now runs a top-of-function check ahead of normal
+dispatch — `dispatch` is `Update`'s old body, split out so the check can batch
+its `tea.Exec` handover command alongside the message's ordinary handling
+instead of replacing it (a refresh failure still surfaces the original error).
+A `credRefreshing` bool latches against an error storm (`List`+`Watch`+an
+action all failing at once) spawning concurrent handovers. `credErrorFrom`
+extracts the error from `seedFailedMsg`/`actionResultMsg`/`attachFailedMsg`/
+`connectUpdateMsg`. On success, `credRefreshDoneMsg` re-drives the cluster via
+the same `seedCmd`+`startWatchCmd` pair the dashboard's own `r` retry key uses;
+on failure it's surfaced through the pre-existing `connectErr` detail-pane
+field (a session-scoped toast didn't fit a cluster-wide failure).
+
+Read bubbletea v2's `exec.go` to answer the stdout question up front:
+`Program.exec` calls `SetStdout` unconditionally, but the stock
+`osExecCommand.SetStdout` only fills it when `Cmd.Stdout == nil` — so a
+pre-set `Stdout` survives the handover. `wrapExecCommand` (the adapter that
+lets a plain `*exec.Cmd` satisfy `tea.ExecCommand`) is unexported, so
+`internal/cli/credrefresh.go`'s `newKubeExecRefresher` (resolving the exec
+plugin the same way `doctor.go`'s `loadAmbientKubeconfig` does — default
+loading rules, current context, `AuthInfo.Exec`) ships a small `kubeExecCmd`
+wrapper reproducing that exact fill-if-nil semantics, and `Refresh` sets
+`Stdout = io.Discard` before returning it — the plugin's `ExecCredential` JSON
+blob never paints the terminal during the handover. `NeedsRefresh` matches a
+named, commented `credExpiryMarkers` list (case-insensitive, full error chain)
+covering both client-go's own exec-plugin wrapper phrasing and API-server 401
+signatures. Wired into all three `dashboard.RunOptions{}` sites
+(`root.go`, `claude_remote.go`, `commands.go`).
+
+**Review addendum — the latch was not enough (guard added, `[D11]`).** The
+in-flight `credRefreshing` latch stops CONCURRENT handovers but says nothing
+about SEQUENTIAL ones, and the sequential loop needs only a plugin that exits
+**zero** while leaving the credential still bad — logged into the wrong cluster,
+or an SSO session for the wrong role. Then: handover "succeeds" →
+`handleCredRefreshDone` re-seeds → the seed fails identically → hand the terminal
+over again, forever, with the dashboard suspended each time. A *cancelled* login
+was already safe (non-zero exit ⇒ surface the error, don't re-seed); this is the
+other half.
+
+Added `maxCredRefreshAttempts = 2`, a budget of consecutive handovers.
+`credErrorFrom` grew a second return distinguishing "this message reports a
+cluster OUTCOME" from "this message says nothing about the cluster", because the
+re-arm rule is the subtle part: the budget resets **only on an observed cluster
+success** (an action that succeeded, a connect that completed), never on a
+successful handover. "The plugin ran" is not evidence that the credential now
+works, and counting it would re-open the exact loop the budget closes. A connect
+*progress tick* likewise does not re-arm — only a `ready` one does.
+
+Pinned by three tests, each verified to fail against a mutation: deleting the
+budget check makes the thrash test report 5 handovers across 5 failing rounds
+against a cap of 2, and treating every message as a cluster outcome additionally
+breaks the progress-tick test. Bumping the constant alone does NOT fail the
+suite — the tests reference `maxCredRefreshAttempts` symbolically, so they pin
+that a cap is ENFORCED and re-armed correctly, not what its value is. That is
+deliberate (the value is a tuning knob) but worth knowing before trusting the
+tests to catch a change to it.
+
+## Session titles + typed sync status promoted to the public SDK (2026-07-27, §8 "Remaining client-level capability gaps")
+
+Two things the shipped CLI could do that an importer could not — which
+`docs/design-principles.md` calls the bug, not the gap.
+
+**Titles: the local index won, and the argument is suspend.** The item left the
+shape open — promote `internal/index`, or add a title field on the runner. The
+runner shape loses on one fact: a title must be settable for a **suspended**
+session, whose runner is not running, and parking a session is exactly when you
+rename it. `sandbox rename` works with no cluster today and had to keep working.
+Everything else pointed the same way — `client.SessionMatch` already exposed
+`Title` on the READ side (`client/resolve.go`), so promoting the write side was
+the consistent and far smaller change, where a runner field needs a route, a
+protocol bump, and a wire break. The accepted cost is that titles are
+per-install rather than cross-machine; the session ID is the identity that
+travels, and that trade now lives in the `client.Title` doc comment rather than
+being discovered at integration time.
+
+`client.Title{Name, Auto}` + `Display()` (Name wins, else Auto) +
+`Client.Title/SetTitle/SetAutoTitle`, no `context.Context` (local-index ops,
+matching `RemoveLocalState`). `SetTitle` trims and rejects blank with
+`ErrEmptyTitle`, so a user-chosen label can't be silently cleared. Writes keep
+the `[V7]` partial-entry discipline — only the identity fields plus the one
+field the call owns, letting `index.Save`'s locked merge fill the rest, because
+loading a full entry and writing it back races a concurrent snapshot writer's
+newer `LastEventSeq`.
+
+**Sync status: the raw-bytes method was dead, so it was deleted, not
+supplemented.** `Client.SyncStatus` returned `[]byte` of mutagen CLI output and
+had zero callers repo-wide. Publishing a raw accessor is a promise to keep
+mutagen's output shape stable forever, so no `SyncStatusRaw` was retained. The
+typed replacement returns `SyncStatus{State, Conflicts, Hint, Detail}` —
+`Detail` being the part every caller was re-deriving: an errored probe's shaped
+reason, or the definite "no sync session — attach to create one" that is an
+*answer*, not a failure to answer. `probeErrDetail` moved from `internal/cli`
+into `internal/sync` where the client can reach it. `Conflict.Alpha/Beta` became
+`Local/Remote`: alpha/beta is mutagen's vocabulary, and principle 3's spirit —
+don't make a consumer learn the implementation — applies to field names too.
+
+**The orphan GC needed its POLICY promoted, not its predicate.** The item said
+the classification was stuck in `internal/sync`, but `IsOrphanStatus` was only
+half of it: the policy using it lived in `internal/cli`, carrying four
+separately hard-won guards — MF3 (skip another kube context's syncs), `[V28]`
+(skip another namespace's), `[V35]` (a paused sync of a deleted session is
+otherwise immortal), and the refusal to run at all when the cluster can't be
+listed, since during an outage every sync looks orphaned and an empty live set
+would nuke them all. Exporting the predicate alone would have invited every
+consumer to re-derive that policy and get one of the four wrong. `Client.SyncGC`
+carries it, comments intact.
+
+**The CLI became the consumer it was supposed to be.** `indexTitleStore`
+delegates to a `sync.Once`-cached offline client; `syncProber` calls
+`Client.SyncStatus` and keeps only the presentation cap (`+N more`);
+`sandbox sync gc` calls `Client.SyncGC` with byte-identical output. The private
+copies of `selectOrphanSyncs`/`syncGCCore`/`gcResult`/`clusterLister`/
+`probeErrDetail` are gone.
+
+**Pinned** in `sdktest/session_state_test.go`: struct-shape pins (which fail on
+an added, renamed, or retyped field, not just a dropped one) for `Title`,
+`SyncStatus` and `SyncConflict`, method pins for all six new `Client` methods,
+and `TestOfflineTitleRoundTrip` — an external module renaming a session through
+`client.Offline` with no cluster whatsoever, which is the pin that proves the
+importer can do what `sandbox rename` does.

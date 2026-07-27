@@ -92,18 +92,18 @@ const (
 	runnerContainerName = "runner"
 
 	// portRunner is the runner HTTP API port inside the pod.
-	portRunner = 8787
+	portRunner = session.RunnerPort
 	// portSSH is the sshd port for Mutagen.
-	portSSH = 22
+	portSSH = session.SSHPort
 	// portOpencode is the `opencode serve` HTTP/OpenAPI port inside the pod,
 	// used only by opencode-server sessions. The local `opencode attach` client
 	// reaches it over a port-forward.
-	portOpencode = 4096
+	portOpencode = session.OpencodePort
 	// portCodex is the `codex app-server` websocket port inside the pod, used
 	// only by codex-app-server sessions. It is pod-loopback + port-forward only —
 	// the app-server listens on ws://127.0.0.1:8788 and is deliberately NOT bound
 	// on the pod network; the local codex client reaches it over a port-forward.
-	portCodex = 8788
+	portCodex = session.CodexPort
 	// terminationGraceSeconds is the pod's SIGTERM→SIGKILL window, giving the
 	// runner time to emit session.terminating, abort turns, and flush on drain.
 	terminationGraceSeconds = 60

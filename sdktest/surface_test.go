@@ -11,12 +11,14 @@ package sdktest
 // consumer-visible changelog entry.
 //
 // client.WithBackend now takes the exported client.Backend interface (pinned
-// below), so its signature is nameable here. Known caveat (deliberately not
-// pinned): client.Backend is not IMPLEMENTABLE outside the main module —
-// EnsureReaper's argument is internal/k8s.ReaperOptions, which an external
-// consumer cannot name — so the interface is an in-module fake-injection seam,
-// not yet a third-party backend contract (tracked in TODO.md §8). Likewise
-// client.WithRESTConfig takes *rest.Config.
+// below), so its signature is nameable here. client.Backend is now IMPLEMENTABLE
+// outside the main module: every type it names (Ref, Spec, State, StateEvent,
+// ResumeOptions, PortSpec, Forwards, ReaperOptions) is exported from client, and
+// PortForward's return type keys handles by PortSpec.Name (client.Forwards)
+// rather than returning a positionally-ordered slice, so a fake backend cannot
+// misroute traffic by handle order. backend_test.go pins this with a full
+// fakeBackend implementation and a behavioral test of the name-routing
+// contract. client.WithRESTConfig still takes *rest.Config.
 
 import (
 	"context"
@@ -68,7 +70,7 @@ var (
 	_ func(*client.Client, context.Context, client.ID) error                               = (*client.Client).SyncPause
 	_ func(*client.Client, context.Context, client.ID) error                               = (*client.Client).SyncResume
 	_ func(*client.Client, context.Context, client.ID) error                               = (*client.Client).SyncTerminate
-	_ func(*client.Client, context.Context, client.ID) ([]byte, error)                     = (*client.Client).SyncStatus
+	_ func(*client.Client, context.Context, client.ID) (client.SyncStatus, error)          = (*client.Client).SyncStatus
 	_ func(*client.Client, context.Context, client.ID)                                     = (*client.Client).StopSync
 	_ func(*client.Client, client.ID)                                                      = (*client.Client).RemoveLocalState
 	_ func(*client.Client) string                                                          = (*client.Client).Namespace

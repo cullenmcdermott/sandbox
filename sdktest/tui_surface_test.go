@@ -84,11 +84,27 @@ func (consumerListItem) Render(width int) string { return "" }
 var _ list.Item = &consumerListItem{}
 
 // --- tui/theme: apply/epoch/tokens + text helpers ---------------------------
+//
+// theme's concurrency + process-scope contract is DOCUMENTED, not enforced
+// (tui/theme/theme.go package doc, decided 2026-07-27): the active palette is
+// one set of plain package vars per process, so ApplyTheme/Register/OnChange and
+// every token read must happen on one goroutine, and two independently themed
+// programs cannot coexist in one binary. A stated contract has no signature to
+// pin — what IS pinnable, and pinned below, is the escape hatch the contract
+// points at: Theme is an inert value a consumer can obtain (ByName /
+// DefaultForBackground) and derive styles from WITHOUT calling ApplyTheme, which
+// is the only way a library embedding this can avoid clobbering its host's
+// palette. If those disappear, the documented workaround disappears with them.
 
 var (
 	_ func(theme.Theme)                         = theme.ApplyTheme
 	_ func() uint64                             = theme.Epoch
+	_ func() string                             = theme.Active
 	_ func(func()) func()                       = theme.OnChange
+	_ func(theme.Theme)                         = theme.Register
+	_ func()                                    = theme.Cycle
+	_ func(string) (theme.Theme, bool)          = theme.ByName
+	_ func(bool) theme.Theme                    = theme.DefaultForBackground
 	_ func(string, bool, ...color.Color) string = theme.GradientText
 	_ func(color.Color, time.Time) color.Color  = theme.FadeColor
 	_ func(int) string                          = theme.SpinnerFrame
