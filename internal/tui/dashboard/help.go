@@ -140,5 +140,15 @@ func keymapCategories(km KeyMap) []helpCategory {
 		}
 		cats = append(cats, helpCategory{name: name, entries: entries})
 	}
+	// Mouse behavior is the one thing here that is NOT a keymap binding, so it
+	// cannot be derived from FullHelp like everything above — it is the terminal's
+	// own handling, which changes depending on whether the current screen captures
+	// the mouse (see App.View). It still belongs in the help, because "how do I
+	// select text in the agent pane" is otherwise unanswerable from inside the UI.
+	cats = append(cats, helpCategory{name: "Mouse", entries: []helpEntry{
+		{key: "drag", desc: "select text (list, feed, pickers)"},
+		{key: "shift+drag", desc: "select text in the agent pane"},
+		{key: "wheel", desc: "scroll pane scrollback; move selection in the list"},
+	}})
 	return cats
 }

@@ -998,19 +998,31 @@ func (a *App) attachedSessionID() session.ID {
 // toast over it.
 func (a *App) View() tea.View {
 	v := a.withToast(a.screenView())
-	// Cell-motion mouse capture on EVERY screen, the external opencode PTY
-	// included. The embedded opencode TUI enables mouse tracking itself (verified
-	// live: it sets DECSET 1000/1002/1003 + SGR 1006), but those requests reach
-	// only the emulator — the HOST terminal's mouse mode is owned by this outer
-	// program. With MouseMode left off on ScreenExternal, the host (e.g. Ghostty)
-	// instead translated the wheel into arrow keys, which fell through to opencode
-	// as Up/Down and hijacked its prompt history. Capturing here routes
-	// wheel/click/drag to the app, where handleMouse re-encodes them as SGR mouse
-	// and writes them to opencode's PTY — so opencode's own wheel-scroll and
-	// clickable spots work (Phase 3 item 3). On the transcript it drives the
-	// scrollbar wheel/click-drag (T1). Trade-off: app mouse capture replaces native
-	// click-drag selection (shift+drag still selects).
-	v.MouseMode = tea.MouseModeCellMotion
+	// Mouse capture is a PER-SCREEN decision, because DECSET 1002 is one switch
+	// for click, release, wheel AND drag-while-held — there is no wheel-only mouse
+	// mode to ask for. Enabling it tells the terminal this app owns the mouse, so
+	// the terminal stops doing its own click-drag selection; shift+drag is the
+	// bypass terminals conventionally honor, and it is the only way out.
+	//
+	// So capture only where the events are actually consumed. handleMouse is
+	// reachable from updateExternalScreen and NOWHERE else, so on the dashboard
+	// list, the feed and the pickers capture bought nothing while still costing
+	// the user selection: every event was captured and dropped, leaving those
+	// screens with neither drag-select nor a working wheel. Left off, the terminal
+	// handles the mouse itself again — native selection, and (in the alt screen)
+	// the wheel translated to Up/Down, which the list already binds to navigation.
+	//
+	// The pane is the one screen where capture earns its cost: the wheel drives
+	// pane scrollback, and a child that enables its own tracking (opencode sets
+	// DECSET 1000/1002/1003 + SGR 1006, verified live) needs clicks forwarded —
+	// its requests reach only the emulator, since the HOST terminal's mouse mode
+	// is owned by this outer program. With MouseMode off here the host (e.g.
+	// Ghostty) translated the wheel into arrow keys, which fell through to the
+	// child as Up/Down and hijacked its prompt history. handleMouse re-encodes
+	// captured events as SGR mouse onto the child's PTY (Phase 3 item 3).
+	if a.screen == ScreenExternal {
+		v.MouseMode = tea.MouseModeCellMotion
+	}
 	// Opaque page background everywhere EXCEPT the external pane, which paints its
 	// own — otherwise unpainted cells (splash whitespace, overlay margins) bleed the
 	// terminal's possibly-transparent background through (T9).

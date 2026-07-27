@@ -412,11 +412,27 @@ func (m *Model) renderDetailLines(width, height int) []string {
 			modelVal += fmt.Sprintf("   ctx %d%%", pct)
 		}
 	}
+	// detailKVWidth is the fixed key column width for aligned key/value rows
+	// (kit §KV, design-system §1.3). It is sized to the LONGEST key, because
+	// kit.KV truncates an over-long one: at the previous width of 7 the new
+	// "worktree" row rendered its own label as "worktr…".
+	const detailKVWidth = 8
+	// kit.KV truncates the KEY but never the VALUE, so any value that can be
+	// long has to be fitted here or it overflows the pane. Project paths are
+	// short enough to have never hit this; a worktree path is not.
+	pathW := max(8, width-detailKVWidth-1)
+
 	kvPairs := []struct{ k, v string }{
 		{"status", glyphStyle(s.DashStatus).Render(s.DashStatus.Glyph() + " " + s.DashStatus.String())},
 		{"agent", MarkedClientLabel(s.State.Backend)},
 		{"model", modelVal},
-		{"project", s.State.ProjectPath},
+		{"project", fitPathTail(shortProjectPath(s.State.ProjectPath), pathW)},
+		// The local dir holding this session's changes. WorkspacePath is the pod's
+		// cwd / Mutagen alpha, which IS the per-session git worktree when there is
+		// one; it equals ProjectPath for a non-git or --worktree=off session, and
+		// showing the same path twice under two names would just be noise, so that
+		// case renders no row at all.
+		{"worktree", worktreeDetail(s, pathW)},
 		{"session", string(s.ID())},
 		{"pod", s.State.PodName},
 		{"created", relativeTime(s.State.CreatedAt)},
@@ -448,9 +464,6 @@ func (m *Model) renderDetailLines(width, height int) []string {
 		kvPairs = append(kvPairs, struct{ k, v string }{"sync", v})
 	}
 
-	// detailKVWidth is the fixed key column width for aligned key/value rows
-	// (kit §KV, design-system §1.3). "created" and "project" are the longest keys.
-	const detailKVWidth = 7
 	for _, kv := range kvPairs {
 		if kv.v == "" {
 			continue // skip unknown fields (e.g. model before session.started)

@@ -60,10 +60,19 @@ func TestExternalScreenEnablesMouseCapture(t *testing.T) {
 		t.Fatalf("ScreenExternal must enable MouseModeCellMotion (host reports wheel/click to the app); got %v", got)
 	}
 
-	// Counter: a non-external screen still enables capture too (unchanged) — so the
-	// fix widened coverage rather than moving it.
+	// Counter: a non-external screen must NOT capture.
+	//
+	// This assertion used to require the opposite — capture everywhere, on the
+	// reasoning that Phase 3 item 3 "widened coverage rather than moving it". That
+	// pinned a side effect rather than a requirement. Item 3's actual need is the
+	// pane, and capturing elsewhere had a cost nobody had priced: DECSET 1002
+	// covers drag as well as wheel, so it takes native click-drag selection away
+	// from the user, and on these screens the events were then dropped — handleMouse
+	// is reachable only from updateExternalScreen. The result was a dashboard where
+	// text could not be selected AND the wheel did nothing. Capture is now scoped to
+	// the screen that consumes it; see App.View.
 	app.screen = ScreenDashboard
-	if got := app.View().MouseMode; got != tea.MouseModeCellMotion {
-		t.Fatalf("dashboard screen lost MouseModeCellMotion; got %v", got)
+	if got := app.View().MouseMode; got != tea.MouseModeNone {
+		t.Fatalf("dashboard screen must not capture the mouse (it consumes no mouse events, and capture costs the user text selection); got %v", got)
 	}
 }
