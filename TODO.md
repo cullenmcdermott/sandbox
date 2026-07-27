@@ -1,35 +1,5 @@
 # TODO — backlog
 
-### bugs/ideas to discusss
-* ~~ctx inside the runner session and on the dashboard do not match up~~ —
-  *FIXED 2026-07-25 (done log). Exactly 5×: models.dev reports the opus tier's
-  1M MAXIMUM window, Claude Code runs 200k. Part A clamps the guess
-  (`models.EffectiveContextLimit`); part B carries the agent's own
-  `context_window_size` on `usage.updated` as `contextLimitTokens` and prefers
-  it. **Part B needs a runner image rebuild** — live sessions run part A until
-  they are recreated on a new image. Residual: the part-A clamp keys off family
-  keywords (`claude`/`opus`/`sonnet`/`haiku`), so a non-Anthropic model named
-  "haiku-*" would be misread — acceptable while it is only the fallback.*
-* ~~is auto-compact on? Probably should be.~~ — *ANSWERED 2026-07-27: **yes, it
-  is on**, and nothing needs seeding. Claude Code auto-compacts by default and
-  the sandbox does not touch the setting anywhere — not the pane env allowlist
-  (`buildClaudePaneEnv`: TERM/COLORTERM/CLAUDE_CONFIG_DIR/IS_SANDBOX + PATH/HOME/
-  LANG), not the seeded `settings.json` (`mergeSettings` owns statusLine/sandbox
-  and seeds only `permissions.defaultMode`), not the `.claude.json` seed
-  (`WORKSPACE_TRUST_SEED` + `hasCompletedOnboarding`). Confirmed empirically
-  against a LIVE pane pod's `/session/state/claude/.claude.json`: no
-  `autoCompactEnabled: false` (its absence is the ON default) and an
-  `autoCompactWindowsCache` key present. **But see the new item below — it
-  happens invisibly.***
-* Passing in MCPs and skills
-  * Somewhat related but exposing  endpoints from laptop to agent pods. Could be MCP servers, ssh key socket, etc. Potentially risky so should be careful/explicit before using.
-* What is not exposed through our public sdk. I want an external consumer to be able to reuse all of our tui compnents like building blocks, transitions, modals, etc. Glyphs, information, all that jazz
-* rewrite agent piece into go?
-* Validate that the project/sdk adheres to some principles:
-    * people should be able to use custom transports to communicate with kube-api/pod endpoints
-    * TUI should be batteries included but customizable by consumers, for example modifying the layout by adding or removing boxes should be possible, resizing them, etc.
-    * Lean on agent-sandbox/k8s primitives when it makes sense. However do not (typically) expose these to consumers.
-
 > **How to use this file (agents):** sections are numbered workstreams, ordered
 > roughly bugs → strategy → perf → platform. Every item carries `file:line`
 > pointers and a fix direction — enough to plan without re-discovery. Pick a
@@ -89,27 +59,51 @@
 > sign-off). The §10 `[~]` "Observability first cut" item is the direct
 > ancestor: `[T4]` and `[T9]` are its "STILL OPEN" tail with pointers.
 >
-> **Opus-ready map (updated 2026-07-21 after the seven-agent Fable fan-out
-> batch — [S1]/[S3], [L7]+[P3], the pane RTT probe, [O1]/[O3]/[O5]/
-> [O7]-[O10] incl. both parked-worktree harvests, §9 T10 dirPicker, and the
-> §9 statusline chain all landed; done log):** best first picks, in order —
-> §7a = execute `openspec/changes/opencode-multi-provider-auth/tasks.md`,
-> §8 pod-bootstrap (maintainer re-raise 2026-07-21 = the sign-off signal;
-> confirm the design doc then execute), §10 [O15] residue sweep + §7c
-> table-driven CLI smoke (small, related), §9 worktree continuity +
-> merge-back UX, §2e workstreams A/C/D/E. Every open item carries pointers
-> + a fix direction + a verification line; if one doesn't, that's a bug in
-> this file. Rules of the road for Opus: (1) run the tests named in the
-> item, not the full gate, per change; run `just check` once per batch
-> (command-sandbox caveats in CLAUDE.md); (2) line numbers drift — anchor
-> by symbol name and re-`rg` before editing; (3) never touch `openspec/`
-> structure, `*.gen.*` files, or memory. Drafted, awaiting maintainer
-> sign-off: §7b package-manager ADR, §2e plan-doc workstreams (A-G).
-> Maintainer-decision gated: §8 [L6], §2e [L5] floating-modal design.
-> Needs the live cluster or the maintainer's eyeball: [L2] repro,
-> claude-pane-first gates 8.2/8.3, §5 Spegel, §6 codex live spike, §7c
-> verify sweeps, [O14] hero GIF, the [S1] FQDN set hubble-verify, [L7]
-> trackpad feel + T10 overlay feel, live reaper deploy ([O5] manifests).
+> **Agent-ready map — rewritten 2026-07-27** (the previous version pointed at
+> work that had already shipped; each claim below was re-verified against the
+> tree on that date).
+>
+> **Pick from here — open, unblocked, no decision needed:**
+> - §8 `[P1-1]`+`[P1-6]` — make `client.Backend` externally implementable
+>   (two type aliases + a public `ReaperOptions` + named endpoints). Small,
+>   self-contained, sdktest-pinned.
+> - §8 `[P1-0a]` — `tea.Exec` terminal handover for mid-session credential
+>   refresh. Precedent already in-tree.
+> - §8 `[P2-7]` — state or finish the `tui/theme` concurrency contract.
+> - §7c table-driven CLI smoke; §10 `[T4]`/`[T9]` observability tails.
+>
+> **The one large workstream — plan it whole before writing code:**
+> - §8 **the panel workstream** (`[P2-2]`/`[P2-3]`/`[P2-4]` merged with §2e
+>   `[L5]`/A/F, decided 2026-07-27). Extraction for external consumability
+>   *and* the visual polish pass happen together, with a two-part acceptance
+>   bar. §2e A/F/`[L5]` are folded in and must not be started separately —
+>   they rewrite the same code. §2e A4/C/D/E remain independent and are free
+>   to pick up any time.
+>
+> **Blocked on a maintainer decision — do not start:**
+> - §7b package-manager rollout — direction is settled (Flox/Nix preferred
+>   everywhere); what is gated is the Depot spike + kind conformance. The
+>   FloxHub-publish half can land independently.
+> - §10 `[T10]` local OTel stack — four open decisions in
+>   `docs/observability-design.md`.
+> - §0 MCP / laptop-endpoint exposure — needs a scope call on reverse
+>   tunnels before any design.
+>
+> **Cannot be closed without the live cluster or the maintainer's eyeball:**
+> §0b runner image rebuild (gates ctx% part B *and* the compaction marker
+> reaching live), `[L2]` pane-replay repro, claude-pane-first gates 8.2/8.3,
+> §5 Spegel, §6 codex live spike, §7c verify sweeps, `[O14]` hero GIF,
+> `[S1]` FQDN hubble-verify, `[L7]` trackpad + T10 overlay feel, live reaper
+> deploy (`[O5]` manifests), §0 workspace-guide two-target validation.
+>
+> **Rules of the road:** (1) run the tests named in the item, not the full
+> gate, per change; `just check` once per batch (command-sandbox caveats in
+> CLAUDE.md); (2) line numbers drift — anchor by symbol name and re-`rg`
+> before editing; (3) never touch `openspec/` structure, `*.gen.*` files, or
+> memory; (4) anything exported from `client/` or `tui/` is governed by
+> [`docs/design-principles.md`](docs/design-principles.md). Every open item
+> carries pointers + a fix direction + a verification line; if one doesn't,
+> that's a bug in this file.
 
 ## 0) Inbox — human notes, needs triage
 
@@ -117,163 +111,209 @@ Raw maintainer notes. Triage = either promote into a numbered section with
 pointers, or answer inline and archive. (Resolved investigations moved to the
 done log.)
 
-* ~~Seven runner files were reformatted by an unwanted prettier run~~ —
-  *RESOLVED 2026-07-27, keep the reflow (maintainer call).*
-  `runner/src/{workspace-guide,opencode,index}.ts` and
-  `runner/test/{workspace-guide,opencode,claude-pane,claude-pane-statusline}.test.ts`
-  went through `npx prettier --write` (agent error — the repo has no prettier
-  dep and no config; it is hand-formatted). Reviewed rather than reverted:
-  `eslint src test` is clean, both tsconfigs typecheck, the suite is green, and
-  the surviving style markers match the rest of the tree (single quotes,
-  2-space, semicolons, trailing commas in multiline). The only residual
-  difference is wrap width — those seven wrap at 100 where other files run to
-  130 — which is tighter, not wrong. Guard that stands: **no formatter runs in
-  this tree unless a config for it is checked in.** If the wrap-width split ever
-  becomes annoying, the fix is to decide on a formatter repo-wide and check its
-  config in, not to reflow files piecemeal.
+- [ ] **The idle reaper never fires while the dashboard is running: detach
+  (ctrl+]) leaves the pane WebSocket attached forever.** Diagnosed live
+  2026-07-27 on `claude-pane-df80e6-031396fb` — agent's last real work was
+  16:09:08Z, pod still Running at 18:10Z (2h), reaper Job healthy and polling
+  the whole time with zero log lines past `watching;`.
+  **Chain:** `handleLeaderTimeout` (`internal/tui/dashboard/app.go:915-922`) and
+  `leaderJump` (`app.go:1015-1022`) resolve a detach by setting
+  `a.screen = ScreenDashboard` and nothing else — `a.external.close()` is only
+  reached when a *different* session's pane comes up (`app.go:798`), the child
+  exits (`app.go:852`), or the process dies. `leaderJump`'s own comment states
+  this ("the child keeps running") so it is deliberate, for fast reattach. But
+  the pane socket staying open keeps `sup.attached()` true
+  (`runner/src/claude-pane.ts:427`), which is wired straight into
+  `setExternalActivityProbe` (`claude-pane.ts:575`); `idleStatus()` calls the
+  probe and stamps `setExternalActivity()` on *every* poll
+  (`runner/src/session.ts:515`), so `isDetached()` (`session.ts:450-454`) is
+  never true, `recomputeIdle()` never sets `idleSince`, and the reaper's
+  `evaluateIdle` returns early forever (`internal/cli/reap.go:169-171`).
+  Net effect: one attach pins the pod against the reaper for the entire life of
+  the dashboard process. RV6 solved this for passive SSE list streams; the pane
+  WS is the same hole reopened on a different transport.
+  **Proof (both directions):** killing the dashboard at ~18:08:43Z produced
+  `idleSince=2026-07-27T18:10:13.516Z` — exactly `EXTERNAL_ACTIVE_WINDOW_MS`
+  (90s, `session.ts:84`) after the socket closed; the reaper then suspended the
+  session at ~18:25:13Z (idleSince + 15m) and TTL-cleaned its Job. The reaper
+  was never broken — it was never told the session was idle.
+  **READ THIS BEFORE PICKING A FIX — the current behavior is test-pinned.**
+  `TestLeaderTimeoutDetaches` (`internal/tui/dashboard/leader_wiring_test.go:74-76`)
+  asserts `app.external != nil` after a detach with the message *"timeout detach
+  tore the pane down; it must only minimize"*. Minimize-don't-tear-down is a
+  deliberate, defended invariant, not an oversight. So:
+  - **(b) preferred — keep the socket, add a client→runner "backgrounded"
+    control frame** that makes `attached()` report false for idle purposes while
+    the transport stays warm. Preserves the invariant and instant reattach;
+    `parsePaneControl` (`runner/src/server.ts:235`) is already the control-frame
+    seam and already has tests (`runner/test/pane-control-bounds.test.ts`).
+  - **(a) close the socket on detach** is smaller but *fails the test above* —
+    taking it means deliberately reversing that invariant and rewriting the test,
+    and paying a reattach round-trip each time. Don't do this by accident.
+  **Coverage gap that let this ship:** `runner/test/pane-output-idle.test.ts` has
+  exactly two tests, both about `notePaneOutput` (the PTY-output window); neither
+  touches `externalActivityProbe`/`attached()` — the path that actually fired.
+  The dashboard side is worse than uncovered: it pins the wrong half.
+  **Cross-refs:** [L8] (§1h, "reaper eligibility unchanged — still
+  isDetached-gated") treats isDetached-gating as the sound backstop; this item is
+  the proof it isn't while any pane is attached. Also `SECURITY.md:269-271` —
+  see the correction item below.
+  **Verification:** `cd runner && npm test` (extend `pane-output-idle.test.ts`
+  with "backgrounded pane ⇒ `idleSince` advances"); `go test
+  ./internal/tui/dashboard/ ./internal/runner/ ./internal/cli/` (unsandboxed —
+  `internal/runner` binds httptest ports). Live: attach, detach, then poll
+  `/sessions/:id/idle` on the pod and confirm `idleSince` advances without
+  reattaching.
 
-* **Session-pod egress reaches `cache.nixos.org` — §7b's "no substituter at
-  activation" blocker does not hold on the live cluster** (measured 2026-07-27
-  from inside a claude-pane session pod). §7b's 2026-07-22 assessment
-  (`TODO.md` §7b, "The real blocker beyond *building* is runtime") states that
-  default-deny egress prevents `flox activate` / `nix` from fetching from a
-  substituter in-pod, and concludes that a pre-seeded `/nix` must be BAKED into
-  the image. Measured instead: `downloads.flox.dev`, `cache.nixos.org`,
-  `proxy.golang.org`, and the Debian mirrors all answer 200 from a session pod.
-  `apt-get install ./flox.deb` (flox 1.13.2, the ADR's `>= 1.13` bar) followed
-  by `flox activate` pulled the full pinned toolchain — go 1.26.3, just 1.51.0,
-  git 2.54.0, golangci-lint 2.12.2 — into a ~2.6 GB `/nix` and ran to
-  completion, after which `just fmt-check|vet|build|typecheck|lint|test|
-  sdk-conformance|verify|e2e` all pass in-pod (0 failures, incl. the httptest
-  packages CLAUDE.md flags, and `e2e` because it drives a fake runner). The one
-  stage of `just check` that cannot run in-pod is the **gen-drift gate**: `just
-  gen` regenerates correctly and then reports a false "generated files are
-  stale" because its drift check shells out to `git`, which a session worktree
-  cannot satisfy (`justfile` gen recipe, line ~46). Worth a guard so the recipe
-  distinguishes "git unavailable" from "output drifted". This does NOT settle
-  the flox-base-image rollout — the
-  accepted acceptance gate is still a Depot build + kind conformance, and a
-  2.6 GB activation-time pull is not a cold-start story — but it removes the
-  stated reason that "no low-risk partial exists", and it means the
-  baked-closures requirement is a startup-latency/size argument rather than a
-  connectivity one. Re-verify before relying on it: this is one pod on one
-  cluster at one point in time, and the egress allowlist is the kind of thing
-  that changes. Fix direction: fold the corrected premise into the §7b spike
-  when it is next picked up.
+- [ ] **Pane WebSocket has no keepalive and no reconnect: after laptop sleep the
+  pane freezes silently while the port-forward under it self-heals.** Maintainer
+  report 2026-07-27, mechanism traced same day. Same seam as the reaper item
+  above — read them together.
+  1. **No keepalive, either direction.** The only ping machinery is
+     `startRTTProbe`, gated on `paneTraceEnabled()` (`internal/runner/pane.go:119`)
+     — i.e. only under `SANDBOX_TRACE` — and even armed it is pure measurement: a
+     missing pong records no sample and fails nothing
+     (`internal/runner/pane_rtt.go:130-173`). Server side, `ws` auto-pongs but
+     never pings (`runner/src/server.ts:203`, no ping interval on the
+     `WebSocketServer`).
+  2. **No read deadline.** `PaneStream.Read` blocks in `conn.NextReader()` with no
+     `SetReadDeadline` (`pane.go:142`). A peer that vanishes without a FIN — what
+     sleep does — leaves that read blocked forever. The pane just freezes: no
+     bytes, no error, no `externalPaneFinishedMsg`, so nothing reaches
+     `handleExternalPaneFinished`. It doesn't fail to reconnect; it never learns
+     there is anything to reconnect.
+  3. **No reconnect path even if it did learn.** `external_pane.go:320-332` treats
+     every read error as terminal — the comment there lists "network drop"
+     alongside child exit — and `handleExternalPaneFinished` (`app.go:845`) closes
+     the pane and drops to the dashboard. Reattach is manual.
+  4. **The asymmetry is the actual bug.** The port-forward underneath *does*
+     recover: `runForward` reconnects indefinitely with capped backoff and
+     preserves the local port (`internal/k8s/portforward.go:197-217`). On wake the
+     tunnel is back and the pane sitting on it is still dead.
+  5. **Suspected reaper interaction (mechanism traced, NOT yet observed —
+     confirm before fixing on this basis).** A cleanly-killed dashboard releases
+     the session 90s later, as measured. A slept laptop may not: the runner's
+     `socket !== null` (`claude-pane.ts:427`) stays true until the pod-side TCP
+     actually tears down, and with no keepalive nothing forces that promptly. If
+     kubelet does not reap the proxied connection, a session you slept on and
+     never returned to stays pinned against the reaper indefinitely. Mitigating
+     factor: single-attacher preemption (4001) means the *next* attach kicks the
+     stale socket. To confirm, sleep with a pane attached, wake, and check
+     `attached()`/`/idle` on the pod without reattaching.
+  **Fix direction:** add a server-side ping interval + client-side pong-driven
+  read deadline so both ends detect a dead peer within ~30s. That alone converts
+  the silent freeze into a clean stream error and (5) into a bounded release.
+  Then decide whether the pane auto-redials on transport error — it should, since
+  the forward below it already does, and the runner's 256 KiB scrollback ring
+  makes a redial cheap and near-seamless. Distinguish transport death (redial)
+  from the terminal close codes 4001/4002 (don't).
+  **Do this WITH the §4 slow-link item, not before it.** That item
+  (`perMessageDeflate` + swapping `DefaultDialer` for a configured
+  `websocket.Dialer`) edits the exact two call sites a keepalive touches —
+  `runner/src/server.ts:203` `new WebSocketServer(...)` and
+  `internal/runner/pane.go:101` `DefaultDialer.DialContext`. Two uncoordinated
+  passes over the same lines is how the wrap-width mess happened. Note the
+  keepalive is NOT gated on RTT numbers the way the compression half is: it is a
+  correctness fix, so it can lead.
+  **Reuse, don't rebuild:** `startRTTProbe` (`pane_rtt.go:130`) already does
+  WriteControl pings on a ticker with a pong handler. A keepalive is that loop
+  with (i) the `paneTraceEnabled()` gate removed and (ii) a pong-driven
+  `SetReadDeadline`. Keep the trace summary as-is; don't fork a second pinger.
+  **Verification:** `go test ./internal/runner/` (unsandboxed) with a new test
+  pinning "no pong within N ⇒ Read returns an error" — `panePingInterval` is
+  already a package var precisely so tests can shorten it; `cd runner && npm
+  test`. Live: attach a pane, sleep the laptop 5+ min, wake, and confirm the pane
+  either recovers or reports a clean error rather than sitting frozen.
 
-* **DEFERRED 2026-07-27 (maintainer call) — revisit on the next occurrence.**
-  Left here rather than archived because the fix directions below are the
-  starting point when it recurs; direction (3), the pane byte-flow debug log, is
-  the one worth doing pre-emptively if this bites again, since it is what makes
-  a next occurrence root-causeable at all.
-  **opencode pane blank for ~13 min on the first attach of a fresh session;
-  self-healed when the port-forward cycled** (incident 2026-07-25, investigated
-  same day, root cause not provable post-mortem). Fresh `sandbox opencode`
-  session: pod healthy, `opencode serve` answering through the forward
-  (verified by direct curl of `/session`, `/config`, `/path`, `/event` SSE with
-  the session secret), attach child #1 alive with a normal connection profile,
-  yet the pane rendered nothing from 16:26 until the SPDY forward dropped at
-  ~16:39 — after which `runForward`'s reconnect loop respawned the attach child
-  and the pane immediately rendered. Eliminated while live: server side, the
-  x/vt emulator + reply-pump pipeline (a headless replica of the exact
-  `ExternalPane` plumbing — PTY child → emulator → reply pump → `Render()` —
-  rendered the TUI correctly through the replacement forward), the
-  OSC 66 / CSI 6n width-measurement exchange (emulator answers "cursor didn't
-  move"; opentui tolerates it), and a dashboard main-loop freeze (the loop
-  processed the 16:39 reconnect). Also: a manual `opencode attach` through the
-  ORIGINAL forward rendered fine while the pane was still blank. What remains
-  unexcluded, fit-all-facts candidate: one or more of child #1's startup
-  streams stalling inside the legacy SPDY port-forward (`forwardOnce`,
-  `internal/k8s/portforward.go:310-329` — bare `spdy.NewDialer`, no WebSocket
-  fallback; SPDY stream stalls under concurrent long-lived streams are the
-  upstream-known pathology `PortForwardWebsockets` was built for). The gap that
-  made it user-visible for 13 min: NOTHING detects a silent pane — the system
-  only recovers when the forward happens to die. Fix directions, in order of
-  value: (1) liveness watchdog in the pane/attach path — child alive but no
-  emulator frame within N seconds of attach → respawn the attach and/or cycle
-  the connection (`internal/tui/dashboard/external_pane.go:223` Init,
-  `:367` apply); (2) switch the dialer to `portforward.NewSPDYOverWebsocketDialer`
-  / `NewFallbackDialer` (`internal/k8s/portforward.go:319`); (3) a debug log
-  file for pane byte-flow so the next occurrence is root-causeable — the TUI
-  hides stderr, so child #1's byte stream was unobservable post-mortem.
+- [ ] **`SECURITY.md:269-271` overstates the "bounded" idle-reaper stall — a
+  durable reference is wrong.** Found while diagnosing the two pane items above
+  (2026-07-27). The text says a malicious in-pod agent holding a synthetic
+  'busy' is *"bounded: once observer events go quiet, the staleness release
+  `SYNTHETIC_BUSY_STALE_MS` frees the session for reaping after 5 minutes."*
+  Two verified problems, only the first of which is agent-exploitable:
+  1. **The bound is defeatable by the agent, which is the threat this section is
+     about.** `syntheticBusyStale()` returns false whenever `paneOutputActive()`
+     (`runner/src/session.ts:431`), and pane-output freshness is just "the child
+     printed within 90s" (`session.ts:438`) — something the in-pod agent fully
+     controls. Going quiet on *observer events* while still writing to stdout
+     holds the stall open indefinitely. The bound is on observer silence AND
+     output silence, not observer silence alone.
+  2. **"Frees the session for reaping" doesn't follow even when the release does
+     fire.** The release only flips status to idle; `recomputeIdle` still gates
+     `idleSince` on `isDetached()` (`session.ts:406-415`), which is false while
+     any pane is attached — see the reaper item above. Not agent-controlled, so
+     not a security hole, but it makes the sentence untrue as written.
+  **Fix direction:** correct the parenthetical to state both conditions and drop
+  the unconditional "frees the session for reaping". Whether the residual is
+  still an *accepted* risk is a maintainer call — (1) turns a 5-minute bound into
+  an unbounded one, which may or may not change the verdict. Do NOT quietly
+  restate the bound without deciding that. Sequencing: fixing the reaper item
+  above resolves (2), so land this correction with or after it and describe the
+  world as it will then be. Provenance for the original claim:
+  `docs/review-2026-07-20.md` §S [S3].
+  **Verification:** doc-only; re-read against `session.ts:392-440` after the
+  reaper fix lands. No test.
 
-* ~~The workspace guide is claude-pane-only~~ — *FIXED 2026-07-27 (done log):
-  new `guideTargetFor(backend, env)` resolves the file each backend actually
-  reads (`$CLAUDE_CONFIG_DIR/CLAUDE.md`, `$CODEX_HOME/AGENTS.md`, and an
-  `AGENTS.md` beside the opencode config, registered in that config's
-  `instructions` array since opencode has no implicit pickup); the write moved
-  out of the claude-pane branch in `index.ts` to one backend-dispatched call.
-  Unset config-dir env → null and skip, never a workspace fallback.*
-  - [ ] **Residual: live-validate the two new targets.** Both rest on
-    documented-but-unexercised behavior — that codex reads
-    `$CODEX_HOME/AGENTS.md` (CODEX_HOME being the documented relocation of
-    `~/.codex`), and that opencode honors an absolute path in `instructions`
-    (the field is typed in the pinned `@opencode-ai/sdk`, not observed).
-    Verification: start a codex and an opencode session on a worktree-backed
-    project, ask the agent what it knows about its git situation before it runs
-    any git command — it should already say the worktree is detached. If codex
-    misses it, the fallback is `$CODEX_HOME/config.toml`'s instruction keys.
+- [ ] **Passing MCPs and skills into sessions — needs a design call.** Skills
+  already flow: `ConfigInputsSubs` (`internal/sync/sync.go`) one-way syncs
+  `~/.claude/{skills,agents,commands,hooks,statusline}` plus the project
+  `.claude/` (README documents it). **MCP servers do not**, and the harder half
+  is the maintainer's own framing: *exposing laptop endpoints to agent pods* —
+  MCP servers, an ssh-agent socket — is a reverse tunnel out of the pod into
+  the developer's machine, which inverts the current trust direction (today
+  everything is host→pod push, or pod→cluster egress on an allowlist).
+  Prerequisite for any design: decide whether reverse exposure is in scope at
+  all, and if so whether it is per-session opt-in with an explicit grant.
+  Related surface that already exists: `CreateOptions.ExtraEnv`/`ExtraSecretEnv`
+  + `BootstrapFiles` (§8, all shipped) can carry an MCP *config* today — what
+  is missing is the *transport* for a host-side server.
+  `k8s/networkpolicy-egress-fqdn.yaml.example` carries the egress precedent and
+  its "opening egress for a tool also opens its token's exfil path" note.
 
-* ~~`sandbox worktree path` needs a kubeconfig it does not use~~ — *FIXED
-  2026-07-27 (done log): `internal/cli/offline.go` adds `newOfflineClient()`,
-  which injects a refusing `offlineBackend` through the existing public
-  `client.WithBackend` seam, so no kubeconfig is resolved; `worktree path` and
-  `completeSessions` use it. Deliberately NOT a `client.Offline()` constructor
-  (public surface for a CLI-local problem) and NOT a lazy k8s backend (would
-  move every command's connection error from construction to first use) —
-  `sdktest` passes unchanged, proving no public surface moved. Verified against
-  a real binary with no KUBECONFIG and no `~/.kube`, with `sandbox status` as
-  the counter-check that still fails there.*
+- [ ] **Pane byte-flow debug log — the last residual of the 2026-07-25 blank-pane
+  incident (MITIGATED, not closed).** *Status corrected 2026-07-27: two of the
+  three original fix directions shipped in `3e4a2fd` and this note previously
+  described them as outstanding.*
+  **The incident:** a fresh `sandbox opencode` session rendered nothing in the
+  pane from 16:26 until the SPDY forward dropped at ~16:39, then rendered
+  immediately once `runForward`'s reconnect respawned the attach child. Pod
+  healthy, `opencode serve` answering through the forward (direct curl of
+  `/session`, `/config`, `/path`, `/event` SSE), attach child #1 alive, and a
+  manual `opencode attach` through the ORIGINAL forward rendered fine. Ruled out
+  live: the server side, the x/vt emulator + reply-pump pipeline (headless
+  replica of the exact `ExternalPane` plumbing rendered correctly), the
+  OSC 66 / CSI 6n width exchange, and a dashboard main-loop freeze. Best
+  fit-all-facts candidate that was never excluded: one of child #1's startup
+  streams stalling inside the legacy SPDY forward — the upstream-known pathology
+  `PortForwardWebsockets` exists to fix.
+  **Shipped since (both in `3e4a2fd`, verify by symbol not line):**
+  (1) startup-recovery watchdog — `startupRecoveryAttempted` + a first-frame
+  deadline in `internal/tui/dashboard/external_pane.go`, one recovery per user
+  attach so a legitimately quiet client cannot respawn-loop; (2) the WebSocket
+  dialer with SPDY fallback — `portforward.NewSPDYOverWebsocketDialer` +
+  `NewFallbackDialer` + `shouldFallbackToSPDY` (`internal/k8s/portforward.go:330-335`),
+  replacing the bare `spdy.NewDialer`. Together these address both the trigger
+  and the 13-minute detection gap.
+  **What remains (this item):** a debug log file for pane byte-flow, so a
+  recurrence is root-causeable at all — the TUI hides stderr, which is why child
+  #1's byte stream was unobservable post-mortem. Natural home is the existing
+  per-session file sink from §10 `[T1]` (already landed) rather than a new
+  mechanism. **Verification:** attach a pane, confirm the byte-flow log records
+  first-frame timing and stream lifecycle; check it captures the recovery path
+  by forcing the startup deadline low.
 
-* ~~The dashboard DROPS `rate_limit.updated` on the floor~~ — *FIXED 2026-07-27
-  (done log): read-model fields + the one reducer case + the type added to
-  `ApplyRunnerEvent`'s dispatch; rendered as `5h 42% ⟳2h · wk 18%` in the pane
-  status row beside ctx%/cost. Reset instants are parsed in the reducer (not per
-  frame). The render gate is a flag set only by an `Available` report — a
-  never-reported session shows nothing rather than a fabricated 0%, and an
-  unavailable report closes the gate instead of freezing stale windows. Counter-
-  checked by deleting the dispatch line (4 tests fail).*
-
-* ~~`internal/authstatus` tests read the AMBIENT `CLAUDE_CONFIG_DIR` and fail
-  inside a sandbox pod~~ — *FIXED 2026-07-27 (done log): explicit `noEnv()` at
-  all six previously-nil `Env` construction sites (plus CodexProvider's
-  auth-file table), so a test asserting "nothing is configured" no longer
-  consults the developer's environment. Verified green under both a clean env
-  and the hostile pod-shaped env; reverting the injections fails exactly the
-  three named cases.*
-
-* ~~`just typecheck` does not cover `runner/test/`~~ — *FIXED 2026-07-25 in the
-  [O15] sweep itself (done log): `runner/tsconfig.test.json` covers `src/` +
-  `test/` with `noEmit`, `just typecheck` runs both configs, lint widened to
-  `eslint src test`. The "is the suite's exit code propagated?" sub-question was
-  chased down at the same time and answered YES — the `just test` recipe carries
-  `npm test`'s status; the blind spot was typecheck-only.*
-
-* ~~Autopilot residue in the runner~~ — *FIXED 2026-07-27 (done log). The
-  keep-vs-drop question was already settled and the item was stale on it:
-  `internal/session/types.go:449` AND an sdktest pin both document
-  `capabilities.autopilot` as deliberately KEPT, always-false, so old clients
-  still decode `/status` — no change made. Beyond the comments, two seams turned
-  out to be DEAD and were removed: `turnSettledHandler`/`setTurnSettledHandler`
-  (nothing in `src/` ever registered one after the driver was deleted, so every
-  turn's `.finally` called `null?.()`) and `readTurnOutcome` (zero references
-  anywhere). `sumTokens` was kept — only its own [V39] test calls it, but the
-  double-count rule it encodes is what §10 observability wants — with an honest
-  "nothing in src/ calls this" comment. Remaining comments corrected in
-  turns.ts/server.ts×2/index.ts.*
-
-* Create nix flake (with binary and container outputs?). Is there a place to
-  host nix binary cache, maybe tigris? Also consider publishing to FloxHub as
-  a public package (via Depot CI). — *note: a flake exists but only packages
-  the Go CLI (`flake.nix:20-33`); "container outputs" intersects the §7b
-  package-manager ADR (Nix-built OCI is its deferred option 2), the
-  binary-cache hosting question is the ADR's §4a substituter decision, and
-  FloxHub publishing is the distribution channel on top — proposals for all
-  three in
-  [`docs/decision-proposals-2026-07-06.md`](docs/archive/decision-proposals-2026-07-06.md)
-  §2.3/§2.8. Standing directive recorded 2026-07-06: Flox (preferably) or
-  Nix is the preferred install mechanism everywhere in the chain. Triage
-  alongside the §7b sign-off.*
+- [ ] **LIVE: validate the two new workspace-guide targets** (the fix landed
+  2026-07-27, done log; `guideTargetFor(backend, env)` in `runner/src/index.ts`
+  + `runner/src/workspace-guide.ts`). Both new targets rest on
+  documented-but-unexercised behavior: that codex reads `$CODEX_HOME/AGENTS.md`
+  (`CODEX_HOME` being the documented relocation of `~/.codex`), and that
+  opencode honors an absolute path in its config's `instructions` array (the
+  field is typed in the pinned `@opencode-ai/sdk`, never observed working).
+  **Verification:** start a codex session and an opencode session on a
+  worktree-backed project and ask each agent what it knows about its git
+  situation *before* it runs any git command — it should already say the
+  worktree's `.git` points at a host path. **If codex misses it,** the fallback
+  is `$CODEX_HOME/config.toml`'s instruction keys.
 
 ### 0b. Loose ends from the 2026-07-25 ctx%/sync batch
 
@@ -302,34 +342,10 @@ done log.)
   parent bullet in the top-of-file list.
 
 - [x] **Compaction is INVISIBLE to the dashboard — FIXED 2026-07-27** (done
-  log): `PreCompact` added to `PROVISIONED_HOOK_EVENTS` + mapped in the observer
-  switch, so auto-compaction now lands in the feed instead of ctx% dropping
-  unexplained. Ships as a MARKER (no `postTokens` — the hook carries no counts
-  and fires pre-compaction), but `preTokens` is REAL: the observer tracks the
-  latest statusline occupancy in the ctx% numerator's own units. `trigger`
-  distinguishes auto from `/compact`. **Needs the §0b runner image rebuild to
-  reach live sessions.**
-  *(original item, for the pointer trail)* — `context.compacted` was emitted by nobody — `schema/events.json`
-  says so outright ("no backend currently emits this … the vocabulary + Go
-  consumer are retained because in-pane compaction is observable and an observer
-  may re-emit it"), and the Go side is fully wired and waiting
-  (`sessionReadModel.ApplyEvent` handles it, `ApplyRunnerEvent` dispatches it,
-  the feed renders a marker). The gap is one line of provisioning:
-  `PROVISIONED_HOOK_EVENTS` (`runner/src/claude-pane-observer.ts:578`) lists
-  UserPromptSubmit/PreToolUse/PostToolUse/PermissionRequest/PermissionDenied/
-  MessageDisplay/Stop/SessionEnd — **not `PreCompact`**, which is the Claude Code
-  hook that fires on compaction (matchers `manual`/`auto`). Consequence: when a
-  long pane session auto-compacts, ctx% simply drops with no explanation, and
-  nothing in the feed records that it happened. Fix direction: add
-  `{ event: 'PreCompact', matcher: true }` and map it in the observer's ingest
-  switch. NOTE the payload mismatch — PreCompact's hook input carries
-  `session_id`/`transcript_path`/`trigger`/`custom_instructions` but NO token
-  counts, so `preTokens`/`postTokens` would be 0; that is safe (the reducer skips
-  its ctx% reset when `PostTokens == 0`, and ctx% self-corrects from the next
-  statusline sample anyway) but it means the value here is the MARKER, not the
-  gauge reset. Worth carrying `trigger` so the feed can distinguish an auto
-  compaction from a user's `/compact`. Needs a runner image rebuild to reach live
-  sessions, so batch it with the §0b rebuild.
+  log): `PreCompact` added to `PROVISIONED_HOOK_EVENTS` + mapped in the
+  observer switch, so auto-compaction lands in the feed instead of ctx%
+  dropping unexplained. **Still needs the §0b runner image rebuild to reach
+  live sessions.**
 
 ### 0a. Live-dogfood reports (2026-07-15) — ALL RESOLVED same day (done log)
 
@@ -613,12 +629,22 @@ Disposition of the items that were still open here:
 ### 2e. Dashboard premium-feel backlog (2026-07-07 Crush/ecosystem research)
 
 Design detail lives in [`docs/tui-premium-plan.md`](docs/tui-premium-plan.md)
-(draft, awaiting sign-off) — five-agent comparative study of Crush
-(FSL: **ideas only, never copy code**), ultraviolet, gh-dash, huh (all MIT).
-Retargeted at the dashboard/feed after claude-pane-first deleted the
-transcript: workstream **B (transcript depth) is OBSOLETE** — skip it when
-reading the plan doc; the rest apply to surfaces that still exist (dashboard
-modals, session list, feed, theming).
+— five-agent comparative study of Crush (FSL: **ideas only, never copy
+code**), ultraviolet, gh-dash, huh (all MIT). Retargeted at the dashboard/feed
+after claude-pane-first deleted the transcript: workstream **B (transcript
+depth) is OBSOLETE** — skip it when reading the plan doc.
+
+> **SPLIT 2026-07-27 (maintainer decision).** The layout-touching workstreams
+> — **[L5]**, **A**, and **F** — are **folded into §8's panel workstream** and
+> must NOT be started here; they rewrite the same code the panelization
+> dissolves, and doing them separately would produce an internal-only
+> abstraction that then has to be redone. The premium-feel intent travels with
+> them: the merged item carries a visual acceptance bar alongside the
+> consumability one.
+>
+> **A4, C, D, E stay here** — they are independent of layout and can proceed
+> any time. They no longer need the plan doc signed off as a whole; each is
+> self-contained against its own `Plan §` section.
 
 - [x] **"needs input" relabel — done 2026-07-21** (done log): display label
   → "ready" (row label, attention summaries "%d ready"/"%d ready below",
@@ -626,19 +652,22 @@ modals, session list, feed, theming).
   Status constant, and the already-calm ❯ `GlyphNeedsInput` untouched;
   goldens unaffected (no fixture renders NeedsInput) — attention tests pin
   the new strings; StatusWaiting semantics unchanged.
-- [ ] **[L5] Design pass: external panes as floating modals over the
-  dashboard (maintainer idea, 2026-07-20).** Render in-pane clients
-  (claude/opencode) as floating modals instead of full-screen takeover —
-  fleet context stays visible around the agent surface. Needs: sizing/focus
-  semantics, sub-region rendering through the vt emulator, and [P1]
-  coalescing first (dashboard renders around a busy pane). Seam already
-  exists (`pane_transport.go`); detail in review-2026-07-20.md §L5.
+- **[L5] — FOLDED into §8's panel workstream (2026-07-27).** External panes
+  as floating modals over the dashboard (fleet context stays visible instead
+  of a full-screen takeover). It needs both a modal system (workstream A's
+  output) and a pane viewer (`[P2-4]`'s output), so it cannot lead. Sizing/
+  focus semantics, sub-region rendering through the vt emulator, and input
+  coalescing are the open design questions; seam exists
+  (`internal/tui/dashboard/pane_transport.go`), detail in
+  `docs/review-2026-07-20.md` §L5.
 
-- [ ] **A. Dialog stack manager + async grace period + huh for form dialogs**
-  — one `Dialog` interface + stack on App replaces ~8 bespoke overlays and 4
-  copies of center/shadow math (`model_render.go:122-166`, `app.go:1009`,
-  `app.go:1137`, `backend_picker.go:211`); 200ms/1.5s/500ms grace kills the
-  async-permission blind-approve class. Plan §A.
+- **A. Dialog stack manager — FOLDED into §8's panel workstream
+  (2026-07-27).** One `Dialog` interface + stack replacing ~8 bespoke overlays
+  and 4 copies of center/shadow math (`model_render.go:122-166`,
+  `app.go:1009`, `app.go:1137`, `backend_picker.go:211`) — the cited range is
+  *inside* the `render()` the panelization dissolves, which is why it moved.
+  Carry the 200ms/1.5s/500ms grace period with it: it kills the
+  async-permission blind-approve class and is not purely cosmetic. Plan §A.
 - [ ] **A4. Input coalescing** — no `tea.WithFilter` today; 16ms wheel/motion
   throttle with sign-aware delta summation. Plan §A4.
 - [x] **B. Transcript depth — OBSOLETE 2026-07-20** (claude-pane-first
@@ -662,11 +691,13 @@ modals, session list, feed, theming).
   authentic tool output), `/theme` picker with live preview + persisted
   choice (`SANDBOX_THEME` env > saved > auto). `tui/theme/theme.go:290-317`
   already stubs the hooks. Plan §E.
-- [ ] **F. Ultraviolet phase 1–2 (ADR first)** — bubbletea v2 already
-  renders through uv; composing cells ourselves deletes the
-  `withBackground`/`bgSeq`/`clampLines` opacity machinery
-  (`zones.go:50-105`) and collapses the dual overlay systems. Does NOT fix
-  tea.Raw/Kitty (already correct) or child resize seeding. Plan §F.
+- **F. Ultraviolet phase 1–2 — FOLDED into §8's panel workstream
+  (2026-07-27).** Composing cells ourselves deletes the
+  `withBackground`/`bgSeq`/`clampLines` opacity machinery (`zones.go:50-105`)
+  and collapses the dual overlay systems — that compositing layer is what any
+  panel abstraction sits on, so it belongs in the same pass. Still ADR-first.
+  Does NOT fix tea.Raw/Kitty (already correct) or child resize seeding.
+  Plan §F.
 - [ ] **G. Capability probing + notification backend selection (LOW)** —
   allowlist-gated DA1/XTVERSION/pixel/Kitty/OSC99 probe burst; notification
   escalation (native/OSC99/OSC777/bell) with focus suppression. Plan §G.
@@ -969,10 +1000,20 @@ ChatGPT-plan OAuth owned by the credential manager.
      `ANTHROPIC_API_KEY` must never ride a shared opencode Secret once
      per-account claude creds exist. This item is the cross-backend
      contract; the opencode mechanics live in §7a.
-- [ ] **Auth status — remaining read-side scope** (core landed in
-  `internal/authstatus`): dashboard strip rendering (CLI-only today);
-  `--check` live pings (codex plan/rate-limit via app-server; provider key
-  liveness); Claude check should read the credential store, not just env.
+- [ ] **Auth status — remaining read-side scope.** Core landed in
+  `internal/authstatus` (offline per-agent report behind `sandbox auth
+  status`). Three gaps, independently shippable:
+  (a) **dashboard strip rendering** — CLI-only today, nothing in
+  `internal/tui/dashboard` consumes the report;
+  (b) **`--check` live pings** — codex plan/rate-limit via app-server, and
+  provider-key liveness; today every check is offline;
+  (c) **the Claude check reads env only, not the credential store** —
+  `internal/authstatus/providers.go:119-149` inspects env vars while the real
+  source of truth is `client/cred` (multi-account store), so a
+  Keychain-stored account reports as unconfigured.
+  (c) is the smallest and the most wrong; do it first. **Verification:**
+  `internal/authstatus` tests are hermetic via `noEnv()` (done log 2026-07-27)
+  — add cases with a populated `cred.Store` and assert the report flips.
 - [x] **Codex transport spike — COMPLETE (2026-07-06, containerized).**
   `codex app-server --listen ws://127.0.0.1:PORT` (fixed port, loopback, no
   auth needed, `/readyz`+`/healthz` free) on the PLAIN npm build — standalone
@@ -981,8 +1022,23 @@ ChatGPT-plan OAuth owned by the credential manager.
   `thread/read`; key on notifications, not `thread/list`). Full results in
   the plan's "Spike results (2026-07-06)". Residual for Phase 2: authed live
   turn-observe + refresh-ownership decision.
-- [ ] Codex runner-as-metrics-observer (same pattern as opencode's, app-server
-  thread notifications).
+- [ ] **Close the observer event-coverage gap — both directions.** *(Rewritten
+  2026-07-27: the old text said "codex runner-as-metrics-observer, same pattern
+  as opencode's", which is stale — codex already observes more than opencode in
+  two dimensions.)* Measured coverage of the normalized event set:
+  - `runner/src/codex-observer.ts` emits `turn.{started,completed,failed,interrupted}`,
+    `tool.{started,completed,failed}`, `usage.updated` — **missing** `message.*`
+    and `session.title`.
+  - `runner/src/opencode-observer.ts` emits `session.{created,started,updated,idle,error,title}`,
+    `message.updated`, `turn.{started,failed,interrupted}` — **missing**
+    `tool.*` and `usage.updated`.
+
+  Per the §7 parity bar the runner is the metrics source for every backend, so
+  both gaps matter. Codex's usage already maps `thread/tokenUsage/updated`
+  (`codex-observer.ts:209`) — mirror that shape for opencode, and add codex
+  message/title mapping from its app-server thread notifications.
+  **Verification:** `docs/backend-conformance.md` is the per-backend contract —
+  extend its table and assert each backend's emitted set there.
 
 ## 7) Cross-backend parity (operational)
 
@@ -1021,40 +1077,9 @@ the connect path. The cross-backend contract these decisions implement
 Secret) is §6's "Unified per-backend credential lifecycle" item — read that
 first.
 
-- [x] **Implement OpenCode credentials — DONE 2026-07-21** (done log):
-  executed `openspec/changes/opencode-multi-provider-auth/tasks.md` §1-5
-  (docs §6 in the same batch) across seven-agent fan-out —
-  `f5a6eb0`/`93ce61f`/`4a7f631`/`521839e`/`683c13a`. `sandbox opencode`
-  harvests the host's local `opencode auth.json` and seeds it JIT into the
-  per-session Secret (`opencode-auth-json` → `OPENCODE_AUTH_JSON` +
-  `SANDBOX_OPENCODE_PROVIDER`, codex transport pattern); runner materializes
-  it with a per-entry seed-hash refresh-preserving merge + fail-closed gate;
-  seeded↔fallback re-create rejected; shared `opencode-credentials` Secret
-  demoted to fallback. `--seed-providers` narrows the seed; `opencode auth
-  login` passthrough for a missing provider. `just check` green. **Live
-  verify on omni-prod still pending (task 6.4):** multi-provider seed
-  session + fallback session — the original `CreateContainerConfigError`
-  repro. Deferred follow-ups (filed, not blocking):
-  - ~~Dashboard opencode creator seeds ALL local providers but collects no
-    `--provider` (defaults anthropic) and has no per-provider picker — a
-    user whose local login lacks anthropic hits `ErrOpencodeProviderNotSeeded`
-    fail-closed at Create instead of the CLI's login prompt.~~ **Defaulting
-    DONE 2026-07-25:** an unset `--provider` now defaults to the remembered
-    last-used provider (new pref file
-    `~/.local/share/sandbox/last-opencode-provider`, recorded after each
-    successful create) when still logged in, else auto-picks from the
-    harvested local login (preference: anthropic, opencode-zen, openai) — in
-    BOTH `sandbox opencode` and the dashboard creator. Remaining follow-up:
-    a provider picker for the create overlay (parity with the account
-    picker).
-  - ~~`stampOpencodeCredsFreshness` still stamps a shared-Secret provider-key
-    fingerprint for SEEDED sessions too~~ — **FIXED 2026-07-27** (done log):
-    early return on `len(spec.OpencodeAuthJSON) > 0`, the same seeded-vs-fallback
-    discriminator `opencodeEnv` uses; leaving the annotations off is sufficient
-    because `warnIfOpencodeCredsRotated`/`refreshOpencodeCredsStamp` no-op
-    without them. Pinned + counter-checked. Create-time only — a seeded session
-    made before the fix keeps its stamp until recreated.
-  - Multi-*account* per opencode provider (design non-goal) stays deferred.
+- [x] **Implement OpenCode credentials — DONE 2026-07-21** — harvest local
+  `auth.json` + per-session Secret seeding; detail in the done log.
+
 - [ ] **Validate OpenCode provider auth before/at connect.** `sandbox auth
   status` only reports local env vars (`internal/authstatus/providers.go:119-149`),
   while connect waits for runner health + `opencode serve` readiness only
@@ -1066,6 +1091,14 @@ first.
   noted in the k8s manifest.
 
 ### 7b. Flox/Nix-first runner environment (2026-07-04 triage)
+
+> **Standing direction (maintainer, reaffirmed 2026-07-27): Flox — or Nix
+> beneath it — is the preferred primary package manager for this project going
+> forward, everywhere in the chain: host toolchain, CI, containers, and session
+> pods.** Everything in this section is the *how*, not the *whether*. When a
+> new tool needs to exist somewhere, the default answer is a pinned Flox env,
+> not an `apt-get`/`npm -g` line in a Dockerfile. The open questions are
+> sequencing, image size, and cache hosting — not direction.
 
 **ADR ACCEPTED WITH AMENDMENT 2026-07-07** —
 [`docs/runner-package-manager-adr.md`](docs/runner-package-manager-adr.md):
@@ -1082,19 +1115,33 @@ regardless: the activation hook's `go get .`
 (`.flox/env/manifest.toml:54-60`) goes — it mutates go.mod/module cache as a
 side effect of `cd`.
 
-**2026-07-22 — assessed, NOT attempted this session (image left unchanged).**
-The rollout is unverifiable from a laptop: the accepted acceptance gate is a
-Depot build + kind conformance (no Docker/Depot/cluster locally), and this stays
-maintainer-sign-off-gated (§7b is in the "maintainer-decision gated" list up
-top). The runner image (`runner/Dockerfile`) is still `node:24-slim` with no
-flox/nix. The real blocker beyond *building* is runtime: session pods run
-default-deny egress, so `flox activate` / `nix` cannot fetch from a substituter
-at activation — a working in-pod flox needs a pre-seeded store BAKED into the
-image (the ADR's "baked closures first" line), which is also what drives the
-size delta the task wants measured. No low-risk partial exists (the flox CLI is
-inert without nix + a store; installing nix alone still needs egress or a seeded
-`/nix`), so a speculative Dockerfile change would be both unverifiable here and a
-whole-fleet risk if wrong. Deferred to the maintainer-gated Depot spike below.
+**2026-07-22 assessment — SUPERSEDED 2026-07-27; its central claim was wrong.**
+It stated that "session pods run default-deny egress, so `flox activate` / `nix`
+cannot fetch from a substituter at activation", and concluded from that a
+pre-seeded `/nix` must be BAKED into the image and that "no low-risk partial
+exists". **Measured from inside a live claude-pane session pod on 2026-07-27:
+`downloads.flox.dev`, `cache.nixos.org`, `proxy.golang.org`, and the Debian
+mirrors all answer 200.** `apt-get install ./flox.deb` (flox 1.13.2, the ADR's
+`>= 1.13` bar) then `flox activate` pulled the full pinned toolchain — go
+1.26.3, just 1.51.0, git 2.54.0, golangci-lint 2.12.2 — into a ~2.6 GB `/nix`,
+after which `just fmt-check|vet|build|typecheck|lint|test|sdk-conformance|
+verify|e2e` ALL passed in-pod (0 failures, including the httptest packages
+CLAUDE.md flags).
+
+What that changes and what it doesn't:
+
+- **Changes:** baked closures are now a *startup-latency and image-size*
+  requirement, not a connectivity one — and a low-risk partial DOES exist, since
+  flox can be installed and activated in-pod without touching the base image.
+- **Does not change:** the acceptance gate is still a Depot build + kind
+  conformance (unverifiable from a laptop), a 2.6 GB activation-time pull is not
+  a cold-start story, and the runner image (`runner/Dockerfile`) remains
+  `node:24-slim` with no flox/nix.
+- **Caveat:** one pod, one cluster, one point in time. The egress allowlist is
+  exactly the kind of thing that changes — re-measure before relying on it.
+
+One concrete bug found while measuring — tracked as its own item in §10
+("`just gen` drift check reports a false positive in a session pod").
 
 - [ ] **Spike the flox-base image, then implement the rollout** (items below
   are the ADR's work breakdown, kept for pointers):
@@ -1117,6 +1164,22 @@ whole-fleet risk if wrong. Deferred to the maintainer-gated Depot spike below.
     anti-poisoning publish gate (follow-on design) + pruning story.
   - ~~Remove the `go get .` activation hook~~ — **done 2026-07-12** (done log).
 
+- [ ] **Distribution side: flake outputs, binary-cache hosting, FloxHub
+  publish** (folded in from the inbox 2026-07-27 — same decision as the ADR,
+  not a separate one). Today `flake.nix:20-33` packages **only the Go CLI**.
+  Three pieces, each already has a home in the accepted ADR:
+  - **Container outputs from the flake** = the ADR's deferred option 2
+    (Nix-built OCI, pass 2).
+  - **Binary-cache hosting** = the ADR's §4a substituter decision — home is
+    ceph S3 with an egress CIDR carve-out; Tigris was the candidate for the
+    public/OSS cache.
+  - **FloxHub publish via Depot CI** = the distribution channel on top; the
+    ADR notes this **can land independently** of the base-image spike, so it
+    is the cheapest first move here if the spike stays gated.
+  Proposals for all three:
+  [`docs/archive/decision-proposals-2026-07-06.md`](docs/archive/decision-proposals-2026-07-06.md)
+  §2.3/§2.8.
+
 ### 7c. OpenCode operational items
 
 - [x] CLI `opencode` `--model`/`--provider`/`[prompt]` — done 2026-07-12
@@ -1125,8 +1188,18 @@ whole-fleet risk if wrong. Deferred to the maintainer-gated Depot spike below.
   turn via the turn adapter pre-attach (hard error, never silently
   dropped). NOT yet live-verified on a cluster: create → headless turn →
   `opencode attach --continue` picking up the in-flight turn.
-- [ ] Verify detach (Ctrl+]) + surrounding chrome behave identically for every
-  backend's external pane.
+- [ ] **Verify detach + surrounding chrome behave identically for every
+  backend's external pane.** The two pane transports differ by construction —
+  claude-pane is a WebSocket to the runner, opencode/codex are child-process
+  PTYs (`internal/tui/dashboard/pane_transport.go`) — so detach has two code
+  paths that can drift. Bindings live in
+  `internal/tui/dashboard/keymap.go` (`Detach`, `esc`) with the pane-scoped
+  escape cascade in `external_pane.go`; the existing regression pin is
+  `TestAppExternalPaneEscIsForwardedNotDetached` (self-skips without a PTY —
+  see CLAUDE.md). **Verification:** for each of the three backends, attach,
+  confirm esc reaches the child rather than detaching, confirm the documented
+  detach key returns to the list with the pod still running, and confirm the
+  status/footer chrome renders the same fields.
 - [~] **Live-session verify sweep — opencode (2026-07-06 headless pass on
   my-cluster, zen provider, free big-pickle):** (a) **busy/idle status:
   CONFIRMED live** — `session.status_changed busy→idle` streams at turn
@@ -1201,7 +1274,154 @@ Suggested batching: one tui/* PR (Register + palette + Finished + B-tier);
 one client-behavior PR (destroy ordering + DialRunner); the interface,
 naming-break, and Shell items each stand alone.
 
-- [ ] **[L6] Decide: public pane-viewer widget? (2026-07-20).** The pane
+**2026-07-27 principle conformance.** The maintainer's three principles are now
+a durable reference ([`docs/design-principles.md`](docs/design-principles.md))
+and the whole public surface was reviewed against them
+([`docs/review-principles-2026-07-27.md`](docs/review-principles-2026-07-27.md),
+ids `[P1-#]`/`[P2-#]`/`[P3-#]`). Principle 3 came back clean — the normalized
+model carries no k8s type and the exceptions (`rest.Config`, namespace/image
+knobs) are decided keeps, so there is no §3 work. The items below are the
+principle-1 (transport) and principle-2 (TUI) gaps, in dependency order.
+
+**Scope narrowed 2026-07-27 (maintainer): consumers reach the cluster through
+the kube-api.** This retired most of the principle-1 list before it started.
+The port-forward is a *subresource of the kube-api*
+(`internal/k8s/portforward.go:381-386`) dialed from the same `*rest.Config`
+(`:324,:330`), so all four channels — runner HTTP+SSE, pane WS, sshd, Mutagen —
+inherit whatever the kubeconfig points at. Teleport (`tsh`/`tbot`), bastions,
+and API-server proxies therefore **work today** via
+`WithKubeconfig`/`WithContext`/`WithRESTConfig`, with nothing to build.
+`[P1-2]` `[P1-3]` `[P1-5]` `[P1-8]` are consequently **not defects** — they are
+the work-list for a possible future *bypass* transport (Teleport app/TCP
+straight to 8787, ingress, Tailscale sidecar) and live in the review doc, not
+here. `[P1-4]` (`ssh.InsecureIgnoreHostKey`, `client/shell.go:163`) is the
+security tripwire on that future work: correct today because the hop really is
+loopback, but any bypass transport must make it transport-conditional **in the
+same change**. Do not start any of it without the maintainer taking up the
+bypass option.
+
+- [ ] **[P1-1] + [P1-6] Make `client.Backend` externally implementable — one
+  change, not two.** *(Justification revised 2026-07-27: not transport — that's
+  handled by the kubeconfig — but **consumer testability**. An external consumer
+  building on this SDK cannot fake the cluster to test their own app; we use
+  exactly this seam for ours, `client/orchestration_test.go:126,145`.)*
+  Three types block it, not the one the docs claim:
+  `session.PortSpec` + `session.ForwardHandle` (`client/client.go:109`) and
+  `k8s.ReaperOptions` (`:114`). The first two are plain declarations
+  (`internal/session/types.go:507-514`) and only need adding to the alias block
+  at `client/client.go:31-50`; `ReaperOptions` needs a real public type.
+  **But do not export alone:** `Connect` indexes handles *positionally*
+  (`handles[0]` `client/session.go:417`, `handles[2]` `:548`) against an
+  ordering documented only on the internal helper
+  (`internal/k8s/portforward.go:438`). An external implementer would compile
+  fine and misroute opencode traffic to the sshd port. Change the seam to
+  **named** endpoints in the same change, then correct the undercounted caveat
+  at `client/client.go:84-87` and `sdktest/surface_test.go:15-18`, and add an
+  sdktest pin where an *external* type satisfies `client.Backend` (that pin is
+  the proof the principle holds). Folds in **[P1-7]**: export the standard
+  forward specs too, since public paths already call the internal helpers
+  (`client/client.go:865`, `client/session.go:400-404`).
+
+- [ ] **[P1-0a] Hand the terminal back for a mid-session credential refresh.**
+  Found while validating the Teleport flow. Interactive kubeconfig `exec:`
+  plugins (`tsh kube credentials`) are fine at *startup* — client-go runs them
+  lazily at first request, and the CLI finishes its cluster work before
+  `tea.NewProgram` (`internal/tui/dashboard/app.go:376,392`), so the prompt gets
+  a real terminal. The gap is **expiry while the dashboard is running**: it
+  makes live cluster calls for its whole lifetime (`List`/`Watch`/`Suspend`/
+  `Resume`/`Destroy`, `internal/tui/dashboard/actions.go:24-30`, plus background
+  observer port-forwards and forward re-resolve), and a `tsh` cert TTL is easily
+  shorter than a left-open session — so the plugin prompts underneath an
+  alt-screen raw-mode program and the auth silently fails or corrupts the
+  display. **The pattern already exists:** subscription login hands the terminal
+  to a child via `tea.Exec`
+  (`internal/tui/dashboard/account_picker.go:301-310`, wired `app.go:477`).
+  Apply the same handover to a credential-refresh failure. Small, self-contained,
+  and it makes `tsh` a first-class path rather than one needing tbot to work
+  around.
+
+- [ ] **THE PANEL WORKSTREAM — `[P2-2]`+`[P2-3]`+`[P2-4]` merged with §2e
+  `[L5]`/A/F. The big one.**
+
+  > **Decided 2026-07-27 (maintainer):** the public-consumability extraction
+  > and the premium-feel polish happen **as one pass**, not sequentially. "As
+  > we extract/reconfigure the way we build our panels and UI components so
+  > they can be more easily consumed by an API consumer, we should also take
+  > that time to make sure they are visually and overall up to snuff."
+  > This resolves the collision recorded in the preamble: §2e workstreams
+  > **A** (dialog stack), **F** (ultraviolet/overlay collapse), and **`[L5]`**
+  > (panes as floating modals) touch the *same* code as this item and are
+  > folded in here. §2e **C/D/E/A4** are independent of layout and stay put.
+
+  **Why they had to merge.** §2e A rewrites the overlay dispatch at
+  `model_render.go:122-166` — which is *inside* the `render()` this item
+  dissolves (`model_render.go:91`, 729-line file). §2e F collapses the dual
+  overlay systems at `zones.go:50-105`, the compositing layer any panel
+  abstraction sits on. `[L5]` needs both a modal system (A's output) and a
+  pane widget (`[P2-4]`'s output). Landing them separately means rewriting the
+  same file two or three times, and — the real risk — §2e alone has no reason
+  to *export* its new abstraction, so it would produce another internal-only
+  layer that this item then has to redo.
+
+  **The work.** The would-be panels are `*Model` methods, not constructible
+  components: `renderSessionRow:278`, `renderDetailLines:395`,
+  `renderConfirm:594`, `renderConvertModal:615`, `renderHelp:661`, plus
+  `feed.go`, `dirpicker.go`, `backend_picker.go`, `account_picker.go`. Extract
+  each into something that takes its data through an interface and renders at
+  a caller-chosen size; express composition as a value the caller can rebuild
+  rather than a fixed concatenation order; build the dialog/modal stack and
+  the overlay collapse **as part of that shape**, exported from the start; then
+  publish. **This closes `[L6]`** — a pane viewer (vt emulator +
+  key/paste/mouse encoding, today `external_pane.go`/`key_encode.go`) is simply
+  one of the panels, and `[L5]`'s floating modal is that panel composed rather
+  than fullscreened.
+
+  **Acceptance — both halves, or it isn't done:**
+  1. *Consumability:* an external consumer can build this dashboard minus one
+     panel, plus a panel of their own, at a size they choose — pinned in
+     `sdktest/` (if the pin can't be written, the seam isn't real). No `tui/`
+     package imports `internal/`.
+     2. *Visual:* the result is at least as good as today's dashboard at
+     80x24 / 100x30 / 140x40, in both light and dark themes, with
+     `anim.ReduceMotion` honored — goldens updated deliberately, never
+     rubber-stamped. This is the checkable form of "premium feel", which §2e
+     never had.
+
+  *Encouraging:* `[P2-5]` — the entry seams are already interface-shaped
+  (`Run(backend, connector, creator, opts...)`, `app.go:373`) and the types
+  crossing them (`session.Ref`/`ID`/`State`) are already aliased in `client`,
+  so re-typing to `client.*` is identity. Budget the effort in the extraction
+  and the visual pass, not the promotion.
+
+  **Read first:** [`docs/design-principles.md`](docs/design-principles.md)
+  §2 (the bar), [`docs/tui-premium-plan.md`](docs/tui-premium-plan.md) §A/§F
+  (the design detail for the folded-in pieces — note **§B is OBSOLETE**, the
+  transcript it describes was deleted), and
+  [`docs/review-2026-07-20.md`](docs/review-2026-07-20.md) §L5.
+  **Plan the whole cluster before writing code** — this is the one item in the
+  file where a piecemeal start is actively harmful.
+
+- [ ] **[P2-7] + [P2-8] State (or finish) the `tui/theme` concurrency
+  contract.** `tui/kit` moved its palette behind an `atomic.Pointer`
+  specifically so "multiple tea.Programs sharing this process never race"
+  (`tui/kit/palette.go:4,35`) — but its upstream `theme.ApplyTheme`
+  (`tui/theme/theme.go:199`) writes ~40 plain package globals (`:107-158`) plus
+  `activeTheme`/`changeHooks`/`themeEpoch` (`:161,166,184`) unsynchronized, and
+  is what calls `kit.SetANSITable`/`SetComponentColors` — so kit's hardening is
+  defeated one layer up. The single-goroutine contract lives only in a comment
+  on an unexported var, while the package doc advertises "reusable across TUI
+  applications" (`theme.go:7-11`). Also `OnChange`'s unsubscribe writes
+  `changeHooks[idx] = nil` (`:176`) unguarded. Either state the contract in the
+  package doc and on `ApplyTheme`/`Register`/`OnChange`, or finish the
+  hardening to match `kit` — the current split is the thing that's wrong.
+  Same edit should document `[P2-8]`: one palette per *process* is a real
+  customization ceiling (two differently-themed consumers can't coexist) and
+  should be a stated decision, not a surprise found at integration time.
+  Independent of every other item here.
+
+- [ ] **[L6] Decide: public pane-viewer widget? (2026-07-20).** *(2026-07-27:
+  the principle-2 decision answers this — a pane viewer IS in scope; fold this
+  into the `[P2-2]` panel work above rather than deciding it separately.)* The pane
   *transport* is fully public + pinned (`Session.AttachPane`, `PaneStream`
   w/ Resize, sentinels — `sdktest/surface_test.go:108-128`), but the
   *presentation* layer (vt emulator wiring, key/paste/mouse encoding,
@@ -1550,6 +1770,24 @@ naming-break, and Shell items each stand alone.
 
 ## 10) Harness / tests / docs / ops
 
+- [ ] **`just gen`'s drift check reports a false positive inside a session
+  pod** (found 2026-07-27 while measuring in-pod egress for §7b). The recipe
+  regenerates correctly, then gates on
+  `git diff --exit-code -- internal/session/eventtypes.gen.go runner/src/events.gen.ts`
+  (`justfile:45-46`). In a per-session worktree the `.git` file points at a
+  **host** path that does not exist in the pod — git fails by design (this is
+  exactly what `runner/src/workspace-guide.ts` tells the agent) — so `git diff`
+  exits non-zero and the `||` branch prints "generated files are stale" even
+  when nothing drifted. **This is the one stage of `just check` that cannot run
+  in a session pod**, which matters now that everything else can. Fix
+  direction: probe git usability first (e.g. `git rev-parse --git-dir`) and
+  distinguish "git unavailable → skip the drift gate with a visible note" from
+  "git works and output drifted → fail". Do not silently skip — a gate that
+  quietly passes is worse than one that noisily fails.
+  **Verification:** run `just gen` in a session pod (expect a skip note, exit
+  0) and on the host with a hand-edited `*.gen.*` file (expect the stale error,
+  exit 1).
+
 **2026-07-20 onboarding/newcomer review** (full walkthrough narrative in
 [`docs/review-2026-07-20.md`](docs/review-2026-07-20.md) §O — what the docs
 do well is recorded there too; fix in roughly this order):
@@ -1614,42 +1852,9 @@ do well is recorded there too; fix in roughly this order):
   error both carry "log in with `claude` on this machine" remediation.
 - [ ] **[O14] README hero GIF predates the pane UI** — re-record after the
   live pass (was already noted in 7.4; now has an id).
-- [x] **[O15] Retired-backend residue sweep — done 2026-07-25** (done log):
-  `client.Create`'s empty-`Backend` default moved off the retired
-  `BackendClaudeSDK` to `BackendClaudePane` — the old default silently
-  provisioned a pod whose `selectAgent` returns null (409 on every turn); the
-  new one fails closed with `ErrClaudePaneCredentialMissing` before any
-  cluster call, and the dashboard Creator's fallback matches. Retired-id doc
-  block on the constant (`agent.ts:66` pattern); `Spec.Backend` / `ID` /
-  `AgentSessionID` / `ApprovalPolicy` docs corrected; the cluster-strip
-  backend mix now aggregates by DISPLAY LABEL (a claude-sdk + claude-pane
-  fleet rendered `claude 1 · claude 1`, since both map to the same
-  `ClientLabel`/`BackendMark`); `runner/src/session.ts` local-dev defaults →
-  claude-pane; `SelectAnthropicAccount` doc scoped to the token path;
-  justfile kind-up/kind-test comments rewritten against `backendCases`;
-  `Example` / `doc.go` / `Example_chat` retargeted at opencode (the only
-  backend still accepting runner turns). Two listed pointers were ALREADY
-  fixed — `internal/k8sit/local_test.go`'s conformance row and SECURITY.md's
-  A1 citation. **Verified: runner suite (244 pass / 0 fail) + `tsc --noEmit`
-  only; NO Go toolchain in the authoring environment, so `just check` has not
-  been run — the Go edits are unbuilt.**
-  *(original item, for the pointer trail)* — `backend.go:1716`,
-  `internal/session/types.go:53`, `runner/src/session.ts:37`,
-  `client/account.go:69`, `internal/k8sit/local_test.go:44`; apply the
-  `agent.ts:66` retired-id comment pattern or delete dead branches. (The
-  stale `--pane` comment in dashboard_connector.go was rewritten with [L1].)
-  **2026-07-21 batch additions (discovered during the O-docs harvest):**
-  `internal/k8sit/local_test.go:66` still drives `BackendClaudeSDK`
-  expecting a real turn (409s post-pane-first when the legacy Secret is
-  present — stale conformance row; fold into the §7c table-driven smoke
-  rework); justfile ~:158-160/:220-224 comments still claim
-  `anthropic-credentials` makes `just dev` claude work; `client.Create`
-  defaults empty `Backend` to the retired `BackendClaudeSDK`
-  (`client/client.go:459` — also mirrored by the dashboard creator's
-  default; decide the new default, likely claude-pane);
-  `internal/session/types.go:53` example id `claude-sdk-7f3a`; SECURITY.md
-  A1-residual section cites the deleted `runner/src/claude.ts` (should
-  point at `opencode.ts`/`codex.ts`).
+- [x] **[O15] Retired-backend residue sweep — done 2026-07-25** — detail in
+  the done log.
+
 - [ ] **Go-runner rewrite watch item** — investigation complete
   ([`docs/go-runner-rewrite-investigation.md`](docs/go-runner-rewrite-investigation.md)):
   gated on live gates 2.5/8.2 + soak; pre-work available now: build the
@@ -1700,9 +1905,17 @@ do well is recorded there too; fix in roughly this order):
   healthz body / 409 table / interrupt empty-segment; README auth+sync-gc+
   opencode flags; LAUNCH-CHECKLIST HEAD claim fixed; HARDENING-BACKLOG
   marked provenance-only (verified zero true TODO overlaps).
-- [ ] Ops: new CLI-created sessions use `:latest` and can hit the stale traefik
-  manifest cache — bust the cache or pin digests CLI-side. (Resume path
-  already fixed via digest pinning — see done log.)
+- [ ] **Ops: new CLI-created sessions use `:latest` and can hit the stale
+  traefik manifest cache.** `client.DefaultRunnerImage`
+  (`client/client.go:172`) is a moving tag, and the pull-policy derivation
+  (`internal/k8s/backend.go:292`) correctly maps a moving tag to `Always` — so
+  a stale registry-proxy manifest, not the policy, is what serves an old
+  image. The **resume** path was already fixed by digest pinning
+  (`internal/k8s/backend.go:73`, done log); create was not. Fix direction:
+  either resolve the tag to a digest CLI-side at Create (same mechanism as
+  resume) or bust the traefik cache. **Verification:** create a session
+  immediately after publishing a new runner image and confirm the pod's
+  `image:` is the new digest.
 - [x] **`sandbox doctor` — done 2026-07-12** (done log): 10-check host
   readiness table (cluster checks can FAIL and short-circuit; binaries/
   creds/images advisory WARN/INFO with remediation); PASS paths of the
@@ -1897,12 +2110,25 @@ all of it line-oriented text nothing can ingest.
 
 ## Open caveats (carry-forward)
 
-- [ ] Resumable-transcripts migration: pre-existing sessions' old
-  `-session-workspace-…` transcripts may break in-session resume-by-id across
-  the host-path migration → call out in release notes.
-- [ ] rate-limit/usage: unverified against a live max/pro session; consider
-  pinning the Agent SDK version; `seven_day_oauth_apps` + `extra_usage`
-  (overage) are dropped runner-side; black-line/opacity fixes unverified in a
-  live attach.
-- [ ] `~/.claude/todos` + `~/.claude/tasks` sync is ancillary (not required for
-  resume) — keep but low priority.
+- [ ] **Release-notes item: resumable-transcripts migration.** Sessions created
+  before the workspace host-path migration have transcripts under the old
+  `-session-workspace-…` path, so in-session resume-by-id may fail for them.
+  No code fix intended — this is a note to write when release notes are
+  drafted. **Done when:** the caveat appears in the release notes; then delete
+  this item.
+
+- [ ] **LIVE: rate-limit/usage against a real max/pro session.** The read path
+  landed (`rate_limit.updated` → dashboard, done log 2026-07-27) but has never
+  been exercised against an account that actually reports limits. Known
+  deliberate drops runner-side: `seven_day_oauth_apps` and `extra_usage`
+  (overage) — confirm those are still the right calls once real payloads are
+  visible. **Verification:** attach a max/pro session, confirm the pane status
+  row shows the `5h …% ⟳… · wk …%` segment with plausible values, and confirm
+  a never-reported session still shows nothing rather than a fabricated 0%.
+
+- [ ] **`~/.claude/todos` + `~/.claude/tasks` sync — decide keep or drop.**
+  Ancillary: not required for resume. `ConfigInputsSubs`
+  (`internal/sync/sync.go`) is where it would be added alongside the existing
+  `skills`/`agents`/`commands`/`hooks`/`statusline` entries. Low priority;
+  needs a call on whether agent-local task state should round-trip to the host
+  at all before anyone implements it.

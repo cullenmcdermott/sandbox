@@ -1,10 +1,26 @@
 # TUI premium-feel program — design
 
-Status: draft (awaiting maintainer sign-off); §B (transcript depth) OBSOLETE
-as of 2026-07-20 — claude-pane-first deleted the custom transcript renderer,
-so skip §B; the remaining workstreams target surfaces that still exist
-(dashboard modals, session list, feed, theming). Backlog now lives in
-TODO §2e ("dashboard premium-feel backlog").
+Status: **partially superseded 2026-07-27 — read this note before using the
+document.**
+
+- **§A (dialog stack) and §F (ultraviolet) are no longer standalone
+  workstreams.** The maintainer decided on 2026-07-27 that they land *as part
+  of* the panel-extraction workstream in `TODO.md` §8 — together with §L5
+  (panes as floating modals, `docs/review-2026-07-20.md`). They rewrite the
+  same `render()`/`zones.go` code that the extraction dissolves, and doing them
+  separately would produce an internal-only abstraction that then has to be
+  redone. **The design content of §A/§F below is still the reference** for how
+  to build them; only their sequencing changed. The premium-feel intent travels
+  with them — the merged item carries a visual acceptance bar alongside the
+  consumability one, which is the checkable form this document never had.
+- **§A4, §C, §D, §E remain live and independent** of layout, and no longer wait
+  on whole-document sign-off — each stands on its own section.
+- **§B (transcript depth) is OBSOLETE** as of 2026-07-20 — claude-pane-first
+  deleted the custom transcript renderer. Skip it.
+
+Backlog pointers: `TODO.md` §8 (the merged panel workstream) and §2e (A4/C/D/E).
+See also [`design-principles.md`](design-principles.md) §2 for the bar the
+merged workstream is held to.
 Date: 2026-07-07
 Provenance: five-agent comparative study of Charm Crush, ultraviolet, gh-dash,
 huh, and the iTerm2-Color-Schemes collection vs. our TUI

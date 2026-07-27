@@ -2,8 +2,9 @@
 
 Status: **parts A + B implemented** (part B `d6e55fa`, 2026-07-21; part A
 2026-07-22 — `CreateOptions.BootstrapFiles`, per-session-Secret transport,
-runner boot materialize before any agent starts). The docs closeout is done bar
-the operator-prose README section for env/file injection (TODO §8); part C stays
+runner boot materialize before any agent starts). The docs closeout is complete
+— the operator-prose README section landed 2026-07-27 ("Injecting your own
+config into sessions (Go SDK)", `README.md:357`); part C stays
 documentation. One decision was resolved during
 implementation and **needs maintainer eyes** (see the callout in part B
 below): `ExtraSecretEnv` was made **agent-visible** rather than
