@@ -24,6 +24,11 @@ When you discover or are told about a new issue mid-task, add it to `TODO.md`
 **Durable references** — when a change alters what one of these describes,
 update the doc *in the same change* (stale references are bugs):
 
+- `docs/design-principles.md` — the three principles constraining the public
+  SDK (`client/`, `tui/`): pluggable transport, dismantlable TUI, Kubernetes
+  as an implementation detail. **Read before adding or changing anything
+  exported under `client/` or `tui/`** — it carries the review checklist and
+  the resolved scope decisions.
 - `docs/architecture.md` — component map, event-model rationale
 - `docs/runner-api.md` — the HTTP+SSE contract between CLI and runner
 - `docs/session-lifecycle.md` — create/suspend/resume/destroy flow
@@ -45,6 +50,13 @@ update the doc *in the same change* (stale references are bugs):
 **Repo hygiene:** if you notice tracked cruft — empty files, stale build
 outputs, docs your change just obsoleted — remove or archive it in a dedicated
 commit rather than leaving it for the next agent.
+
+**No formatter runs in this tree unless a config for it is checked in.** The
+Go side is `gofmt`; the runner is hand-formatted TypeScript with no prettier
+dep and no config. An `npx prettier --write` once reflowed seven runner files
+(kept, on review — but the wrap-width split it left is exactly the cost). If a
+formatter is ever wanted, decide it repo-wide and commit the config; never
+reflow files piecemeal.
 
 ## Commands
 
@@ -120,6 +132,14 @@ Module: `github.com/cullenmcdermott/sandbox`
 | `internal/sync` | Mutagen sync manager: project (two-way-safe), config inputs (one-way), transcripts (one-way) |
 | `internal/index` | Local session index at `~/.local/share/sandbox/remote-sessions/<id>/session.json` |
 | `internal/e2e` | Build-tagged (`//go:build e2e`) CLI↔runner smoke test driving a full turn across the HTTP+SSE seam |
+
+**Public-surface rule:** anything exported from `client/`, `client/cred`,
+`client/models`, or `tui/` is governed by `docs/design-principles.md`. The two
+failures that recur: an exported signature naming an `internal/…` type (which
+makes the interface uninhabitable outside this module), and a hardcoded
+host/port/scheme on a path a consumer's own transport would flow through.
+Both are caught by writing the `sdktest/` pin in the same change — if the pin
+can't be written, the seam isn't real.
 
 ### TypeScript runner (`runner/`)
 
