@@ -1,5 +1,11 @@
 # TODO — backlog
 
+### inbox
+* dashboard shows a session "ready" but the agent is waitin gon subagents. How can we make this clear to the user that its not idle?
+* On the detail sidebar it looks like created and last active are the same time? Last active should tell me basically the last time we heard from the agent itself.
+* Claude Code TUI seems "sticky" to the bottom of the transcript. Its impossible to scroll up while the agent is actively writing output
+
+
 > **How to use this file (agents):** sections are numbered workstreams, ordered
 > roughly bugs → strategy → perf → platform. Every item carries `file:line`
 > pointers and a fix direction — enough to plan without re-discovery. Pick a
