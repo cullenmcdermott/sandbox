@@ -224,15 +224,26 @@ function attachPaneUpgrade(server: Server, cfg: ReturnType<typeof loadConfig>, p
   // which compresses ~10-20x — and a reattach replays up to SCROLLBACK_BYTES
   // (256 KiB) as one frame, so this is the single biggest lever on time-to-
   // readable-pane over a high-latency link. `ws` documents real per-connection
-  // memory/fragmentation cost for deflate, so the window and memLevel are set
-  // conservatively rather than left at zlib's defaults; there is only ever one
-  // pane client per session, and [S5] still bounds inbound frames.
+  // memory/fragmentation cost for deflate, so memLevel is set below zlib's
+  // default rather than left alone; there is only ever one pane client per
+  // session, and [S5] still bounds inbound frames.
+  //
+  // Note on windowBits: it is NOT settable here, and an earlier version of this
+  // block set it to 13 believing otherwise. `ws` builds each zlib stream as
+  // `{...zlibDeflateOptions, windowBits}` with windowBits taken from the
+  // NEGOTIATED `{server,client}_max_window_bits` (permessage-deflate.js) — the
+  // spread comes first, so anything set here is overwritten. Narrowing the
+  // window would require the peer to offer `client_max_window_bits`, and our Go
+  // client (gorilla) offers only `server_no_context_takeover;
+  // client_no_context_takeover` (client.go:254). So both windows run at zlib's
+  // default 15. Which is also why there is no inflate-window mismatch to worry
+  // about: a >8 KiB paste from gorilla would have failed to inflate against a
+  // real 13-bit window.
   const wss = new WebSocketServer({
     noServer: true,
     maxPayload: MAX_PANE_FRAME_BYTES,
     perMessageDeflate: {
-      zlibDeflateOptions: { level: 6, windowBits: 13, memLevel: 7 },
-      zlibInflateOptions: { windowBits: 13 },
+      zlibDeflateOptions: { level: 6, memLevel: 7 },
       // Deflating a tiny keystroke frame costs more than it saves.
       threshold: 512,
       // Our Go client (gorilla) only ever negotiates no-context-takeover, so
