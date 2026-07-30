@@ -168,6 +168,22 @@ func (t *syncTask) finish(warning string, err error) {
 	close(t.done)
 }
 
+// addWarning appends a LATE advisory — one discovered after the task settled.
+// [R5]: the reconnect path deliberately detaches its flush (a healthy mutagen
+// session reconciles on its own, so the turn gate must not wait on it), which
+// means a failure can only be known after finish has already run. result() reads
+// under the same mutex, so an AwaitSync made after this call — the next turn,
+// via stagedRunner — still sees it. Never touches err: a late discovery cannot
+// retroactively make a completed connect fatal.
+func (t *syncTask) addWarning(w string) {
+	if w == "" {
+		return
+	}
+	t.mu.Lock()
+	t.warning = appendWarning(t.warning, w)
+	t.mu.Unlock()
+}
+
 func (t *syncTask) result() (string, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -369,7 +385,22 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 	// freshly created session the pod is still scheduling and pulling the image;
 	// for a just-resumed one the new pod is booting. Observer streams only attach
 	// to already-warm sessions, so they skip the explicit wait.
-	if full {
+	//
+	// [R1a] So does a warm reattach. The Status call above already did the exact
+	// two API round trips waitForPodReady's first poll would repeat (Sandbox Get
+	// + pod List), and PodReady is only set when that pod passed isPodReady, so
+	// re-asking cannot learn anything new — it just adds a serialized round trip
+	// to every attach on an already-running session. The two traps the wait
+	// exists for are both handled before we get here, in Status itself:
+	//   - a pod on a dead/unreachable node reads Running+Ready for minutes, so
+	//     podStale forces PodReady=false and StatusUnknown (backend.go, podStale
+	//     / the podStale case of Status) — it never reaches this branch;
+	//   - the old pod terminating during a resume is likewise podStale
+	//     (DeletionTimestamp != nil), AND a just-resumed session's Status was
+	//     read as Suspended *before* Resume ran, so it is not StatusRunning here
+	//     either. A freshly created session synthesizes StatusCreating above.
+	// Anything not provably warm still takes the full wait.
+	if full && !(st.PodReady && st.Status == session.StatusRunning) {
 		sp := tr.start("connect.pod_ready")
 		err := s.c.backend.StartWithProgress(ctx, s.ref, func(detail string) {
 			onPhase(StageResume, detail)
@@ -389,6 +420,34 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 	// codex connect creates/health-checks without panicking, just without a codex
 	// turn path. Only opencode currently takes the external-service branch.
 	opencode := st.Backend == session.BackendOpenCode
+
+	// [R1d] The per-session Secret holds both the runner bearer token and the
+	// opencode password, and neither depends on the port-forward — yet both used
+	// to be fetched serially *after* it (the token right after PortForward
+	// returned, the password later still, after health + sync). Start them now so
+	// they overlap the forward, which is far slower than a Secret Get.
+	//
+	// This deliberately keeps two Backend calls rather than adding a fetch-both
+	// method: Backend is public and externally implementable
+	// (docs/design-principles.md), so collapsing them would break that seam for a
+	// saving the overlap already gets us.
+	type secretFetch struct {
+		token string
+		pass  string
+		err   error
+	}
+	secretCh := make(chan secretFetch, 1)
+	go func() {
+		var out secretFetch
+		out.token, out.err = s.c.backend.RunnerToken(ctx, s.ref)
+		// Only opencode sessions consume the password; fetching it otherwise
+		// would charge every claude/codex connect a round trip it never uses.
+		if out.err == nil && full && opencode {
+			out.pass, out.err = s.c.backend.OpencodePassword(ctx, s.ref)
+		}
+		secretCh <- out
+	}()
+
 	var handles Forwards
 	var err error
 	fwdSpan := tr.start("connect.port_forward")
@@ -422,15 +481,19 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 		return nil, fmt.Errorf("sandbox: PortForward did not return a %q forward", PortRunner)
 	}
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d", runnerPort)
-	token, err := s.c.backend.RunnerToken(ctx, s.ref)
-	if err != nil {
+	// [R1d] Join the Secret fetch started before the port-forward. By now it has
+	// almost always finished, so this receive is free; the error handling is
+	// unchanged from when the Get ran here inline.
+	secret := <-secretCh
+	if secret.err != nil {
 		// Tear down the forward on every post-forward failure: leaving it (and
 		// the runner client) in place would leak the SPDY goroutines and make
 		// Runner() hand back a client over an unproven transport after a failed
 		// Connect.
 		s.closeHandles()
-		return nil, err
+		return nil, secret.err
 	}
+	token := secret.token
 	rc := runner.New(endpoint, token)
 	// §10 observability: carry this connect flow's correlation id on runner
 	// requests (X-Sandbox-Trace-Id) so the pod bridges it to each turn id
@@ -505,17 +568,24 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 		case worktreeMissing:
 			syncWarning = appendWarning(syncWarning, fmt.Sprintf(
 				"file sync skipped: this session's worktree (%s) is missing — sync is bound to the worktree/machine that created the session; recreate the worktree manually or destroy the session", workspacePath))
-			bgOK = s.startBackgroundSync(tr, myGen, syncpkg.Spec{}, false, false, reaperImage, reaperPullPolicy, idleTimeout)
+			bgOK = s.startBackgroundSync(tr, myGen, syncpkg.Spec{}, false, false, nil, reaperImage, reaperPullPolicy, idleTimeout)
 		case kerr != nil:
 			// No usable SSH key → no file sync at all, but the reaper must still run.
 			syncWarning = appendWarning(syncWarning, fmt.Sprintf("file sync unavailable (ssh key): %v", kerr))
-			bgOK = s.startBackgroundSync(tr, myGen, syncpkg.Spec{}, false, false, reaperImage, reaperPullPolicy, idleTimeout)
+			bgOK = s.startBackgroundSync(tr, myGen, syncpkg.Spec{}, false, false, nil, reaperImage, reaperPullPolicy, idleTimeout)
 		default:
 			// Non-git same-path collision warning (design §4.5/§1d): a non-worktree
 			// session syncs the repo root itself, so if another live session already
 			// syncs this directory their two-way syncs cross-feed edits. Warn-only
-			// (signed-off resolution 4: never refuse). One List exec per Connect, off
-			// the hot path; silent when mutagen is absent.
+			// (signed-off resolution 4: never refuse). Silent when mutagen is absent.
+			//
+			// [R7] This List exec is the one mutagen spawn still on the connect
+			// FOREGROUND (the other three moved into startBackgroundSync below). It
+			// stays here deliberately: the collision is a pre-existing hazard the
+			// user should see on Connection.Warning immediately, not one AwaitSync
+			// later. An earlier comment here called it "off the hot path" — that is
+			// true of the per-turn path but false of the attach path, which is the
+			// one a user waits on.
 			if w := s.sameDirSyncWarning(ctx, workspacePath, projectPath, string(s.ref.ID)); w != "" {
 				syncWarning = appendWarning(syncWarning, w)
 			}
@@ -529,15 +599,14 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 				s.closeHandles()
 				return nil, fmt.Errorf("sandbox: PortForward did not return a %q forward", PortSSH)
 			}
-			syncSpan := tr.start("connect.project_sync")
-			created, spec, serr := s.c.startProjectSync(ctx, string(s.ref.ID), workspacePath, privPath, sshPort)
-			syncSpan.end()
-			if serr != nil {
-				syncWarning = appendWarning(syncWarning, fmt.Sprintf("file sync unavailable: %v", serr))
-				bgOK = s.startBackgroundSync(tr, myGen, syncpkg.Spec{}, false, false, reaperImage, reaperPullPolicy, idleTimeout)
-			} else {
-				bgOK = s.startBackgroundSync(tr, myGen, spec, created, true, reaperImage, reaperPullPolicy, idleTimeout)
-			}
+			// [R7] The project sync itself now runs inside startBackgroundSync —
+			// four serialized mutagen process spawns off the attach path. Its
+			// advisories land on the syncTask (AwaitSync) instead of
+			// Connection.Warning, which is where the flush advisory it pairs with
+			// already went.
+			bgOK = s.startBackgroundSync(tr, myGen, syncpkg.Spec{}, false, true,
+				&projectSyncInput{workspacePath: workspacePath, privPath: privPath, sshPort: sshPort},
+				reaperImage, reaperPullPolicy, idleTimeout)
 		}
 		if !bgOK {
 			// A concurrent Close/Connect superseded us while we were setting up
@@ -557,11 +626,8 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 		Warning:  syncWarning,
 	}
 	if full && opencode {
-		pass, perr := s.c.backend.OpencodePassword(ctx, s.ref)
-		if perr != nil {
-			s.closeHandles()
-			return nil, fmt.Errorf("opencode password: %w", perr)
-		}
+		// [R1d] Already fetched alongside the runner token, before the forward.
+		pass := secret.pass
 		opencodePort, ok := handles.LocalPort(PortOpencode)
 		if !ok {
 			s.closeHandles()
@@ -595,7 +661,8 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 // can't, so we warn — never refuse (signed-off resolution 4).
 //
 // It scans the host's live Mutagen sync sessions (one `mutagen sync list` per
-// Connect, off the hot path) for another session's "-project" sync and resolves
+// Connect, on the connect foreground — see the call site) for another session's
+// "-project" sync and resolves
 // that session's alpha path from the local index (the worktree dir when set,
 // else the repo root). A missing Mutagen binary/daemon makes List error, which
 // degrades silently to no warning (never an error). Returns "" when there is no
@@ -679,7 +746,21 @@ func protocolVersionWarning(rc *runner.Client) string {
 // background goroutine would arm mutagen flushes and reaper retries against a
 // port-forward Close already tore down, and its cancel func would be one Close
 // already missed (V9).
-func (s *Session) startBackgroundSync(tr *tracer, gen uint64, spec syncpkg.Spec, created, doSync bool, reaperImage, reaperPullPolicy string, idleTimeout time.Duration) bool {
+// projectSyncInput carries what startProjectSync needs so that [R7] can run it
+// INSIDE the background goroutine instead of on the connect foreground. Nothing
+// in the foreground consumed its results except the flush gating, which is
+// already background — so the four serialized mutagen process spawns it costs
+// (`sync list`, `sync resume`, a second scoped list, maybe `sync create`) were
+// charged to the user's attach for nothing. Nil means "already resolved, or no
+// project sync to start" and startBackgroundSync uses the spec/created it was
+// passed.
+type projectSyncInput struct {
+	workspacePath string
+	privPath      string
+	sshPort       int
+}
+
+func (s *Session) startBackgroundSync(tr *tracer, gen uint64, spec syncpkg.Spec, created, doSync bool, psi *projectSyncInput, reaperImage, reaperPullPolicy string, idleTimeout time.Duration) bool {
 	// C6: the whole background phase gets one generous overall deadline. The
 	// first flush is bounded (12s below) but CreateInputs (7 mutagen execs) and
 	// the reaper retry loop were not — a wedged mutagen daemon would hang this
@@ -707,6 +788,48 @@ func (s *Session) startBackgroundSync(tr *tracer, gen uint64, spec syncpkg.Spec,
 		var fatal error
 		id := string(s.ref.ID)
 		mgr := s.c.syncManager()
+
+		// [X1] The idle reaper is what caps runaway pod cost, and it depends on
+		// nothing the sync block below produces — yet it used to run after it, so
+		// on a first connect a session sat unprotected for up to the full 12s flush
+		// budget plus input-sync creation. Start it now, concurrently, and join
+		// before reporting. (This goroutine is inside the background task, so it
+		// never delays the attach either way; what changes is how soon cost
+		// protection actually exists.)
+		reaperDone := make(chan string, 1)
+		go func() {
+			if bgCtx.Err() != nil {
+				reaperDone <- ""
+				return
+			}
+			reaperSpan := tr.start("connect.reaper")
+			w := s.c.ensureReaperWithRetry(bgCtx, s.ref, reaperImage, reaperPullPolicy, idleTimeout)
+			reaperSpan.end()
+			reaperDone <- w
+		}()
+
+		// [R7] Start the project sync here rather than on the connect foreground.
+		// A failure degrades exactly as it did when this ran upstream: no sync, but
+		// the reaper (already in flight above) still gets ensured.
+		if doSync && psi != nil {
+			syncSpan := tr.start("connect.project_sync")
+			c, sp, resumeWarn, serr := s.c.startProjectSync(bgCtx, id, psi.workspacePath, psi.privPath, psi.sshPort)
+			syncSpan.end()
+			// [R5] A failed un-pause is not fatal — CreateProject may well have
+			// succeeded — but it is the case where files silently stop moving.
+			if resumeWarn != nil && bgCtx.Err() == nil {
+				warn = appendWarning(warn, fmt.Sprintf(
+					"file sync may be paused (resuming it failed: %v); edits may not propagate", resumeWarn))
+			}
+			if serr != nil {
+				if bgCtx.Err() == nil {
+					warn = appendWarning(warn, fmt.Sprintf("file sync unavailable: %v", serr))
+				}
+				doSync = false
+			} else {
+				created, spec = c, sp
+			}
+		}
 		if doSync {
 			if created {
 				// First-ever sync: `mutagen sync create` returns before the transport
@@ -748,10 +871,34 @@ func (s *Session) startBackgroundSync(tr *tracer, gen uint64, spec syncpkg.Spec,
 				// and reconciles on its own, so don't hold the gate on a full flush —
 				// kick a detached one so mutagen re-establishes the transport on the
 				// new port-forward promptly.
+				//
+				// [R5] Detached, but no longer silent. Discarding this error meant a
+				// mutagen transport that died across suspend/resume reconnected
+				// "clean": nothing consulted StatusSummary, SyncForwardAlive() sees a
+				// healthy SSH forward and so cannot notice, and the user's edits simply
+				// stop propagating. Classify a failure the same way the first-flush
+				// branch above does, and record it as a late advisory.
 				go func() {
 					fctx, fc := context.WithTimeout(bgCtx, 30*time.Second)
 					defer fc()
-					_ = mgr.FlushAll(fctx, id)
+					ferr := mgr.FlushAll(fctx, id)
+					if ferr == nil || bgCtx.Err() != nil {
+						return
+					}
+					probeCtx, pc := context.WithTimeout(bgCtx, syncProbeTimeout)
+					st, serr := mgr.StatusSummary(probeCtx, id)
+					pc()
+					if bgCtx.Err() != nil {
+						return
+					}
+					// A stalled transport is the case that loses data: files are frozen
+					// and nothing else reports it. Anything else (still syncing over a
+					// healthy transport, or an unreadable status) stays quiet — the
+					// reconnect flush is best-effort by design.
+					if serr == nil && st == syncpkg.SyncStalled {
+						task.addWarning(fmt.Sprintf(
+							"file sync is stalled after reconnect (%v); edits may not be propagating", ferr))
+					}
 				}()
 			}
 			// Create the config/transcript syncs now, off the foreground. A real
@@ -763,16 +910,11 @@ func (s *Session) startBackgroundSync(tr *tracer, gen uint64, spec syncpkg.Spec,
 				warn = appendWarning(warn, fmt.Sprintf("config/transcript sync setup failed: %v", ierr))
 			}
 		}
-		// Ensure the idle reaper (with bounded retry): it caps runaway pod cost, so
-		// it must run reliably even off the foreground — a transient blip must not
-		// silently leave a session with no auto-suspend.
-		if bgCtx.Err() == nil {
-			reaperSpan := tr.start("connect.reaper")
-			w := s.c.ensureReaperWithRetry(bgCtx, s.ref, reaperImage, reaperPullPolicy, idleTimeout)
-			reaperSpan.end()
-			if w != "" {
-				warn = appendWarning(warn, w)
-			}
+		// [X1] Join the reaper ensure started above. It ran with bounded retry —
+		// it caps runaway pod cost, so a transient blip must not silently leave a
+		// session with no auto-suspend — and its advisory joins the others here.
+		if w := <-reaperDone; w != "" {
+			warn = appendWarning(warn, w)
 		}
 		// A timed-out background phase must be visible: the bgCtx.Err() guards
 		// above suppress per-step errors on cancellation (closeHandles), which

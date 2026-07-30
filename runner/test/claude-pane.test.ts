@@ -14,6 +14,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   ScrollbackRing,
+  trimPartialEscape,
   SCROLLBACK_BYTES,
   CLOSE_BACKPRESSURE,
   MAX_PANE_CLIENT_BUFFER_BYTES,
@@ -140,6 +141,67 @@ test('ScrollbackRing tail-trims a single chunk larger than the cap', () => {
   ring.push(Buffer.from('abcdefgh'));
   assert.equal(ring.size, 4);
   assert.equal(ring.snapshot().toString(), 'efgh');
+});
+
+// [X3] The ring trims mid-byte-stream, so a snapshot can begin with the tail of
+// a chopped escape sequence — which the attaching terminal renders as literal
+// garbage on the first line. snapshot() drops such a remnant.
+test('trimPartialEscape drops a chopped CSI remnant', () => {
+  // "\x1b[32mhello" with the ESC trimmed away leaves "[32mhello".
+  assert.equal(trimPartialEscape(Buffer.from('[32mhello')).toString(), 'hello');
+  // Multi-parameter CSI.
+  assert.equal(trimPartialEscape(Buffer.from('[1;31;40mx')).toString(), 'x');
+});
+
+test('trimPartialEscape drops a chopped OSC remnant (BEL or ST terminated)', () => {
+  assert.equal(trimPartialEscape(Buffer.from(']0;a title\x07rest')).toString(), 'rest');
+  assert.equal(trimPartialEscape(Buffer.from(']0;a title\x1b\\rest')).toString(), 'rest');
+});
+
+test('trimPartialEscape leaves intact output alone', () => {
+  // A complete sequence still has its ESC: nothing was chopped.
+  const whole = '\x1b[32mhello';
+  assert.equal(trimPartialEscape(Buffer.from(whole)).toString(), whole);
+  // Ordinary text, including text that merely contains a bracket later on.
+  assert.equal(trimPartialEscape(Buffer.from('hello [world]')).toString(), 'hello [world]');
+  assert.equal(trimPartialEscape(Buffer.from('')).toString(), '');
+});
+
+// The safety property that matters more than the fix: bracketed text is
+// EVERYWHERE in terminal output, and "[w" is syntactically a valid (empty
+// parameter) CSI — so a naive "'[' then any final byte" rule silently eats the
+// first two characters of real log lines. Requiring a parameter byte is what
+// keeps these intact.
+test('trimPartialEscape never eats ordinary bracketed text', () => {
+  for (const s of [
+    '[warn] disk almost full',
+    '[INFO] started',
+    '[x] done',
+    '[] empty',
+    '[main a1b2c3] commit subject',
+  ]) {
+    assert.equal(trimPartialEscape(Buffer.from(s)).toString(), s, `mangled: ${s}`);
+  }
+});
+
+test('trimPartialEscape gives up rather than eating real output', () => {
+  // A '[' that never terminates within the scan window is far likelier to be
+  // real text than a partial sequence — leave it.
+  const longText = '[' + 'x'.repeat(400);
+  assert.equal(trimPartialEscape(Buffer.from(longText)).toString(), longText);
+  // Same for a ']' with no OSC "digits;" preamble.
+  assert.equal(trimPartialEscape(Buffer.from(']not an osc')).toString(), ']not an osc');
+});
+
+test('ScrollbackRing snapshot drops a remnant left by its own trim', () => {
+  // Cap chosen so the trim lands INSIDE the escape sequence.
+  const ring = new ScrollbackRing(9);
+  ring.push(Buffer.from('AAAA\x1b[32mhello')); // 14 bytes → tail-trim to last 9
+  // Raw tail would be "2mhello" preceded by remnant bytes; the snapshot must not
+  // begin mid-sequence.
+  const snap = ring.snapshot().toString();
+  assert.ok(!snap.startsWith('['), `snapshot still begins with a CSI remnant: ${JSON.stringify(snap)}`);
+  assert.ok(snap.endsWith('hello'), `snapshot lost real output: ${JSON.stringify(snap)}`);
 });
 
 test('ScrollbackRing under the cap retains everything, in order', () => {
@@ -269,6 +331,82 @@ test('reattach to a running child forces a repaint; a fresh spawn does not', () 
     [100, 39],
     [100, 40],
   ]);
+  assert.equal(ptys.length, 1, 'no respawn on reattach');
+});
+
+// [R4] The child is spawned lazily INSIDE attach(), before any client frame can
+// be read, so geometry that arrives as the first post-handshake resize is a full
+// round trip too late — the first attach paints 80x24 and reflows. attach() takes
+// the client's geometry and adopts it before the spawn.
+test('attach geometry reaches the fresh spawn instead of the 80x24 default', () => {
+  const { spawn, spawns } = makeSpawner();
+  const sup = createClaudePaneSupervisor({
+    cwd: '/w',
+    env: {},
+    persistence: makePersistence('u'),
+    spawn,
+    readSettings: noSettings,
+  });
+
+  sup.attach(new FakeSocket(), 203, 51);
+  assert.equal(spawns.length, 1);
+  assert.equal(spawns[0].cols, 203, 'child born at the client width');
+  assert.equal(spawns[0].rows, 51, 'child born at the client height');
+});
+
+test('attach without geometry keeps the default, and a bad size is ignored', () => {
+  const { spawn, spawns } = makeSpawner();
+  const sup = createClaudePaneSupervisor({
+    cwd: '/w',
+    env: {},
+    persistence: makePersistence('u'),
+    spawn,
+    readSettings: noSettings,
+  });
+
+  sup.attach(new FakeSocket());
+  assert.equal(spawns[0].cols, 80, 'omitted geometry falls back to the default');
+  assert.equal(spawns[0].rows, 24);
+
+  // A zero/negative dimension must never reach a PTY ioctl.
+  const other = createClaudePaneSupervisor({
+    cwd: '/w',
+    env: {},
+    persistence: makePersistence('u'),
+    spawn,
+    readSettings: noSettings,
+  });
+  other.attach(new FakeSocket(), 0, -5);
+  assert.equal(spawns[1].cols, 80);
+  assert.equal(spawns[1].rows, 24);
+});
+
+// [R4] + 5b interaction: on a REATTACH the child already exists, so the new
+// geometry has to reach the PTY through the repaint jiggle — which must restore
+// to the client's size, not the size the child was last told about.
+test('reattach geometry lands on the PTY via the repaint jiggle', () => {
+  const { spawn, ptys } = makeSpawner();
+  const sup = createClaudePaneSupervisor({
+    cwd: '/w',
+    env: {},
+    persistence: makePersistence('u'),
+    spawn,
+    readSettings: noSettings,
+  });
+
+  sup.attach(new FakeSocket(), 100, 40);
+  const before = ptys[0].resizes.length;
+
+  // Reattach from a differently-sized terminal.
+  sup.attach(new FakeSocket(), 120, 30);
+  assert.deepEqual(
+    ptys[0].resizes.slice(before),
+    [
+      [120, 29],
+      [120, 30],
+    ],
+    'jiggle and restore both use the NEW geometry',
+  );
   assert.equal(ptys.length, 1, 'no respawn on reattach');
 });
 

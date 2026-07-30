@@ -1,12 +1,14 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -161,6 +163,127 @@ func TestAttachPaneInitialResize(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("server never received the initial resize control frame")
+	}
+}
+
+// TestAttachPaneGeometryOnUpgradeURL covers [R4]: the runner spawns the pane
+// child lazily inside attach(), which runs before it can read any frame, so the
+// geometry has to ride the handshake URL as well as the control frame. Without
+// the query params the first-ever attach always spawns 80x24 and reflows a full
+// round trip later.
+func TestAttachPaneGeometryOnUpgradeURL(t *testing.T) {
+	accept := make(chan *panePeer, 1)
+	queries := make(chan string, 4)
+	up := websocket.Upgrader{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		queries <- r.URL.RawQuery
+		conn, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		accept <- &panePeer{conn: conn, binary: make(chan []byte, 8), text: make(chan string, 8), closed: make(chan int, 1)}
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "tok")
+	ps, err := c.AttachPane(context.Background(), session.Ref{ID: "s1"}, 203, 51)
+	if err != nil {
+		t.Fatalf("AttachPane: %v", err)
+	}
+	defer ps.Close()
+	waitPeer(t, accept)
+
+	q, err := url.ParseQuery(<-queries)
+	if err != nil {
+		t.Fatalf("parse handshake query: %v", err)
+	}
+	if got := q.Get("cols"); got != "203" {
+		t.Errorf("handshake cols = %q, want 203", got)
+	}
+	if got := q.Get("rows"); got != "51" {
+		t.Errorf("handshake rows = %q, want 51", got)
+	}
+}
+
+// TestAttachPaneNoGeometryNoQuery pins the other half of [R4]: a 0,0 attach must
+// not put an unusable size on the URL — the runner keeps its default geometry.
+func TestAttachPaneNoGeometryNoQuery(t *testing.T) {
+	accept := make(chan *panePeer, 1)
+	queries := make(chan string, 4)
+	up := websocket.Upgrader{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		queries <- r.URL.RawQuery
+		conn, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		accept <- &panePeer{conn: conn, binary: make(chan []byte, 8), text: make(chan string, 8), closed: make(chan int, 1)}
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "tok")
+	ps, err := c.AttachPane(context.Background(), session.Ref{ID: "s1"}, 0, 0)
+	if err != nil {
+		t.Fatalf("AttachPane: %v", err)
+	}
+	defer ps.Close()
+	waitPeer(t, accept)
+
+	if q := <-queries; strings.Contains(q, "cols") || strings.Contains(q, "rows") {
+		t.Errorf("handshake query = %q, want no geometry params", q)
+	}
+}
+
+// TestPaneDialerNegotiatesCompression pins [R2]: the pane dialer must offer
+// permessage-deflate (a reattach replays up to 256 KiB of highly compressible
+// ANSI as one frame) and must not sit on gorilla's 4 KiB buffers.
+func TestPaneDialerNegotiatesCompression(t *testing.T) {
+	if !paneDialer.EnableCompression {
+		t.Error("paneDialer.EnableCompression = false, want true")
+	}
+	if paneDialer.ReadBufferSize < 32*1024 {
+		t.Errorf("paneDialer.ReadBufferSize = %d, want >= 32 KiB", paneDialer.ReadBufferSize)
+	}
+	if paneDialer.WriteBufferSize < 32*1024 {
+		t.Errorf("paneDialer.WriteBufferSize = %d, want >= 32 KiB", paneDialer.WriteBufferSize)
+	}
+
+	// End to end: a compression-enabled server and our dialer must agree on the
+	// extension, and bytes must still round-trip intact through deflate.
+	accept := make(chan *panePeer, 1)
+	up := websocket.Upgrader{EnableCompression: true}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.Header.Get("Sec-WebSocket-Extensions"), "permessage-deflate") {
+			t.Errorf("client offered no permessage-deflate: %q", r.Header.Get("Sec-WebSocket-Extensions"))
+		}
+		conn, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		conn.EnableWriteCompression(true)
+		accept <- &panePeer{conn: conn, binary: make(chan []byte, 8), text: make(chan string, 8), closed: make(chan int, 1)}
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "tok")
+	ps, err := c.AttachPane(context.Background(), session.Ref{ID: "s1"}, 0, 0)
+	if err != nil {
+		t.Fatalf("AttachPane: %v", err)
+	}
+	defer ps.Close()
+	peer := waitPeer(t, accept)
+
+	// A large, highly repetitive frame — the scrollback-replay shape.
+	payload := bytes.Repeat([]byte("\x1b[32mhello world\x1b[0m "), 4096)
+	if err := peer.conn.WriteMessage(websocket.BinaryMessage, payload); err != nil {
+		t.Fatalf("server write: %v", err)
+	}
+	got := make([]byte, len(payload))
+	if _, rerr := io.ReadFull(ps, got); rerr != nil {
+		t.Fatalf("ReadFull: %v", rerr)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Error("payload did not survive the compressed round trip")
 	}
 }
 

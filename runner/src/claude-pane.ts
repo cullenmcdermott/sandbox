@@ -117,6 +117,75 @@ export interface PaneExitInfo {
 
 // --- Scrollback ring ------------------------------------------------------
 
+/** Bytes that terminate a CSI sequence (final byte, 0x40-0x7E). */
+const CSI_FINAL_MIN = 0x40;
+const CSI_FINAL_MAX = 0x7e;
+const ESC = 0x1b;
+const BEL = 0x07;
+
+/**
+ * How far into a snapshot to look for the end of a chopped escape sequence
+ * ([X3]). Real sequences are a handful of bytes; an OSC carrying a window title
+ * can be longer but not unboundedly so. If nothing terminates within this
+ * window the buffer almost certainly does not START with a partial sequence at
+ * all, so we return it untouched rather than eat real output.
+ */
+const MAX_PARTIAL_ESCAPE_SCAN = 256;
+
+/**
+ * [X3] Drop a leading PARTIAL escape sequence — the remnant left when the ring
+ * trimmed the head mid-sequence, i.e. one whose introducer (ESC) was cut away.
+ *
+ * Deliberately conservative: it only acts on a buffer whose first byte is a
+ * plausible mid-sequence remnant, only scans a bounded window, and returns the
+ * input unchanged whenever it cannot identify a clean resumption point. Dropping
+ * a few bytes of a broken sequence is safe; eating real output is not.
+ *
+ * Exported for unit tests.
+ */
+export function trimPartialEscape(buf: Buffer): Buffer {
+  if (buf.length === 0) return buf;
+  // A buffer starting with ESC is a WHOLE sequence — nothing was chopped.
+  if (buf[0] === ESC) return buf;
+  // '[' or ']' as the very first byte is the classic remnant: "ESC [" / "ESC ]"
+  // split by the trim. Anything else is ordinary text (or a lone final byte we
+  // cannot distinguish from real output, which we leave alone on purpose).
+  const first = buf[0];
+  if (first !== 0x5b /* [ */ && first !== 0x5d /* ] */) return buf;
+
+  const limit = Math.min(buf.length, MAX_PARTIAL_ESCAPE_SCAN);
+  if (first === 0x5b) {
+    // CSI remnant. Note a bare "[w" is *syntactically* a valid CSI, so matching
+    // "'[' then any final byte" would eat the first two characters of ordinary
+    // output like "[warn] ..." or "[INFO] ..." — text a terminal shows all the
+    // time. Require at least one PARAMETER byte (0x30-0x3F: digits, ';', '?')
+    // before the final byte, which every colour/cursor sequence the pane
+    // actually emits has ("[32m", "[1;31m", "[?25l"). The cost is not trimming a
+    // parameterless remnant like "[m"; that renders as two stray characters,
+    // which is strictly better than swallowing real text.
+    let i = 1;
+    while (i < limit && buf[i] >= 0x30 && buf[i] <= 0x3f) i++;
+    if (i === 1) return buf; // no parameter bytes → treat as ordinary text
+    while (i < limit && buf[i] >= 0x20 && buf[i] <= 0x2f) i++; // intermediates
+    if (i < limit && buf[i] >= CSI_FINAL_MIN && buf[i] <= CSI_FINAL_MAX) {
+      return buf.subarray(i + 1);
+    }
+    return buf;
+  }
+  // OSC remnant: "]<digits>;<text>" terminated by BEL or ST (ESC \). Requiring
+  // the digits-then-';' preamble keeps ordinary text starting with ']' safe.
+  let j = 1;
+  while (j < limit && buf[j] >= 0x30 && buf[j] <= 0x39) j++;
+  if (j === 1 || j >= limit || buf[j] !== 0x3b /* ; */) return buf;
+  for (let i = j + 1; i < limit; i++) {
+    if (buf[i] === BEL) return buf.subarray(i + 1);
+    if (buf[i] === ESC && i + 1 < buf.length && buf[i + 1] === 0x5c /* \ */) {
+      return buf.subarray(i + 2);
+    }
+  }
+  return buf;
+}
+
 /**
  * A byte-bounded ring of recent PTY output. Retains at most `cap` bytes: once
  * appended output exceeds the cap, the oldest bytes are dropped (whole chunks
@@ -150,9 +219,20 @@ export class ScrollbackRing {
     }
   }
 
-  /** A single Buffer snapshot of the retained scrollback (oldest → newest). */
+  /**
+   * A single Buffer snapshot of the retained scrollback (oldest → newest), with
+   * any partial escape sequence at the HEAD removed.
+   *
+   * [X3] The ring is a byte tail, not a screen model: `push` trims the head
+   * chunk mid-byte-stream, so the first bytes of a snapshot can be the tail of a
+   * chopped-in-half escape sequence (`[32m` with its ESC gone, an unterminated
+   * OSC, …). Replayed as-is, the attaching terminal renders that remnant as
+   * literal garbage on the first line. `forceRepaint()` bounds how long it
+   * survives, but the cheap fix is not to send it: skip to the first byte that
+   * can legally begin output.
+   */
   snapshot(): Buffer {
-    return Buffer.concat(this.chunks, this.total);
+    return trimPartialEscape(Buffer.concat(this.chunks, this.total));
   }
 
   get size(): number {
@@ -269,8 +349,10 @@ export interface ClaudePanePersistence {
 
 export interface ClaudePaneSupervisor {
   /** Attach a pane socket. Preempts any current socket (close 4001), spawns the
-   * child on the first attach, replays scrollback, then forwards live output. */
-  attach(socket: PaneSocket): void;
+   * child on the first attach, replays scrollback, then forwards live output.
+   * `cols`/`rows` are the attaching client's geometry, adopted before the lazy
+   * spawn so the child is born at the right size; omit to keep the current. */
+  attach(socket: PaneSocket, cols?: number, rows?: number): void;
   /** Drop the current socket (close 1000). The child keeps running so a later
    * attach resumes it; idle reaping handles suspend. Idempotent. */
   detachAll(): void;
@@ -347,7 +429,7 @@ class Supervisor implements ClaudePaneSupervisor {
     this.ring = new ScrollbackRing(deps.scrollbackBytes ?? SCROLLBACK_BYTES);
   }
 
-  attach(socket: PaneSocket): void {
+  attach(socket: PaneSocket, cols?: number, rows?: number): void {
     if (this.stopped) {
       // The runner is shutting down; refuse the attach so the client reconnects
       // once the pod is back rather than talking to a dying child.
@@ -371,6 +453,15 @@ class Supervisor implements ClaudePaneSupervisor {
     // paints itself, so only a reattach to a live child needs the forced repaint.
     const wasRunning = this.pty !== null;
     this.socket = socket;
+    // [R4] Adopt the attaching client's geometry BEFORE the lazy spawn, so a
+    // fresh child is born at the real terminal size instead of painting 80x24
+    // and reflowing a round trip later. On a reattach the child already exists,
+    // so the new geometry reaches the PTY through forceRepaint() below — whose
+    // jiggle-and-restore lands on the restored (new) size.
+    if (cols !== undefined && rows !== undefined && cols > 0 && rows > 0) {
+      this.cols = cols;
+      this.rows = rows;
+    }
     this.ensureSpawned();
     // Replay accumulated scrollback so a (re)attaching pane catches up, as one
     // binary frame; live output follows via the onData forwarder. No data can

@@ -65,6 +65,25 @@
 > sign-off). The §10 `[~]` "Observability first cut" item is the direct
 > ancestor: `[T4]` and `[T9]` are its "STILL OPEN" tail with pointers.
 >
+> **2026-07-30 connect-path + pane-transport review — CLOSED same day.**
+> [`docs/archive/review-2026-07-30.md`](docs/archive/review-2026-07-30.md)
+> (ids `[R1]`-`[R12]`, `[X1]`-`[X4]`), archived because nothing in it remains
+> open. Landed: `[R2]` `[R4]` (pane compression + attach geometry), `[R1a-d]`
+> (connect de-serialization), `[R5]` (swallowed reconnect sync errors), `[R6]`
+> `[X1]` `[R7]`(a), and `[X3]` as a bounded mitigation. Closed without code:
+> `[R10]` `[X4]` **rejected** (premised on a timer that does not exist in
+> `claude-pane.ts`); `[R3]` `[R11]` `[R12]` **not applicable** (they describe a
+> codex connect path whose symbols exist nowhere in the tree); `[R8]` `[R9]`
+> `[R7]`(b)(c) `[X2]` **won't-do**, each with its reasoning recorded inline in
+> §4 so it is not re-litigated. Detail + verdicts in the done log.
+> **Two lessons for the next burndown:** (1) re-verify every finding against the
+> tree before scheduling it — a third of this review described an uncommitted
+> diff that was never in this working tree; (2) re-cost later findings *after*
+> earlier ones land — `[R8]`, `[X2]` and `[R7]`(b) were all dissolved by
+> `[R1]`/`[R7]`(a) rather than by argument. **Still owed:** a live before/after
+> warm-reattach measurement; the round trips removed are pinned only by
+> action-counting tests.
+>
 > **Agent-ready map — rewritten 2026-07-27** (the previous version pointed at
 > work that had already shipped; each claim below was re-verified against the
 > tree on that date).
@@ -644,6 +663,39 @@ row-model consolidation moved to §2a where it belongs.
 
 ### 1d. System reliability (2026-07-01 whole-system review; HIGHs all fixed — see done log)
 
+**2026-07-30 review addition** — detail in
+[`docs/archive/review-2026-07-30.md`](docs/archive/review-2026-07-30.md):
+
+- [x] **[R5] done 2026-07-30** (done log): the detached reconnect flush now
+  classifies a failure via `StatusSummary` and records a late advisory on the
+  syncTask (new `addWarning`, visible to the next `AwaitSync`); `ResumeAll`'s
+  error is returned from `startProjectSync` and surfaced as a connect warning.
+  Both fixes mutation-checked against the original bug.
+
+  <details><summary>original finding</summary>
+
+- [ ] **[R5] Reconnect-path sync failures are swallowed — silent data loss.**
+  Two discards on the same path. (a) `client/session.go:784-788`: the
+  non-`created` (reconnect) branch fires `_ = mgr.FlushAll(fctx, id)` in a
+  detached goroutine and drops the error — no warning, no syncTask contribution
+  — while the `created` branch (`:750-778`) classifies the same failure via
+  `StatusSummary`. Detaching the flush is *correct* (the comment at `:780-783`
+  is right that a healthy mutagen session reconciles itself); the gap is that
+  nothing ever consults `StatusSummary` when it fails, so a mutagen transport
+  that died across suspend/resume reconnects "clean" and edits silently stop
+  propagating — `SyncForwardAlive()` (`session.go:246`) cannot see it because
+  the SSH forward is healthy. Keep the flush detached; on error run the same
+  classification and surface an advisory. (b) `client/sync.go:313`:
+  `_ = mgr.ResumeAll(ctx, id)` — the comment directly above it explains that a
+  failed un-pause leaves "files frozen with no error", then discards exactly
+  that error; propagate into `syncWarning`. The Codex cross-check adds that a
+  paused pre-existing sync makes `CreateProject` succeed as a no-op, attaching
+  the agent to a stale workspace. Verification: a fake mutagen manager whose
+  `FlushAll`/`ResumeAll` fail must produce a surfaced warning on the reconnect
+  path, not a clean connect.
+
+  </details>
+
 **2026-07-07 handoff-review additions** — detail in
 [`docs/review-2026-07-07.md`](docs/review-2026-07-07.md) §C/§H (id in brackets):
 
@@ -957,6 +1009,159 @@ Outcome at the time: **not happening; invest in §2 instead.**
   (web→local only).
 
 ## 4) Performance
+
+**2026-07-30 connect-path + pane-transport review** (detail in
+[`docs/archive/review-2026-07-30.md`](docs/archive/review-2026-07-30.md), ids `[R1]`-`[R12]`
+plus a Codex cross-check `[X1]`-`[X4]`). Consumer profile is a local TUI
+attaching over Teleport at ~60ms RTT, so every serialized API round trip is
+user-visible attach latency; the doc's baseline is ~9-10 serialized round trips
+on a *warm* reattach, ~6 of them redundant. **Latency items must land with a
+measurement, not an assertion** — time a warm reattach before/after and put the
+number in the done-log line. `[R1]`/`[R3]`/`[X2]` all rewrite
+`client/session.go` and must be serialized against each other.
+
+- [x] **[R2]+[R4] done 2026-07-30** (done log): pane WS `permessage-deflate`
+  on both ends + 32 KiB gorilla buffers, and client geometry carried on the
+  handshake URL so the lazy spawn is born at the real size instead of painting
+  80x24 and reflowing a round trip later.
+- [x] **[R1a-d] done 2026-07-30** (done log): warm-reattach skips the redundant
+  readiness wait; pod lookup goes straight from `ref` (also halving each
+  readiness poll); the digest pin is decided from what the poll already observed;
+  the Secret read overlaps the port-forward. `client.Backend` now documents that
+  implementations must be safe for concurrent use. **Still owed: the before/after
+  warm-reattach measurement** — the structural round trips are gone and counted
+  by test, but no live timing was taken (no cluster in the dev pod).
+- **NOT APPLICABLE to this tree 2026-07-30 — [R3], [R11], [R12].** All three
+  describe the codex *connect* path (`waitCodexReady`, `waitCodexReadyWithin`,
+  `probeCodexOnce`, a codex readiness stage). **None of those symbols exist
+  anywhere in the repo** — the only occurrences are the review doc itself. The
+  codex app-server forward is still explicitly future work: see the comment at
+  `client/session.go:419` ("the forward is expressible today as
+  `Forward(PortRunner, PortSSH, PortCodex)`, just not requested here"). The
+  review was written against a tree carrying an uncommitted 2026-07-28/29
+  codex-connect diff that is not present here. **Re-file these against that
+  branch when it lands** — the substance (don't define readiness as holding a
+  1s TCP read deadline; expose readiness on the runner, which already
+  supervises the child and answers `/healthz` on the same forward; give the
+  wait an `OnPhase` stage) is sound and worth applying *before* it ships.
+- [x] **[R6] done 2026-07-30** (done log): `waitHealthyWithin` and
+  `waitOpencodeReady` start at 100ms and back off to their 1s ceiling instead of
+  sleeping a flat 1s between probes that ride an established loopback forward.
+  (The review also listed `waitCodexReadyWithin`, which does not exist in this
+  tree — see the not-applicable note above.)
+- [x] **[R7] done 2026-07-30 — (a) landed, (b) and (c) closed won't-do**
+  (done log). (a): `startProjectSync` moved into `startBackgroundSync`, taking
+  three of the four mutagen process spawns off the attach path, and the wrong
+  "off the hot path" comment is corrected. The one remaining foreground spawn is
+  the collision List, kept there deliberately so the warning reaches
+  `Connection.Warning` immediately rather than one `AwaitSync` later.
+
+  **(b) one List feeding both the collision warning and the existence map —
+  won't do.** (a) made this *harder*, not easier: the unfiltered List
+  (`sameDirSyncWarning`) is now on the connect foreground while the scoped one
+  (`CreateProject` → `sessionSyncsByName`) runs inside the background goroutine,
+  so sharing a result means threading it across a concurrency boundary. What it
+  buys is one local process spawn that (a) already took off the attach path.
+
+  **(c) skip `sameDirSyncWarning` on reconnect — won't do.** It would save the
+  last foreground spawn, but the collision it detects is not purely
+  creation-time: if the OTHER colliding session was created after yours, your
+  next reconnect is the first moment you could learn about it. Trading a real
+  (if uncommon) detection for one local spawn is not worth it.
+
+  <details><summary>original finding</summary>
+
+- [ ] **[R7] Four serialized mutagen CLI spawns in the connect foreground.**
+  `sameDirSyncWarning` (`session.go:533`) + `startProjectSync` (`:547`) →
+  `ResumeAll` + `CreateProject` → a second label-scoped list
+  (`internal/sync/sync.go:276-315,484`). In value order: fold `startProjectSync`
+  into `startBackgroundSync`; one unfiltered List feeding both the collision
+  warning and the existence map; skip the warning on reconnect when the project
+  sync exists. The comment at `session.go:531` calling this List "off the hot
+  path" is wrong for the connect foreground — correct it when touching this.
+
+  </details>
+- **WON'T DO — [R8] drive `waitForPodReady` off the Sandbox informer** (decided
+  with the maintainer, 2026-07-30). The finding is real —
+  `internal/k8s/watch.go` does already run a Sandbox informer with
+  condition-based readiness (`sandboxReady`) — but its cost case was overtaken
+  by the same batch that would have preceded it: `[R1b]` halved the poll to one
+  List per tick (~30 calls over a 30s cold start, not ~60), and `[R1a]` removed
+  the wait from warm reattach entirely, so what remains is cold-start-only, on
+  the path already dominated by an image pull. Against that, the caveat lands on
+  exactly that path: the Sandbox informer carries no pod-level detail, so
+  `podPhaseDetail`'s "scheduling → pulling image → starting" splash text — the
+  only feedback during a 30s cold start — would coarsen unless a second, pod
+  informer supplements it. Trading that feedback plus informer-lifecycle
+  complexity for ~30 cheap List calls is a bad deal; `[R6]` takes most of the
+  remaining tail latency for far less. Reopen only if cold-start API load is
+  ever measured to actually matter.
+- **WON'T DO (for now) — [R9] resize coalescing on the pane path** (decided with
+  the maintainer, 2026-07-30). Accurate as described:
+  `internal/tui/dashboard/external_pane.go:710` enqueues a control frame per
+  `WindowSizeMsg` and `runner/src/server.ts` applies each straight to
+  `pane.resize` → ioctl + SIGWINCH, so dragging a terminal edge is a redraw
+  storm of full-screen repaints across the link. Not taken because it only
+  bites during an ACTIVE window drag — sessions overwhelmingly attach at a fixed
+  size and never resize — and the input queue already bounds the damage
+  (64 entries, drop-on-full). If flicker while dragging ever becomes a real
+  annoyance, the fix is a trailing debounce (~40-60ms) on the RUNNER side of
+  `resize()`: the source end, which owns the PTY and so is what actually
+  triggers the repaint, and which also protects any other pane client.
+- [x] **[X1] done 2026-07-30** (done log): reaper ensure now runs concurrently
+  with the sync block inside the background task, its advisory joined at
+  completion — idle-cost protection no longer waits out the 12s flush budget on
+  a first connect.
+
+  <details><summary>original finding</summary>
+
+- [ ] **[X1] Reaper ensure is serialized behind the initial flush.**
+  `client/session.go:743-808` — inside `startBackgroundSync` (so it never delays
+  the attach), reaper ensure runs after the flush block and `CreateInputs`, so
+  first-connect can wait the full 12s flush budget before idle-cost protection
+  exists. Run it concurrently within the background task; merge warnings at
+  completion.
+
+  </details>
+- **WON'T DO — [X2] run the post-forward steps concurrently** (decided with the
+  maintainer, 2026-07-30). The observation was right when written, but the
+  earlier batches took most of it: `[R1d]` overlapped the Secret fetch with the
+  port-forward, and `[R7]`a moved project-sync setup out of the chain entirely.
+  What is left serial (`client/session.go:506-651`) is the runner-health wait,
+  a local SSH-key ensure, the collision List, and — for opencode sessions only —
+  `waitOpencodeReady`. The one remaining prize is running the two independent
+  up-to-30s waits (`waitHealthy`, `waitOpencodeReady`) concurrently, and that
+  helps **only opencode**; claude-pane, the primary backend, has no opencode
+  wait and would see essentially nothing. The cost did not shrink with the
+  prize: every error path in that block does `s.closeHandles()` and returns, so
+  making it concurrent means coordinating cancellation and deciding which error
+  wins a race. Reopen if a codex/opencode connect is ever measured to be
+  attach-latency-bound.
+- [~] **[X3] mitigated 2026-07-30** (done log): `ScrollbackRing.snapshot()`
+  strips a partial escape sequence left at the head by its own byte trim, so a
+  replay never begins mid-CSI/OSC. The terminal-state-snapshot redesign below is
+  NOT done and stays deferred — the maintainer has not observed the artifact on
+  a live reattach, so the cheap mitigation was preferred to putting a vt
+  emulator dependency in the runner. Revisit only if garbage is actually seen.
+
+  <details><summary>original finding</summary>
+
+- [ ] **[X3] Scrollback replay can start mid-ANSI-sequence.**
+  `runner/src/claude-pane.ts:133-155,350-385` — the ring is a byte-trimmed tail,
+  so replay can begin mid-escape-sequence and paint garbage until the forced
+  repaint. `[R4]` removed the stale-dimensions half; the residual is replaying
+  from a reset/full-frame boundary, or keeping a terminal-state snapshot instead
+  of a byte ring. CAVEAT: a snapshot is a real design change — cost it first.
+
+  </details>
+- **REJECTED 2026-07-30, verified against the tree:** `[R10]` (the 80ms repaint
+  hold racing the client's initial resize) and `[X4]` (a stale repaint timer
+  firing against a respawned PTY). Both are premised on an 80ms `setTimeout`
+  with an unretained handle; there is **no timer anywhere in
+  `runner/src/claude-pane.ts`** — `forceRepaint()` (`claude-pane.ts:394-399`) is
+  a synchronous jiggle-and-restore that runs to completion inside `attach()`,
+  before any client frame can be processed, and it guards `if (!this.pty)`. No
+  race and no stale-timer window exists. Do not re-file without new evidence.
 
 **2026-07-20 pane byte-path review** (detail in
 [`docs/review-2026-07-20.md`](docs/review-2026-07-20.md) §P; all prior

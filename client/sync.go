@@ -279,17 +279,19 @@ func rewriteSSHInclude(userCfg, oldConfig, newInclude string) {
 // was freshly created (this session's first-ever sync) so the caller can skip a
 // blocking initial flush on reconnect. The built Spec is returned so the caller
 // can hand it to the background CreateInputs without rebuilding it.
-func (c *Client) startProjectSync(ctx context.Context, id, workspacePath, privPath string, sshLocalPort int) (created bool, spec syncpkg.Spec, err error) {
+// resumeWarn is non-nil when un-pausing a previously suspended sync failed; the
+// project sync may still have been created, so it is advisory, not an error.
+func (c *Client) startProjectSync(ctx context.Context, id, workspacePath, privPath string, sshLocalPort int) (created bool, spec syncpkg.Spec, resumeWarn error, err error) {
 	cfg, err := c.sshConfig()
 	if err != nil {
-		return false, syncpkg.Spec{}, err
+		return false, syncpkg.Spec{}, nil, err
 	}
 	if err := cfg.Upsert(id, sshLocalPort, privPath); err != nil {
-		return false, syncpkg.Spec{}, err
+		return false, syncpkg.Spec{}, nil, err
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return false, syncpkg.Spec{}, err
+		return false, syncpkg.Spec{}, nil, err
 	}
 	spec = syncpkg.Spec{
 		SessionID: id,
@@ -307,10 +309,17 @@ func (c *Client) startProjectSync(ctx context.Context, id, workspacePath, privPa
 	// Resume any syncs paused by a prior suspend BEFORE creating: CreateProject/
 	// CreateInputs are idempotent and SKIP an existing sync (pre-create existence
 	// check) without un-pausing it, so without this a plain re-attach would leave
-	// files frozen with no error. Best-effort.
-	_ = mgr.ResumeAll(ctx, id)
+	// files frozen with no error.
+	//
+	// [R5] The comment above describes exactly the failure mode, so discarding the
+	// error was self-defeating: when the un-pause fails, CreateProject then
+	// succeeds as a no-op against the still-paused sync and the session comes up
+	// looking clean while the agent works against a stale workspace. Report it —
+	// it stays non-fatal (a paused sync is recoverable and the rest of the connect
+	// is sound), but the caller now has something to surface.
+	resumeWarn = mgr.ResumeAll(ctx, id)
 	created, err = mgr.CreateProject(ctx, spec)
-	return created, spec, err
+	return created, spec, resumeWarn, err
 }
 
 // ensureReaper starts (or confirms) the per-session idle reaper. A failure is
@@ -373,13 +382,45 @@ func waitHealthy(ctx context.Context, client healthChecker) error {
 	return waitHealthyWithin(ctx, client, 30*time.Second, time.Second)
 }
 
+// initialProbeInterval is where the readiness polls below start before backing
+// off to their ceiling ([R6]). These probes ride an already-established loopback
+// port-forward and cost microseconds, so the flat 1s they used to sleep was pure
+// dead time: the wait after the service actually comes up is bounded by the poll
+// interval, which averaged ~500ms of nothing on every resume. Starting fast
+// catches the common case (the pod is already warm, the service answers on the
+// first or second try) while the backoff keeps a genuinely slow start from
+// hammering — same reasoning as waitForPodReady's "2s → 1s" note.
+const initialProbeInterval = 100 * time.Millisecond
+
+// nextProbeInterval doubles cur toward ceiling (never past it). A ceiling below
+// the initial interval — which tests inject — just pins every wait at ceiling.
+func nextProbeInterval(cur, ceiling time.Duration) time.Duration {
+	if cur >= ceiling {
+		return ceiling
+	}
+	if next := cur * 2; next < ceiling {
+		return next
+	}
+	return ceiling
+}
+
+// probeInterval picks the starting interval for a poll whose ceiling is given.
+func probeInterval(ceiling time.Duration) time.Duration {
+	if ceiling < initialProbeInterval {
+		return ceiling
+	}
+	return initialProbeInterval
+}
+
 // waitHealthyWithin is the testable core of waitHealthy: it polls client.Health
-// every interval until it returns nil, the budget elapses (returning the last
-// error), or ctx is cancelled. budget/interval are injected so the
-// deadline-exhaustion branch is exercisable without a real 30s wait. Each poll
-// caps at a 3s per-attempt timeout, matching production.
+// until it returns nil, the budget elapses (returning the last error), or ctx is
+// cancelled. budget/interval are injected so the deadline-exhaustion branch is
+// exercisable without a real 30s wait; interval is the poll CEILING, which the
+// wait backs off toward from initialProbeInterval ([R6]). Each poll caps at a 3s
+// per-attempt timeout, matching production.
 func waitHealthyWithin(ctx context.Context, client healthChecker, budget, interval time.Duration) error {
 	deadline := time.Now().Add(budget)
+	wait := probeInterval(interval)
 	var lastErr error
 	for {
 		hctx, cancel := context.WithTimeout(ctx, 3*time.Second)
@@ -395,8 +436,9 @@ func waitHealthyWithin(ctx context.Context, client healthChecker, budget, interv
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(interval):
+		case <-time.After(wait):
 		}
+		wait = nextProbeInterval(wait, interval)
 	}
 }
 
@@ -408,6 +450,7 @@ func waitHealthyWithin(ctx context.Context, client healthChecker, budget, interv
 func waitOpencodeReady(ctx context.Context, url string) error {
 	deadline := time.Now().Add(30 * time.Second)
 	client := &http.Client{Timeout: 3 * time.Second}
+	wait := probeInterval(time.Second) // [R6] 100ms → 1s, not a flat 1s
 	var lastErr error
 	for {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -426,8 +469,9 @@ func waitOpencodeReady(ctx context.Context, url string) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(time.Second):
+		case <-time.After(wait):
 		}
+		wait = nextProbeInterval(wait, time.Second)
 	}
 }
 
