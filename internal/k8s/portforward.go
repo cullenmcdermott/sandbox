@@ -51,11 +51,11 @@ func (b *Backend) PortForward(ctx context.Context, ref session.Ref, ports []sess
 	// precede this existed only to feed getPodForSandbox, which never read
 	// anything off the object but the name and namespace ref already carries —
 	// so it was a serialized API round trip on the connect critical path buying
-	// nothing. A missing Sandbox and a Sandbox with no pod both surface here as
-	// "no pod", which is the same actionable state for the caller either way.
+	// nothing. describeNoPod re-asks the "does it exist?" question only when the
+	// lookup came back empty, which is off the critical path by definition.
 	pod, err := b.getPodForRef(ctx, ref)
 	if err != nil || pod == nil {
-		return nil, fmt.Errorf("k8s: no pod found for sandbox %s", ref.ID)
+		return nil, b.describeNoPod(ctx, ref, "port-forward")
 	}
 
 	// Establish every forward concurrently rather than serially: each forwardPort

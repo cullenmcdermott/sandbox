@@ -1085,10 +1085,12 @@ func (b *Backend) pinIsCurrent(sb *agentv1alpha1.Sandbox, pod *corev1.Pod) bool 
 // given stdio. When tty is true a pseudo-terminal is allocated and sizeQueue
 // (if non-nil) propagates window resizes.
 func (b *Backend) Exec(ctx context.Context, ref session.Ref, command []string, stdin io.Reader, stdout, stderr io.Writer, tty bool, sizeQueue remotecommand.TerminalSizeQueue) error {
-	// [R1b] The Sandbox Get this used to do only fed getPodForSandbox.
+	// [R1b] The Sandbox Get this used to do only fed getPodForSandbox. `sandbox
+	// shell` reaches here without resolving Status first, so "no such session" is
+	// a real thing a user hits — it gets its own message, off the failure path.
 	pod, err := b.getPodForRef(ctx, ref)
 	if err != nil || pod == nil {
-		return fmt.Errorf("k8s: no pod found for sandbox %s", ref.ID)
+		return b.describeNoPod(ctx, ref, "exec")
 	}
 
 	req := b.core.CoreV1().RESTClient().Post().
@@ -1749,11 +1751,35 @@ func (b *Backend) getPodForSandbox(ctx context.Context, sb *agentv1alpha1.Sandbo
 // getPodForRef is getPodForSandbox without the Sandbox object ([R1b]). The
 // lookup only ever needed a namespace and a session id, both of which ref
 // already carries, so callers that fetched the Sandbox purely to reach this
-// helper were paying an extra serialized API round trip for nothing. Callers
-// that must distinguish "no such Sandbox" from "Sandbox has no pod" still need
-// their own Get.
+// helper were paying an extra serialized API round trip for nothing. When it
+// finds nothing, describeNoPod says which of the two reasons it was.
 func (b *Backend) getPodForRef(ctx context.Context, ref session.Ref) (*corev1.Pod, error) {
 	return b.getPodByLabel(ctx, b.namespace, string(ref.ID))
+}
+
+// describeNoPod builds the error for a getPodForRef that came back empty,
+// distinguishing "there is no such session" from "the session exists but has no
+// pod" — two states with completely different user actions (recreate it vs.
+// resume it / wait for it), which [R1b] had collapsed into one message when it
+// dropped the Sandbox Get.
+//
+// The Get it does costs nothing that matters: this runs only on the failure
+// path, where the fast path has already lost, and it does not touch the connect
+// critical path at all. Callers that resolve Status first (PortForward, reached
+// via Session.Connect) would have caught a missing session earlier; Exec
+// (`sandbox shell`) and PodIP (the out-of-namespace reaper) call in cold, and
+// they are exactly the ones that used to report the vaguer message.
+//
+// A Get that itself fails is not worth escalating: it is a second failure on an
+// already-failing path, so fall back to the generic message rather than report a
+// confusing error about the diagnosis instead of the problem.
+func (b *Backend) describeNoPod(ctx context.Context, ref session.Ref, op string) error {
+	if _, err := b.agents.AgentsV1alpha1().Sandboxes(b.namespace).Get(ctx, string(ref.ID), metav1.GetOptions{}); err != nil {
+		if k8serrors.IsNotFound(err) {
+			return fmt.Errorf("k8s: no Sandbox %s (%s): the session does not exist", ref.ID, op)
+		}
+	}
+	return fmt.Errorf("k8s: no pod found for sandbox %s (%s)", ref.ID, op)
 }
 
 func (b *Backend) getPodByLabel(ctx context.Context, namespace, sessionID string) (*corev1.Pod, error) {
@@ -1778,10 +1804,12 @@ func (b *Backend) getPodByLabel(ctx context.Context, namespace, sessionID string
 // PodIP returns the IP of the sandbox's running pod, for direct HTTP access
 // without a port-forward (e.g. an out-of-namespace reaper polling the runner).
 func (b *Backend) PodIP(ctx context.Context, ref session.Ref) (string, error) {
-	// [R1b] The Sandbox Get this used to do only fed getPodForSandbox.
+	// [R1b] The Sandbox Get this used to do only fed getPodForSandbox. The reaper
+	// calls this cold, with no prior Status, so the "does the session even exist?"
+	// question is answered on the failure path instead.
 	pod, err := b.getPodForRef(ctx, ref)
 	if err != nil || pod == nil {
-		return "", fmt.Errorf("k8s: no pod for sandbox %s", ref.ID)
+		return "", b.describeNoPod(ctx, ref, "pod ip")
 	}
 	if pod.Status.PodIP == "" {
 		return "", fmt.Errorf("k8s: pod %s has no IP yet", pod.Name)
