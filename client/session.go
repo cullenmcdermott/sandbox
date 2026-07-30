@@ -400,7 +400,21 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 	//     read as Suspended *before* Resume ran, so it is not StatusRunning here
 	//     either. A freshly created session synthesizes StatusCreating above.
 	// Anything not provably warm still takes the full wait.
-	if full && !(st.PodReady && st.Status == session.StatusRunning) {
+	switch {
+	case !full:
+		// Observer connect: no readiness wait, and no pin refresh either — an
+		// observer mutates nothing about the session.
+	case st.PodReady && st.Status == session.StatusRunning:
+		// The warm skip. StartWithProgress does TWO things, though, and only the
+		// wait is redundant here: it also refreshes the runner-image digest pin,
+		// which is what lets a later resume boot the exact image this pod is
+		// running instead of a moving tag. Skipping it outright meant a session
+		// that stays Running across a reschedule (new node, possibly a different
+		// image behind the same tag) never re-pinned until its next
+		// suspend/resume. So keep the refresh — just off the path the user waits
+		// on.
+		s.refreshImagePinAsync()
+	default:
 		sp := tr.start("connect.pod_ready")
 		err := s.c.backend.StartWithProgress(ctx, s.ref, func(detail string) {
 			onPhase(StageResume, detail)
@@ -973,6 +987,36 @@ func (s *Session) AwaitSync(ctx context.Context) (warning string, err error) {
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}
+}
+
+// imagePinRefreshTimeout bounds the detached pin refresh below. It is a couple
+// of API calls against an already-warm pod; anything slower than this is a sick
+// API server, and there is no user waiting on the answer.
+const imagePinRefreshTimeout = 30 * time.Second
+
+// refreshImagePinAsync re-runs the backend's start path off the connect
+// critical path, purely for its digest-pin side effect (see the warm-reattach
+// branch in Connect).
+//
+// Backend exposes no "pin the image" call and should not grow one: pinning is a
+// Kubernetes implementation detail, and docs/design-principles.md keeps that out
+// of the public interface. StartWithProgress is the call that owns it, so this
+// invokes that — on a pod already known Ready its readiness poll resolves on the
+// first tick, which is precisely why paying for it here is acceptable and paying
+// for it inline was not.
+//
+// Detached deliberately: it is rooted at context.Background() rather than the
+// connect's ctx (which is typically cancelled the moment Connect returns) and
+// its outcome is discarded. The pin is best-effort — a failure only means a later
+// resume falls back to the tag ref — so there is nothing to report and nothing to
+// wait for. Bounded so a wedged API server cannot accumulate one goroutine per
+// attach.
+func (s *Session) refreshImagePinAsync() {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), imagePinRefreshTimeout)
+		defer cancel()
+		_ = s.c.backend.StartWithProgress(ctx, s.ref, nil)
+	}()
 }
 
 // SyncAdvisory returns the background sync work's advisory so far, without

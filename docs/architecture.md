@@ -151,6 +151,10 @@ on a remote cluster, so the connect path avoids the ones it can
   anything not provably warm: a fresh create, a resume (whose status was read as
   Suspended *before* the resume), and the stale-node case, which `Status`
   downgrades to `Unknown`/`PodReady=false` precisely so it cannot take the skip.
+  That call also refreshes the runner-image digest pin, and a warm reattach
+  still needs that half — a pod rescheduled while the session stayed `Running`
+  would otherwise keep a stale pin until its next suspend/resume — so it runs
+  **detached**, off the path the user waits on.
 - The Secret read overlaps the port-forward instead of following it, so
   `Backend` implementations must be safe for concurrent use.
 - Pod lookup goes straight from the session ref (a label-selected pod List)

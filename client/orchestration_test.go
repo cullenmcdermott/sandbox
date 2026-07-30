@@ -60,8 +60,13 @@ type fakeBackend struct {
 	// portForwardHook, if set, runs at the start of PortForward — a test seam to
 	// stall Connect mid-flight (e.g. to race Close against it).
 	portForwardHook func()
-	token           string
-	tokenErr        error
+	// startHook, if set, runs inside StartWithProgress AFTER the call is
+	// recorded. The warm-reattach tests use it both to observe the detached pin
+	// refresh and to stall the call, since "did Connect BLOCK on this?" is the
+	// property that matters once the call also happens off the critical path.
+	startHook func()
+	token     string
+	tokenErr  error
 
 	// captured inputs
 	gotSpec       Spec
@@ -139,6 +144,9 @@ func (f *fakeBackend) Destroy(_ context.Context, ref Ref) error {
 
 func (f *fakeBackend) StartWithProgress(_ context.Context, ref Ref, _ func(string)) error {
 	f.record("start", ref)
+	if f.startHook != nil {
+		f.startHook()
+	}
 	return nil
 }
 
