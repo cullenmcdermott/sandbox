@@ -67,6 +67,14 @@ type ExternalPane struct {
 	// real (close()), never on minimize. nil in tests.
 	transportClose func()
 
+	// seedAdvisory is the advisory known when the connect returned
+	// (ConnectResult.Warning); advisory, when set, polls the live one
+	// (ConnectResult.Advisory) for the ones discovered afterwards. Both feed the
+	// status row's warning segment — see paneAdvisory. advisory is called from
+	// the render path, so it must not block.
+	seedAdvisory string
+	advisory     func() string
+
 	emu       *vt.Emulator
 	transport PaneTransport
 	out       chan ptyChunk
@@ -826,12 +834,47 @@ func (p *ExternalPane) scrolledBody(live string) string {
 	return strings.Join(out, "\n")
 }
 
-// statusRow is the reserved last line: title · client · model · live status ·
-// ctx% · cost, with a detach hint on the right. The live status/ctx%/cost come
-// from the runner's passive observer stream (opencode observer / claude-pane
-// hook+statusline observer) via the dashboard read-model, so every external
-// pane reaches metric parity regardless of engine. (^] / ctrl+] only — esc is
-// forwarded to the child so its own overlays can use it.)
+// maxAdvisoryWidth caps the advisory segment so a long mutagen error can't
+// crowd the title and metrics off the bar entirely. The full text is not lost:
+// it is what `sandbox status` and the connect log carry.
+const maxAdvisoryWidth = 60
+
+// paneAdvisory is the non-fatal advisory to show in the status row, or "".
+//
+// Two sources, because sync trouble is discovered at two different times and the
+// pane outlives both: seedAdvisory is what the connect already knew
+// (ConnectResult.Warning — a missing worktree, no usable SSH key), while the
+// advisory func polls what the BACKGROUND phase learns afterwards (the project
+// sync's own failure, and a reconnect's stalled-transport classification, which
+// lands after that phase has already settled). The live one wins when both are
+// set: it is a superset — client.Session.SyncAdvisory joins every advisory the
+// task has accumulated — so showing both would just duplicate the seed.
+//
+// Newlines are collapsed: this renders into a single reserved row, and a stray
+// newline there would push the pane body up by a line.
+func (p *ExternalPane) paneAdvisory() string {
+	adv := p.seedAdvisory
+	if p.advisory != nil {
+		if live := p.advisory(); live != "" {
+			adv = live
+		}
+	}
+	return strings.Join(strings.Fields(adv), " ")
+}
+
+// statusRow is the reserved last line: an advisory (when there is one) · title ·
+// client · model · live status · ctx% · cost, with a detach hint on the right.
+// The live status/ctx%/cost come from the runner's passive observer stream
+// (opencode observer / claude-pane hook+statusline observer) via the dashboard
+// read-model, so every external pane reaches metric parity regardless of engine.
+// (^] / ctrl+] only — esc is forwarded to the child so its own overlays can use
+// it.)
+//
+// The advisory goes FIRST for a truncation reason, not an aesthetic one: spread
+// truncates the left segment from the right, so anything placed after the title
+// is the first thing a narrow terminal drops. A "file sync is stalled — your
+// edits are not propagating" notice is precisely the thing that must not be the
+// first casualty of a small window.
 func (p *ExternalPane) statusRow() string {
 	s := p.session()
 	model := s.Model
@@ -846,6 +889,10 @@ func (p *ExternalPane) statusRow() string {
 	muted := lipgloss.NewStyle().Foreground(theme.TextMuted)
 	left := lipgloss.NewStyle().Foreground(theme.Charple).Bold(true).Render(s.DisplayTitle()) +
 		muted.Render(" · "+p.label+" · "+model)
+	if adv := p.paneAdvisory(); adv != "" {
+		left = lipgloss.NewStyle().Foreground(theme.Warning).Bold(true).
+			Render("⚠ "+truncate(adv, maxAdvisoryWidth)) + muted.Render(" · ") + left
+	}
 
 	// Live metrics, surfaced only once the observer has reported them (a fresh
 	// pane with no turn yet shows just title/model, no empty "idle · ctx 0%").

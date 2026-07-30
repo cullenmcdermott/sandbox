@@ -34,7 +34,14 @@ const (
 // fakeBackend implements client.Backend. Each method optionally records itself
 // into *order (shared with the fake sync runner so a test can pin cross-seam
 // call ordering) and returns the pre-seeded result/error for that method.
+//
+// recordMu guards the recording side: since [R1d], Connect fetches the session
+// Secret concurrently with PortForward, so two Backend methods genuinely run at
+// once and an unsynchronized append to order/gotRefs is a data race in the fake.
+// The real backend needs no such lock (client-go clients are goroutine-safe).
 type fakeBackend struct {
+	recordMu sync.Mutex
+
 	order *[]string
 
 	// results / errors, keyed by method
@@ -53,8 +60,13 @@ type fakeBackend struct {
 	// portForwardHook, if set, runs at the start of PortForward — a test seam to
 	// stall Connect mid-flight (e.g. to race Close against it).
 	portForwardHook func()
-	token           string
-	tokenErr        error
+	// startHook, if set, runs inside StartWithProgress AFTER the call is
+	// recorded. The warm-reattach tests use it both to observe the detached pin
+	// refresh and to stall the call, since "did Connect BLOCK on this?" is the
+	// property that matters once the call also happens off the critical path.
+	startHook func()
+	token     string
+	tokenErr  error
 
 	// captured inputs
 	gotSpec       Spec
@@ -67,7 +79,19 @@ func newFakeBackend() *fakeBackend {
 	return &fakeBackend{gotRefs: map[string][]Ref{}}
 }
 
+// callCount reports how many times a method was recorded, under recordMu. Use
+// this rather than reading gotRefs directly from a test: Connect's [R1d] Secret
+// fetch can still be in flight on an early-error return, so an unlocked read of
+// the map races it.
+func (f *fakeBackend) callCount(method string) int {
+	f.recordMu.Lock()
+	defer f.recordMu.Unlock()
+	return len(f.gotRefs[method])
+}
+
 func (f *fakeBackend) record(method string, ref Ref) {
+	f.recordMu.Lock()
+	defer f.recordMu.Unlock()
 	if f.order != nil {
 		*f.order = append(*f.order, method)
 	}
@@ -120,6 +144,9 @@ func (f *fakeBackend) Destroy(_ context.Context, ref Ref) error {
 
 func (f *fakeBackend) StartWithProgress(_ context.Context, ref Ref, _ func(string)) error {
 	f.record("start", ref)
+	if f.startHook != nil {
+		f.startHook()
+	}
 	return nil
 }
 
@@ -157,6 +184,11 @@ type fakeSyncRunner struct {
 	order *[]string
 	mu    sync.Mutex
 	calls [][]string
+	// verbErr fails a given `mutagen sync <verb>` (e.g. "resume", "flush"), so a
+	// test can drive the best-effort sync failure paths that used to be silent
+	// ([R5]). verbOut supplies canned stdout for a verb (e.g. "list").
+	verbErr map[string]error
+	verbOut map[string][]byte
 }
 
 func (r *fakeSyncRunner) Output(_ context.Context, _ io.Reader, args ...string) ([]byte, error) {
@@ -166,7 +198,26 @@ func (r *fakeSyncRunner) Output(_ context.Context, _ io.Reader, args ...string) 
 	if r.order != nil && len(args) >= 2 && args[0] == "sync" {
 		*r.order = append(*r.order, "sync-"+args[1])
 	}
+	if len(args) >= 2 && args[0] == "sync" {
+		verb := args[1]
+		if err, ok := r.verbErr[verb]; ok {
+			return r.verbOut[verb], err
+		}
+		if out, ok := r.verbOut[verb]; ok {
+			return out, nil
+		}
+	}
 	return nil, nil
+}
+
+// failVerb makes `mutagen sync <verb>` return err.
+func (r *fakeSyncRunner) failVerb(verb string, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.verbErr == nil {
+		r.verbErr = map[string]error{}
+	}
+	r.verbErr[verb] = err
 }
 
 func (r *fakeSyncRunner) sawSync(verb string) bool {

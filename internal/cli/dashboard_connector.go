@@ -142,6 +142,11 @@ func newDashboardConnector(c *client.Client, reaperImage string) dashboard.Conne
 			OpencodeCreds: mapOpencode(conn.External),
 			PaneDial:      mapPaneDial(sess, conn.Backend),
 			Warning:       conn.Warning,
+			// Connect returns before the background file sync settles, and a
+			// reconnect's stalled-transport classification lands later still, so
+			// conn.Warning alone cannot carry those. SyncAdvisory is the
+			// non-blocking read the pane polls for them.
+			Advisory: sess.SyncAdvisory,
 			// §1d C1: forwards outlive the connect ctx by design; this is the only
 			// handle that actually releases them. sess is per-connector-call, so
 			// closing here can't touch another connect's forwards.
@@ -318,7 +323,11 @@ func newDashboardCreator(c *client.Client, runnerImage, reaperImage string) dash
 			OpencodeCreds: mapOpencode(conn.External),
 			PaneDial:      mapPaneDial(sess, conn.Backend),
 			Warning:       conn.Warning,
-			Close:         func() { _ = sess.Close() },
+			// A brand-new session is where this matters most: its first-ever
+			// project sync is the one most likely to stall, and it runs in the
+			// background, so nothing about it is known here.
+			Advisory: sess.SyncAdvisory,
+			Close:    func() { _ = sess.Close() },
 		}, nil
 	}
 }

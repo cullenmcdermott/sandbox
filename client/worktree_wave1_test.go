@@ -24,7 +24,7 @@ func TestStartProjectSyncUsesWorkspaceEndpoints(t *testing.T) {
 	be := newFakeBackend()
 	c, _, _ := fakeClient(t, be)
 
-	_, spec, err := c.startProjectSync(context.Background(), "claude-sdk-abc123", "/work/repo", "/keys/id_ed25519", 12345)
+	_, spec, _, err := c.startProjectSync(context.Background(), "claude-sdk-abc123", "/work/repo", "/keys/id_ed25519", 12345)
 	if err != nil {
 		t.Fatalf("startProjectSync: %v", err)
 	}

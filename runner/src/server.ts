@@ -155,6 +155,25 @@ export function parsePaneControl(text: string): { type: 'resize'; cols: number; 
   return { type: 'resize', cols, rows };
 }
 
+/**
+ * [R4] Read the attaching client's terminal geometry off the upgrade URL
+ * (`?cols=&rows=`). The pane child is spawned lazily inside `attach()`, before
+ * any client frame can be read, so without this the first attach always spawns
+ * at 80x24 and reflows one round trip later. Same bounds as `parsePaneControl`
+ * — both are untrusted input reaching a PTY ioctl. Absent or invalid params
+ * yield null, which keeps the previous default-geometry behaviour.
+ */
+export function parsePaneGeometry(url: URL): { cols: number; rows: number } | null {
+  const rawCols = url.searchParams.get('cols');
+  const rawRows = url.searchParams.get('rows');
+  if (rawCols === null || rawRows === null) return null;
+  const cols = Number(rawCols);
+  const rows = Number(rawRows);
+  if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols <= 0 || rows <= 0) return null;
+  if (cols > MAX_PANE_DIMENSION || rows > MAX_PANE_DIMENSION) return null;
+  return { cols, rows };
+}
+
 /** Coalesce a `ws` RawData frame into a single Buffer. */
 function rawToBuffer(data: RawData): Buffer {
   if (Array.isArray(data)) return Buffer.concat(data);
@@ -200,7 +219,40 @@ function paneSocketAdapter(ws: WebSocket): PaneSocket {
 function attachPaneUpgrade(server: Server, cfg: ReturnType<typeof loadConfig>, pane: ClaudePaneSupervisor): void {
   // [S5] maxPayload bounds a single inbound frame; without it `ws` defaults to
   // 100 MiB, which one authenticated client could make the runner buffer at will.
-  const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_PANE_FRAME_BYTES });
+  //
+  // [R2] permessage-deflate is off by default in `ws`. The pane streams ANSI —
+  // which compresses ~10-20x — and a reattach replays up to SCROLLBACK_BYTES
+  // (256 KiB) as one frame, so this is the single biggest lever on time-to-
+  // readable-pane over a high-latency link. `ws` documents real per-connection
+  // memory/fragmentation cost for deflate, so memLevel is set below zlib's
+  // default rather than left alone; there is only ever one pane client per
+  // session, and [S5] still bounds inbound frames.
+  //
+  // Note on windowBits: it is NOT settable here, and an earlier version of this
+  // block set it to 13 believing otherwise. `ws` builds each zlib stream as
+  // `{...zlibDeflateOptions, windowBits}` with windowBits taken from the
+  // NEGOTIATED `{server,client}_max_window_bits` (permessage-deflate.js) — the
+  // spread comes first, so anything set here is overwritten. Narrowing the
+  // window would require the peer to offer `client_max_window_bits`, and our Go
+  // client (gorilla) offers only `server_no_context_takeover;
+  // client_no_context_takeover` (client.go:254). So both windows run at zlib's
+  // default 15. Which is also why there is no inflate-window mismatch to worry
+  // about: a >8 KiB paste from gorilla would have failed to inflate against a
+  // real 13-bit window.
+  const wss = new WebSocketServer({
+    noServer: true,
+    maxPayload: MAX_PANE_FRAME_BYTES,
+    perMessageDeflate: {
+      zlibDeflateOptions: { level: 6, memLevel: 7 },
+      // Deflating a tiny keystroke frame costs more than it saves.
+      threshold: 512,
+      // Our Go client (gorilla) only ever negotiates no-context-takeover, so
+      // each frame deflates independently. That is fine for the case this is
+      // for — the one large scrollback-replay frame — and it keeps the
+      // per-connection retained memory to the buffers alone.
+      concurrencyLimit: 4,
+    },
+  });
   server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     const url = new URL(req.url ?? '/', `http://localhost:${PORT}`);
     const outcome = evaluatePaneUpgrade(url.pathname, cfg.sessionId, cfg.backend, authOk(req));
@@ -223,10 +275,15 @@ function attachPaneUpgrade(server: Server, cfg: ReturnType<typeof loadConfig>, p
       traceIDFromHeader(url.searchParams.get('traceId') ?? undefined);
     const paneLog = paneTraceId !== '' ? httpLog.child({ traceId: paneTraceId }) : httpLog;
 
+    // [R4] Geometry must be known BEFORE attach(), which is what lazily spawns
+    // the child — a resize arriving on the first post-handshake frame is a full
+    // round trip too late.
+    const geom = parsePaneGeometry(url);
+
     wss.handleUpgrade(req, socket, head, (ws) => {
       const adapter = paneSocketAdapter(ws);
       paneLog.info('pane attached');
-      pane.attach(adapter);
+      pane.attach(adapter, geom?.cols, geom?.rows);
       ws.on('message', (data: RawData, isBinary: boolean) => {
         if (isBinary) {
           pane.write(rawToBuffer(data));

@@ -122,21 +122,46 @@ sequenceDiagram
     CLI->>K: create Secret (token + ssh pubkey + credential docs), PVC, Sandbox
     K-->>R: schedule pod (PVC mounted, env injected)
     R->>R: materialize .credentials.json + .claude.json seed + settings/hooks
-    CLI->>K: wait for pod ready
-    CLI->>K: port-forward :8787 and :22
+    CLI->>K: wait for pod ready (skipped on a warm reattach — see below)
+    par
+        CLI->>K: port-forward :8787 and :22
+    and
+        CLI->>K: read RUNNER_TOKEN (+ opencode password) from Secret
+    end
     CLI->>R: GET /healthz
-    CLI->>K: read RUNNER_TOKEN from Secret
     CLI->>M: write ssh alias + mutagen sync create
     M-->>R: sync project into the host project path (SSH)
     CLI-->>U: open TUI
     U->>CLI: attach (enter)
-    CLI->>R: WS GET /sessions/:id/pane (Bearer token)
+    CLI->>R: WS GET /sessions/:id/pane?cols&rows (Bearer token)
     R->>R: lazy-spawn claude under node-pty (--session-id / --resume)
     R-->>CLI: scrollback replay + live PTY bytes (keystrokes go back up)
     R-->>CLI: SSE events in parallel (observer: turns, tools, permissions, usage)
     CLI-->>U: real Claude Code TUI in the pane; dashboard/feed from SSE
     Note over U,R: Ctrl+] detaches; the claude child keeps running.<br/>`sandbox attach` re-forwards, replays the pane scrollback,<br/>and resumes SSE from the last seq.
 ```
+
+**Attach latency.** Every serialized API-server round trip above is user-visible
+on a remote cluster, so the connect path avoids the ones it can
+([`docs/archive/review-2026-07-30.md`](archive/review-2026-07-30.md) `[R1]`):
+
+- The pod-readiness wait is **skipped entirely on a warm reattach** — when the
+  `Status` call that precedes it already reported `Running` with `PodReady`,
+  re-polling can only re-learn what was just read. The wait still runs for
+  anything not provably warm: a fresh create, a resume (whose status was read as
+  Suspended *before* the resume), and the stale-node case, which `Status`
+  downgrades to `Unknown`/`PodReady=false` precisely so it cannot take the skip.
+  That call also refreshes the runner-image digest pin, and a warm reattach
+  still needs that half — a pod rescheduled while the session stayed `Running`
+  would otherwise keep a stale pin until its next suspend/resume — so it runs
+  **detached**, off the path the user waits on.
+- The Secret read overlaps the port-forward instead of following it, so
+  `Backend` implementations must be safe for concurrent use.
+- Pod lookup goes straight from the session ref (a label-selected pod List)
+  rather than fetching the Sandbox first just to read its name — which also
+  halves the API cost of each readiness poll during a cold start.
+- The runner-image digest pin is decided from what the readiness poll already
+  observed, so the common (already-pinned) case costs no extra call.
 
 ## State & storage
 

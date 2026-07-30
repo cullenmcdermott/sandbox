@@ -1,13 +1,17 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -161,6 +165,127 @@ func TestAttachPaneInitialResize(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("server never received the initial resize control frame")
+	}
+}
+
+// TestAttachPaneGeometryOnUpgradeURL covers [R4]: the runner spawns the pane
+// child lazily inside attach(), which runs before it can read any frame, so the
+// geometry has to ride the handshake URL as well as the control frame. Without
+// the query params the first-ever attach always spawns 80x24 and reflows a full
+// round trip later.
+func TestAttachPaneGeometryOnUpgradeURL(t *testing.T) {
+	accept := make(chan *panePeer, 1)
+	queries := make(chan string, 4)
+	up := websocket.Upgrader{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		queries <- r.URL.RawQuery
+		conn, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		accept <- &panePeer{conn: conn, binary: make(chan []byte, 8), text: make(chan string, 8), closed: make(chan int, 1)}
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "tok")
+	ps, err := c.AttachPane(context.Background(), session.Ref{ID: "s1"}, 203, 51)
+	if err != nil {
+		t.Fatalf("AttachPane: %v", err)
+	}
+	defer ps.Close()
+	waitPeer(t, accept)
+
+	q, err := url.ParseQuery(<-queries)
+	if err != nil {
+		t.Fatalf("parse handshake query: %v", err)
+	}
+	if got := q.Get("cols"); got != "203" {
+		t.Errorf("handshake cols = %q, want 203", got)
+	}
+	if got := q.Get("rows"); got != "51" {
+		t.Errorf("handshake rows = %q, want 51", got)
+	}
+}
+
+// TestAttachPaneNoGeometryNoQuery pins the other half of [R4]: a 0,0 attach must
+// not put an unusable size on the URL — the runner keeps its default geometry.
+func TestAttachPaneNoGeometryNoQuery(t *testing.T) {
+	accept := make(chan *panePeer, 1)
+	queries := make(chan string, 4)
+	up := websocket.Upgrader{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		queries <- r.URL.RawQuery
+		conn, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		accept <- &panePeer{conn: conn, binary: make(chan []byte, 8), text: make(chan string, 8), closed: make(chan int, 1)}
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "tok")
+	ps, err := c.AttachPane(context.Background(), session.Ref{ID: "s1"}, 0, 0)
+	if err != nil {
+		t.Fatalf("AttachPane: %v", err)
+	}
+	defer ps.Close()
+	waitPeer(t, accept)
+
+	if q := <-queries; strings.Contains(q, "cols") || strings.Contains(q, "rows") {
+		t.Errorf("handshake query = %q, want no geometry params", q)
+	}
+}
+
+// TestPaneDialerNegotiatesCompression pins [R2]: the pane dialer must offer
+// permessage-deflate (a reattach replays up to 256 KiB of highly compressible
+// ANSI as one frame) and must not sit on gorilla's 4 KiB buffers.
+func TestPaneDialerNegotiatesCompression(t *testing.T) {
+	if !paneDialer.EnableCompression {
+		t.Error("paneDialer.EnableCompression = false, want true")
+	}
+	if paneDialer.ReadBufferSize < 32*1024 {
+		t.Errorf("paneDialer.ReadBufferSize = %d, want >= 32 KiB", paneDialer.ReadBufferSize)
+	}
+	if paneDialer.WriteBufferSize < 32*1024 {
+		t.Errorf("paneDialer.WriteBufferSize = %d, want >= 32 KiB", paneDialer.WriteBufferSize)
+	}
+
+	// End to end: a compression-enabled server and our dialer must agree on the
+	// extension, and bytes must still round-trip intact through deflate.
+	accept := make(chan *panePeer, 1)
+	up := websocket.Upgrader{EnableCompression: true}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.Header.Get("Sec-WebSocket-Extensions"), "permessage-deflate") {
+			t.Errorf("client offered no permessage-deflate: %q", r.Header.Get("Sec-WebSocket-Extensions"))
+		}
+		conn, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		conn.EnableWriteCompression(true)
+		accept <- &panePeer{conn: conn, binary: make(chan []byte, 8), text: make(chan string, 8), closed: make(chan int, 1)}
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "tok")
+	ps, err := c.AttachPane(context.Background(), session.Ref{ID: "s1"}, 0, 0)
+	if err != nil {
+		t.Fatalf("AttachPane: %v", err)
+	}
+	defer ps.Close()
+	peer := waitPeer(t, accept)
+
+	// A large, highly repetitive frame — the scrollback-replay shape.
+	payload := bytes.Repeat([]byte("\x1b[32mhello world\x1b[0m "), 4096)
+	if err := peer.conn.WriteMessage(websocket.BinaryMessage, payload); err != nil {
+		t.Fatalf("server write: %v", err)
+	}
+	got := make([]byte, len(payload))
+	if _, rerr := io.ReadFull(ps, got); rerr != nil {
+		t.Fatalf("ReadFull: %v", rerr)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Error("payload did not survive the compressed round trip")
 	}
 }
 
@@ -373,5 +498,129 @@ func TestAttachPaneOmitsEmptyTraceID(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("server never saw the handshake")
+	}
+}
+
+// countingListener wraps each accepted conn so a test can measure how many
+// bytes the CLIENT actually put on the wire — the only way to observe whether
+// an outbound frame was deflated, since gorilla exposes no getter for it.
+type countingListener struct {
+	net.Listener
+	n *int64
+}
+
+func (l *countingListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return &countingConn{Conn: c, n: l.n}, nil
+}
+
+type countingConn struct {
+	net.Conn
+	n *int64
+}
+
+func (c *countingConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	atomic.AddInt64(c.n, int64(n))
+	return n, err
+}
+
+// TestPaneClientDoesNotCompressOutbound pins the write half of [R2]. The
+// compression win is entirely server→client (a 256 KiB scrollback replay of
+// highly compressible ANSI). Client→server is keystrokes, and gorilla has no
+// size threshold the way the runner's `threshold: 512` does — so with write
+// compression left enabled it deflates every 1-3 byte frame, burning CPU on
+// both ends to make the frame bigger, on the one direction where latency is
+// felt keypress by keypress.
+//
+// Measured on the wire: a highly compressible payload must arrive at roughly
+// its uncompressed size. If write compression were on, deflate would take this
+// payload to a small fraction of it.
+func TestPaneClientDoesNotCompressOutbound(t *testing.T) {
+	var fromClient int64
+	accept := make(chan *panePeer, 1)
+	up := websocket.Upgrader{EnableCompression: true}
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		accept <- &panePeer{conn: conn, binary: make(chan []byte, 8), text: make(chan string, 8), closed: make(chan int, 1)}
+	}))
+	srv.Listener = &countingListener{Listener: srv.Listener, n: &fromClient}
+	srv.Start()
+	defer srv.Close()
+
+	c := New(srv.URL, "tok")
+	ps, err := c.AttachPane(context.Background(), session.Ref{ID: "s1"}, 0, 0)
+	if err != nil {
+		t.Fatalf("AttachPane: %v", err)
+	}
+	defer ps.Close()
+	peer := waitPeer(t, accept)
+
+	// Baseline: everything the handshake itself cost.
+	handshake := atomic.LoadInt64(&fromClient)
+
+	payload := bytes.Repeat([]byte("aaaaaaaaaaaaaaaa"), 4096) // 64 KiB, ~1000:1 deflatable
+	if _, werr := ps.Write(payload); werr != nil {
+		t.Fatalf("Write: %v", werr)
+	}
+	// Read it server-side so the write has certainly hit the wire.
+	typ, got, rerr := peer.conn.ReadMessage()
+	if rerr != nil {
+		t.Fatalf("server read: %v", rerr)
+	}
+	if typ != websocket.BinaryMessage {
+		t.Fatalf("server saw message type %d, want binary", typ)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatal("payload did not survive the round trip")
+	}
+
+	onWire := atomic.LoadInt64(&fromClient) - handshake
+	if onWire < int64(len(payload))/2 {
+		t.Errorf("client put %d bytes on the wire for a %d byte frame — it was deflated; "+
+			"outbound compression costs CPU per keystroke and buys nothing", onWire, len(payload))
+	}
+}
+
+// The other half: disabling WRITE compression must not disable READ inflation.
+// permessage-deflate is negotiated per direction, and the direction that matters
+// is the one carrying the scrollback replay.
+func TestPaneClientStillInflatesInbound(t *testing.T) {
+	accept := make(chan *panePeer, 1)
+	up := websocket.Upgrader{EnableCompression: true}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		conn.EnableWriteCompression(true)
+		accept <- &panePeer{conn: conn, binary: make(chan []byte, 8), text: make(chan string, 8), closed: make(chan int, 1)}
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "tok")
+	ps, err := c.AttachPane(context.Background(), session.Ref{ID: "s1"}, 0, 0)
+	if err != nil {
+		t.Fatalf("AttachPane: %v", err)
+	}
+	defer ps.Close()
+	peer := waitPeer(t, accept)
+
+	payload := bytes.Repeat([]byte("\x1b[32mhello world\x1b[0m "), 4096)
+	if werr := peer.conn.WriteMessage(websocket.BinaryMessage, payload); werr != nil {
+		t.Fatalf("server write: %v", werr)
+	}
+	got := make([]byte, len(payload))
+	if _, rerr := io.ReadFull(ps, got); rerr != nil {
+		t.Fatalf("ReadFull: %v", rerr)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Error("a server-compressed replay frame did not inflate on the client")
 	}
 }

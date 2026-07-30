@@ -67,9 +67,14 @@ type attachReadyMsg struct {
 	// backend whose interactive TUI runs in the pod (claude-pane): the attach
 	// routes to an ExternalPane over it instead of a Go transcript.
 	paneDial PaneDial
-	// warning is a non-fatal advisory (e.g. sync failure) to surface in the
-	// transcript as an info block so it is visible in the alt-screen TUI (C9).
-	warning string
+	// warning is the connect-time non-fatal advisory (e.g. sync unavailable) and
+	// advisory polls the ones the background sync phase discovers afterwards.
+	// Both are handed to the pane, which renders them in its status row. They
+	// used to go to the transcript as an info block (C9); that surface was
+	// deleted with the chat TUI, and for a while afterwards nothing read either
+	// field — a sync failure reached the user through no channel at all.
+	warning  string
+	advisory func() string
 	// close tears down the connection's transport (ConnectResult.Close — the
 	// SPDY forwards, §1d C1). The handler hands it to the owning pane
 	// (TranscriptModel.transportClose / ExternalPane.transportClose); a dropped
@@ -889,6 +894,12 @@ func (a *App) handleAttachReady(msg attachReadyMsg) (tea.Model, tea.Cmd) {
 	// The pane owns the attach connection's forwards from here; its close()
 	// releases them once the stream is down (§1d C1).
 	pane.transportClose = msg.close
+	// The pane's status row is the only surface a user sees while attached, so it
+	// is where connect + background-sync advisories have to land. Dropping these
+	// two fields here is what made every sync warning invisible after the
+	// transcript info block went away.
+	pane.seedAdvisory = msg.warning
+	pane.advisory = msg.advisory
 	a.external = pane
 	a.screen = ScreenExternal
 	// Mark everything seen for the session we're now viewing so its unread
@@ -1302,6 +1313,7 @@ func (a *App) connectCmd(sess Session) tea.Cmd {
 				opencodeCreds: res.OpencodeCreds,
 				paneDial:      res.PaneDial,
 				warning:       res.Warning,
+				advisory:      res.Advisory,
 				close:         res.Close,
 			}
 			ch <- connectUpdateMsg{gen: gen, ready: &ready}
@@ -1362,6 +1374,7 @@ func (a *App) createCmd(params CreateParams) tea.Cmd {
 				opencodeCreds: res.OpencodeCreds,
 				paneDial:      res.PaneDial,
 				warning:       res.Warning, // RV23: surface new-session sync warnings
+				advisory:      res.Advisory,
 				close:         res.Close,
 			}
 			ch <- connectUpdateMsg{gen: gen, ready: &ready}

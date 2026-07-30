@@ -115,6 +115,15 @@ var _ RunnerClient = (*runner.Client)(nil)
 // PortForward must return exactly one handle per requested spec, keyed by that
 // spec's PortSpec.Name in the returned Forwards: callers route by name, never by
 // position in the request slice.
+//
+// Implementations must be safe for concurrent use. Session.Connect overlaps
+// independent calls to shorten the attach path — RunnerToken/OpencodePassword
+// run while PortForward is in flight ([R1d]) — so a Backend that mutates shared
+// state per call needs its own synchronization. The production
+// *internal/k8s.Backend gets this for free (client-go clients are
+// goroutine-safe); a hand-rolled fake generally needs a mutex around whatever it
+// records. Note also that Connect may return before an overlapped call has
+// finished (an early error), so such a call can still be in flight afterwards.
 type Backend interface {
 	// Namespace is the namespace this backend addresses.
 	Namespace() string

@@ -1045,26 +1045,52 @@ func (b *Backend) Start(ctx context.Context, ref session.Ref) error {
 // only when the phase string changes (never with ""), and may be nil — in which
 // case this is exactly Start.
 func (b *Backend) StartWithProgress(ctx context.Context, ref session.Ref, onPhase func(detail string)) error {
-	if err := b.waitForPodReady(ctx, ref, onPhase); err != nil {
+	sb, pod, err := b.waitForPodReady(ctx, ref, onPhase)
+	if err != nil {
 		return err
 	}
-	// Best-effort: a failed pin must not fail the start — the session is up;
+	// [R1c] Best-effort: a failed pin must not fail the start — the session is up;
 	// it only means a later resume falls back to the (moving) tag ref.
+	//
+	// This used to call pinRunnerImageDigest unconditionally, paying a
+	// RetryOnConflict Sandbox Get + pod List on the connect critical path even
+	// when the annotation already held the right digest — which is the common
+	// case, since the pin only changes when a reschedule pulls a different image.
+	// The readiness poll above already fetched exactly the Sandbox and pod the
+	// digest is derived from, so decide from those: no extra API call at all
+	// unless the pin genuinely needs to move.
+	if b.pinIsCurrent(sb, pod) {
+		return nil
+	}
 	_ = b.pinRunnerImageDigest(ctx, ref)
 	return nil
+}
+
+// pinIsCurrent reports whether the pinned-image annotation on sb already matches
+// the digest the running pod reports, i.e. whether pinRunnerImageDigest would be
+// a no-op. A pod that is absent or terminating, or a digest that cannot be
+// derived, is also "nothing to do" — pinRunnerImageDigest returns nil for both.
+func (b *Backend) pinIsCurrent(sb *agentv1alpha1.Sandbox, pod *corev1.Pod) bool {
+	if sb == nil {
+		return false // unknown → take the slow path and find out
+	}
+	if pod == nil || pod.DeletionTimestamp != nil {
+		return true
+	}
+	pinned := pinnedRunnerImageRef(sb, pod)
+	return pinned == "" || sb.Annotations[annotationPinnedRunnerImage] == pinned
 }
 
 // Exec runs a command in the session pod's runner container, streaming the
 // given stdio. When tty is true a pseudo-terminal is allocated and sizeQueue
 // (if non-nil) propagates window resizes.
 func (b *Backend) Exec(ctx context.Context, ref session.Ref, command []string, stdin io.Reader, stdout, stderr io.Writer, tty bool, sizeQueue remotecommand.TerminalSizeQueue) error {
-	sb, err := b.agents.AgentsV1alpha1().Sandboxes(b.namespace).Get(ctx, string(ref.ID), metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("k8s: get Sandbox %s for exec: %w", ref.ID, err)
-	}
-	pod, err := b.getPodForSandbox(ctx, sb)
+	// [R1b] The Sandbox Get this used to do only fed getPodForSandbox. `sandbox
+	// shell` reaches here without resolving Status first, so "no such session" is
+	// a real thing a user hits — it gets its own message, off the failure path.
+	pod, err := b.getPodForRef(ctx, ref)
 	if err != nil || pod == nil {
-		return fmt.Errorf("k8s: no pod found for sandbox %s", ref.ID)
+		return b.describeNoPod(ctx, ref, "exec")
 	}
 
 	req := b.core.CoreV1().RESTClient().Post().
@@ -1216,11 +1242,17 @@ func (b *Backend) Resume(ctx context.Context, ref session.Ref, opts session.Resu
 	if err != nil {
 		return fmt.Errorf("k8s: update Sandbox %s for resume: %w", ref.ID, err)
 	}
-	if err := b.waitForPodReady(ctx, ref, nil); err != nil {
+	readySb, readyPod, err := b.waitForPodReady(ctx, ref, nil)
+	if err != nil {
 		return err
 	}
 	// Re-pin best-effort: a no-op when the annotation already matches (the
-	// common case, since the template now carries the pinned digest ref).
+	// common case, since the template now carries the pinned digest ref). [R1c]:
+	// decide that from what the readiness poll already observed, so the common
+	// case costs no API call rather than a Get + List.
+	if b.pinIsCurrent(readySb, readyPod) {
+		return nil
+	}
 	_ = b.pinRunnerImageDigest(ctx, ref)
 	return nil
 }
@@ -1563,8 +1595,13 @@ func (b *Backend) setReplicas(ctx context.Context, ref session.Ref, replicas int
 // config, crash loop) so a broken runner image surfaces a clear message instead
 // of polling silently until the caller's deadline / forever (RV: `sandbox
 // claude` could hang indefinitely with zero feedback on an ImagePullBackOff pod).
-func (b *Backend) waitForPodReady(ctx context.Context, ref session.Ref, onPhase func(detail string)) error {
+// It returns the Sandbox and pod as observed on the poll that saw readiness, so
+// callers needing them (the [R1c] digest pin) do not re-fetch what this loop
+// just read.
+func (b *Backend) waitForPodReady(ctx context.Context, ref session.Ref, onPhase func(detail string)) (*agentv1alpha1.Sandbox, *corev1.Pod, error) {
 	var lastDetail string
+	var readySb *agentv1alpha1.Sandbox
+	var readyPod *corev1.Pod
 	report := func(pod *corev1.Pod) {
 		if onPhase == nil {
 			return
@@ -1580,12 +1617,14 @@ func (b *Backend) waitForPodReady(ctx context.Context, ref session.Ref, onPhase 
 	// bounded by the poll interval, so halving it shaves up to ~1s off every
 	// cold start / resume for one extra lightweight Sandbox+pod Get per second
 	// (§5). Kept at 1s rather than 500ms to stay gentle on the API server.
-	return wait.PollUntilContextCancel(ctx, 1*time.Second, true, func(ctx context.Context) (bool, error) {
-		sb, err := b.agents.AgentsV1alpha1().Sandboxes(b.namespace).Get(ctx, string(ref.ID), metav1.GetOptions{})
-		if err != nil {
-			return false, err
-		}
-		pod, err := b.getPodForSandbox(ctx, sb)
+	err := wait.PollUntilContextCancel(ctx, 1*time.Second, true, func(ctx context.Context) (bool, error) {
+		// [R1b] Only the pod is needed to decide readiness, and finding it needs
+		// nothing from the Sandbox object but its name and namespace — both
+		// already in ref. This used to Get the Sandbox on every tick purely to
+		// hand it to getPodForSandbox, doubling the API cost of the poll (2 calls
+		// per second for the whole of a cold start). The Sandbox is now fetched
+		// once, on the tick that actually observes readiness, for the caller's pin.
+		pod, err := b.getPodForRef(ctx, ref)
 		if err != nil || pod == nil {
 			report(nil) // no pod yet → "scheduling"
 			return false, nil
@@ -1604,8 +1643,21 @@ func (b *Backend) waitForPodReady(ctx context.Context, ref session.Ref, onPhase 
 			return false, startErr
 		}
 		report(pod)
-		return isPodReady(pod), nil
+		if !isPodReady(pod) {
+			return false, nil
+		}
+		// Ready. Fetch the Sandbox once, for the caller's digest-pin decision. A
+		// failure here is not a readiness failure — the pod IS ready — so report
+		// success and let the caller fall back to the slow pin path (pinIsCurrent
+		// treats a nil Sandbox as "unknown, go and check").
+		sb, gerr := b.agents.AgentsV1alpha1().Sandboxes(b.namespace).Get(ctx, string(ref.ID), metav1.GetOptions{})
+		if gerr != nil {
+			sb = nil
+		}
+		readySb, readyPod = sb, pod
+		return true, nil
 	})
+	return readySb, readyPod, err
 }
 
 // podPhaseDetail returns a short, user-facing description of where a pod is in
@@ -1693,8 +1745,46 @@ func podStartupError(pod *corev1.Pod) error {
 // old pod + a new running one), the first non-terminating pod is returned.
 // Only if all pods are terminating does it fall back to the first entry (R7).
 func (b *Backend) getPodForSandbox(ctx context.Context, sb *agentv1alpha1.Sandbox) (*corev1.Pod, error) {
-	selector := fmt.Sprintf("%s=%s", labelSessionID, sb.Name)
-	pods, err := b.core.CoreV1().Pods(sb.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	return b.getPodByLabel(ctx, sb.Namespace, sb.Name)
+}
+
+// getPodForRef is getPodForSandbox without the Sandbox object ([R1b]). The
+// lookup only ever needed a namespace and a session id, both of which ref
+// already carries, so callers that fetched the Sandbox purely to reach this
+// helper were paying an extra serialized API round trip for nothing. When it
+// finds nothing, describeNoPod says which of the two reasons it was.
+func (b *Backend) getPodForRef(ctx context.Context, ref session.Ref) (*corev1.Pod, error) {
+	return b.getPodByLabel(ctx, b.namespace, string(ref.ID))
+}
+
+// describeNoPod builds the error for a getPodForRef that came back empty,
+// distinguishing "there is no such session" from "the session exists but has no
+// pod" — two states with completely different user actions (recreate it vs.
+// resume it / wait for it), which [R1b] had collapsed into one message when it
+// dropped the Sandbox Get.
+//
+// The Get it does costs nothing that matters: this runs only on the failure
+// path, where the fast path has already lost, and it does not touch the connect
+// critical path at all. Callers that resolve Status first (PortForward, reached
+// via Session.Connect) would have caught a missing session earlier; Exec
+// (`sandbox shell`) and PodIP (the out-of-namespace reaper) call in cold, and
+// they are exactly the ones that used to report the vaguer message.
+//
+// A Get that itself fails is not worth escalating: it is a second failure on an
+// already-failing path, so fall back to the generic message rather than report a
+// confusing error about the diagnosis instead of the problem.
+func (b *Backend) describeNoPod(ctx context.Context, ref session.Ref, op string) error {
+	if _, err := b.agents.AgentsV1alpha1().Sandboxes(b.namespace).Get(ctx, string(ref.ID), metav1.GetOptions{}); err != nil {
+		if k8serrors.IsNotFound(err) {
+			return fmt.Errorf("k8s: no Sandbox %s (%s): the session does not exist", ref.ID, op)
+		}
+	}
+	return fmt.Errorf("k8s: no pod found for sandbox %s (%s)", ref.ID, op)
+}
+
+func (b *Backend) getPodByLabel(ctx context.Context, namespace, sessionID string) (*corev1.Pod, error) {
+	selector := fmt.Sprintf("%s=%s", labelSessionID, sessionID)
+	pods, err := b.core.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
 	if err != nil {
 		return nil, err
 	}
@@ -1714,13 +1804,12 @@ func (b *Backend) getPodForSandbox(ctx context.Context, sb *agentv1alpha1.Sandbo
 // PodIP returns the IP of the sandbox's running pod, for direct HTTP access
 // without a port-forward (e.g. an out-of-namespace reaper polling the runner).
 func (b *Backend) PodIP(ctx context.Context, ref session.Ref) (string, error) {
-	sb, err := b.agents.AgentsV1alpha1().Sandboxes(b.namespace).Get(ctx, string(ref.ID), metav1.GetOptions{})
-	if err != nil {
-		return "", fmt.Errorf("k8s: get Sandbox %s: %w", ref.ID, err)
-	}
-	pod, err := b.getPodForSandbox(ctx, sb)
+	// [R1b] The Sandbox Get this used to do only fed getPodForSandbox. The reaper
+	// calls this cold, with no prior Status, so the "does the session even exist?"
+	// question is answered on the failure path instead.
+	pod, err := b.getPodForRef(ctx, ref)
 	if err != nil || pod == nil {
-		return "", fmt.Errorf("k8s: no pod for sandbox %s", ref.ID)
+		return "", b.describeNoPod(ctx, ref, "pod ip")
 	}
 	if pod.Status.PodIP == "" {
 		return "", fmt.Errorf("k8s: pod %s has no IP yet", pod.Name)

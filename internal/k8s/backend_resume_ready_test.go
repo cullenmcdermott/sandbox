@@ -9,6 +9,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 	agentv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	agentsfake "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned/fake"
 
@@ -63,13 +64,33 @@ func TestWaitForPodReadyIgnoresTerminatingPod(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
-	err := b.waitForPodReady(ctx, session.Ref{ID: "sess-resume"}, nil)
+	_, _, err := b.waitForPodReady(ctx, session.Ref{ID: "sess-resume"}, nil)
 	if err == nil {
 		t.Fatal("waitForPodReady reported ready against a terminating pod; it must keep waiting")
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("expected the wait to still be polling (context deadline), got: %v", err)
 	}
+
+	// [R1b] The poll needs only the pod. It used to Get the Sandbox every tick
+	// purely to pass it to getPodForSandbox, doubling the API cost of a cold
+	// start; the Get now happens once, on the tick that sees readiness — which
+	// this never-ready wait never reaches.
+	if n := countSandboxGets(agents.Actions()); n != 0 {
+		t.Errorf("waitForPodReady issued %d Sandbox Gets while polling, want 0 "+
+			"(the readiness decision needs only the pod)", n)
+	}
+}
+
+// countSandboxGets counts get actions against the sandboxes resource.
+func countSandboxGets(actions []k8stesting.Action) int {
+	n := 0
+	for _, a := range actions {
+		if a.GetVerb() == "get" && a.GetResource().Resource == "sandboxes" {
+			n++
+		}
+	}
+	return n
 }
 
 // Once a genuinely-new, non-terminating Ready pod exists (alongside the still-
@@ -85,7 +106,23 @@ func TestWaitForPodReadyAcceptsNewNonTerminatingPod(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if err := b.waitForPodReady(ctx, session.Ref{ID: "sess-resume2"}, nil); err != nil {
+	sb, pod, err := b.waitForPodReady(ctx, session.Ref{ID: "sess-resume2"}, nil)
+	if err != nil {
 		t.Fatalf("waitForPodReady should accept the new non-terminating ready pod: %v", err)
+	}
+	// [R1c] The wait hands back what it observed so callers (the digest pin) need
+	// not re-fetch it. It must be the NEW pod, not the terminating one.
+	if sb == nil {
+		t.Fatal("waitForPodReady returned a nil Sandbox alongside a successful wait")
+	}
+	if pod == nil {
+		t.Fatal("waitForPodReady returned a nil pod alongside a successful wait")
+	}
+	if pod.Name != "sess-resume2-new" {
+		t.Errorf("returned pod = %q, want the new non-terminating pod", pod.Name)
+	}
+	// [R1b] Exactly one Sandbox Get, on the ready tick — not one per poll.
+	if n := countSandboxGets(agents.Actions()); n != 1 {
+		t.Errorf("waitForPodReady issued %d Sandbox Gets, want exactly 1 (on the ready tick)", n)
 	}
 }

@@ -71,6 +71,24 @@ type PaneStream struct {
 	pingerDone chan struct{}
 }
 
+// paneDialer is the pane transport's dialer. It differs from
+// websocket.DefaultDialer in two ways, both [R2]:
+//
+//   - EnableCompression negotiates permessage-deflate. The pane carries ANSI,
+//     which compresses roughly 10-20x, and a reattach replays up to 256 KiB of
+//     scrollback as a single frame — the dominant cost of time-to-readable-pane
+//     on a high-latency link. (gorilla implements no-context-takeover only, so
+//     each frame deflates independently; the big replay frame is the win.)
+//   - 32 KiB read/write buffers instead of gorilla's 4 KiB, so that replay
+//     frame is not chopped into dozens of syscalls.
+var paneDialer = &websocket.Dialer{
+	Proxy:             websocket.DefaultDialer.Proxy,
+	HandshakeTimeout:  websocket.DefaultDialer.HandshakeTimeout,
+	EnableCompression: true,
+	ReadBufferSize:    32 * 1024,
+	WriteBufferSize:   32 * 1024,
+}
+
 // AttachPane dials the session's pane WebSocket on the runner base URL (the
 // same port-forward every other runner call rides — no extra forward spec) and
 // returns the live PTY stream. A positive cols/rows sends the initial resize
@@ -85,6 +103,15 @@ func (c *Client) AttachPane(ctx context.Context, ref session.Ref, cols, rows int
 	// http://host → ws://host, https://host → wss://host.
 	wsBase := "ws" + strings.TrimPrefix(c.baseURL, "http")
 	u := wsBase + fmt.Sprintf("/sessions/%s/pane", ref.ID)
+	// [R4] Carry the geometry on the handshake URL as well as in the initial
+	// resize frame below. The runner spawns the child lazily inside attach(),
+	// which runs before it can read any frame, so query params are the only way
+	// the first-ever spawn gets a real size instead of 80x24 + a reflow one
+	// round trip later. The resize frame stays: it is what a runner that ignores
+	// the params (older image) still honours, and what covers a later resize.
+	if cols > 0 && rows > 0 {
+		u += fmt.Sprintf("?cols=%d&rows=%d", cols, rows)
+	}
 	hdr := http.Header{}
 	if c.token != "" {
 		hdr.Set("Authorization", "Bearer "+c.token)
@@ -98,7 +125,7 @@ func (c *Client) AttachPane(ctx context.Context, ref session.Ref, cols, rows int
 	if c.traceID != "" {
 		hdr.Set("X-Sandbox-Trace-Id", c.traceID)
 	}
-	conn, resp, err := websocket.DefaultDialer.DialContext(ctx, u, hdr)
+	conn, resp, err := paneDialer.DialContext(ctx, u, hdr)
 	if err != nil {
 		// A pre-upgrade rejection (401/404/409) arrives as ErrBadHandshake with
 		// the plain HTTP response attached; fold its status into the error the
@@ -109,6 +136,15 @@ func (c *Client) AttachPane(ctx context.Context, ref session.Ref, cols, rows int
 		}
 		return nil, fmt.Errorf("runner pane attach: %w", err)
 	}
+	// [R2] Compression is negotiated for BOTH directions, but only one of them
+	// benefits. Server→client is scrollback replay and ANSI — the reason
+	// EnableCompression is on at all. Client→server is keystrokes: gorilla has no
+	// size threshold (unlike the runner's `threshold: 512`), so with write
+	// compression left on it deflates every 1-3 byte frame, spending CPU on both
+	// ends to make the frame BIGGER, on the one direction where latency is felt
+	// keystroke by keystroke. Turning writes off keeps inbound inflate intact —
+	// the negotiation is per-direction.
+	conn.EnableWriteCompression(false)
 	ps := &PaneStream{conn: conn, done: make(chan struct{}), traceID: c.traceID}
 	if cols > 0 && rows > 0 {
 		if rerr := ps.Resize(cols, rows); rerr != nil {

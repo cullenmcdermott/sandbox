@@ -3651,3 +3651,310 @@ an added, renamed, or retyped field, not just a dropped one) for `Title`,
 and `TestOfflineTitleRoundTrip` — an external module renaming a session through
 `client.Offline` with no cluster whatsoever, which is the pin that proves the
 importer can do what `sandbox rename` does.
+
+## 2026-07-30 connect/pane review — batch A ([R2] + [R4])
+
+Provenance: [`docs/review-2026-07-30.md`](review-2026-07-30.md). The two
+findings the review ranked first — small, independent, and both pure
+time-to-readable-pane wins on a high-latency link.
+
+- **[R2] permessage-deflate was off on both ends of the pane WebSocket.**
+  `runner/src/server.ts` built `WebSocketServer({ noServer, maxPayload })` and
+  `ws` defaults `perMessageDeflate: false`; the Go client dialed with
+  `websocket.DefaultDialer`, whose `EnableCompression` is also false. The pane
+  carries ANSI (~10-20x compressible) and a reattach replays up to
+  `SCROLLBACK_BYTES` (256 KiB) as a single frame, so this was the dominant term
+  in attach → readable pane. Both ends now negotiate it. Server-side options are
+  deliberately conservative rather than zlib defaults (`level 6`, `windowBits
+  13`, `memLevel 7`, `threshold 512`, `concurrencyLimit 4`) because `ws`
+  documents real per-connection memory/fragmentation cost for deflate; gorilla
+  only ever negotiates no-context-takeover, so each frame deflates independently
+  and the big replay frame is the win. Added `paneDialer` in
+  `internal/runner/pane.go` (also 32 KiB read/write buffers instead of gorilla's
+  4 KiB, so the replay frame is not chopped into dozens of syscalls).
+  Negotiation stays optional in both directions — a peer that does not offer it
+  still works, uncompressed.
+- **[R4] the pane child was spawned at 80x24 before the client's geometry
+  arrived.** The child is spawned lazily *inside* `pane.attach()`, which
+  `server.ts` calls from within `handleUpgrade` — before `ws.on('message')` is
+  even registered — while the client sent its geometry as the first
+  post-handshake resize frame. Every first attach therefore painted a full 80x24
+  screen and reflowed one round trip later. Geometry now rides the handshake URL
+  (`?cols=&rows=`, parsed by the new exported `parsePaneGeometry`, same bounds as
+  `parsePaneControl` since both are untrusted input reaching a PTY ioctl) and
+  `attach(socket, cols?, rows?)` adopts it *before* `ensureSpawned()`. The resize
+  control frame is kept: it is what an older runner still honours, and what
+  covers later resizes. Nice interaction with the existing 5b repaint jiggle — on
+  a *reattach* the child already exists, so the new geometry reaches the PTY
+  through `forceRepaint()`, whose jiggle-and-restore now lands on the client's
+  size.
+
+**Also settled: [R10] and [X4] are rejected, not deferred.** Both are premised on
+an 80ms `setTimeout` repaint hold with an unretained timer handle. There is no
+timer anywhere in `runner/src/claude-pane.ts` — `forceRepaint()` is a synchronous
+jiggle-and-restore running to completion inside `attach()`, guarded by
+`if (!this.pty)`. Neither the race nor the stale-timer window exists in this tree.
+
+Verification: runner `344 tests, 0 fail` (49 skipped — all `better-sqlite3`
+native-addon-unavailable, a pre-existing artifact of `npm install
+--ignore-scripts` in the pod, untouched by this change); `tsc --noEmit` clean;
+full `go test ./...` zero failures; `gofmt -l` clean; `go vet ./...` clean. New
+tests: three in `runner/test/claude-pane.test.ts` (fresh-spawn geometry,
+default/invalid fallback, reattach geometry landing via the jiggle), two in
+`runner/test/pane-control-bounds.test.ts` (URL geometry parsing + bounds parity
+with the control frame), three in `internal/runner/pane_test.go`
+(`TestAttachPaneGeometryOnUpgradeURL`, `TestAttachPaneNoGeometryNoQuery`,
+`TestPaneDialerNegotiatesCompression` — the last asserts the extension is
+actually offered *and* round-trips a 90 KiB repetitive payload through deflate
+intact). `docs/runner-api.md` updated for both the query params and compression.
+
+**Not measured.** The review's latency numbers are by-inspection and the goal
+doc requires landing latency claims with a measurement; these two are structural
+(a round trip removed, a compression extension enabled) and the pod has no
+cluster to time a warm reattach against. The before/after number is still owed
+and should be taken on the maintainer's live setup.
+
+## 2026-07-30 connect/pane review — batch B ([R1a-d])
+
+The connect critical path. The review's baseline: a *warm* reattach (pod already
+Running+Ready) performed ~9-10 serialized API-server round trips before the first
+byte of runner health, ~6 of them redundant. All four cuts landed.
+
+- **[R1a] The pod-readiness wait is skipped on a warm reattach.** `Connect`
+  called `StartWithProgress` on every full connect, and `waitForPodReady`'s first
+  poll repeated the exact two calls (Sandbox Get + pod List) that the `Status`
+  call immediately above had just made. It now skips when `st.PodReady &&
+  st.Status == StatusRunning`. Both traps the wait exists for were verified still
+  covered, *before* the skip is reachable: (1) the stale-node case — a pod on a
+  dead node reads Running+Ready for minutes — is caught inside `Status` itself,
+  where `podStale` forces `PodReady=false` and `StatusUnknown`; (2) the
+  terminating-old-pod-on-resume case is also `podStale` (`DeletionTimestamp !=
+  nil`), *and* a just-resumed session's status was read as Suspended before
+  `Resume` ran, so it is never `StatusRunning` here. A fresh create synthesizes
+  `StatusCreating`. Four tests in `client/session_warm_reattach_test.go` cover the
+  skip and all three must-still-wait cases; both obvious mutations (always-wait,
+  and skipping on `Running` alone) were confirmed to fail distinct tests.
+- **[R1b] Pod lookup goes straight from the session ref.** `getPodForSandbox`
+  read nothing off the Sandbox object but `Name` and `Namespace`, both already in
+  `ref` — yet `PortForward`, `Exec`, `PodIP` and *every tick* of
+  `waitForPodReady` did a Sandbox Get first, serialized. Added `getPodForRef`
+  (shared `getPodByLabel` core). The poll-loop win is the big one: readiness now
+  costs one List per tick instead of a Get + a List, halving the API cost of a
+  cold start, with a single Sandbox Get on the tick that observes readiness (for
+  [R1c]). Pinned by action-counting assertions on the fake clientset: zero
+  Sandbox Gets across a never-ready wait, exactly one across a ready one.
+- **[R1c] The digest pin no longer pays for itself on the happy path.**
+  `pinRunnerImageDigest` ran unconditionally inside `StartWithProgress` — a
+  RetryOnConflict Sandbox Get + pod List on the critical path even when the
+  annotation already held the right digest, which is the common case. First
+  attempt backgrounded it in a detached goroutine; that broke
+  `TestStartPinsRunnerImageDigest` and `TestStartPinsThroughDockerPullablePrefix`,
+  which correctly assert the annotation right after `Start`. Backing out to a
+  better fix: `waitForPodReady` now returns the Sandbox and pod it observed, and
+  the new `pinIsCurrent` decides from those — **zero** extra API calls unless the
+  pin genuinely needs to move, and the pin stays synchronous, so semantics and
+  both tests are unchanged. Applied on the Resume path too.
+- **[R1d] The Secret read overlaps the port-forward.** The runner token was
+  fetched right after `PortForward` returned and the opencode password later
+  still (after health + sync) — two serial Gets of the *same* Secret, neither
+  depending on the forward. Both now start before it, in one goroutine joined
+  where the token was previously read. Deliberately **not** collapsed into a
+  single fetch-both `Backend` method: `Backend` is public and externally
+  implementable (docs/design-principles.md), so that would break the seam for a
+  saving the overlap already gets; the password is still only fetched for
+  opencode sessions.
+
+**A real contract change fell out of [R1d], caught by the race detector.**
+Overlapping the calls means two `Backend` methods now genuinely run at once. The
+race was in the test fake (`fakeBackend.record` appending unsynchronized), not
+production — client-go clients are goroutine-safe — but it is a change to what a
+`Backend` implementation must tolerate, so the interface's doc comment in
+`client/client.go` now states that implementations must be safe for concurrent
+use, and that Connect may return with an overlapped call still in flight (the
+early-error paths). The fake got a `recordMu` and a locked `callCount` accessor.
+
+Verification: `gofmt -l` clean; `go vet ./...` clean; `go test ./...` zero
+failures; `go test -race` twice over the whole tree, clean; SDK conformance
+(`sdktest`, separate module) green with `go mod tidy -diff` clean — which is the
+check that the public seam survived. Docs: `docs/architecture.md`'s connect
+sequence diagram corrected (token read now parallel to the forward, geometry on
+the pane URL) plus a new "Attach latency" section recording why each round trip
+is gone; `client.Backend`'s doc comment as above.
+
+**Still owed: the measurement.** The goal doc requires landing latency claims
+with a before/after number. The round trips removed are structural and pinned by
+tests that count API actions, but no warm reattach was timed — the dev pod has no
+cluster. Take it on the live setup before treating the ~400-700ms estimate as
+confirmed.
+
+## 2026-07-30 connect/pane review — batch D ([R5])
+
+The only correctness bug in the review's HIGH VALUE cluster, and the one with a
+silent failure mode: two best-effort sync calls on the RECONNECT path discarded
+their errors, and both discard the same outcome — files stop moving while the
+connect reports clean. `SyncForwardAlive()` cannot notice, because the SSH
+forward really is healthy.
+
+- **The detached reconnect flush is still detached, but no longer silent.**
+  `client/session.go`'s non-`created` branch fires `mgr.FlushAll` in a goroutine
+  and dropped the error, while the `created` branch classifies the identical
+  failure via `StatusSummary`. Detaching is right — a healthy mutagen session
+  reconciles on its own and the turn gate must not wait on a full flush — so the
+  fix keeps it detached and adds the classification: on error, probe
+  `StatusSummary` and, when it reports `SyncStalled` (a dropped transport, as
+  opposed to a large upload still in flight over a healthy one), record a late
+  advisory. Anything else stays quiet, which preserves the best-effort intent.
+- **`syncTask.addWarning`** is the new late-advisory path. The detached flush can
+  only fail *after* `finish` has run, so the advisory has to be appendable
+  post-settle; `result()` already read under the same mutex, so an `AwaitSync`
+  made afterwards — the next turn, via `stagedRunner` — sees it. It joins rather
+  than clobbers, ignores an empty string, and deliberately never touches `err`:
+  a late discovery must not retroactively make a completed connect fatal.
+- **A failed un-pause is reported.** `client/sync.go`'s `startProjectSync` did
+  `_ = mgr.ResumeAll(...)` directly beneath a comment explaining that without the
+  un-pause a re-attach leaves "files frozen with no error" — then discarded
+  exactly that error. It now returns a fourth `resumeWarn` result (advisory, not
+  an error: `CreateProject` may well have succeeded) which Connect appends to the
+  connect warning. This is the case the Codex cross-check sharpened: a paused
+  pre-existing sync makes `CreateProject` succeed as a *no-op*, so the agent
+  attaches to a stale workspace with nothing reported anywhere.
+
+Verification: four tests in `client/sync_silent_failure_test.go` — the resume
+error is returned and wraps the cause, it stays non-fatal and the spec is still
+built, a late advisory reaches `AwaitSync`, and late advisories join without
+disturbing `err`. `fakeSyncRunner` gained per-verb error injection (`failVerb`)
+so the best-effort failure paths are drivable at all. Mutation-checked: restoring
+`_ = mgr.ResumeAll(...)` fails `TestStartProjectSyncReportsFailedResume`.
+`gofmt`/`go vet`/`go test ./...`/race-twice/SDK conformance all green.
+
+## 2026-07-30 review — findings rejected on verification
+
+Recorded so they are not re-filed from the review doc without new evidence.
+
+- **[R10] and [X4] — rejected, the code does not exist.** Both are premised on an
+  80ms `setTimeout` repaint hold whose timer handle is not retained ([R10]: it
+  races the client's initial resize; [X4]: a stale callback resizes a respawned
+  PTY). `runner/src/claude-pane.ts` contains no `setTimeout` at all — the string
+  `80` appears only as `DEFAULT_COLS`. `forceRepaint()` is a synchronous
+  jiggle-and-restore that runs to completion inside `attach()`, before any client
+  frame can be processed, and it guards `if (!this.pty) return`. Neither the race
+  nor the stale-timer window is reachable.
+- **[R3], [R11], [R12] — not applicable to this tree.** All three describe the
+  codex connect path: `waitCodexReady`, `waitCodexReadyWithin`, `probeCodexOnce`,
+  and a missing `OnPhase` stage for the codex wait. None of those symbols exist
+  anywhere in the repo; `client/session.go` still carries the comment marking the
+  codex app-server forward as a later wave ("expressible today as
+  `Forward(PortRunner, PortSSH, PortCodex)`, just not requested here"). The
+  substance is sound and should be applied to the codex-connect branch **before**
+  it ships — re-filed in TODO.md §4 as a not-applicable note rather than deleted.
+
+Common cause: the review was produced against a tree carrying an uncommitted
+2026-07-28/29 diff (codex connect forward, PTY repaint jiggle hold) that is not
+present in the tree it was burned down against. Every finding tagged "new in the
+07-28 diff" in the review doc needs that caveat applied.
+
+## 2026-07-30 connect/pane review — second tier ([R6], [X1], [R7]a, [X3]); [R8] closed
+
+Scoped with the maintainer after batches A/B/D, by ratio rather than by review
+order. `[R9]` and `[X2]` were deliberately deferred: `[R9]` only bites when
+someone drags a window edge over a high-latency link, and `[X2]` rewrites the
+teardown/ordering semantics of the whole post-forward block and overlaps `[R7]`
+— it wants to be its own change, after `[R7]` settles.
+
+- **[R6] Readiness polls start fast and back off.** `waitHealthyWithin` and
+  `waitOpencodeReady` slept a flat 1s between probes that ride an
+  already-established loopback port-forward and cost microseconds, so the tail
+  wait after the service actually came up averaged ~500ms of nothing on every
+  resume. Both now start at `initialProbeInterval` (100ms) and double toward
+  their ceiling. The injected `interval` parameter became the *ceiling*, which
+  is why the existing tests (which pass 1ms) still pin what they always did.
+- **[X1] Reaper ensure runs concurrently with the sync block.** It depends on
+  nothing the flush/`CreateInputs` block produces, but ran after it, so a first
+  connect could sit without idle-cost protection for up to the full 12s flush
+  budget plus input-sync creation. Now started at the top of the background
+  goroutine and joined at the end, advisory merged as before. This never
+  affected attach latency (it was already off the foreground); what changed is
+  how soon the cost cap actually exists.
+- **[R7](a) The project sync moved off the connect foreground.**
+  `startProjectSync` — up to four serialized mutagen *process* spawns (`sync
+  list`, `sync resume`, a second scoped list, maybe `sync create`) — ran on the
+  attach path even though nothing in the foreground consumed its results except
+  the flush gating, which was already background. It now runs inside
+  `startBackgroundSync` via a new `projectSyncInput`; its advisories land on the
+  syncTask (AwaitSync), joining the flush advisory they pair with. The
+  collision-warning `sync list` stays on the foreground on purpose — it warns
+  about a pre-existing hazard the user should see on `Connection.Warning`
+  immediately, not one AwaitSync later. The review's (b) and (c) remain open.
+  Also corrected the comment that called that List "off the hot path": true of
+  the per-turn path, false of the attach path, which is the one a user waits on.
+- **[X3] mitigated, not redesigned.** `ScrollbackRing.snapshot()` now strips a
+  partial escape sequence left at the head by the ring's own byte trim, so a
+  replay never starts mid-CSI/OSC. Chosen over the terminal-state-snapshot
+  redesign because the maintainer has not observed the artifact live and
+  `forceRepaint()` already bounds how long it survives — a vt emulator in the
+  runner is not worth buying on a hypothesis.
+
+  Worth recording how this landed: the **first implementation was wrong and its
+  own test caught it.** Matching "'[' followed by any CSI final byte (0x40-0x7E)"
+  is faithful to the spec — `[w` *is* a valid empty-parameter CSI — but it means
+  ordinary terminal output like `[warn] disk full`, `[INFO] started` or
+  `[x] done` loses its first two characters. The heuristic now requires at least
+  one parameter byte (0x30-0x3F) before the final byte, which every sequence the
+  pane actually emits has (`[32m`, `[1;31m`, `[?25l`), and the OSC branch
+  requires the `]<digits>;` preamble. The cost is not trimming a parameterless
+  remnant like `[m` — two stray characters, strictly better than swallowing real
+  text. `trimPartialEscape` is bounded to a 256-byte scan and returns its input
+  unchanged whenever it cannot identify a clean resumption point.
+
+**[R8] closed as WON'T DO** (maintainer decision). Driving `waitForPodReady` off
+the existing Sandbox informer is a real opportunity, but its cost case was
+overtaken by batch B: `[R1b]` halved the poll to one List per tick (~30 calls
+over a 30s cold start, not the ~60 the review costed) and `[R1a]` removed the
+wait from warm reattach entirely, leaving a cold-start-only win on a path already
+dominated by the image pull. The caveat lands on that same path — the Sandbox
+informer has no pod-level detail, so `podPhaseDetail`'s "scheduling → pulling
+image → starting" splash, the only feedback during a 30s cold start, would
+coarsen without a second pod informer. Reasoning recorded in TODO.md §4 so it is
+not re-litigated; reopen only if cold-start API load is ever measured to matter.
+
+Verification: `gofmt`/`go vet`/`go test ./...`/race-twice all clean; SDK
+conformance green with `go mod tidy -diff` clean; runner `tsc` clean and 301
+passing (up from 295 — six new `[X3]` cases), 0 failing, the same 49
+`better-sqlite3` skips. Still owed, as for batches A/B: a live before/after
+warm-reattach measurement.
+
+## 2026-07-30 connect/pane review — remaining items closed; review fully burned down
+
+`[R7]`(b)(c), `[R9]` and `[X2]` closed as won't-do with the maintainer, which
+retires the last open items from `docs/review-2026-07-30.md`. Reasoning lives in
+TODO.md §4 next to each id so it is not re-litigated from the review doc; the
+short version:
+
+- **[R7](b)** — deduping the two `mutagen sync list` spawns got HARDER after
+  [R7](a), not easier: the unfiltered list is on the connect foreground and the
+  scoped one is now inside the background goroutine, so sharing a result means
+  threading it across a concurrency boundary to save one local process spawn
+  that (a) already moved off the attach path.
+- **[R7](c)** — skipping the collision check on reconnect would save the last
+  foreground spawn, but the collision is not purely creation-time: when the
+  *other* session is created after yours, a reconnect is the first opportunity
+  to detect it. Not worth trading a real detection for a local spawn.
+- **[R9]** — accurate, but only bites during an active window drag, and the
+  input queue already bounds the damage. Recorded the fix direction (trailing
+  debounce on the RUNNER side of `resize()`, the end that owns the PTY) for
+  whenever drag flicker actually annoys someone.
+- **[X2]** — undercut by its own predecessors. `[R1d]` overlapped the Secret
+  fetch and `[R7]`(a) removed project-sync setup from the chain, leaving the two
+  independent 30s waits as the only real prize — and that helps opencode only,
+  not claude-pane. The cost (coordinating cancellation across error paths that
+  all `closeHandles()` and return) did not shrink with it.
+
+The pattern worth remembering: **three of this review's findings were dissolved
+by earlier findings in the same review.** `[R8]` and `[X2]` were both costed
+against a serial connect path that `[R1]` had already de-serialized, and
+`[R7]`(b) against a call ordering that `[R7]`(a) changed. Sequencing a burndown
+by value means the later items must be re-costed against the tree, not the doc —
+which is also how `[R10]`/`[X4]` and the `[R3]` cluster were caught.
+
+`docs/review-2026-07-30.md` and `docs/goal-2026-07-30.md` archived in the same
+change.

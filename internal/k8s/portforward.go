@@ -47,13 +47,15 @@ func (b *Backend) PortForward(ctx context.Context, ref session.Ref, ports []sess
 		return nil, err
 	}
 
-	sb, err := b.agents.AgentsV1alpha1().Sandboxes(b.namespace).Get(ctx, string(ref.ID), metav1.GetOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("k8s: get Sandbox %s for port-forward: %w", ref.ID, err)
-	}
-	pod, err := b.getPodForSandbox(ctx, sb)
+	// [R1b] Look the pod up straight from ref. The Sandbox Get that used to
+	// precede this existed only to feed getPodForSandbox, which never read
+	// anything off the object but the name and namespace ref already carries —
+	// so it was a serialized API round trip on the connect critical path buying
+	// nothing. describeNoPod re-asks the "does it exist?" question only when the
+	// lookup came back empty, which is off the critical path by definition.
+	pod, err := b.getPodForRef(ctx, ref)
 	if err != nil || pod == nil {
-		return nil, fmt.Errorf("k8s: no pod found for sandbox %s", ref.ID)
+		return nil, b.describeNoPod(ctx, ref, "port-forward")
 	}
 
 	// Establish every forward concurrently rather than serially: each forwardPort
