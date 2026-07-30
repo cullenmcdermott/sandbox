@@ -58,9 +58,18 @@ type ConnectResult struct {
 	// backends whose interactive TUI runs in the pod; the App routes the attach
 	// to an ExternalPane over this transport instead of a Go transcript.
 	PaneDial PaneDial
-	// Warning is a non-fatal advisory surfaced to the user (e.g. sync failed).
-	// The dashboard renders it inline rather than dropping it to hidden stderr.
+	// Warning is a non-fatal advisory known by the time the connect returns (a
+	// missing worktree, no usable SSH key). It seeds the attached pane's advisory
+	// line — see Advisory, which carries the ones discovered later.
 	Warning string
+	// Advisory, when non-nil, reports the connection's CURRENT non-fatal advisory
+	// (or "" for none) without blocking. It is polled while the pane is attached,
+	// because most sync trouble is not known at connect time: the project sync
+	// runs in the background, and a reconnect's stalled-transport classification
+	// lands after the background phase has already settled. A one-shot Warning
+	// cannot express either, and the blocking AwaitSync a caller might use instead
+	// is not callable from a render. Must be safe for concurrent use.
+	Advisory func() string
 	// Close, when non-nil, tears down the connection's transport — the SPDY
 	// port-forward(s) and their reconnect loops (§1d C1). The context handed to
 	// the Connector governs only establishment; an established forward lives
@@ -172,6 +181,11 @@ type CreateResult struct {
 	// common path, and where the initial sync is most likely to hiccup — silently
 	// dropped the warning the connector computed (RV23).
 	Warning string
+	// Advisory mirrors ConnectResult.Advisory for the create path. A fresh session
+	// is exactly where it earns its keep: the first-ever project sync is the one
+	// most likely to stall, and it runs in the background, so its advisory is not
+	// known when this struct is built.
+	Advisory func() string
 	// Close mirrors ConnectResult.Close for the create path (§1d C1).
 	Close func()
 }

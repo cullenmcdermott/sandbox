@@ -105,3 +105,51 @@ func TestSyncTaskLateWarningJoinsAndKeepsErr(t *testing.T) {
 		t.Errorf("addWarning(\"\") changed the advisory: %q → %q", before, after)
 	}
 }
+
+// SyncAdvisory is the non-blocking half of AwaitSync. It exists for the surface
+// that has to show these without blocking a render, and — more importantly — for
+// the [R5] advisories that land AFTER the task settles, which no blocking call
+// will ever return because there is nothing left to block on.
+func TestSyncAdvisoryReadsWithoutWaitingForTheTaskToSettle(t *testing.T) {
+	task := &syncTask{done: make(chan struct{})}
+	s := &Session{syncTask: task}
+
+	// Still in flight: the advisory reads clean and, crucially, returns.
+	if got := s.SyncAdvisory(); got != "" {
+		t.Errorf("SyncAdvisory on an unsettled task = %q, want empty", got)
+	}
+	task.addWarning("file sync unavailable: mutagen refused")
+	if got := s.SyncAdvisory(); !strings.Contains(got, "mutagen refused") {
+		t.Errorf("SyncAdvisory = %q, want the in-flight advisory", got)
+	}
+
+	task.finish("file sync unavailable: mutagen refused", nil)
+	task.addWarning("file sync is stalled after reconnect")
+	got := s.SyncAdvisory()
+	if !strings.Contains(got, "mutagen refused") || !strings.Contains(got, "stalled after reconnect") {
+		t.Errorf("SyncAdvisory = %q, want both the settled and the late advisory", got)
+	}
+}
+
+// A session that never connected has no task; the advisory is empty, not a panic.
+func TestSyncAdvisoryIsEmptyWithNoBackgroundWork(t *testing.T) {
+	if got := (&Session{}).SyncAdvisory(); got != "" {
+		t.Errorf("SyncAdvisory with no syncTask = %q, want empty", got)
+	}
+}
+
+// The FATAL outcome is AwaitSync's alone: it is a hard gate that refuses a turn,
+// not a line of status-row text. SyncAdvisory must never be the thing a caller
+// checks for it.
+func TestSyncAdvisoryDoesNotLeakTheFatalError(t *testing.T) {
+	task := &syncTask{done: make(chan struct{})}
+	task.finish("", ErrInitialSyncFailed)
+	s := &Session{syncTask: task}
+
+	if got := s.SyncAdvisory(); got != "" {
+		t.Errorf("SyncAdvisory = %q, want empty (a fatal outcome is not an advisory)", got)
+	}
+	if _, err := s.AwaitSync(context.Background()); !errors.Is(err, ErrInitialSyncFailed) {
+		t.Errorf("AwaitSync err = %v, want ErrInitialSyncFailed still reported there", err)
+	}
+}

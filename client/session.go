@@ -975,6 +975,37 @@ func (s *Session) AwaitSync(ctx context.Context) (warning string, err error) {
 	}
 }
 
+// SyncAdvisory returns the background sync work's advisory so far, without
+// waiting for it to settle — "" when there is nothing to report.
+//
+// This is the POLLABLE half of AwaitSync, and it exists because the advisories
+// this package produces are discovered at three different times, only one of
+// which lines up with a blocking call:
+//
+//   - BEFORE Connect returns (a missing worktree, no usable SSH key): those ride
+//     out on Connection.Warning;
+//   - WHILE the background phase runs ([R7] moved the project sync itself there,
+//     alongside the reaper ensure): AwaitSync's return value covers these, but
+//     only for a caller that happens to be gating a turn when they land;
+//   - AFTER the task has already settled ([R5]: the detached reconnect flush
+//     classifying a stalled transport, via syncTask.addWarning). Nothing blocking
+//     will ever return these — there is nothing left to block on.
+//
+// An attached UI needs all three, and needs them without blocking a render. So:
+// cheap, non-blocking, safe to call every frame and from any goroutine. It never
+// reports the FATAL ErrInitialSyncFailed — that one is a hard gate and stays
+// AwaitSync's alone.
+func (s *Session) SyncAdvisory() string {
+	s.mu.Lock()
+	t := s.syncTask
+	s.mu.Unlock()
+	if t == nil {
+		return ""
+	}
+	w, _ := t.result()
+	return w
+}
+
 // Close tears down any active port-forwards. It does not destroy the session.
 func (s *Session) Close() error {
 	s.closeHandles()
