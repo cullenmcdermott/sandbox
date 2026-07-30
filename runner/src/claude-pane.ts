@@ -124,6 +124,17 @@ const ESC = 0x1b;
 const BEL = 0x07;
 
 /**
+ * `]` (0x5D) is a syntactically legal CSI final byte that no real sequence uses,
+ * and excluding it is what keeps bracketed COUNTS out of the trim. Requiring a
+ * parameter byte (below) already protects `[warn]` and `[INFO]`, but not
+ * `[12] server started`, `[100%] done`, `[1] 12345` or `[0]abc` — all of which
+ * are `[`, parameter/intermediate bytes, then `]`, and all of which were losing
+ * their bracketed prefix. Bracketed counters and percentages are far more common
+ * in terminal output than a `]`-terminated CSI, which is to say: than nothing.
+ */
+const CSI_FINAL_EXCLUDED = 0x5d;
+
+/**
  * How far into a snapshot to look for the end of a chopped escape sequence
  * ([X3]). Real sequences are a handful of bytes; an OSC carrying a window title
  * can be longer but not unboundedly so. If nothing terminates within this
@@ -167,7 +178,12 @@ export function trimPartialEscape(buf: Buffer): Buffer {
     while (i < limit && buf[i] >= 0x30 && buf[i] <= 0x3f) i++;
     if (i === 1) return buf; // no parameter bytes → treat as ordinary text
     while (i < limit && buf[i] >= 0x20 && buf[i] <= 0x2f) i++; // intermediates
-    if (i < limit && buf[i] >= CSI_FINAL_MIN && buf[i] <= CSI_FINAL_MAX) {
+    if (
+      i < limit &&
+      buf[i] >= CSI_FINAL_MIN &&
+      buf[i] <= CSI_FINAL_MAX &&
+      buf[i] !== CSI_FINAL_EXCLUDED
+    ) {
       return buf.subarray(i + 1);
     }
     return buf;

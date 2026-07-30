@@ -184,6 +184,36 @@ test('trimPartialEscape never eats ordinary bracketed text', () => {
   }
 });
 
+// Requiring a parameter byte protects "[warn]" and "[INFO]", but NOT bracketed
+// COUNTS: "[12]" is '[' + parameter bytes + a final byte, and ']' is a
+// syntactically legal CSI final. So each of these used to lose its prefix —
+// "[12] server started" came back as " server started". Excluding ']' as a
+// final byte fixes all of them at no cost, because no real CSI sequence
+// terminates with ']'.
+test('trimPartialEscape never eats bracketed counts or percentages', () => {
+  for (const s of [
+    '[12] server started',
+    '[100%] done',
+    '[1] 12345',
+    '[0]abc',
+    '[3/5] building deps',
+    '[2026-07-30] log line',
+  ]) {
+    assert.equal(trimPartialEscape(Buffer.from(s)).toString(), s, `mangled: ${s}`);
+  }
+});
+
+// The exclusion must not weaken the actual fix: every sequence the pane really
+// emits still gets trimmed.
+test('trimPartialEscape still trims the sequences the pane emits', () => {
+  assert.equal(trimPartialEscape(Buffer.from('[32mgreen')).toString(), 'green');
+  assert.equal(trimPartialEscape(Buffer.from('[1;31mred')).toString(), 'red');
+  assert.equal(trimPartialEscape(Buffer.from('[?25lx')).toString(), 'x');
+  assert.equal(trimPartialEscape(Buffer.from('[2Jcleared')).toString(), 'cleared');
+  assert.equal(trimPartialEscape(Buffer.from('[10;20Hmoved')).toString(), 'moved');
+  assert.equal(trimPartialEscape(Buffer.from('[0Kerased')).toString(), 'erased');
+});
+
 test('trimPartialEscape gives up rather than eating real output', () => {
   // A '[' that never terminates within the scan window is far likelier to be
   // real text than a partial sequence — leave it.
