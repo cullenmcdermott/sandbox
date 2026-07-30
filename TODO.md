@@ -84,6 +84,34 @@
 > warm-reattach measurement; the round trips removed are pinned only by
 > action-counting tests.
 >
+> **Follow-up review of that burndown — 7 findings, all fixed 2026-07-30**
+> (commits `5241bc5`..`f419c88`). One was a regression the burndown introduced,
+> the rest were gaps in what it claimed:
+>
+> - **Advisories had no surface at all.** `Connection.Warning` →
+>   `attachReadyMsg.warning` was assigned and never read: the transcript info
+>   block (C9) that rendered it went away with the chat TUI on 2026-07-20, and
+>   `AwaitSync`'s warning return is discarded at every production call site. So
+>   `[R5]`'s "no longer silent" was not true end to end, and `[R7]` moved a
+>   previously-live warning onto the same dead path. Fixed by giving the SDK a
+>   pollable `Session.SyncAdvisory()` and rendering it in the attached pane's
+>   status row.
+> - **`[R2]`'s `windowBits: 13` was dead config** — `ws` overwrites it with the
+>   negotiated value, and gorilla never offers `client_max_window_bits`. Also
+>   `[R2]` left gorilla compressing every outbound keystroke frame (no
+>   client-side threshold); now disabled, measured by a byte-counting test.
+> - **`[X3]`'s `trimPartialEscape` ate bracketed counts** — `[12] server
+>   started`, `[100%] done`, `[1] …`, `[0]abc`. `]` is now excluded as a CSI
+>   final byte.
+> - **`[R1a]` dropped the digest pin**, not just the readiness wait; it now runs
+>   detached. **`[R1b]` flattened "no such Sandbox" into "no pod"** for `Exec` /
+>   `PodIP`, which call in cold; the distinction is restored on the failure path
+>   only. **`[R1d]`'s new Backend concurrency requirement** is now pinned in
+>   `sdktest/`, where an external implementer meets it.
+>
+> Every fix is mutation-checked. The warm-reattach measurement above is still
+> owed and is now the only open item from either pass.
+>
 > **Agent-ready map — rewritten 2026-07-27** (the previous version pointed at
 > work that had already shipped; each claim below was re-verified against the
 > tree on that date).
