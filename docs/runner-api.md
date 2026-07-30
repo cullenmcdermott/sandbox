@@ -271,6 +271,12 @@ upgrade the socket carries the interactive `claude` child's PTY:
   replay below is one large frame, so this is the dominant term in
   time-to-readable-pane on a high-latency link. Negotiation is optional in both
   directions: a peer that does not offer it still works, uncompressed.
+  In practice it applies **server→client only**: the server skips frames under
+  512 bytes (`threshold`), and the Go client disables outbound compression
+  outright. Client→server traffic is keystrokes, gorilla applies no size
+  threshold of its own, and deflating a 1-3 byte frame spends CPU on both ends
+  to make it larger — on the one direction where latency is felt keypress by
+  keypress.
 - **On attach** the server first sends the retained scrollback (a bounded
   ~256 KiB ring) as one binary frame, then live output. The interactive child
   is spawned lazily on the first attach ever (`--session-id <uuid>`) and

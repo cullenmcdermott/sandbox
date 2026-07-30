@@ -136,6 +136,15 @@ func (c *Client) AttachPane(ctx context.Context, ref session.Ref, cols, rows int
 		}
 		return nil, fmt.Errorf("runner pane attach: %w", err)
 	}
+	// [R2] Compression is negotiated for BOTH directions, but only one of them
+	// benefits. Server→client is scrollback replay and ANSI — the reason
+	// EnableCompression is on at all. Client→server is keystrokes: gorilla has no
+	// size threshold (unlike the runner's `threshold: 512`), so with write
+	// compression left on it deflates every 1-3 byte frame, spending CPU on both
+	// ends to make the frame BIGGER, on the one direction where latency is felt
+	// keystroke by keystroke. Turning writes off keeps inbound inflate intact —
+	// the negotiation is per-direction.
+	conn.EnableWriteCompression(false)
 	ps := &PaneStream{conn: conn, done: make(chan struct{}), traceID: c.traceID}
 	if cols > 0 && rows > 0 {
 		if rerr := ps.Resize(cols, rows); rerr != nil {
