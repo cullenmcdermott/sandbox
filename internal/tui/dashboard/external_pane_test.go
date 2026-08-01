@@ -634,24 +634,126 @@ func TestExternalPaneWheelForwardedWhenTrackingOn(t *testing.T) {
 	}
 }
 
-// L7: new child output snaps a scrolled-back view to live before the bytes
-// feed the emulator, so the freshly painted frame is what renders.
-func TestExternalPaneOutputSnapsBack(t *testing.T) {
+// paneBody is the rendered pane WITHOUT its reserved status row — i.e. the part
+// of the frame that shows child output. The anchor-hold tests compare bodies
+// rather than whole views on purpose: the status row is *expected* to change
+// under new output (the offset counter moves, the "new output below" note
+// appears), and including it would make an assertion about held content fail for
+// the one thing that is supposed to move.
+func paneBody(p *ExternalPane) string {
+	content := p.View().Content
+	if i := strings.LastIndex(content, "\n"); i >= 0 {
+		return content[:i]
+	}
+	return content
+}
+
+// L10: new child output must NOT move a scrolled-back view. This reverses the
+// original L7 rule (TestExternalPaneOutputSnapsBack, "snap back to live") — a
+// deliberate reversal, not a regression: snapping on output made scrollback
+// unusable during a streaming response, which is when a user most wants it.
+//
+// The assertion is about CONTENT, not just the offset. Holding the offset
+// constant would be the wrong fix — the lines it points at shift as history
+// grows, so a fixed offset drifts the view upward one burst at a time. What
+// must hold still is the text under the user's eye.
+func TestExternalPaneOutputHoldsScrollAnchor(t *testing.T) {
 	p := scrolledPane(t)
 	p.handleMouse(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
 	if p.scrollOffset == 0 {
 		t.Fatal("precondition: pane should be scrolled back")
 	}
+	before := paneBody(p)
 
-	cmd, finished := p.apply(ptyChunk{data: []byte("l6"), ok: true})
+	// Two bursts, each pushing a line into scrollback (the 3-row screen is full,
+	// so every new line evicts one off the top of the live screen).
+	for _, chunk := range []string{"\r\nl6", "\r\nl7"} {
+		cmd, finished := p.apply(ptyChunk{data: []byte(chunk), ok: true})
+		if finished || cmd == nil {
+			t.Fatal("apply(live chunk) should continue the drain")
+		}
+	}
+
+	if p.scrollOffset == 0 {
+		t.Fatal("child output snapped the view back to live; it must hold the anchor (L10)")
+	}
+	if got := paneBody(p); got != before {
+		t.Fatalf("anchored view moved under new output.\nbefore:\n%s\nafter:\n%s", before, got)
+	}
+	// The offset grew precisely because the content did not move.
+	if want := 2 + 2; p.scrollOffset != want {
+		t.Fatalf("scrollOffset = %d, want %d (2 seeded + 2 lines the bursts pushed)", p.scrollOffset, want)
+	}
+	// Off-screen arrival is the one thing the user cannot see, so the status row
+	// has to say it: with the anchor held there is otherwise no sign of output.
+	if !strings.Contains(p.View().Content, "new output below") {
+		t.Fatalf("status row must report output arriving off-screen:\n%s", p.View().Content)
+	}
+
+	// Returning to live shows the new bytes and clears the note.
+	p.handleKey(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	if p.scrollOffset != 0 || p.pendingOutput {
+		t.Fatalf("key should snap to live and clear the note: offset=%d pending=%v", p.scrollOffset, p.pendingOutput)
+	}
+	live := p.View().Content
+	if !strings.Contains(live, "l7") {
+		t.Fatalf("live view should contain the newest output:\n%s", live)
+	}
+	if strings.Contains(live, "new output below") {
+		t.Fatalf("the off-screen note must not survive the return to live:\n%s", live)
+	}
+}
+
+// L10: the anchor-hold is scoped to a scrolled-back view. At the live tail
+// (offset 0, the overwhelmingly common case) output must keep following the
+// child exactly as before — this is the half a naive "never move the view" fix
+// would break, leaving the pane frozen on old content.
+func TestExternalPaneLiveTailStillFollowsOutput(t *testing.T) {
+	p := scrolledPane(t)
+	if p.scrollOffset != 0 {
+		t.Fatal("precondition: pane starts at the live tail")
+	}
+
+	cmd, finished := p.apply(ptyChunk{data: []byte("\r\nl6"), ok: true})
+	if finished || cmd == nil {
+		t.Fatal("apply(live chunk) should continue the drain")
+	}
+
+	if p.scrollOffset != 0 {
+		t.Fatalf("scrollOffset = %d, want 0 (a live view must not acquire an offset)", p.scrollOffset)
+	}
+	if p.pendingOutput {
+		t.Fatal("output arriving on a live view is on screen; it is not pending")
+	}
+	if got := p.View().Content; !strings.Contains(got, "l6") {
+		t.Fatalf("live view should have followed the new output:\n%s", got)
+	}
+}
+
+// L10: on the alt screen the anchor-hold is inert. A full-screen child repaints
+// in place and pushes nothing to scrollback, and scrollBy already refuses to
+// build an offset there — so there is no anchor, and the hold must not invent
+// one from a scrollback length that belongs to the main screen underneath.
+func TestExternalPaneAltScreenOutputDoesNotAnchor(t *testing.T) {
+	p := scrolledPane(t)
+	if _, err := p.emu.WriteString("\x1b[?1049h"); err != nil {
+		t.Fatalf("enter alt screen: %v", err)
+	}
+	if !p.emu.IsAltScreen() {
+		t.Fatal("precondition: emulator should be on the alt screen")
+	}
+
+	p.handleMouse(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	if p.scrollOffset != 0 {
+		t.Fatalf("precondition: wheel is ignored on the alt screen, got offset %d", p.scrollOffset)
+	}
+
+	cmd, finished := p.apply(ptyChunk{data: []byte("\r\nalt"), ok: true})
 	if finished || cmd == nil {
 		t.Fatal("apply(live chunk) should continue the drain")
 	}
 	if p.scrollOffset != 0 {
-		t.Fatalf("scrollOffset after child output = %d, want 0 (snap back to live)", p.scrollOffset)
-	}
-	if !strings.Contains(p.View().Content, "l6") {
-		t.Fatalf("view after output should be live and contain the new bytes:\n%s", p.View().Content)
+		t.Fatalf("alt-screen output produced a phantom offset %d the user can never scroll off", p.scrollOffset)
 	}
 }
 

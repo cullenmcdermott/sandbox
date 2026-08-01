@@ -147,7 +147,8 @@ func keymapCategories(km KeyMap) []helpCategory {
 	// select text in the agent pane" is otherwise unanswerable from inside the UI.
 	cats = append(cats, helpCategory{name: "Mouse", entries: []helpEntry{
 		{key: "drag", desc: "select text (list, feed, pickers)"},
-		{key: "shift+drag", desc: "select text in the agent pane"},
+		{key: "^] s", desc: "agent pane: release the mouse to select/copy (toggle)"},
+		{key: "shift+drag", desc: "select in the pane without toggling (terminal bypass)"},
 		{key: "wheel", desc: "scroll pane scrollback; move selection in the list"},
 	}})
 	return cats

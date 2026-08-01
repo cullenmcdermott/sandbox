@@ -3,7 +3,9 @@
 ### inbox
 * dashboard shows a session "ready" but the agent is waitin gon subagents. How can we make this clear to the user that its not idle?
 * On the detail sidebar it looks like created and last active are the same time? Last active should tell me basically the last time we heard from the agent itself.
-* Claude Code TUI seems "sticky" to the bottom of the transcript. Its impossible to scroll up while the agent is actively writing output
+* *(pane sticky-scroll + drag-select: triaged and FIXED 2026-08-01 — §1h
+  `[L10]`/`[L11]`. Statusline usage from the same session turned out to be the
+  stale-`:latest` cache, not a missing rebuild — see §10.)*
 
 
 > **How to use this file (agents):** sections are numbered workstreams, ordered
@@ -570,6 +572,58 @@ done log.)
   exactly rather than approximately. *Maintainer confirmed the rebuild cost is
   acceptable ("This is fine. As long as it works idc", 2026-07-25).*
 
+  **RESOLVED 2026-08-01 — THE REBUILD ALREADY HAPPENED; THE BUG IS THE STALE
+  `:latest` CACHE (§10).** Maintainer reported no usage in the in-pane
+  statusline. Diagnosed from inside a running session pod AND against GHCR;
+  the first read of the evidence (below) blamed this item, which was wrong.
+  **What the registry says** (queried anonymously from the pod — ghcr.io is
+  reachable through the egress allowlist, `ghcr.io/v2/…/manifests/latest`):
+  - `:latest` manifest digest
+    `sha256:94c730bb59c7c3aece5c7c9585ccb594237db3dfc756c1536a014b86c0277435`,
+    config `created` = **2026-07-30 21:14 UTC** (amd64; arm64 21:15).
+  - Its runner layer (layer 14 of the amd64 manifest, 0.6 MB uncompressed)
+    **contains the work**: `addWindow(rl.seven_day, 'wk')` present, `five_hour`
+    ×5, `seven_day` ×5, `rate_limits` ×3, and `contextLimitTokens` ×1.
+  So both ctx% part B and the 5h/weekly statusline line are published and have
+  been since 2026-07-30. Nothing about this item is outstanding — the workflow
+  fired on the `runner/**` push exactly as designed.
+  **Why the pod still doesn't have it:** this session was created 2026-08-01 and
+  is running the **2026-07-25** build — five days older than `:latest`. That is
+  §10's "new CLI-created sessions use `:latest` and can hit the stale traefik
+  manifest cache", now with hard evidence rather than a hypothesis. Track the
+  fix there; this item is closed.
+  **Evidence from inside the pod** (kept — it is how the vintage was pinned):
+  - The pod's `/app/dist/claude-pane-observer.js` has mtime **2026-07-25
+    17:14 UTC**.
+  - Its `STATUSLINE_SCRIPT` is the pre-usage minimal one. The provisioned copy
+    at `$CLAUDE_CONFIG_DIR/pane-observer/statusline.js` prints
+    `model + ' · ctx ' + pct + '%'` and contains **zero** occurrences of
+    `rate_limits`/`five_hour`/`seven_day`, so the 5h + weekly segments the
+    current source prints (`claude-pane-observer.ts:566-582`) cannot appear.
+  - `contextLimitTokens` is absent from the built file entirely — ctx% part B,
+    exactly as this item says.
+  - **What DOES work on this image:** rate-limit *ingestion* is present
+    (`five_hour`/`seven_day` → `rate_limit.updated`, built file line 322), so
+    the dashboard's rate-limit surface is fed; only the in-pane printed line is
+    missing usage. Useful to know when triaging "usage missing" reports — the
+    two surfaces have different vintages.
+  - **Ruled out — this is NOT PVC staleness.** `provisionPaneObserver`
+    (`claude-pane-observer.ts:659-670`) rewrites `statusline.js`
+    unconditionally on every boot rather than only-if-absent, so the script
+    tracks the image and a rebuild genuinely reaches existing PVCs. No
+    migration or manual cleanup needed.
+  **Verification once §10's pinning lands:** create a session and confirm the
+  in-pane statusline reads `<model> · ctx <n>% · 5h <n>% <until> · wk <n>%
+  <until>` on a Pro/Max session — the windows appear only after the session's
+  first API response. Quick vintage check for any pod, no cluster access needed:
+  `grep -c seven_day /app/dist/claude-pane-observer.js` (0 = stale image).
+  **Method note worth reusing:** the pod can query GHCR directly with `node`
+  (there is no `curl` in the image) — anonymous token from
+  `ghcr.io/token?scope=repository:<img>:pull`, then walk index → manifest →
+  config blob for `created`, and gunzip a small layer to grep its contents. That
+  is how "is the fix published?" got separated from "did this pod get it?", a
+  distinction the first diagnosis collapsed.
+
 - [x] **`go test ./...` walks into `runner/node_modules` — done 2026-07-27**
   (done log): one `ignore runner/node_modules` line in `go.mod` (the Go 1.25
   directive) instead of narrowing each recipe's pattern, so it cannot drift as
@@ -671,6 +725,23 @@ row-model consolidation moved to §2a where it belongs.
   `terminal.ParseOSC52` (sdktest-pinned). Applies to every pane backend.
   Residual: clipboard *reads* (`OSC 52 ; c ; ?`) are still dropped — an
   answer needs `tea.ReadClipboard` plus an async reply down the transport.
+- [x] **[L10] Pane sticky-scroll — done 2026-08-01**
+  ([done log](docs/archive/done-log-2026-08.md)): new child output no longer
+  snaps the view to live — it holds the scroll anchor by growing the offset
+  with the scrollback the burst pushed, so the lines under the user's eye stay
+  put. Key/paste still snap (user intent); live tail and alt screen unchanged;
+  a "new output below" note marks off-screen arrival. Reverses the [L7]
+  output-snap rule and its test, deliberately. Mutation-checked.
+- [x] **[L11] Click-drag selection in the pane — done 2026-08-01**
+  ([done log](docs/archive/done-log-2026-08.md)): `ctrl+] s` toggles selection
+  mode, releasing the mouse to the terminal (`MouseMode` now comes from the
+  pane, not a hardcoded `CellMotion`). Rejected the conditional-capture fix —
+  it reopens the wheel→arrow-key prompt-history hijack; confirmed bubbletea
+  v2.0.7 has no button-only mode that would avoid the trade. Help surface leads
+  with the chord, keeps shift+drag as the bypass. Mutation-checked.
+  **Residual:** in selection mode the wheel reaches the child as Up/Down —
+  accepted (suppressing arrows would break "keys always reach the child"), and
+  the eventual answer is owning selection ourselves on §8's compositing layer.
 - [x] **[L3] done 2026-07-21** (done log): feed opens seeded from a
   ONE-SHOT passive SSE replay from seq 0 (`feed_history.go` — attach-gate/
   connect-slot/C1 discipline, 15s read bound, 2000-event tail cap, gen
@@ -2308,6 +2379,19 @@ do well is recorded there too; fix in roughly this order):
   resume) or bust the traefik cache. **Verification:** create a session
   immediately after publishing a new runner image and confirm the pod's
   `image:` is the new digest.
+  **OBSERVED LIVE 2026-08-01 — no longer hypothetical, and the staleness window
+  is days not minutes.** A session created 2026-08-01 was running a runner built
+  **2026-07-25 17:14 UTC** while `:latest` in GHCR had been
+  **2026-07-30 21:14 UTC** for two days (digest
+  `sha256:94c730bb59c7c3ae…`; verified by reading the pod's
+  `/app/dist/claude-pane-observer.js` mtime and separately querying the registry
+  from inside the pod — method recorded in §0b). User-visible symptom: the
+  in-pane statusline showed no 5h/weekly usage, because that code shipped in the
+  newer image. §0b was initially blamed and is in fact closed — this is the
+  live repro that item's verification line was waiting for. Raises priority:
+  every published runner fix is silently invisible to new sessions for an
+  unbounded window, and the failure mode is "the feature you just shipped
+  doesn't exist" with no error anywhere.
 - [x] **`sandbox doctor` — done 2026-07-12** (done log): 10-check host
   readiness table (cluster checks can FAIL and short-circuit; binaries/
   creds/images advisory WARN/INFO with remediation); PASS paths of the

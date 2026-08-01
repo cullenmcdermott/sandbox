@@ -51,10 +51,15 @@ func TestExternalPaneForwardsWheelAsSgr(t *testing.T) {
 // which re-encodes them as SGR mouse for opencode's native handling.
 func TestExternalScreenEnablesMouseCapture(t *testing.T) {
 	app := NewApp(nil, nil, nil)
-	// Size the app + dashboard so View() renders (external pane is nil here; the
-	// MouseMode decision in View() keys off a.screen, not the pane).
+	// Size the app + dashboard so View() renders.
 	app.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 
+	// A live pane is now part of the precondition: since L11 the pane owns the
+	// exact mode (it knows whether the user has released the mouse to select),
+	// so View() asks it rather than keying off a.screen alone. With no pane there
+	// is nothing to consume the events and capture stays off — asserted
+	// separately by TestMouseCaptureOffWithoutAPane.
+	app.external = scrolledPane(t)
 	app.screen = ScreenExternal
 	if got := app.View().MouseMode; got != tea.MouseModeCellMotion {
 		t.Fatalf("ScreenExternal must enable MouseModeCellMotion (host reports wheel/click to the app); got %v", got)

@@ -120,9 +120,25 @@ type ExternalPane struct {
 	// visible window up by N rows, composing the scrollback tail above the top
 	// of the live screen. Wheel events adjust it ONLY while the child has not
 	// enabled mouse tracking (a tracking child gets the wheel forwarded and
-	// scrolls itself); any key press, paste, or new child output snaps back to
-	// 0 so type-ahead and fresh frames always land on the live view.
+	// scrolls itself); a key press or paste snaps back to 0 so type-ahead
+	// always lands on the live view.
+	//
+	// New child output does NOT snap it (L10). Output is the agent's activity,
+	// not the user's intent: snapping on it made scrollback unusable during a
+	// streaming response, which is exactly when you want to read back. Instead
+	// holdScrollAnchor grows the offset by whatever the burst pushed into
+	// history, keeping the same lines under the user's eye.
 	scrollOffset int
+
+	// pendingOutput records that the child produced output while the view was
+	// scrolled back (L10), so the status row can say so — with the anchor held,
+	// new output is off-screen and otherwise gives no sign it arrived. Cleared
+	// whenever the view returns to live.
+	pendingOutput bool
+
+	// selectionMode releases the mouse to the host terminal so the user can
+	// click-drag to select and copy (L11). See mouseMode.
+	selectionMode bool
 
 	w, h   int
 	exited bool
@@ -419,10 +435,17 @@ func (p *ExternalPane) readCmd() tea.Cmd {
 func (p *ExternalPane) apply(chunk ptyChunk) (tea.Cmd, bool) {
 	data, end := p.drainBatch(chunk)
 	if len(data) > 0 && p.emu != nil {
-		// New child output snaps the scrollback view back to live (L7) BEFORE
-		// the bytes land, so the frame the child just painted is what renders.
-		p.scrollOffset = 0
+		// The viewport belongs to the user (L10): a burst of child output must
+		// not move it. At the live tail (offset 0, the common case) this is the
+		// old behavior — the new frame simply renders. While scrolled back the
+		// anchor is held across the feed instead, and the arrival is remembered
+		// so the status row can say output is landing off-screen.
+		if p.scrollOffset > 0 {
+			p.pendingOutput = true
+		}
+		before := p.emu.ScrollbackLen()
 		p.feed(data)
+		p.holdScrollAnchor(before)
 	}
 	if end == nil {
 		// Clipboard writes ride out alongside the next read (O8): feed() may have
@@ -609,7 +632,7 @@ func (p *ExternalPane) recordInputDrop(kind string) {
 // Any key snaps a scrolled-back view to live (L7) before forwarding, so the
 // child's echo of the keystroke is visible immediately.
 func (p *ExternalPane) handleKey(msg tea.KeyPressMsg) {
-	p.scrollOffset = 0
+	p.snapToLive()
 	if b := encodeKey(msg); len(b) > 0 {
 		p.send(b)
 	}
@@ -620,7 +643,7 @@ func (p *ExternalPane) handleKey(msg tea.KeyPressMsg) {
 // travels as a single unit (one frame on a network transport). Like a key
 // press, a paste snaps a scrolled-back view to live (L7).
 func (p *ExternalPane) handlePaste(msg tea.PasteMsg) {
-	p.scrollOffset = 0
+	p.snapToLive()
 	if !p.activeModes[ansi.ModeBracketedPaste] {
 		return
 	}
@@ -651,6 +674,14 @@ func (p *ExternalPane) mouseEnabled() bool {
 // scrolled by the terminal's own history, but in the pane the vt emulator is
 // the only history there is. Non-wheel events without tracking stay dropped.
 func (p *ExternalPane) handleMouse(msg tea.MouseMsg) {
+	// Selection mode has released the mouse to the terminal (L11), so nothing
+	// here should act on one. The host stops reporting on the next render, but a
+	// frame's worth of events can already be in flight behind the mode change —
+	// consuming those would scroll or click the child from a drag the user aimed
+	// at the terminal's own selection.
+	if p.selectionMode {
+		return
+	}
 	if wheel, ok := msg.(tea.MouseWheelMsg); ok && !p.mouseEnabled() {
 		switch wheel.Button {
 		case tea.MouseWheelUp:
@@ -702,6 +733,85 @@ func (p *ExternalPane) scrollBy(delta int) {
 		off = 0
 	}
 	p.scrollOffset = off
+	if off == 0 {
+		// Scrolled back down to the live tail: whatever arrived while away is
+		// now on screen, so the "new output" note has nothing left to report.
+		p.pendingOutput = false
+	}
+}
+
+// snapToLive returns the view to the live tail (L7). Called for key presses and
+// pastes — user intent to interact with the child, which must always land on
+// what the child is currently painting. Deliberately NOT called for child
+// output; see holdScrollAnchor.
+func (p *ExternalPane) snapToLive() {
+	p.scrollOffset = 0
+	p.pendingOutput = false
+}
+
+// holdScrollAnchor keeps a scrolled-back view pinned to the same content across
+// a burst of child output (L10). before is the scrollback length sampled
+// immediately BEFORE the feed: whatever the burst pushed into history moved the
+// user's rows that many lines further back, so the offset grows by the same
+// delta and the lines under their eye stay put.
+//
+// No-ops at the live tail — offset 0 is the common case and must keep following
+// new output — and on the alt screen, where scrollBy refuses to build an offset
+// in the first place (a full-screen child repaints in place and pushes nothing
+// to scrollback, so there is no anchor to hold).
+//
+// One case it cannot save, by construction: a view parked at the very top of a
+// FULL scrollback ring (paneScrollbackLines). There the ring evicts as fast as
+// it grows, ScrollbackLen stops rising, the delta is 0, and the anchored lines
+// are genuinely gone — evicted history cannot be held onto. The offset stays
+// clamped at the top of what remains, which is the best available answer.
+func (p *ExternalPane) holdScrollAnchor(before int) {
+	if p.scrollOffset == 0 || p.emu == nil || p.emu.IsAltScreen() {
+		return
+	}
+	if grew := p.emu.ScrollbackLen() - before; grew > 0 {
+		p.scrollBy(grew)
+	}
+}
+
+// mouseMode is the terminal mouse mode this pane needs (L11).
+//
+// Capture (DECSET 1002 via MouseModeCellMotion) is the default because the pane
+// consumes mouse events: the wheel drives scrollback (L7) and a child that
+// enables its own tracking (opencode: DECSET 1000/1002/1003 + SGR 1006) needs
+// clicks forwarded, since its requests reach only our emulator — the HOST
+// terminal's mouse mode is owned by the outer Bubble Tea program.
+//
+// That capture is also what takes native click-drag selection away, because
+// 1002 is a single switch covering click, release, wheel AND drag: there is no
+// finer-grained mode to ask for (bubbletea v2.0.7 offers exactly None,
+// CellMotion and AllMotion — verified against the module source, not assumed).
+// Shift-drag is the conventional terminal bypass, but it is undiscoverable and
+// several terminals bind it otherwise, so selection mode makes the trade
+// explicit: while it is on we release the mouse entirely and the terminal does
+// its own selection, exactly as it would for any uninstrumented program.
+func (p *ExternalPane) mouseMode() tea.MouseMode {
+	if p.selectionMode {
+		return tea.MouseModeNone
+	}
+	return tea.MouseModeCellMotion
+}
+
+// toggleSelectionMode flips mouse ownership between the pane and the host
+// terminal (L11) and reports the new state.
+//
+// Known cost while selection mode is on, accepted deliberately rather than
+// papered over: with the mouse released, terminals translate wheel ticks in the
+// alt screen into Up/Down key presses, which this pane forwards to the child
+// like any other key — so scrolling during a selection drives the child's own
+// history/list instead of our scrollback. Suppressing arrows here would be the
+// obvious "fix" and is worse: it would silently eat legitimate arrow keys, and
+// "keys always reach the child" is an invariant of handleKey. Selection mode is
+// a brief, user-initiated interaction with a visible indicator; the wheel is
+// the thing to leave alone during it.
+func (p *ExternalPane) toggleSelectionMode() bool {
+	p.selectionMode = !p.selectionMode
+	return p.selectionMode
 }
 
 // resize updates the pane size and propagates it to the emulator and the
@@ -910,11 +1020,23 @@ func (p *ExternalPane) statusRow() string {
 	segs = append(segs, s.rateLimitSegs(time.Now())...)
 	left += muted.Render(" · " + strings.Join(segs, " · "))
 	right := kit.Kbd("^]", "dash")
-	if p.scrollOffset > 0 {
+	switch {
+	case p.selectionMode:
+		// Selection-mode indicator (L11). This one is not optional chrome: the
+		// mode changes who owns the mouse, and without a visible marker a pane
+		// whose wheel has stopped scrolling looks broken rather than switched.
+		right = lipgloss.NewStyle().Foreground(theme.Gold).Bold(true).
+			Render("select — drag to copy · ^] s to exit")
+	case p.scrollOffset > 0:
 		// Scrolled-back indicator (L7): replaces the detach hint while the view
 		// is over history; any key returns to live (and still reaches the child).
-		right = lipgloss.NewStyle().Foreground(theme.Gold).Bold(true).
-			Render(fmt.Sprintf("↑ %d lines — any key to return", p.scrollOffset))
+		// With the anchor held across new output (L10) this is also the only
+		// sign that the child is still producing, hence the pendingOutput note.
+		label := fmt.Sprintf("↑ %d lines — any key to return", p.scrollOffset)
+		if p.pendingOutput {
+			label = fmt.Sprintf("↑ %d lines · new output below — any key to return", p.scrollOffset)
+		}
+		right = lipgloss.NewStyle().Foreground(theme.Gold).Bold(true).Render(label)
 	}
 
 	w := p.w

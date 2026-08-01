@@ -76,6 +76,33 @@ func TestLeaderTimeoutDetaches(t *testing.T) {
 	}
 }
 
+// TestLeaderSelectTogglesWithoutLeavingThePane (L11): ctrl+] s flips mouse
+// ownership and STAYS on the pane. Unlike every other leader action, this one
+// changes how the pane behaves rather than where the user is — a version that
+// dropped to the dashboard would make selecting text cost you your place.
+func TestLeaderSelectTogglesWithoutLeavingThePane(t *testing.T) {
+	app := externalApp()
+
+	app.Update(keyMsg("ctrl+]"))
+	app.Update(keyMsg("s"))
+
+	if app.screen != ScreenExternal {
+		t.Fatalf("ctrl+] s left the pane: screen=%v, want ScreenExternal", app.screen)
+	}
+	if !app.external.selectionMode {
+		t.Fatal("ctrl+] s did not enter selection mode")
+	}
+	if app.leaderArmed {
+		t.Fatal("leader still armed after the select action")
+	}
+
+	app.Update(keyMsg("ctrl+]"))
+	app.Update(keyMsg("s"))
+	if app.external.selectionMode {
+		t.Fatal("ctrl+] s a second time did not leave selection mode; it must toggle")
+	}
+}
+
 // TestLeaderStaleTimeoutIgnored: a timeout tagged with an OLD generation (e.g.
 // from a superseded arming) must be dropped, leaving the still-armed pane on the
 // external screen.

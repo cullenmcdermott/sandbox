@@ -17,12 +17,16 @@ func TestLeaderStep(t *testing.T) {
 		{"unarmed x ignored", false, "x", leaderIgnore},
 		{"unarmed esc ignored", false, "esc", leaderIgnore},
 		{"unarmed enter ignored", false, "enter", leaderIgnore},
+		// The counter-half of the L11 binding, and the one that matters: a bare
+		// "s" is ordinary text the child must receive. Only the chord toggles.
+		{"unarmed s ignored", false, "s", leaderIgnore},
 
 		// Armed: leader keys detach, g/k jump, anything else forwards.
 		{"armed ctrl+] detaches", true, "ctrl+]", leaderDetach},
 		{"armed ctrl+4 detaches", true, "ctrl+4", leaderDetach},
 		{"armed g jumps next", true, "g", leaderJumpNext},
 		{"armed k jumps prev", true, "k", leaderJumpPrev},
+		{"armed s toggles selection", true, "s", leaderSelect},
 		{"armed x forwards", true, "x", leaderForward},
 		{"armed esc forwards", true, "esc", leaderForward},
 		{"armed enter forwards", true, "enter", leaderForward},

@@ -1067,6 +1067,14 @@ func (a *App) updateExternalScreen(msg tea.Msg, dashCmd tea.Cmd) (tea.Model, tea
 			a.leaderArmed = false
 			a.leaderGen++
 			return a, a.leaderJump(dashCmd, a.dashboard.jumpToPrevNeedingAttention())
+		case leaderSelect:
+			// Toggle mouse ownership between the pane and the terminal (L11) so
+			// click-drag selection is reachable. Stays on the external screen —
+			// this changes how the pane behaves, it does not leave it.
+			a.leaderArmed = false
+			a.leaderGen++
+			a.external.toggleSelectionMode()
+			return a, dashCmd
 		case leaderForward:
 			// Disarm and forward THIS key to the child; the earlier arming
 			// ctrl+] never reached it.
@@ -1145,8 +1153,14 @@ func (a *App) View() tea.View {
 	// Ghostty) translated the wheel into arrow keys, which fell through to the
 	// child as Up/Down and hijacked its prompt history. handleMouse re-encodes
 	// captured events as SGR mouse onto the child's PTY (Phase 3 item 3).
-	if a.screen == ScreenExternal {
-		v.MouseMode = tea.MouseModeCellMotion
+	//
+	// The pane itself owns the exact mode, because it knows whether the user has
+	// released the mouse for a selection (L11) — capture costs click-drag
+	// selection, and that trade is the user's to make per-moment rather than
+	// ours to make once. A nil pane keeps capture off: nothing would consume the
+	// events, and this frame can render while an attach is still in flight.
+	if a.screen == ScreenExternal && a.external != nil {
+		v.MouseMode = a.external.mouseMode()
 	}
 	// Opaque page background everywhere EXCEPT the external pane, which paints its
 	// own — otherwise unpainted cells (splash whitespace, overlay margins) bleed the
