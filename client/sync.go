@@ -442,12 +442,27 @@ func waitHealthyWithin(ctx context.Context, client healthChecker, budget, interv
 	}
 }
 
-// waitOpencodeReady blocks until an HTTP request to url elicits any HTTP response
-// (confirming `opencode serve` is listening in the pod), or the budget/context
-// expires. ANY status code counts as ready — only transport errors are retried —
-// because a client-go SPDY forward accepts the local connection the instant its
-// listener binds, so a bare TCP dial false-passes before the pod port answers.
-func waitOpencodeReady(ctx context.Context, url string) error {
+// waitExternalReady blocks until an HTTP request to url elicits any HTTP
+// response (confirming the pod-side external service is listening), or the
+// budget/context expires. ANY status code counts as ready — only transport
+// errors are retried — because a client-go SPDY forward accepts the local
+// connection the instant its listener binds, so a bare TCP dial false-passes
+// before the pod port answers.
+//
+// Both external-service backends share this one probe, because both answer
+// plain HTTP on the port Connect forwards:
+//
+//   - opencode: `opencode serve` is an HTTP server; any response proves it bound.
+//   - codex: `codex app-server --listen ws://…` serves GET /readyz and /healthz
+//     on the SAME port as the websocket listener, so the readiness check needs
+//     no websocket handshake — and, unlike a bare dial or a read-deadline probe,
+//     it asks the server a question only a bound server can answer.
+//
+// claude-pane has no third caller by construction: its pane is the runner's own
+// WebSocket on the runner port, whose readiness waitHealthy already established
+// (StageRunner), and the pod-side child is spawned lazily on first attach — so
+// at connect time there is nothing yet to probe.
+func waitExternalReady(ctx context.Context, url string) error {
 	deadline := time.Now().Add(30 * time.Second)
 	client := &http.Client{Timeout: 3 * time.Second}
 	wait := probeInterval(time.Second) // [R6] 100ms → 1s, not a flat 1s
