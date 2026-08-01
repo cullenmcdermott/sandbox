@@ -42,7 +42,14 @@ const (
 type fakeBackend struct {
 	recordMu sync.Mutex
 
-	order *[]string
+	// order is shared with fakeSyncRunner, so appends to it take orderMu — a
+	// lock the two fakes hold in COMMON. recordMu alone is not enough: once a
+	// test drives a full Connect the two writers are genuinely concurrent (the
+	// detached image-pin refresh records "start" while the connect foreground
+	// records "sync-list" from the collision check), and two fakes each guarding
+	// the same slice with their own mutex is not a lock at all.
+	order   *[]string
+	orderMu *sync.Mutex
 
 	// results / errors, keyed by method
 	createErr   error
@@ -90,12 +97,20 @@ func (f *fakeBackend) callCount(method string) int {
 }
 
 func (f *fakeBackend) record(method string, ref Ref) {
+	f.noteOrder(method)
 	f.recordMu.Lock()
 	defer f.recordMu.Unlock()
-	if f.order != nil {
-		*f.order = append(*f.order, method)
-	}
 	f.gotRefs[method] = append(f.gotRefs[method], ref)
+}
+
+// noteOrder appends to the shared order log under the shared orderMu.
+func (f *fakeBackend) noteOrder(entry string) {
+	if f.order == nil {
+		return
+	}
+	f.orderMu.Lock()
+	defer f.orderMu.Unlock()
+	*f.order = append(*f.order, entry)
 }
 
 func (f *fakeBackend) Namespace() string { return "agent-sessions" }
@@ -113,16 +128,12 @@ func (f *fakeBackend) Status(_ context.Context, ref Ref) (State, error) {
 }
 
 func (f *fakeBackend) List(context.Context) ([]State, error) {
-	if f.order != nil {
-		*f.order = append(*f.order, "list")
-	}
+	f.noteOrder("list")
 	return f.listStates, f.listErr
 }
 
 func (f *fakeBackend) Watch(context.Context) (<-chan StateEvent, error) {
-	if f.order != nil {
-		*f.order = append(*f.order, "watch")
-	}
+	f.noteOrder("watch")
 	return f.watchCh, f.watchErr
 }
 
@@ -181,9 +192,12 @@ var _ Backend = (*fakeBackend)(nil)
 // and returns success, so the best-effort sync calls the orchestration paths
 // make are observable and side-effect-free.
 type fakeSyncRunner struct {
-	order *[]string
-	mu    sync.Mutex
-	calls [][]string
+	// order/orderMu are the SAME slice and mutex the fake backend appends under
+	// — see fakeBackend.order. r.mu guards this fake's own calls slice only.
+	order   *[]string
+	orderMu *sync.Mutex
+	mu      sync.Mutex
+	calls   [][]string
 	// verbErr fails a given `mutagen sync <verb>` (e.g. "resume", "flush"), so a
 	// test can drive the best-effort sync failure paths that used to be silent
 	// ([R5]). verbOut supplies canned stdout for a verb (e.g. "list").
@@ -196,7 +210,9 @@ func (r *fakeSyncRunner) Output(_ context.Context, _ io.Reader, args ...string) 
 	defer r.mu.Unlock()
 	r.calls = append(r.calls, args)
 	if r.order != nil && len(args) >= 2 && args[0] == "sync" {
+		r.orderMu.Lock()
 		*r.order = append(*r.order, "sync-"+args[1])
+		r.orderMu.Unlock()
 	}
 	if len(args) >= 2 && args[0] == "sync" {
 		verb := args[1]
@@ -236,8 +252,9 @@ func (r *fakeSyncRunner) sawSync(verb string) bool {
 func fakeClient(t *testing.T, be *fakeBackend) (*Client, *fakeSyncRunner, *[]string) {
 	t.Helper()
 	order := &[]string{}
-	be.order = order
-	spy := &fakeSyncRunner{order: order}
+	orderMu := &sync.Mutex{}
+	be.order, be.orderMu = order, orderMu
+	spy := &fakeSyncRunner{order: order, orderMu: orderMu}
 	c, err := New(WithBackend(be), WithStateDir(t.TempDir()))
 	if err != nil {
 		t.Fatalf("New: %v", err)

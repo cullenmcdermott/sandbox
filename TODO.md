@@ -165,6 +165,20 @@
 
 ## 0) Inbox — human notes, needs triage
 
+- **`Session.Close` cancels the background sync task but never joins it, and
+  there is no way to join it from outside** (found 2026-08-01 while writing the
+  codex connect tests). `closeHandles` (`client/session.go:1172`) sets
+  `s.syncTask = nil`, so an `AwaitSync` made *after* `Close` — or after any
+  failed `Connect`, which closes handles on the way out — returns instantly
+  with `t == nil` instead of waiting. The goroutine can still be writing
+  `<stateDir>/ssh/config` at that point. Benign in production (the state dir
+  persists, and `bgSyncOverallTimeout` bounds the goroutine), but it means a
+  library consumer cannot Close a session and then safely delete its state dir,
+  and it flakes any test using `t.TempDir` as the state dir ("RemoveAll
+  cleanup: directory not empty"). Fix direction: have `closeHandles` keep the
+  task reachable for joining (or give `Close` a `CloseAndWait`/context variant
+  that blocks on `task.done`) rather than nilling the only handle to it.
+
 ### Decisions taken without sign-off (agent run, 2026-07-27)
 
 Judgment calls made while burning down the §8 SDK-usability batch, recorded so
@@ -1130,19 +1144,29 @@ number in the done-log line. `[R1]`/`[R3]`/`[X2]` all rewrite
   implementations must be safe for concurrent use. **Still owed: the before/after
   warm-reattach measurement** — the structural round trips are gone and counted
   by test, but no live timing was taken (no cluster in the dev pod).
-- **NOT APPLICABLE to this tree 2026-07-30 — [R3], [R11], [R12].** All three
-  describe the codex *connect* path (`waitCodexReady`, `waitCodexReadyWithin`,
-  `probeCodexOnce`, a codex readiness stage). **None of those symbols exist
-  anywhere in the repo** — the only occurrences are the review doc itself. The
-  codex app-server forward is still explicitly future work: see the comment at
-  `client/session.go:419` ("the forward is expressible today as
-  `Forward(PortRunner, PortSSH, PortCodex)`, just not requested here"). The
-  review was written against a tree carrying an uncommitted 2026-07-28/29
-  codex-connect diff that is not present here. **Re-file these against that
-  branch when it lands** — the substance (don't define readiness as holding a
-  1s TCP read deadline; expose readiness on the runner, which already
-  supervises the child and answers `/healthz` on the same forward; give the
-  wait an `OnPhase` stage) is sound and worth applying *before* it ships.
+- [x] **[R3], [R11], [R12] done 2026-08-01.** All three described a codex
+  connect-path readiness wait (`waitCodexReady`, `waitCodexReadyWithin`,
+  `probeCodexOnce`, a codex readiness stage) whose symbols never existed in this
+  tree; they were written against an uncommitted 2026-07-28/29 codex-connect
+  diff, and the 2026-07-30 triage deferred them to "re-file when that branch
+  lands". It landed on 2026-08-01 **with the wait**, built the way those items
+  argued rather than the way they found it. `waitOpencodeReady` is now the
+  backend-agnostic `waitExternalReady` (`client/sync.go:445`) and BOTH
+  external-service backends share it: the codex app-server serves `GET /readyz`
+  on the same port as its ws listener (spike finding,
+  `docs/codex-integration-plan.md`), so readiness is a plain HTTP question with
+  no 1s-TCP-read-deadline probe and no websocket handshake. The wait has its own
+  `StageCodex` phase (`client/session.go:30`), carried 1:1 into
+  `dashboard.StageCodex` with a "Starting codex" stepper step. The dashboard's
+  `connectingOpencode` bool became `connectingBackend string`, selecting the
+  stepper lifecycle via `connectStagesFor` — claude-pane selects neither, since
+  its pane is the runner's own WebSocket (already covered by `StageRunner`) and
+  its child spawns lazily on first attach, so there is nothing to probe at
+  connect time.
+  **Follow-up (cosmetic, unowned):** there is no codex mascot in `tui/theme`, so
+  a codex connect splash falls back to the Claude block-pixel guy
+  (`internal/tui/dashboard/app.go:1440`). Add `theme.CodexMascot()` alongside
+  `OpenCodeMascot()` when someone wants the splash on-brand.
 - [x] **[R6] done 2026-07-30** (done log): `waitHealthyWithin` and
   `waitOpencodeReady` start at 100ms and back off to their 1s ceiling instead of
   sleeping a flat 1s between probes that ride an established loopback forward.

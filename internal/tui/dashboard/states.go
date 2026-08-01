@@ -15,6 +15,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 
+	"github.com/cullenmcdermott/sandbox/internal/session"
 	"github.com/cullenmcdermott/sandbox/tui/kit"
 	"github.com/cullenmcdermott/sandbox/tui/theme"
 )
@@ -26,8 +27,9 @@ import (
 // done when its value is below the current one, so a stage emitted later that
 // sorted earlier would make the checklist visibly regress (and, since the
 // current stage would then sit between two displayed stages, render no spinner —
-// the screen looks frozen). connect emits Sync *before* Opencode, so StageSync
-// must precede StageOpencode here.
+// the screen looks frozen). connect emits Sync *before* the external-service
+// wait, so StageSync must precede both StageOpencode and StageCodex here, and
+// both must precede StageAttach.
 type ConnectStage int
 
 const (
@@ -37,16 +39,35 @@ const (
 	StageRunner                       // waiting for the runner /healthz
 	StageSync                         // (re)starting file sync
 	StageOpencode                     // (opencode only) waiting for opencode serve to listen
+	StageCodex                        // (codex only) waiting for the codex app-server to listen
 	StageAttach                       // done — handing off to the transcript/pane
 )
 
-// opencodeConnectStages is the stepper's displayed lifecycle for opencode-server
-// sessions: the same stages as the default plus StageOpencode (the wait for
-// `opencode serve` to bind), which the default list omits. Threading this into
-// connectingStepper for opencode connects keeps the current stage in the
-// displayed set so it always renders a live spinner instead of looking stuck.
+// opencodeConnectStages / codexConnectStages are the stepper's displayed
+// lifecycles for the two backends that wait on an external service: the default
+// stages plus that backend's own wait, which the default list omits. Threading
+// the right one into connectingStepper keeps the current stage inside the
+// displayed set, so it always renders a live spinner instead of looking stuck.
+// claude-pane needs no such list — it has no external service to wait for.
 var opencodeConnectStages = []ConnectStage{
 	StageCheck, StageResume, StageForward, StageRunner, StageSync, StageOpencode, StageAttach,
+}
+
+var codexConnectStages = []ConnectStage{
+	StageCheck, StageResume, StageForward, StageRunner, StageSync, StageCodex, StageAttach,
+}
+
+// connectStagesFor returns the stepper lifecycle for a backend, or nil for the
+// default (no external-service wait).
+func connectStagesFor(backend string) []ConnectStage {
+	switch backend {
+	case session.BackendOpenCode:
+		return opencodeConnectStages
+	case session.BackendCodex:
+		return codexConnectStages
+	default:
+		return nil
+	}
 }
 
 // connectStageLabel returns the user-facing label for a connect stage.
@@ -62,6 +83,8 @@ func connectStageLabel(s ConnectStage) string {
 		return "Waiting for runner"
 	case StageOpencode:
 		return "Starting opencode"
+	case StageCodex:
+		return "Starting codex"
 	case StageSync:
 		return "Syncing files"
 	case StageAttach:

@@ -1,11 +1,16 @@
 # Codex backend — integration plan (Option B: remote app-server + local TUI)
 
-Status: **Phase 1 implemented (2026-07-17)** — backend id + credential
-contract (`Spec.CodexAuthJSON`/`CodexAccountID` → per-session Secret →
-`$CODEX_HOME/auth.json` materialization), k8s env/port wiring, runner
-supervisor + passive metrics observer, `sandbox codex` command, Dockerfile
-pin. Phases 2–4 (interactive pane, parity polish, live verification) remain
-planned. Decision (2026-06-24): ship **Option B** — run the Codex
+Status: **Phase 1 implemented (2026-07-17; connect path completed 2026-08-01)**
+— backend id + credential contract (`Spec.CodexAuthJSON`/`CodexAccountID` →
+per-session Secret → `$CODEX_HOME/auth.json` materialization), k8s env/port
+wiring, runner supervisor + passive metrics observer, `sandbox codex` command,
+Dockerfile pin, and (2026-08-01) the **client connect path**: a full codex
+connect forwards `PortCodex` alongside runner+SSH, waits for the app-server's
+`GET /readyz` under a `StageCodex` phase (the same `waitExternalReady` probe
+opencode uses), and publishes
+`Connection.External.URL = ws://127.0.0.1:<local port>` for a local
+`codex --remote` TUI to attach to. Phases 2–4 (embedding that TUI as a
+dashboard pane, parity polish, live verification) remain planned. Decision (2026-06-24): ship **Option B** — run the Codex
 **app-server daemon** in the pod and drive it from a local `codex --remote …` TUI
 embedded as an external pane, mirroring the OpenCode backend. **Auth (revised
 2026-06-24):** ChatGPT-plan **OAuth tokens delivered via a CLI-injected Secret**
@@ -345,12 +350,26 @@ questions answered; Option B's transport is settled:**
    prompt. **Add the OpenAI/ChatGPT auth + API hosts to the egress allowlist
    NetworkPolicy** (token refresh + inference) — without it codex can't refresh or
    call the model.
-4. **`client/session.go`** — request the codex forward on the connect path:
-   `Forward(PortRunner, PortSSH, PortCodex)` (the named endpoint and its
-   standard port already exist; the `ForwardSpecs*` helpers this step used to
-   name were deleted on 2026-07-27 — see TODO §0 `[D4]`). Read the handle back
-   by name via `Forwards.LocalPort(PortCodex)`. If the spike picks
-   unix-over-SSH, no extra forward — reuse the SSH forward.
+4. **`client/session.go`** — **done 2026-08-01.** A full codex connect requests
+   `Forward(PortRunner, PortSSH, PortCodex)` and reads the handle back by name
+   via `Forwards.LocalPort(PortCodex)`; a Backend that returns no such forward
+   is an error, mirroring the opencode branch. The local address is published as
+   `Connection.External = &ExternalCreds{URL: "ws://127.0.0.1:<port>"}` with
+   **empty** `Username`/`Password` — the app-server has no auth of its own and
+   binds pod-loopback, so the port-forward is the access control. Observer
+   connects are unchanged: runner port only, `External` nil. (The spike chose ws
+   over unix-over-SSH, so the extra forward is real rather than a reuse of the
+   SSH one. The `ForwardSpecs*` helpers this step used to name were deleted on
+   2026-07-27 — see TODO §0 `[D4]`.)
+
+   The URL is only handed out once the app-server answers: the connect waits on
+   **`GET /readyz`** — which the spike confirmed the app-server serves on the
+   same port as the ws listener — through the same `waitExternalReady` probe the
+   opencode branch uses, under its own `StageCodex` phase ("Starting codex" in
+   the dashboard stepper). Symmetry is the point: two backends with an external
+   service, one probe, one stage each. claude-pane has neither, because its pane
+   is the runner's own WebSocket on the runner port (already covered by the
+   `/healthz` wait) and its child is spawned lazily on first attach.
 5. **`runner/src/codex.ts`** — a supervisor modeled on `opencode.ts`:
    - fail-closed if neither the codex-auth `auth.json` nor `OPENAI_API_KEY` is present;
    - spawn `codex remote-control start` (or daemon + enable-remote-control),

@@ -27,6 +27,7 @@ const (
 	StageRunner                // waiting for the runner to be healthy
 	StageSync                  // setting up / flushing file sync
 	StageOpencode              // waiting for `opencode serve` to answer
+	StageCodex                 // waiting for the codex app-server to answer
 	StageAttach                // connected
 )
 
@@ -45,6 +46,8 @@ func (s Stage) String() string {
 		return "sync"
 	case StageOpencode:
 		return "opencode"
+	case StageCodex:
+		return "codex"
 	case StageAttach:
 		return "attach"
 	default:
@@ -52,15 +55,27 @@ func (s Stage) String() string {
 	}
 }
 
-// ExternalCreds holds the local endpoint and HTTP basic-auth credentials for a
-// backend that exposes a secondary local service the caller drives directly (an
-// external UI/API pane): today an opencode-server session's `opencode serve`,
-// and the shape codex will reuse for its remote TUI. Nil for a claude-sdk
-// session, which has no such external service.
+// ExternalCreds holds the local endpoint — and, where the service has any, the
+// HTTP basic-auth credentials — for a backend that exposes a secondary local
+// service the caller drives directly as an external UI/API pane, reached over
+// this connect's port-forward. Two backends populate it:
+//
+//   - opencode: `opencode serve`, an HTTP service behind basic auth. Username
+//     and Password are both set; URL is http://127.0.0.1:<local opencode port>.
+//   - codex: the codex app-server's websocket. URL is
+//     ws://127.0.0.1:<local codex port> and Username/Password are left EMPTY.
+//     That is deliberate, not an omission: the app-server has no auth of its
+//     own and binds loopback only inside the pod, so the port-forward is the
+//     access control. The URL is what a local `codex --remote`-style TUI
+//     attaches to.
+//
+// Nil for a claude-pane session, whose pane is the runner's own WebSocket
+// rather than a separate service, and nil on any observer connect, which
+// forwards the runner port only whatever the backend.
 type ExternalCreds struct {
-	Username string
-	Password string
-	URL      string // e.g. http://127.0.0.1:4096
+	Username string // empty for codex: the app-server has no auth
+	Password string // empty for codex: the app-server has no auth
+	URL      string // e.g. http://127.0.0.1:<port> (opencode), ws://127.0.0.1:<port> (codex)
 }
 
 // Connection is the successful outcome of Session.Connect: a live runner client,
@@ -70,7 +85,7 @@ type Connection struct {
 	Runner   RunnerClient
 	Endpoint string         // runner HTTP base URL
 	Backend  string         // resolved backend id
-	External *ExternalCreds // nil for a backend with no external service (claude-sdk)
+	External *ExternalCreds // nil for claude-pane, and on every observer connect
 	// Warning is a non-fatal advisory (e.g. file sync failed) the caller should
 	// surface rather than discard.
 	Warning string
@@ -290,8 +305,9 @@ func (g *stagedRunner) StartTurn(ctx context.Context, ref Ref, in TurnInput) (Tu
 // Connect establishes (or re-establishes) a live runner connection: resume the
 // pod if suspended, wait for it to be ready, port-forward, wait for runner
 // health, and — unless Observer is set — set up file sync, ensure the idle
-// reaper, and (for opencode sessions) wait for `opencode serve`. Safe to call
-// repeatedly; prior port-forwards are closed.
+// reaper, and forward the backend's external-service port (waiting for
+// `opencode serve` to answer; for codex the forward alone, see ExternalCreds).
+// Safe to call repeatedly; prior port-forwards are closed.
 func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection, error) {
 	if err := validateImagePullPolicy(opt.ReaperImagePullPolicy); err != nil {
 		return nil, err
@@ -426,14 +442,13 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 	}
 
 	stage(StageForward)
-	// Phase 1: a codex-app-server session has no external-pane forward here yet —
-	// it falls through to the default (runner HTTP + SSH) branch below, exactly
-	// like claude-sdk. The codex app-server port-forward + interactive pane land in
-	// a later wave (the forward is expressible today as
-	// Forward(PortRunner, PortSSH, PortCodex), just not requested here), so a
-	// codex connect creates/health-checks without panicking, just without a codex
-	// turn path. Only opencode currently takes the external-service branch.
 	opencode := st.Backend == session.BackendOpenCode
+	// A codex session's external pane is the app-server websocket, so a full
+	// connect forwards it alongside runner+SSH. Unlike opencode it needs no
+	// credential fetched below: the app-server has no auth of its own and binds
+	// loopback inside the pod, so this forward IS the access control (see
+	// ExternalCreds).
+	codex := st.Backend == session.BackendCodex
 
 	// [R1d] The per-session Secret holds both the runner bearer token and the
 	// opencode password, and neither depends on the port-forward — yet both used
@@ -475,6 +490,8 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 		handles, err = s.c.backend.PortForward(ctx, s.ref, Forward(PortRunner))
 	case opencode:
 		handles, err = s.c.backend.PortForward(ctx, s.ref, Forward(PortRunner, PortSSH, PortOpencode))
+	case codex:
+		handles, err = s.c.backend.PortForward(ctx, s.ref, Forward(PortRunner, PortSSH, PortCodex))
 	default:
 		handles, err = s.c.backend.PortForward(ctx, s.ref, Forward(PortRunner, PortSSH))
 	}
@@ -650,7 +667,7 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 		addr := fmt.Sprintf("127.0.0.1:%d", opencodePort)
 		stage(StageOpencode)
 		ocSpan := tr.start("connect.opencode_ready")
-		werr := waitOpencodeReady(ctx, "http://"+addr+"/")
+		werr := waitExternalReady(ctx, "http://"+addr+"/")
 		ocSpan.end()
 		if werr != nil {
 			s.closeHandles()
@@ -661,6 +678,33 @@ func (s *Session) Connect(ctx context.Context, opt ConnectOptions) (*Connection,
 			Password: pass,
 			URL:      "http://" + addr,
 		}
+	}
+	if full && codex {
+		codexPort, ok := handles.LocalPort(PortCodex)
+		if !ok {
+			// Same post-publish teardown as the opencode branch: only reachable
+			// from a third-party Backend that returns an incomplete Forwards, since
+			// the codex case above always requests this port.
+			s.closeHandles()
+			return nil, fmt.Errorf("sandbox: PortForward did not return a %q forward", PortCodex)
+		}
+		// Mirror of the opencode branch above, down to the shared probe: don't
+		// hand back a URL for a service that isn't up yet, or the local
+		// `codex --remote` TUI races the pod-side app-server on every attach. The
+		// app-server serves GET /readyz on the SAME port as the ws listener, so
+		// the readiness question is answerable over plain HTTP — no websocket
+		// handshake, and nothing that a not-yet-bound port can false-pass.
+		addr := fmt.Sprintf("127.0.0.1:%d", codexPort)
+		stage(StageCodex)
+		cxSpan := tr.start("connect.codex_ready")
+		werr := waitExternalReady(ctx, "http://"+addr+"/readyz")
+		cxSpan.end()
+		if werr != nil {
+			s.closeHandles()
+			return nil, fmt.Errorf("codex app-server not ready: %w", werr)
+		}
+		// No Username/Password by design — see ExternalCreds.
+		conn.External = &ExternalCreds{URL: "ws://" + addr}
 	}
 	stage(StageAttach)
 	return conn, nil

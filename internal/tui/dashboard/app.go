@@ -227,10 +227,12 @@ type App struct {
 	// "uploading" during the initial file sync); "" when there is none.
 	connectDetail string
 
-	// connectingOpencode records whether the in-flight connect is for an
-	// opencode-server session, so the connecting stepper shows the extra
-	// StageOpencode ("Starting opencode") step. Set when a connect/create begins.
-	connectingOpencode bool
+	// connectingBackend is the backend of the in-flight connect, which selects
+	// the connecting stepper's lifecycle: the two backends that wait on an
+	// external service each show their own extra step (StageOpencode /
+	// StageCodex), and claude-pane shows neither. Set when a connect/create
+	// begins; "" when nothing is connecting.
+	connectingBackend string
 
 	// connectFrame is the spinner frame index for the connecting screen (U1).
 	connectFrame int
@@ -730,7 +732,7 @@ func (a *App) handleAttach(msg attachMsg) (tea.Model, tea.Cmd) {
 	// Every session is an external pane now — the real agent TUI repaints from
 	// the pane stream itself, so there is no Go transcript preview to build.
 	a.connectingFor = &msg.sess
-	a.connectingOpencode = msg.sess.State.Backend == session.BackendOpenCode
+	a.connectingBackend = msg.sess.State.Backend
 	a.connectErr = nil
 	a.screen = ScreenConnecting
 	return a, a.connectCmd(msg.sess)
@@ -1363,7 +1365,7 @@ func (a *App) createCmd(params CreateParams) tea.Cmd {
 	a.connectStage = StageCheck
 	a.connectDetail = ""
 	a.connectStartedAt = nowFunc()
-	a.connectingOpencode = backend == session.BackendOpenCode
+	a.connectingBackend = backend
 	// Preempt the observer connect burst while the new session provisions (§5).
 	gate := a.dashboard.attachGate
 	go func() {
@@ -1444,19 +1446,19 @@ func (a *App) connectingView() tea.View {
 		Bold(true).
 		Render(title)
 
-	// opencode sessions have an extra "Starting opencode" stage; show it so the
-	// current stage is always in the displayed set and renders a live spinner.
-	var applicable []ConnectStage
-	if a.connectingOpencode {
-		applicable = opencodeConnectStages
-	}
+	// The external-service backends each have an extra stage (opencode/codex);
+	// show it so the current stage is always in the displayed set and renders a
+	// live spinner. nil selects the default lifecycle.
+	applicable := connectStagesFor(a.connectingBackend)
 	stepper := connectingStepper(a.connectStage, a.connectFrame, a.connectDetail, applicable)
 
 	// Block-pixel mascot above the title — the Claude Code guy for Claude, the
 	// pixel "OC" monogram for opencode — so the splash announces which agent is
 	// coming up, in that agent's own brand register.
+	// (No codex mascot exists yet, so a codex connect falls back to the Claude
+	// block-pixel guy rather than showing nothing.)
 	logo := theme.ClaudeMascot()
-	if a.connectingOpencode {
+	if a.connectingBackend == session.BackendOpenCode {
 		logo = theme.OpenCodeMascot()
 	}
 

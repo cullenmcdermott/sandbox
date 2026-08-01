@@ -22,6 +22,7 @@ func TestMapStageCoversAllClientStages(t *testing.T) {
 		client.StageRunner:   dashboard.StageRunner,
 		client.StageSync:     dashboard.StageSync,
 		client.StageOpencode: dashboard.StageOpencode,
+		client.StageCodex:    dashboard.StageCodex,
 		client.StageAttach:   dashboard.StageAttach,
 	}
 	for in, exp := range want {

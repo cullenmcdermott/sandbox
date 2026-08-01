@@ -172,26 +172,46 @@ func TestConnectingStepperOpencodeNoRegress(t *testing.T) {
 	}
 }
 
-// ORACLE: connectingView for an opencode session renders the "Starting opencode"
-// step; for a non-opencode session it does not. [opencode connect U1]
-func TestConnectingViewOpencodeStep(t *testing.T) {
+// ORACLE: connectingView renders the external-service step belonging to the
+// connecting backend — "Starting opencode" for opencode, "Starting codex" for
+// codex — and neither for claude-pane, which has no external service to wait on.
+// Each backend must also NOT show the other's step. [opencode connect U1]
+func TestConnectingViewExternalServiceStep(t *testing.T) {
 	t.Setenv("SANDBOX_REDUCE_MOTION", "1")
 	app := NewApp(nil, nil, nil)
 	app.width, app.height = 80, 24
 	sess := Session{State: session.State{ID: "s1"}, Title: "oc"}
 	app.screen = ScreenConnecting
 	app.connectingFor = &sess
-	app.connectStage = StageOpencode
 
-	app.connectingOpencode = true
-	if oc := app.connectingView().Content; !strings.Contains(oc, connectStageLabel(StageOpencode)) {
+	app.connectingBackend = session.BackendOpenCode
+	app.connectStage = StageOpencode
+	oc := app.connectingView().Content
+	if !strings.Contains(oc, connectStageLabel(StageOpencode)) {
 		t.Errorf("opencode connectingView missing %q step: %q", connectStageLabel(StageOpencode), oc)
 	}
+	if strings.Contains(oc, connectStageLabel(StageCodex)) {
+		t.Errorf("opencode connectingView should omit %q step: %q", connectStageLabel(StageCodex), oc)
+	}
 
-	app.connectingOpencode = false
+	app.connectingBackend = session.BackendCodex
+	app.connectStage = StageCodex
+	cx := app.connectingView().Content
+	if !strings.Contains(cx, connectStageLabel(StageCodex)) {
+		t.Errorf("codex connectingView missing %q step: %q", connectStageLabel(StageCodex), cx)
+	}
+	if strings.Contains(cx, connectStageLabel(StageOpencode)) {
+		t.Errorf("codex connectingView should omit %q step: %q", connectStageLabel(StageOpencode), cx)
+	}
+
+	// COUNTER: claude-pane waits on no external service, so neither step shows.
+	app.connectingBackend = session.BackendClaudePane
 	app.connectStage = StageRunner
-	if cc := app.connectingView().Content; strings.Contains(cc, connectStageLabel(StageOpencode)) {
-		t.Errorf("non-opencode connectingView should omit %q step: %q", connectStageLabel(StageOpencode), cc)
+	cc := app.connectingView().Content
+	for _, s := range []ConnectStage{StageOpencode, StageCodex} {
+		if strings.Contains(cc, connectStageLabel(s)) {
+			t.Errorf("claude-pane connectingView should omit %q step: %q", connectStageLabel(s), cc)
+		}
 	}
 }
 

@@ -43,6 +43,8 @@ func mapStage(st client.Stage) dashboard.ConnectStage {
 		return dashboard.StageSync
 	case client.StageOpencode:
 		return dashboard.StageOpencode
+	case client.StageCodex:
+		return dashboard.StageCodex
 	case client.StageAttach:
 		return dashboard.StageAttach
 	default: // StageCheck and anything else
@@ -51,9 +53,10 @@ func mapStage(st client.Stage) dashboard.ConnectStage {
 }
 
 // mapOpencode adapts the client's generic external-service creds
-// (Connection.External) to the dashboard's opencode pane type. Today the only
-// backend with an external service is opencode-server; codex will reuse the
-// client.ExternalCreds shape with its own dashboard pane.
+// (Connection.External) to the dashboard's opencode pane type. Codex now also
+// populates client.ExternalCreds (a ws:// URL, no credentials) but has no
+// dashboard pane of its own yet — that is Phase 2 of
+// docs/codex-integration-plan.md.
 func mapOpencode(oc *client.ExternalCreds) *dashboard.OpencodeCreds {
 	if oc == nil {
 		return nil
