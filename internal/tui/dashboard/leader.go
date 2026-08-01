@@ -22,6 +22,7 @@ const (
 	leaderDetach                       // detach to the dashboard now
 	leaderJumpNext                     // jump to next session needing attention
 	leaderJumpPrev                     // jump to previous session needing attention
+	leaderSelect                       // toggle selection mode (release the mouse to the terminal; L11)
 	leaderForward                      // disarm; forward THIS key to the child (the arming ctrl+] is never forwarded)
 )
 
@@ -35,8 +36,13 @@ const leaderTimeout = 500 * time.Millisecond
 // When not armed, only ctrl+] (a.k.a. ctrl+4 — the same terminal byte) arms the
 // leader; every other key takes the normal forwarding path. When armed, a second
 // ctrl+] detaches, "g"/"k" jump to the next/previous session needing attention,
-// and anything else disarms and forwards to the child (the original ctrl+] is
-// never itself forwarded).
+// "s" toggles selection mode (L11), and anything else disarms and forwards to
+// the child (the original ctrl+] is never itself forwarded).
+//
+// Selection mode belongs on the leader for the same reason attention-nav does:
+// it must not steal a bare key the embedded client binds, and "s" bare is very
+// much spoken for (claude and opencode both take plain text). Behind ctrl+] it
+// costs the child nothing.
 func leaderStep(armed bool, key string) leaderAction {
 	if !armed {
 		switch key {
@@ -53,6 +59,8 @@ func leaderStep(armed bool, key string) leaderAction {
 		return leaderJumpNext
 	case "k":
 		return leaderJumpPrev
+	case "s":
+		return leaderSelect
 	default:
 		return leaderForward
 	}

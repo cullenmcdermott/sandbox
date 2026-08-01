@@ -47,6 +47,9 @@ func TestMouseCaptureOnlyOnScreensThatConsumeIt(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			a := &App{screen: tc.screen, dashboard: New(nil)}
 			a.dashboard.width, a.dashboard.height = 80, 24
+			if tc.screen == ScreenExternal {
+				a.external = scrolledPane(t)
+			}
 
 			if got := a.View().MouseMode; got != tc.want {
 				t.Errorf("screen %v: MouseMode = %v, want %v", tc.screen, got, tc.want)
@@ -55,12 +58,61 @@ func TestMouseCaptureOnlyOnScreensThatConsumeIt(t *testing.T) {
 	}
 }
 
+// L11: on the pane screen the PANE decides, so a user who has released the
+// mouse to select text actually gets it released. Without this the toggle is
+// inert — App.View would keep asserting capture over the pane's own answer,
+// which is precisely the bug (a hardcoded CellMotion) the toggle exists to fix.
+func TestMouseCaptureReleasedInSelectionMode(t *testing.T) {
+	a := &App{screen: ScreenExternal, dashboard: New(nil), external: scrolledPane(t)}
+	a.dashboard.width, a.dashboard.height = 80, 24
+
+	if got := a.View().MouseMode; got != tea.MouseModeCellMotion {
+		t.Fatalf("default pane MouseMode = %v, want cell motion (the wheel drives scrollback)", got)
+	}
+	a.external.toggleSelectionMode()
+	if got := a.View().MouseMode; got != tea.MouseModeNone {
+		t.Fatalf("selection-mode MouseMode = %v, want none — the terminal must own the mouse to drag-select", got)
+	}
+	a.external.toggleSelectionMode()
+	if got := a.View().MouseMode; got != tea.MouseModeCellMotion {
+		t.Fatalf("MouseMode after toggling back = %v, want cell motion", got)
+	}
+}
+
+// L11: a nil pane on the external screen must not assert capture. Nothing would
+// consume the events (handleMouse is reachable only through a live pane), and
+// this frame renders while an attach is still in flight — the same defensive
+// shape windowTitle and attachedSessionID already use for this state.
+func TestMouseCaptureOffWithoutAPane(t *testing.T) {
+	a := &App{screen: ScreenExternal, dashboard: New(nil)}
+	a.dashboard.width, a.dashboard.height = 80, 24
+
+	if got := a.View().MouseMode; got != tea.MouseModeNone {
+		t.Errorf("nil pane: MouseMode = %v, want none", got)
+	}
+}
+
+// L11: selection mode must also stop the pane CONSUMING mouse events, not just
+// stop asking for them. The mode change reaches the terminal on the next render,
+// so events captured a frame earlier can still arrive — acting on those would
+// scroll the pane from a drag the user aimed at the terminal's selection.
+func TestSelectionModeDropsInFlightMouseEvents(t *testing.T) {
+	p := scrolledPane(t)
+	p.selectionMode = true
+
+	p.handleMouse(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+
+	if p.scrollOffset != 0 {
+		t.Errorf("scrollOffset = %d, want 0 — a released mouse must not drive scrollback", p.scrollOffset)
+	}
+}
+
 // TestMouseCaptureFollowsScreenChanges pins that the decision is re-made per
 // frame rather than latched once. Capture is a terminal mode the renderer diffs
 // between views, so a value computed once at startup would leave the terminal in
 // whatever mode the first screen wanted for the rest of the session.
 func TestMouseCaptureFollowsScreenChanges(t *testing.T) {
-	a := &App{screen: ScreenDashboard, dashboard: New(nil)}
+	a := &App{screen: ScreenDashboard, dashboard: New(nil), external: scrolledPane(t)}
 	a.dashboard.width, a.dashboard.height = 80, 24
 
 	if got := a.View().MouseMode; got != tea.MouseModeNone {
