@@ -126,10 +126,37 @@ jobs:
             --cluster=homelab --user=tailscale-auth --namespace=agent-sessions
           kubectl config use-context homelab
 
-          # Prove the proxy accepted us and show which subject it impersonated,
-          # before doing anything that depends on it. This is the one command
-          # that distinguishes "tailnet/grant is wrong" from "RBAC is wrong".
-          kubectl auth whoami
+          # Diagnose the whole auth path in ONE run, then decide. Under
+          # `set -e` the first failing probe aborts the step and every later
+          # fact is lost, which costs a full build cycle per fact. These are
+          # deliberately non-fatal; the gate is after them.
+          echo "::group::auth diagnostics"
+          set +e
+          tailscale status --peers=false 2>&1 | head -3
+          echo "--- proxy reachable? ---"
+          curl -sS -o /dev/null -w 'GET /version -> http=%{http_code}\n' \
+            --max-time 20 "$KUBE_SERVER/version"
+          echo "--- who does the proxy think we are? ---"
+          kubectl auth whoami -o yaml 2>&1 | sed 's/^/  /'
+          WHOAMI_RC=${PIPESTATUS[0]}
+          echo "--- can we do the things the Role grants? ---"
+          kubectl auth can-i create jobs -n agent-sessions 2>&1
+          kubectl auth can-i list nodes 2>&1
+          set -e
+          echo "::endgroup::"
+
+          # 401 here means the tailnet grant is not matching (the proxy did not
+          # resolve us to a Kubernetes subject at all). 403 would mean the grant
+          # worked and RBAC is the problem. They need different fixes, in
+          # different places, so name which one it is rather than failing with a
+          # generic non-zero.
+          if [ "$WHOAMI_RC" -ne 0 ]; then
+            echo "::error::the API server proxy did not authenticate this device."
+            echo "::error::Check the tailnet policy grant: src tag:ci-sandbox ->"
+            echo "::error::dst tag:k8s-operator, app tailscale.com/cap/kubernetes"
+            echo "::error::with impersonate.groups = [\"tag:ci-sandbox\"]."
+            exit 1
+          fi
 
           SHORT="${GITHUB_SHA::7}"
           # Via a file, not a process substitution: `mapfile < <(cmd)` discards
