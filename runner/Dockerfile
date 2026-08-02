@@ -5,7 +5,13 @@
 # inspection). Node 24 matches the SDK's engine requirement.
 
 # --- build stage ----------------------------------------------------------
-FROM node:24-slim AS build
+# Pinned by digest, not just tag. node:24-slim is a moving tag: when it moves,
+# every layer below it gets a new digest. That is how 708 MB of a 737 MB image
+# changed between two consecutive builds (2026-07-25 -> 07-30), making each
+# incremental build cost a cold pull on every node. Renovate manages the digest,
+# so a base bump becomes a reviewed PR rather than a silent Monday-morning
+# cache miss. Keep this digest identical to the runtime stage below.
+FROM node:24-slim@sha256:235600a8101ab264e117b1768e925532262668dc9b581ef1dd7d96ced463b8e7 AS build
 WORKDIR /app
 
 # better-sqlite3 ships no prebuilt binary for Node 24, so npm ci compiles it
@@ -33,13 +39,13 @@ RUN npm prune --omit=dev
 # No GOOS/GOARCH juggling: Depot builds each platform on a native builder, so
 # the plain build already produces the target arch. CGO_ENABLED=0 keeps it a
 # static binary independent of the runtime stage's glibc.
-FROM golang:1.26-bookworm AS statusline
+FROM golang:1.26-bookworm@sha256:1ecb7edf62a0408027bd5729dfd6b1b8766e578e8df93995b225dfd0944eb651 AS statusline
 WORKDIR /src
 COPY statusline/ ./
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/sandbox-user-statusline .
 
 # --- runtime stage --------------------------------------------------------
-FROM node:24-slim AS runtime
+FROM node:24-slim@sha256:235600a8101ab264e117b1768e925532262668dc9b581ef1dd7d96ced463b8e7 AS runtime
 
 # sshd for Mutagen sync transport (spec 9.2); sqlite3 for events.db ops;
 # git is commonly needed by the agent workspace. wget/netcat/dnsutils give the
