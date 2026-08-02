@@ -3,6 +3,59 @@
 Detail for TODO.md items closed in August 2026. See
 [`done-log-2026-07.md`](done-log-2026-07.md) for the previous month.
 
+## 2026-08-02 — stale `:latest` on CLI-created sessions (§10 ops item)
+
+**Closed with no code change in this repo.** The cause was never the CLI, and
+the fix landed cluster-side.
+
+**What the item alleged.** `client.DefaultRunnerImage` is a moving tag, so new
+sessions could run a days-old runner — observed live 2026-08-01, a session
+running the 2026-07-25 build while `:latest` had been the 2026-07-30 build for
+two days. User-visible symptom: no 5h/weekly usage in the in-pane statusline,
+because that code shipped in the newer image.
+
+**Actual cause.** Spegel (the in-cluster P2P OCI mirror) advertised the
+`resolve` capability, so containerd asked a *peer* to turn `:latest` into a
+digest and peers answered from their own caches. The pull policy was never
+implicated: `resolveImagePullPolicy` (`internal/k8s/backend.go:294`) already
+maps a moving tag to `Always`, which is correct — `Always` re-resolves the tag,
+but it can only be as fresh as whatever answers the resolve.
+
+**Fix.** `spegel.resolveTags: false` in the homelab repo (`f3628f5`). Tags
+resolve upstream at GHCR; layers still come from LAN peers, so the caching win
+is kept. Confirmed at the source on all three big nodes — `capabilities =
+['pull']`, no `'resolve'`, read out of `/etc/cri/conf.d/hosts/_default/hosts.toml`.
+
+**Verification — the item's own acceptance line, run 2026-08-02.** A live
+session created at 18:32Z resolved `sha256:499f33c4…`, matching GHCR's current
+`:latest`. That alone is weak evidence (its node already held that digest), so
+it was re-run as a discriminating test: `talos-297-4am`'s containerd still maps
+`:latest` to the *older* `sha256:841a1960…`, so a Job pinned to that node with
+exactly the create path's image ref and policy (`:latest` + `Always`) had every
+opportunity to serve the stale digest.
+
+```
+GHCR :latest       = sha256:499f33c4…
+node-local :latest = sha256:841a1960…   (stale mapping, still present)
+probe pod resolved = sha256:499f33c4…   ✅ upstream won
+```
+
+**Fix direction not taken.** The item offered "resolve the tag to a digest
+CLI-side at Create". Rejected: it buys nothing now that resolution is correct,
+and costs a registry round-trip in the create hot path plus a new failure mode
+(GHCR auth/network) on a step that currently needs neither. The resume path's
+pin (`pinRunnerImageDigest`) stays as-is — it serves a different purpose,
+holding a session on one image across its lifetime.
+
+**Residual, deliberately accepted.** Correctness now rests on `Always` being
+derived for moving tags. A caller who overrides `--image-pull-policy=IfNotPresent`
+with a moving tag gets whatever that node's containerd last mapped — on
+`talos-297-4am` today, a digest from five builds ago. That is user-chosen and
+the override exists for side-loaded dev images.
+
+Full plan, workstreams, and the six execution surprises:
+`~/git/homelab/docs/ci-auth-and-runner-image-plan.md`.
+
 ## 2026-08-01 — pane viewport + mouse ownership ([L10], [L11])
 
 Two maintainer reports from a live session, both traced to deliberate rules in

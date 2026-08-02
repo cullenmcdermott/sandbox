@@ -5,7 +5,8 @@
 * On the detail sidebar it looks like created and last active are the same time? Last active should tell me basically the last time we heard from the agent itself.
 * *(pane sticky-scroll + drag-select: triaged and FIXED 2026-08-01 — §1h
   `[L10]`/`[L11]`. Statusline usage from the same session turned out to be the
-  stale-`:latest` cache, not a missing rebuild — see §10.)*
+  stale-`:latest` cache, not a missing rebuild — that is now FIXED too
+  (2026-08-02, Spegel `resolveTags: false`; §10 + done log).)*
 
 
 > **How to use this file (agents):** sections are numbered workstreams, ordered
@@ -626,11 +627,19 @@ done log.)
     unconditionally on every boot rather than only-if-absent, so the script
     tracks the image and a rebuild genuinely reaches existing PVCs. No
     migration or manual cleanup needed.
-  **Verification once §10's pinning lands:** create a session and confirm the
-  in-pane statusline reads `<model> · ctx <n>% · 5h <n>% <until> · wk <n>%
-  <until>` on a Pro/Max session — the windows appear only after the session's
-  first API response. Quick vintage check for any pod, no cluster access needed:
+  **Verification — §10 landed 2026-08-02 (cluster-side, not pinning: Spegel
+  `resolveTags: false`), and the vintage check now PASSES on a live session.**
+  A session created 18:32Z runs the `sha256:499f33c4…` image; in-pod,
+  `/app/dist/claude-pane-observer.js` has mtime **2026-07-30 21:14 UTC** (was
+  2026-07-25) with `seven_day` on 4 lines and `contextLimitTokens` on 1 — so
+  both the 5h/weekly statusline work and ctx% part B are now *present in a
+  running session*, which is the whole user-visible symptom that opened this.
+  Quick vintage check for any pod, no cluster access needed:
   `grep -c seven_day /app/dist/claude-pane-observer.js` (0 = stale image).
+  **Still unconfirmed by eye:** the rendered line
+  `<model> · ctx <n>% · 5h <n>% <until> · wk <n>% <until>` on a Pro/Max session
+  — the windows appear only after the session's first API response, so that
+  one needs the maintainer's terminal.
   **Method note worth reusing:** the pod can query GHCR directly with `node`
   (there is no `curl` in the image) — anonymous token from
   `ghcr.io/token?scope=repository:<img>:pull`, then walk index → manifest →
@@ -2392,30 +2401,19 @@ do well is recorded there too; fix in roughly this order):
   healthz body / 409 table / interrupt empty-segment; README auth+sync-gc+
   opencode flags; LAUNCH-CHECKLIST HEAD claim fixed; HARDENING-BACKLOG
   marked provenance-only (verified zero true TODO overlaps).
-- [ ] **Ops: new CLI-created sessions use `:latest` and can hit the stale
-  traefik manifest cache.** `client.DefaultRunnerImage`
-  (`client/client.go:172`) is a moving tag, and the pull-policy derivation
-  (`internal/k8s/backend.go:292`) correctly maps a moving tag to `Always` — so
-  a stale registry-proxy manifest, not the policy, is what serves an old
-  image. The **resume** path was already fixed by digest pinning
-  (`internal/k8s/backend.go:73`, done log); create was not. Fix direction:
-  either resolve the tag to a digest CLI-side at Create (same mechanism as
-  resume) or bust the traefik cache. **Verification:** create a session
-  immediately after publishing a new runner image and confirm the pod's
-  `image:` is the new digest.
-  **OBSERVED LIVE 2026-08-01 — no longer hypothetical, and the staleness window
-  is days not minutes.** A session created 2026-08-01 was running a runner built
-  **2026-07-25 17:14 UTC** while `:latest` in GHCR had been
-  **2026-07-30 21:14 UTC** for two days (digest
-  `sha256:94c730bb59c7c3ae…`; verified by reading the pod's
-  `/app/dist/claude-pane-observer.js` mtime and separately querying the registry
-  from inside the pod — method recorded in §0b). User-visible symptom: the
-  in-pane statusline showed no 5h/weekly usage, because that code shipped in the
-  newer image. §0b was initially blamed and is in fact closed — this is the
-  live repro that item's verification line was waiting for. Raises priority:
-  every published runner fix is silently invisible to new sessions for an
-  unbounded window, and the failure mode is "the feature you just shipped
-  doesn't exist" with no error anywhere.
+- [x] **Ops: new CLI-created sessions ran a stale `:latest` — FIXED
+  2026-08-02** (done log): the cause was Spegel advertising the `resolve`
+  capability, so containerd resolved `:latest` against a *peer's* cache, not
+  the CLI's moving tag or the pull policy (`resolveImagePullPolicy`,
+  `internal/k8s/backend.go:294`, already maps a moving tag to `Always`
+  correctly). Fixed cluster-side by `spegel.resolveTags: false` (homelab
+  `f3628f5`); **no code change in this repo**, and the offered CLI-side
+  digest-at-Create fix was deliberately not taken. Verified with the
+  discriminating test the acceptance line called for: a `:latest`+`Always` pod
+  pinned to a node whose containerd still maps `:latest` to the older
+  `sha256:841a1960…` resolved `sha256:499f33c4…`, matching GHCR. Residual:
+  correctness now rests on `Always`; an explicit `IfNotPresent` override on a
+  moving tag still serves that node's last mapping.
 - [x] **`sandbox doctor` — done 2026-07-12** (done log): 10-check host
   readiness table (cluster checks can FAIL and short-circuit; binaries/
   creds/images advisory WARN/INFO with remediation); PASS paths of the
