@@ -212,3 +212,52 @@ func TestImageIDDigest(t *testing.T) {
 		}
 	}
 }
+
+// The moving-tag -> Always half of this mapping is load-bearing for image
+// currency, and it was previously asserted only incidentally, inside a resume
+// test. A create-path session pod runs `:latest`, so `Always` is the only thing
+// that makes the kubelet re-resolve the tag at all; downgrade it and pods serve
+// whatever digest their node's containerd last mapped the tag to — which is
+// silent, since a stale-but-runnable image reports no error. (The 2026-08-02
+// incident was the resolve itself answering from a mirror's cache; that is
+// fixed cluster-side, but only Always gets us as far as asking upstream.)
+//
+// The digest -> IfNotPresent half is the converse: a digest is immutable, so
+// re-pulling every start is wasted work and breaks offline/rate-limited/private
+// registries.
+func TestResolveImagePullPolicy(t *testing.T) {
+	const digestRef = "ghcr.io/x/runner@" + testDigest
+
+	cases := []struct {
+		name     string
+		override string
+		imageRef string
+		want     corev1.PullPolicy
+	}{
+		{"moving tag resolves to Always", "", "ghcr.io/x/runner:latest", corev1.PullAlways},
+		{"floating version tag is still moving", "", "ghcr.io/x/runner:v1", corev1.PullAlways},
+		{"untagged ref is moving", "", "ghcr.io/x/runner", corev1.PullAlways},
+		{"digest ref resolves to IfNotPresent", "", digestRef, corev1.PullIfNotPresent},
+		{"tag+digest ref is pinned by the digest", "", "ghcr.io/x/runner:v1@" + testDigest, corev1.PullIfNotPresent},
+
+		// An explicit override wins over the derivation in both directions --
+		// including the footgun, which exists for side-loaded dev images.
+		{"override wins over moving-tag default", "IfNotPresent", "ghcr.io/x/runner:latest", corev1.PullIfNotPresent},
+		{"override wins over digest default", "Always", digestRef, corev1.PullAlways},
+		{"Never is honored", "Never", "ghcr.io/x/runner:latest", corev1.PullNever},
+
+		// Anything that is not one of the three valid policies must fall
+		// through to the derivation rather than reaching the pod spec.
+		{"garbage override falls through to derivation", "Sometimes", "ghcr.io/x/runner:latest", corev1.PullAlways},
+		{"wrong-case override falls through", "always", digestRef, corev1.PullIfNotPresent},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveImagePullPolicy(tc.override, tc.imageRef); got != tc.want {
+				t.Errorf("resolveImagePullPolicy(%q, %q) = %q, want %q",
+					tc.override, tc.imageRef, got, tc.want)
+			}
+		})
+	}
+}
