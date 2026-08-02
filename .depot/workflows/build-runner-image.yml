@@ -112,12 +112,31 @@ jobs:
           set -euo pipefail
 
           kubectl config set-cluster homelab --server="$KUBE_SERVER"
-          kubectl config set-context homelab --cluster=homelab --namespace=agent-sessions
+          # The placeholder token is load-bearing. The API server proxy in auth
+          # mode identifies us from the tailnet connection itself, so no client
+          # credential is needed -- but a context with an EMPTY user makes
+          # client-go prompt "Please enter Username:" on stdin before it opens a
+          # connection at all. In CI that prompt is a silent corruption, not a
+          # failure: it goes to stdout, gets captured by the command
+          # substitution below, and becomes the "node name". Any non-empty
+          # authinfo suppresses it; `tailscale configure kubeconfig` writes the
+          # same `token: unused`.
+          kubectl config set-credentials tailscale-auth --token=unused
+          kubectl config set-context homelab \
+            --cluster=homelab --user=tailscale-auth --namespace=agent-sessions
           kubectl config use-context homelab
 
+          # Prove the proxy accepted us and show which subject it impersonated,
+          # before doing anything that depends on it. This is the one command
+          # that distinguishes "tailnet/grant is wrong" from "RBAC is wrong".
+          kubectl auth whoami
+
           SHORT="${GITHUB_SHA::7}"
-          mapfile -t NODES < <(kubectl get nodes -l sandbox.cullen.dev/pool=big \
-                                 -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+          # Via a file, not a process substitution: `mapfile < <(cmd)` discards
+          # cmd's exit status, so a failed lookup silently yields a bogus list.
+          kubectl get nodes -l sandbox.cullen.dev/pool=big \
+            -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' > "$RUNNER_TEMP/nodes.txt"
+          mapfile -t NODES < <(grep -E '^[a-z0-9.-]+$' "$RUNNER_TEMP/nodes.txt" || true)
           if [ "${#NODES[@]}" -eq 0 ]; then
             echo "::warning::no nodes matched sandbox.cullen.dev/pool=big; skipping prepull"
             exit 0
