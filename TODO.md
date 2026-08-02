@@ -7,6 +7,54 @@
   `[L10]`/`[L11]`. Statusline usage from the same session turned out to be the
   stale-`:latest` cache, not a missing rebuild — that is now FIXED too
   (2026-08-02, Spegel `resolveTags: false`; §10 + done log).)*
+* **5h/weekly STILL missing from the in-pane statusline — the image was never
+  the (only) cause.** Reopens the symptom §0b closed 2026-08-02. That closeout
+  verified the 5h/wk code is *present in the running image* and stopped there;
+  it does not *render*, and never could. Verified in live pod
+  `claude-pane-74d71d-375431c0` (on `sha256:499f33c4…`, i.e. current `:latest`)
+  by running the provisioned script against a synthetic payload — output is the
+  Go binary's line, not the built-in one.
+  - `STATUSLINE_SCRIPT` chains to the first of three candidates
+    (`runner/src/claude-pane-observer.ts:587-601`) and a candidate that *ran*
+    ends the search, replacing the **whole** line. Candidate 3,
+    `sandbox-user-statusline`, is baked into the image at
+    `runner/Dockerfile:114` — so it always wins, and the built-in
+    `5h …· wk …` line (`claude-pane-observer.ts:576-583`) is dead code in the
+    default configuration. The comment at `:533-537` asserts that line is the
+    only place a pod can show plan usage; the Dockerfile silently defeats it.
+  - The binary can't recover the numbers itself:
+    `runner/statusline/main.go:189` gates lines 2–3 on `getUsage()`, which is
+    `GET /api/oauth/usage` (`:322`) — dead in-pod twice over. (a) `accessToken()`
+    (`:359-368`) reads `$HOME/.claude/.credentials.json` = `/root/.claude/…`,
+    which does not exist; the runner writes creds to
+    `$CLAUDE_CONFIG_DIR=/session/state/claude/.credentials.json`, so the helper
+    ignores `CLAUDE_CONFIG_DIR` and returns `""` → `nil` before any request.
+    (b) even given the token, it is inference-scoped and cannot call that
+    endpoint (see [[sandbox-usage-limits-local-readout]] / `:534-537`).
+  - The data is already in the pod, for free: the statusline stdin payload
+    carries `rate_limits`, proven by `rate_limit.updated` in the session's
+    events.db (`fiveHourUtil:16`, `sevenDayUtil:88`, with `resets_at`).
+    `claudeInput` (`runner/statusline/main.go:89-111`) has no `rate_limits`
+    field, so main.go parses the payload and throws the usage away.
+  - **FIXED in-tree 2026-08-02** — `main.go` now prefers the stdin payload and
+    falls back to `getUsage()`: new `RateLimits` field on `claudeInput`,
+    `stdinPeriod`/`usageFromStdin`/`epochResetsAt` for the shape adapter
+    (stdin `used_percentage` + epoch-number `resets_at` → `period`'s
+    `utilization` + string `resets_at`, formatted by the existing `fmtReset`
+    epoch branch). `getUsage()` untouched, so API-key/Bedrock/Vertex sessions
+    and the host path behave as before. Verified by rendering lines 2–3 from a
+    real-shaped payload (5h 16% / wk 88% + reset times), and by
+    `runner/statusline/main_test.go` (new) — which `just test` now runs, having
+    skipped the nested module the same way `build`/`vet` called out.
+  - **Still open:** (a) rebuild + publish the runner image, then re-verify in a
+    live pod by *executing* `$CLAUDE_CONFIG_DIR/pane-observer/statusline.js`
+    and reading stdout; (b) upstream the change to
+    `nix-config/pkgs/claude-statusline` — this vendored copy now DIVERGES, and
+    the header's byte-identity/`difft` contract is broken until it is synced.
+  - **Lesson for the §0b closeout pattern:** "the code is in the image" is not
+    the same gate as "the line renders". Verify by executing the provisioned
+    `statusline.js` in the pod and reading its stdout, not by grepping the
+    built file.
 
 
 > **How to use this file (agents):** sections are numbered workstreams, ordered
