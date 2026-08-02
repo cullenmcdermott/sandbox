@@ -309,6 +309,16 @@ per-session Secret (`<session-id>-runner`); you do not manage it manually.
   unreachable image leaves the pod in `ImagePullBackOff`, which `sandbox claude`
   reports instead of hanging.)
 
+  **If you run a registry mirror, check that it does not resolve tags.** A
+  moving tag like `:latest` gets `imagePullPolicy: Always`, but `Always` is only
+  as fresh as whatever answers the tag→digest lookup. A mirror that serves
+  `resolve` from its own cache (Spegel does by default) will hand back a digest
+  from days ago, and nothing reports an error — sessions just silently run an
+  old runner, so a fix you published appears not to exist. Either disable tag
+  resolution on the mirror (`spegel.resolveTags: false`) and let layers still
+  come from peers, or pass a digest-pinned `--runner-image
+  <repo>@sha256:…`, which skips tag resolution entirely.
+
 ## Install
 
 ```bash
