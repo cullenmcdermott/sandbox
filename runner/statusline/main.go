@@ -9,30 +9,37 @@
 // Line 3: reset times
 //
 // VENDORED from github.com/cullenmcdermott/nix-config (pkgs/claude-statusline).
-// This copy is byte-identical to upstream apart from this comment block, so
-// `difft` against that tree shows drift and nothing else. Re-sync by copying
-// main.go over and restoring this header.
+// This copy DIVERGES from upstream as of 2026-08-02: the stdin rate_limits
+// source below is local-only and should be upstreamed, after which the two
+// trees can go back to being byte-identical apart from this comment block (the
+// state `difft` against that tree assumed). Re-sync by copying main.go over,
+// restoring this header, and keeping usageFromStdin/stdinPeriod/epochResetsAt.
 //
 // It ships in the runner image at /usr/local/bin/sandbox-user-statusline — the
 // third and last candidate in the chain that runner/src/claude-pane-observer.ts
 // (STATUSLINE_SCRIPT) walks, so a host-synced statusline/user-statusline still
-// takes precedence over this built-in default.
+// takes precedence over this built-in default. Note that a candidate which runs
+// replaces the ENTIRE line, including that script's own built-in 5h/wk segments
+// — so in the default image this binary is the only thing that can put plan
+// usage in front of a pod user. That is why lines 2–3 have to work here.
 //
-// In-pod behavior worth knowing before editing:
-//   - Lines 2–3 do NOT render. getUsage() needs a token that can reach
-//     /api/oauth/usage, but accessToken() looks in $HOME/.claude (HOME=/root in
+// Where lines 2–3 get their numbers, in order:
+//   - The stdin payload's rate_limits (usageFromStdin). Free, synchronous, and
+//     the ONLY source that works inside a sandbox pod.
+//   - getUsage(), the /api/oauth/usage fetch. Host-only in practice, and dead
+//     in-pod twice over: accessToken() looks in $HOME/.claude (HOME=/root in
 //     this image) while the pod's credential is materialized to
-//     CLAUDE_CONFIG_DIR=/session/state/claude. It finds nothing, returns "" and
-//     bails BEFORE any HTTP call. That miss is load-bearing: the pane's
-//     credential is inference-scoped and cannot hit the usage endpoint anyway,
-//     so a "fix" that located it would only buy a doomed request against the 3s
-//     client timeout — and the chain script allows the whole statusline just 1s
+//     CLAUDE_CONFIG_DIR=/session/state/claude, so it returns "" and bails
+//     before any HTTP call — and that miss is load-bearing, because the pane's
+//     credential is inference-scoped and cannot hit the usage endpoint anyway.
+//     "Fixing" the lookup alone would only buy a doomed request against the 3s
+//     client timeout, inside a chain that allows the whole statusline just 1s
 //     (SANDBOX_STATUSLINE_TIMEOUT_MS is not in claude-pane's env allowlist, so
 //     it cannot be raised from outside). Blowing that budget makes the
-//     statusline vanish in favor of the built-in minimal line.
-//   - The usageCacheFile read still happens and is the intended seam: anything
-//     that drops fresh usage JSON at that path makes lines 2–3 light up with no
-//     code change here.
+//     statusline vanish in favor of the built-in minimal line. Leave it alone.
+//   - The usageCacheFile read inside getUsage() remains a seam: anything that
+//     drops fresh usage JSON at that path feeds a payload that has no
+//     rate_limits of its own.
 package main
 
 import (
@@ -108,6 +115,24 @@ type claudeInput struct {
 	Cost struct {
 		Total float64 `json:"total_cost_usd"`
 	} `json:"cost"`
+	// RateLimits is the same pair of plan windows getUsage() fetches, handed to
+	// us for free on stdin. Pointers, not values: a window legitimately sits at
+	// 0% right after it resets, so the zero value cannot distinguish "absent"
+	// from "unused". Absent for API-key/Bedrock/Vertex sessions and before the
+	// session's first API response.
+	RateLimits *struct {
+		FiveHour *stdinPeriod `json:"five_hour"`
+		SevenDay *stdinPeriod `json:"seven_day"`
+	} `json:"rate_limits"`
+}
+
+// stdinPeriod is one plan window in the shape Claude Code sends on stdin, which
+// is NOT the usage API's shape: the percentage arrives under `used_percentage`
+// rather than `utilization`, and `resets_at` is epoch seconds as a number where
+// the API sends an RFC3339 string.
+type stdinPeriod struct {
+	UsedPct  float64 `json:"used_percentage"`
+	ResetsAt float64 `json:"resets_at"`
 }
 
 type usageData struct {
@@ -185,8 +210,19 @@ func main() {
 		costSeg,
 	)
 
-	// ── Lines 2–3: API usage (best-effort) ───────────────────────────────
-	if u := getUsage(); u != nil {
+	// ── Lines 2–3: plan usage (best-effort) ──────────────────────────────
+	// stdin first, network second. Claude Code already puts both windows in the
+	// payload, so this path needs no token, no HTTP and no cache file — and it
+	// is the ONLY one that works inside a sandbox pod, where getUsage() is dead
+	// twice over (see the header). On the host both work and stdin is simply
+	// faster and fresher. getUsage() remains the fallback for payloads with no
+	// rate_limits at all: API-key/Bedrock/Vertex sessions, and the window before
+	// the session's first API response.
+	u := usageFromStdin(&in)
+	if u == nil {
+		u = getUsage()
+	}
+	if u != nil {
 		fiveBar := usageBar(u.FiveHour.Utilization)
 		weekBar := usageBar(u.SevenDay.Utilization)
 		fiveReset := fmtReset(u.FiveHour.ResetsAt)
@@ -298,6 +334,36 @@ func gitBranch(dir string) string {
 // ── Usage API ────────────────────────────────────────────────────────────────
 
 const usageCacheFile = "/tmp/claude-statusline-usage-cache.json"
+
+// usageFromStdin adapts the payload's rate_limits into the usage-API shape the
+// renderer expects, or returns nil when the payload carries no windows. The
+// presence gate mirrors the runner's own observer (claude-pane-observer.ts):
+// either window is enough, since a payload can carry one and not the other.
+func usageFromStdin(in *claudeInput) *usageData {
+	rl := in.RateLimits
+	if rl == nil || (rl.FiveHour == nil && rl.SevenDay == nil) {
+		return nil
+	}
+	u := &usageData{}
+	if p := rl.FiveHour; p != nil {
+		u.FiveHour = period{Utilization: p.UsedPct, ResetsAt: epochResetsAt(p.ResetsAt)}
+	}
+	if p := rl.SevenDay; p != nil {
+		u.SevenDay = period{Utilization: p.UsedPct, ResetsAt: epochResetsAt(p.ResetsAt)}
+	}
+	return u
+}
+
+// epochResetsAt renders epoch seconds into the string form period.ResetsAt
+// carries. It hands fmtReset a bare epoch — which fmtReset already parses —
+// rather than pre-formatting a timestamp here, so both usage sources converge
+// on one formatting path instead of two that can drift.
+func epochResetsAt(epoch float64) string {
+	if epoch <= 0 {
+		return "" // fmtReset renders this as "N/A"
+	}
+	return strconv.FormatInt(int64(epoch), 10)
+}
 
 func getUsage() *usageData {
 	// Try cached data first.

@@ -85,9 +85,12 @@ vet:
     go vet ./...
     cd runner/statusline && go vet ./...
 
-# Run Go + runner unit tests. See the in-sandbox httptest caveat above.
+# Run Go + runner unit tests, plus the nested runner/statusline module — which
+# `./...` cannot see, exactly as in `build`/`vet` above. See the in-sandbox
+# httptest caveat above.
 test:
     go test ./...
+    cd runner/statusline && go test ./...
     @if [ -d runner/node_modules ]; then \
         cd runner && npm test; \
     else \
