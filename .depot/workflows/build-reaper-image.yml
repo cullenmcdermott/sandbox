@@ -12,6 +12,10 @@ on:
     paths:
       - 'cmd/**'
       - 'internal/**'
+      # cmd/sandbox -> internal/cli/reap.go -> cullenmcdermott/sandbox/client,
+      # so a change confined to client/ still changes the reaper binary. Without
+      # this path the workflow never fires and main ships a stale reaper.
+      - 'client/**'
       - 'go.mod'
       - 'go.sum'
       - 'Dockerfile.reaper'
@@ -21,6 +25,10 @@ on:
     paths:
       - 'cmd/**'
       - 'internal/**'
+      # cmd/sandbox -> internal/cli/reap.go -> cullenmcdermott/sandbox/client,
+      # so a change confined to client/ still changes the reaper binary. Without
+      # this path the workflow never fires and main ships a stale reaper.
+      - 'client/**'
       - 'go.mod'
       - 'go.sum'
       - 'Dockerfile.reaper'
