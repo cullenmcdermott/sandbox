@@ -1,0 +1,39 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":semanticCommits",
+    ":enableVulnerabilityAlerts"
+  ],
+  "rebaseWhen": "conflicted",
+  "minimumReleaseAge": "3 days",
+  "minimumReleaseAgeBehaviour": "timestamp-optional",
+  "internalChecksFilter": "strict",
+  "github-actions": {
+    "description": "CI here is Depot, whose workflows live in .depot/workflows/ rather than .github/workflows/. The stock github-actions manager only scans the latter, so action pins in the Depot workflows would silently never update.",
+    "managerFilePatterns": [
+      "/^\\.github/workflows/.+\\.ya?ml$/",
+      "/^\\.depot/workflows/.+\\.ya?ml$/"
+    ]
+  },
+  "packageRules": [
+    {
+      "description": "Base images are pinned by digest so the runner image's layer delta stays small (see runner/Dockerfile). Renovate is what keeps those digests from going stale; without it the pin is a freeze.",
+      "matchManagers": ["dockerfile"],
+      "matchUpdateTypes": ["digest", "pin", "pinDigest"],
+      "automerge": true
+    },
+    {
+      "description": "A base-image major/minor move changes the runtime under the runner (Node engine, glibc). Review those.",
+      "matchManagers": ["dockerfile"],
+      "matchUpdateTypes": ["major", "minor"],
+      "automerge": false
+    },
+    {
+      "description": "Action pins in the Depot workflows: patch/minor are safe to take automatically.",
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "automerge": true
+    }
+  ]
+}
