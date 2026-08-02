@@ -73,3 +73,127 @@ jobs:
             echo "- digest-pinned: \`${IMAGE}@${DIGEST}\`"
           } >> "$GITHUB_STEP_SUMMARY"
           echo "Pushed ${IMAGE}@${DIGEST}"
+
+      # --- prepull -------------------------------------------------------
+      # Warm the just-published image on the big nodes so the next session pod
+      # starts from a local layer set instead of a cold 700 MB WAN pull.
+      #
+      # Auth is Depot's own OIDC identity, federated into Tailscale (no static
+      # OAuth secret) and then impersonated by the Tailscale operator's API
+      # server proxy as the Kubernetes group "tag:ci-sandbox". The RBAC that
+      # group binds lives in the homelab repo at
+      # k8s/agent-sessions/ci-prepull-rbac.yaml and permits exactly: create,
+      # get, list, watch, delete Jobs in agent-sessions, plus list nodes.
+      - name: Tailscale
+        if: github.ref == 'refs/heads/main' && steps.build.outputs.digest != ''
+        uses: tailscale/github-action@v4
+        with:
+          # depot-sandbox federated identity. There is no oauth-secret: the
+          # Depot job's own OIDC token is the credential, exchanged for a
+          # Tailscale auth key. Client ID and audience are non-secret
+          # identifiers, so they live here rather than in the secret store --
+          # one fewer thing that can be silently unset.
+          oauth-client-id: TDdC11111111CNTRL-kkB9y1Etex11CNTRL
+          audience: api.tailscale.com/TDdC11111111CNTRL-kkB9y1Etex11CNTRL
+          tags: tag:ci-sandbox
+
+      - name: Prepull runner image onto the big nodes
+        # Gate on the digest rather than on (ref == main && event == push).
+        # The build step's own push condition is `ref == main`, so adding an
+        # event check here would be STRICTER than the thing it mirrors and a
+        # workflow_dispatch on main would publish without prepulling. An empty
+        # digest is exactly "nothing was pushed", which also self-guards PR
+        # builds, where push is false.
+        if: github.ref == 'refs/heads/main' && steps.build.outputs.digest != ''
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          KUBE_SERVER: https://tailscale-operator.yak-lionfish.ts.net
+        run: |
+          set -euo pipefail
+
+          kubectl config set-cluster homelab --server="$KUBE_SERVER"
+          kubectl config set-context homelab --cluster=homelab --namespace=agent-sessions
+          kubectl config use-context homelab
+
+          SHORT="${GITHUB_SHA::7}"
+          mapfile -t NODES < <(kubectl get nodes -l sandbox.cullen.dev/pool=big \
+                                 -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+          if [ "${#NODES[@]}" -eq 0 ]; then
+            echo "::warning::no nodes matched sandbox.cullen.dev/pool=big; skipping prepull"
+            exit 0
+          fi
+          echo "prepull targets: ${NODES[*]}"
+
+          # Emit one Job pinned to a specific node.
+          #
+          # Pull by DIGEST, not :latest -- the prepull then does not depend on
+          # the tag-resolution path at all, is idempotent, and provably warms
+          # the exact artifact this run published. imagePullPolicy IfNotPresent
+          # is correct precisely because a digest is immutable.
+          emit_job() {
+            cat <<EOF
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: runner-prepull-$1-${SHORT}
+            namespace: agent-sessions
+            labels:
+              app.kubernetes.io/part-of: sandbox
+          spec:
+            ttlSecondsAfterFinished: 600   # self-GC; orphan-proof if CI dies mid-run
+            backoffLimit: 2
+            template:
+              metadata:
+                labels:
+                  app.kubernetes.io/part-of: sandbox
+              spec:
+                nodeName: $1                # pin directly; no scheduler games
+                restartPolicy: Never
+                containers:
+                  - name: prepull
+                    image: ${IMAGE}@${DIGEST}
+                    imagePullPolicy: IfNotPresent
+                    command: ["/bin/true"]
+                    resources:
+                      requests: { cpu: 10m, memory: 16Mi }
+                    securityContext:
+                      allowPrivilegeEscalation: false
+                      runAsNonRoot: true
+                      runAsUser: 1000
+                      capabilities: { drop: ["ALL"] }
+                      seccompProfile: { type: RuntimeDefault }
+          EOF
+          }
+
+          # Stagger: run the first node to completion, then the rest in
+          # parallel. All three at once would miss Spegel simultaneously and
+          # pull ~2.1 GB from GHCR over the WAN; letting one land first means
+          # the other two fetch layers from it over the LAN. Costs ~1 minute.
+          FIRST="${NODES[0]}"
+          REST=("${NODES[@]:1}")
+
+          emit_job "$FIRST" | kubectl apply -f -
+          kubectl wait --for=condition=complete --timeout=10m \
+            "job/runner-prepull-${FIRST}-${SHORT}" || {
+              echo "::warning::prepull did not complete on ${FIRST}; continuing"
+            }
+
+          for n in "${REST[@]}"; do emit_job "$n" | kubectl apply -f -; done
+          for n in "${REST[@]}"; do
+            kubectl wait --for=condition=complete --timeout=10m \
+              "job/runner-prepull-${n}-${SHORT}" || {
+                echo "::warning::prepull did not complete on ${n}"
+              }
+          done
+
+          kubectl get jobs -l app.kubernetes.io/part-of=sandbox \
+            --field-selector metadata.name!=x -o wide || true
+
+          # NOTE: prepulled images are unreferenced once these Jobs are GC'd, so
+          # they are eligible for kubelet image garbage collection. talos-juq-za9
+          # has the smallest imagefs, so it is the one most likely to evict the
+          # image before a session lands on it. That degrades silently -- the
+          # session still works, it just pays the cold pull the prepull was
+          # meant to avoid. Not worth designing around, but if warm-start
+          # latency regresses on that node, check image GC first.
+          echo "prepull complete for ${IMAGE}@${DIGEST}"
