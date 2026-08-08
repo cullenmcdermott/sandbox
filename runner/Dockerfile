@@ -11,7 +11,7 @@
 # incremental build cost a cold pull on every node. Renovate manages the digest,
 # so a base bump becomes a reviewed PR rather than a silent Monday-morning
 # cache miss. Keep this digest identical to the runtime stage below.
-FROM node:24-slim@sha256:235600a8101ab264e117b1768e925532262668dc9b581ef1dd7d96ced463b8e7 AS build
+FROM node:24-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba3275657f93595428be4fc03 AS build
 WORKDIR /app
 
 # better-sqlite3 ships no prebuilt binary for Node 24, so npm ci compiles it
@@ -45,7 +45,7 @@ COPY statusline/ ./
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/sandbox-user-statusline .
 
 # --- runtime stage --------------------------------------------------------
-FROM node:24-slim@sha256:235600a8101ab264e117b1768e925532262668dc9b581ef1dd7d96ced463b8e7 AS runtime
+FROM node:24-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba3275657f93595428be4fc03 AS runtime
 
 # sshd for Mutagen sync transport (spec 9.2); sqlite3 for events.db ops;
 # git is commonly needed by the agent workspace. wget/netcat/dnsutils give the
