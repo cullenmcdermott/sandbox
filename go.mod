@@ -18,7 +18,7 @@ require (
 	github.com/charmbracelet/x/vt v0.0.0-20260621010513-945fab64fd3e
 	github.com/creack/pty v1.1.24
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
-	github.com/lucasb-eyer/go-colorful v1.4.0
+	github.com/lucasb-eyer/go-colorful v1.4.1
 	github.com/rivo/uniseg v0.4.7
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/crypto v0.53.0
