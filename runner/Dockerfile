@@ -39,7 +39,7 @@ RUN npm prune --omit=dev
 # No GOOS/GOARCH juggling: Depot builds each platform on a native builder, so
 # the plain build already produces the target arch. CGO_ENABLED=0 keeps it a
 # static binary independent of the runtime stage's glibc.
-FROM golang:1.26-bookworm@sha256:e8c859f5632dcfde7b32d2012b4351728f6437930887c2f6a91ea242459e5514 AS statusline
+FROM golang:1.27-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea AS statusline
 WORKDIR /src
 COPY statusline/ ./
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/sandbox-user-statusline .
